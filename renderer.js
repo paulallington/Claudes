@@ -571,7 +571,8 @@ function addColumn(args, targetRow, opts) {
     if (opts.env) sendMsg.env = opts.env;
     wsSend(sendMsg);
 
-    if (!cmd && window.electronAPI) {
+    var isResume = claudeArgs.indexOf('--resume') !== -1;
+    if (!cmd && !isResume && window.electronAPI) {
       preSpawnSessionsPromise.then(function (preSessions) {
         var preIds = {};
         for (var i = 0; i < preSessions.length; i++) {
@@ -651,28 +652,32 @@ function fetchAndSetSessionTitle(columnId, projectPath, sessionId) {
   });
 }
 
+// Collect session IDs already claimed by other columns in the same project
+function getClaimedSessionIds(excludeColumnId) {
+  var claimed = {};
+  allColumns.forEach(function (col, colId) {
+    if (colId !== excludeColumnId && col.sessionId) {
+      claimed[col.sessionId] = true;
+    }
+  });
+  return claimed;
+}
+
 // Detect which session ID was created by a newly spawned Claude
 function detectSession(columnId, projectPath, preExistingIds, attempt) {
   if (attempt > 15) return;
   setTimeout(function () {
     window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+      var claimed = getClaimedSessionIds(columnId);
       for (var i = 0; i < sessions.length; i++) {
-        if (!preExistingIds[sessions[i].sessionId]) {
+        var sid = sessions[i].sessionId;
+        if (!preExistingIds[sid] && !claimed[sid]) {
           var col = allColumns.get(columnId);
           if (col) {
-            col.sessionId = sessions[i].sessionId;
+            col.sessionId = sid;
             persistSessions(col.projectKey);
-            fetchAndSetSessionTitle(columnId, projectPath, sessions[i].sessionId);
+            fetchAndSetSessionTitle(columnId, projectPath, sid);
           }
-          return;
-        }
-      }
-      if (sessions.length > 0) {
-        var col2 = allColumns.get(columnId);
-        if (col2 && !col2.sessionId) {
-          col2.sessionId = sessions[0].sessionId;
-          persistSessions(col2.projectKey);
-          fetchAndSetSessionTitle(columnId, projectPath, sessions[0].sessionId);
           return;
         }
       }
@@ -2386,6 +2391,12 @@ document.getElementById('usage-project-filter').addEventListener('change', funct
 });
 
 connectWS();
+
+// --- App Version ---
+
+window.electronAPI.getVersion().then(function(v) {
+  document.getElementById('app-version').textContent = 'v' + v;
+});
 
 // --- Auto Update Notifications ---
 
