@@ -1,6 +1,6 @@
 {
   "name": "claudes",
-  "version": "2.0.1",
+  "version": "1.0.0",
   "description": "Multi-column Claude Code terminal desktop app",
   "author": "The Code Guy",
   "main": "main.js",
