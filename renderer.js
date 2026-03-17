@@ -327,10 +327,14 @@ function setActiveProject(index, isStartup) {
 }
 
 function restoreProjectSessions(projectPath, project) {
-  window.electronAPI.loadSessions(projectPath).then(function (savedSessionIds) {
-    if (savedSessionIds && savedSessionIds.length > 0) {
-      for (var i = 0; i < savedSessionIds.length; i++) {
-        addColumn(['--resume', savedSessionIds[i]]);
+  window.electronAPI.loadSessions(projectPath).then(function (savedSessions) {
+    if (savedSessions && savedSessions.length > 0) {
+      for (var i = 0; i < savedSessions.length; i++) {
+        // Support both old format (plain string) and new format ({sessionId, title})
+        var entry = savedSessions[i];
+        var sessionId = typeof entry === 'string' ? entry : entry.sessionId;
+        var title = typeof entry === 'object' ? entry.title : null;
+        addColumn(['--resume', sessionId], null, title ? { title: title } : {});
       }
     } else {
       addColumn();
@@ -588,6 +592,12 @@ function addColumn(args, targetRow, opts) {
     removeColumn(id);
   });
 
+  // Extract session ID if resuming
+  var resumeSessionId = null;
+  for (var ai = 0; ai < claudeArgs.length - 1; ai++) {
+    if (claudeArgs[ai] === '--resume') { resumeSessionId = claudeArgs[ai + 1]; break; }
+  }
+
   var colData = {
     element: col,
     terminal: terminal,
@@ -595,7 +605,7 @@ function addColumn(args, targetRow, opts) {
     headerEl: header,
     cwd: cwd,
     projectKey: activeProjectKey,
-    sessionId: null,
+    sessionId: resumeSessionId,
     customTitle: opts.title || null,
     cmd: cmd,
     cmdArgs: claudeArgs
@@ -608,6 +618,11 @@ function addColumn(args, targetRow, opts) {
   refitAll();
   saveColumnCounts();
   renderProjectList();
+
+  // Auto-fetch title from session if resuming without a saved title
+  if (resumeSessionId && !opts.title && !cmd) {
+    fetchAndSetSessionTitle(id, cwd, resumeSessionId);
+  }
 }
 
 function addRow() {
@@ -668,11 +683,13 @@ function persistSessions(projectKey) {
   if (!window.electronAPI) return;
   var state = projectStates.get(projectKey);
   if (!state) return;
-  var sessionIds = [];
+  var sessionData = [];
   state.columns.forEach(function (col) {
-    if (col.sessionId) sessionIds.push(col.sessionId);
+    if (col.sessionId) {
+      sessionData.push({ sessionId: col.sessionId, title: col.customTitle || null });
+    }
   });
-  window.electronAPI.saveSessions(projectKey, sessionIds);
+  window.electronAPI.saveSessions(projectKey, sessionData);
 }
 
 function removeColumn(id) {

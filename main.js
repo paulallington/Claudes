@@ -172,17 +172,25 @@ ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId) => {
   const claudeKey = projectPathToClaudeKey(projectPath);
   const jsonlPath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
   try {
-    const content = fs.readFileSync(jsonlPath, 'utf8');
+    // Read only first 32KB — the first user message is always near the top
+    const fd = fs.openSync(jsonlPath, 'r');
+    const buf = Buffer.alloc(32768);
+    const bytesRead = fs.readSync(fd, buf, 0, 32768, 0);
+    fs.closeSync(fd);
+    const content = buf.toString('utf8', 0, bytesRead);
     const lines = content.split('\n');
     for (const line of lines) {
       if (!line.trim()) continue;
       const msg = JSON.parse(line);
       if (msg.type === 'user' && msg.message && msg.message.content) {
-        const text = typeof msg.message.content === 'string'
+        let text = typeof msg.message.content === 'string'
           ? msg.message.content
           : msg.message.content.filter(b => b.type === 'text').map(b => b.text).join(' ');
-        // Truncate to first line, max 40 chars
+        // Strip XML/HTML tags (from skill invocations etc.)
+        text = text.replace(/<[^>]+>/g, '').trim();
+        if (!text) continue;
         const firstLine = text.split('\n')[0].trim();
+        if (!firstLine) continue;
         return firstLine.length > 40 ? firstLine.substring(0, 37) + '...' : firstLine;
       }
     }
