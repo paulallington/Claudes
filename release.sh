@@ -52,8 +52,8 @@ npx electron-builder --win
 echo "==> Build complete"
 
 # Create GitHub release and upload artifacts
-INSTALLER="dist/Claudes Setup ${VERSION}.exe"
-BLOCKMAP="dist/Claudes Setup ${VERSION}.exe.blockmap"
+INSTALLER="dist/Claudes-Setup-${VERSION}.exe"
+BLOCKMAP="dist/Claudes-Setup-${VERSION}.exe.blockmap"
 LATEST_YML="dist/latest.yml"
 
 echo "==> Creating GitHub release v${VERSION}..."

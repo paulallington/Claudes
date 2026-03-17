@@ -2607,10 +2607,10 @@ window.electronAPI.getVersion().then(function(v) {
     updateBar.classList.remove('hidden');
   });
 
-  window.electronAPI.onUpdateError(function() {
-    updateMessage.textContent = 'Update download failed';
+  window.electronAPI.onUpdateError(function(info) {
+    updateMessage.textContent = 'Update failed: ' + (info.message || 'unknown error');
     updateAction.style.display = 'none';
-    setTimeout(function() { updateBar.classList.add('hidden'); }, 5000);
+    setTimeout(function() { updateBar.classList.add('hidden'); }, 8000);
   });
 
   updateAction.addEventListener('click', function() {
