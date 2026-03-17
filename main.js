@@ -126,6 +126,59 @@ ipcMain.handle('config:saveProjects', (event, config) => {
   writeConfig(config);
 });
 
+// --- Session Management ---
+
+// Convert a project path to Claude's project key format
+function projectPathToClaudeKey(projectPath) {
+  return projectPath.replace(/[:/\\]/g, '-').replace(/^-/, '');
+}
+
+// Get recent session IDs for a project by scanning Claude's data directory
+ipcMain.handle('sessions:getRecent', (event, projectPath) => {
+  const claudeKey = projectPathToClaudeKey(projectPath);
+  const claudeProjectDir = path.join(os.homedir(), '.claude', 'projects', claudeKey);
+
+  try {
+    if (!fs.existsSync(claudeProjectDir)) return [];
+
+    const files = fs.readdirSync(claudeProjectDir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => {
+        const filePath = path.join(claudeProjectDir, f);
+        const stat = fs.statSync(filePath);
+        return {
+          sessionId: f.replace('.jsonl', ''),
+          modified: stat.mtimeMs
+        };
+      })
+      .sort((a, b) => b.modified - a.modified);
+
+    return files;
+  } catch {
+    return [];
+  }
+});
+
+// Save/load session state per project (which sessions were open in columns)
+ipcMain.handle('sessions:save', (event, projectPath, sessionIds) => {
+  const claudesDir = path.join(projectPath, '.claudes');
+  if (!fs.existsSync(claudesDir)) {
+    fs.mkdirSync(claudesDir, { recursive: true });
+  }
+  const sessionsFile = path.join(claudesDir, 'sessions.json');
+  fs.writeFileSync(sessionsFile, JSON.stringify({ sessions: sessionIds }, null, 2), 'utf8');
+});
+
+ipcMain.handle('sessions:load', (event, projectPath) => {
+  const sessionsFile = path.join(projectPath, '.claudes', 'sessions.json');
+  try {
+    const data = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
+    return data.sessions || [];
+  } catch {
+    return [];
+  }
+});
+
 // --- App Lifecycle ---
 
 const gotLock = app.requestSingleInstanceLock();

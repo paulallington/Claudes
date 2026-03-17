@@ -252,18 +252,32 @@ function setActiveProject(index, isStartup) {
   state.containerEl.style.display = 'flex';
 
   if (state.columns.size === 0) {
-    // Spawn columns: restore saved count on startup, otherwise spawn 1
-    var count = (isStartup && project.columnCount > 0) ? project.columnCount : 1;
-    for (var i = 0; i < count; i++) {
+    if (isStartup && window.electronAPI) {
+      // Try to restore previous sessions
+      restoreProjectSessions(newKey, project);
+    } else {
       addColumn();
     }
   } else {
-    // Re-focus the last focused column
     if (state.focusedColumnId !== null) {
       setFocusedColumn(state.focusedColumnId);
     }
     refitAll();
   }
+}
+
+function restoreProjectSessions(projectPath, project) {
+  window.electronAPI.loadSessions(projectPath).then(function (savedSessionIds) {
+    if (savedSessionIds && savedSessionIds.length > 0) {
+      // Resume each saved session
+      for (var i = 0; i < savedSessionIds.length; i++) {
+        addColumn(['--resume', savedSessionIds[i]]);
+      }
+    } else {
+      // No saved sessions, just spawn one fresh
+      addColumn();
+    }
+  });
 }
 
 function addProject(folderPath) {
@@ -386,7 +400,8 @@ function createExitOverlay(id, exitCode, col) {
   restartBtn.addEventListener('click', function () {
     overlay.remove();
     col.fitAddon.fit();
-    wsSend({ type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: col.cwd });
+    var resumeArgs = col.sessionId ? ['--resume', col.sessionId] : [];
+    wsSend({ type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: col.cwd, args: resumeArgs });
     col.terminal.clear();
   });
 
@@ -404,7 +419,7 @@ function createExitOverlay(id, exitCode, col) {
 // Column Management
 // ============================================================
 
-function addColumn() {
+function addColumn(args) {
   if (!activeProjectKey) return;
 
   var state = getActiveState();
@@ -448,10 +463,28 @@ function addColumn() {
   terminal.open(termWrapper);
 
   var cwd = activeProjectKey;
+  var claudeArgs = args || [];
+
+  // Snapshot existing sessions before spawning so we can detect the new one
+  var preSpawnSessionsPromise = window.electronAPI
+    ? window.electronAPI.getRecentSessions(cwd)
+    : Promise.resolve([]);
 
   requestAnimationFrame(function () {
     fitAddon.fit();
-    wsSend({ type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd });
+    wsSend({ type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: claudeArgs });
+
+    // After a delay, detect which session this Claude created
+    if (window.electronAPI) {
+      preSpawnSessionsPromise.then(function (preSessions) {
+        var preIds = {};
+        for (var i = 0; i < preSessions.length; i++) {
+          preIds[preSessions[i].sessionId] = true;
+        }
+        // Poll for the new session (Claude takes a moment to create it)
+        detectSession(id, cwd, preIds, 0);
+      });
+    }
   });
 
   terminal.onData(function (data) {
@@ -472,7 +505,8 @@ function addColumn() {
     fitAddon: fitAddon,
     headerEl: header,
     cwd: cwd,
-    projectKey: activeProjectKey
+    projectKey: activeProjectKey,
+    sessionId: null
   };
 
   state.columns.set(id, colData);
@@ -481,6 +515,58 @@ function addColumn() {
   refitAll();
   saveColumnCounts();
   renderProjectList();
+}
+
+// Detect which session ID was created by a newly spawned Claude
+function detectSession(columnId, projectPath, preExistingIds, attempt) {
+  if (attempt > 15) return; // give up after ~30 seconds
+
+  setTimeout(function () {
+    window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+      // Find sessions that didn't exist before
+      for (var i = 0; i < sessions.length; i++) {
+        if (!preExistingIds[sessions[i].sessionId]) {
+          // New session found — assign it to this column
+          var col = allColumns.get(columnId);
+          if (col) {
+            col.sessionId = sessions[i].sessionId;
+            persistSessions(col.projectKey);
+          }
+          return;
+        }
+      }
+
+      // Also check if the most recent session was updated (resume case)
+      if (sessions.length > 0) {
+        var col = allColumns.get(columnId);
+        if (col && !col.sessionId) {
+          col.sessionId = sessions[0].sessionId;
+          persistSessions(col.projectKey);
+          return;
+        }
+      }
+
+      // Not found yet, retry
+      detectSession(columnId, projectPath, preExistingIds, attempt + 1);
+    });
+  }, 2000);
+}
+
+// Save all active session IDs for a project
+function persistSessions(projectKey) {
+  if (!window.electronAPI) return;
+
+  var state = projectStates.get(projectKey);
+  if (!state) return;
+
+  var sessionIds = [];
+  state.columns.forEach(function (col) {
+    if (col.sessionId) {
+      sessionIds.push(col.sessionId);
+    }
+  });
+
+  window.electronAPI.saveSessions(projectKey, sessionIds);
 }
 
 function removeColumn(id) {
@@ -521,6 +607,7 @@ function removeColumn(id) {
 
   refitAll();
   saveColumnCounts();
+  persistSessions(col.projectKey);
   renderProjectList();
 }
 

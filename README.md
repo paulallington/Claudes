@@ -10,26 +10,28 @@
 
 ## What is Claudes?
 
-Claudes is a desktop app that lets you run multiple [Claude Code](https://claude.ai/claude-code) CLI sessions in resizable columns. Manage multiple projects, spawn as many Claude instances as you need, and switch between workspaces without losing your sessions.
+I built Claudes because I like running lots of Claude Code sessions at once and got tired of juggling terminal windows. It's a simple Electron desktop app that lets you run multiple [Claude Code](https://claude.ai/claude-code) CLI sessions in resizable columns, organised by project.
+
+It's not a commercial project — just a tool I made for myself that I thought others might find useful too. If you find a bug or have an idea, feel free to [raise an issue](https://github.com/paulallington/Claudes/issues) or send me a pull request.
+
+## Screenshot
+
+<p align="center">
+  <img src="screenshot.png" alt="Claudes in action" width="900">
+</p>
 
 ## Features
 
 - **Multi-column terminals** — spawn multiple Claude Code instances side-by-side
 - **Project workspaces** — add projects via folder picker, switch between them instantly
 - **Persistent sessions** — switching projects preserves running Claudes in the background
-- **Session memory** — remembers how many Claudes each project had on restart
+- **Session resume** — remembers which Claude sessions were open per project and resumes them on restart
 - **Resizable columns** — drag handles between columns to resize
 - **Keyboard shortcuts**:
   - `Ctrl+Shift+T` — Spawn a new Claude
   - `Ctrl+Shift+W` — Kill focused Claude
   - `Ctrl+Arrow Left/Right` — Navigate between columns
   - `Ctrl+B` — Toggle sidebar
-
-## Screenshot
-
-<p align="center">
-  <img src="icon.png" alt="Claudes Icon" width="128">
-</p>
 
 ## Installation
 
@@ -55,6 +57,8 @@ Claudes runs as an Electron desktop app. Under the hood, it spawns a separate No
 
 This architecture avoids the need to compile native modules against Electron's Node.js headers — `node-pty` runs under the system Node.js using its prebuilt binaries.
 
+Session state is saved per project (in `.claudes/sessions.json` within the project directory), so when you restart the app your Claude sessions are automatically resumed.
+
 ## Project structure
 
 ```
@@ -68,7 +72,9 @@ Claudes/
   icon.ico         — App icon
 ```
 
-Project configuration is stored in `~/.claudes/projects.json`.
+## Contributing
+
+This is a personal project, but contributions are welcome! If you run into a problem, [open an issue](https://github.com/paulallington/Claudes/issues). If you want to add something, send a pull request and I'll take a look.
 
 ## License
 

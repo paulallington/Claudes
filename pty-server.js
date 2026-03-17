@@ -35,11 +35,11 @@ wss.on('connection', (ws) => {
 
     switch (msg.type) {
       case 'create': {
-        const { id, cols, rows, cwd } = msg;
+        const { id, cols, rows, cwd, args } = msg;
 
         let p;
         try {
-          p = pty.spawn(CLAUDE_PATH, [], {
+          p = pty.spawn(CLAUDE_PATH, args || [], {
             name: 'xterm-256color',
             cols: cols || 120,
             rows: rows || 30,
