@@ -21,8 +21,32 @@
           <span id="active-project-name" class="active-project-name"></span>
         </div>
         <div class="toolbar-actions">
-          <button id="btn-add" title="Spawn Claude (Ctrl+Shift+T)">+ Spawn Claude</button>
-          <span class="shortcut-hint">Ctrl+Arrow navigate | Ctrl+Shift+W close | Ctrl+Shift+T spawn</span>
+          <div class="spawn-split-btn">
+            <button id="btn-add" title="Spawn Claude (Ctrl+Shift+T)">+ Spawn Claude</button>
+            <button id="btn-add-options" title="Spawn options" class="spawn-chevron">&#9662;</button>
+            <div id="spawn-dropdown" class="spawn-dropdown hidden">
+              <label class="spawn-option">
+                <input type="checkbox" id="opt-skip-permissions"> Skip Permissions
+              </label>
+              <div class="spawn-divider"></div>
+              <div class="spawn-option spawn-model-row">
+                <label for="opt-model">Model:</label>
+                <select id="opt-model">
+                  <option value="">Default</option>
+                  <option value="sonnet">Sonnet</option>
+                  <option value="opus">Opus</option>
+                  <option value="haiku">Haiku</option>
+                </select>
+              </div>
+              <div class="spawn-divider"></div>
+              <div class="spawn-option spawn-custom-row">
+                <input type="text" id="opt-custom-args" placeholder="Custom args..." title="Additional CLI arguments">
+              </div>
+              <div class="spawn-divider"></div>
+              <button id="btn-spawn-with-opts" class="spawn-go-btn">Spawn with options</button>
+            </div>
+          </div>
+          <button id="btn-add-row" title="Add Row (Ctrl+Shift+R)">+ Add Row</button>
         </div>
       </div>
       <div id="columns-container"></div>

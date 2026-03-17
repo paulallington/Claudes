@@ -218,7 +218,7 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
-#btn-add {
+#btn-add-row {
   padding: 4px 12px;
   background: #0f3460;
   color: #e0e0e0;
@@ -228,14 +228,136 @@ html, body {
   font-size: 12px;
 }
 
-#btn-add:hover {
+#btn-add-row:hover {
   background: #e94560;
   color: #fff;
 }
 
-.shortcut-hint {
-  font-size: 11px;
+/* --- Spawn Split Button --- */
+
+.spawn-split-btn {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.spawn-split-btn #btn-add {
+  padding: 4px 12px;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #e94560;
+  border-right: none;
+  border-radius: 4px 0 0 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.spawn-split-btn #btn-add:hover {
+  background: #e94560;
+  color: #fff;
+}
+
+.spawn-chevron {
+  padding: 4px 6px;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #e94560;
+  border-radius: 0 4px 4px 0;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.spawn-chevron:hover {
+  background: #e94560;
+  color: #fff;
+}
+
+.spawn-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: #16213e;
+  border: 1px solid #0f3460;
+  border-radius: 6px;
+  padding: 6px 0;
+  min-width: 220px;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.spawn-dropdown.hidden {
+  display: none;
+}
+
+.spawn-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #ccc;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.spawn-option:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.spawn-option input[type="checkbox"] {
+  accent-color: #e94560;
+}
+
+.spawn-model-row select {
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 12px;
+  cursor: pointer;
+  flex: 1;
+}
+
+.spawn-custom-row input[type="text"] {
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 12px;
+  width: 100%;
+}
+
+.spawn-custom-row input[type="text"]::placeholder {
   color: #666;
+}
+
+.spawn-divider {
+  height: 1px;
+  background: #0f3460;
+  margin: 4px 0;
+}
+
+.spawn-go-btn {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 4px 8px;
+  padding: 5px 12px;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #e94560;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: center;
+}
+
+.spawn-go-btn:hover {
+  background: #e94560;
+  color: #fff;
 }
 
 /* --- Column Layout --- */
@@ -249,8 +371,29 @@ html, body {
 
 .project-columns {
   display: flex;
+  flex-direction: column;
   flex: 1;
   overflow: hidden;
+}
+
+.row {
+  display: flex;
+  flex: 1 1 0;
+  overflow: hidden;
+  min-height: 100px;
+}
+
+.row-resize-handle {
+  height: 5px;
+  cursor: row-resize;
+  background: transparent;
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.row-resize-handle:hover,
+.row-resize-handle.active {
+  background: #e94560;
 }
 
 .column {

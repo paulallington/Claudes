@@ -2,23 +2,31 @@
 
 var columnsContainer = document.getElementById('columns-container');
 var btnAdd = document.getElementById('btn-add');
+var btnAddRow = document.getElementById('btn-add-row');
 var btnAddProject = document.getElementById('btn-add-project');
 var btnToggleSidebar = document.getElementById('btn-toggle-sidebar');
 var projectListEl = document.getElementById('project-list');
 var activeProjectNameEl = document.getElementById('active-project-name');
 var sidebar = document.getElementById('sidebar');
 
+var btnAddOptions = document.getElementById('btn-add-options');
+var spawnDropdown = document.getElementById('spawn-dropdown');
+var optSkipPermissions = document.getElementById('opt-skip-permissions');
+var optModel = document.getElementById('opt-model');
+var optCustomArgs = document.getElementById('opt-custom-args');
+var btnSpawnWithOpts = document.getElementById('btn-spawn-with-opts');
+
 var globalColumnId = 0;
+var globalRowId = 0;
 var ws = null;
 
 // All pty columns keyed by global id (for routing WS messages)
 var allColumns = new Map();
 
-// Per-project state: projectKey -> { containerEl, columns: Map, focusedColumnId }
+// Per-project state: projectKey -> { containerEl, rows: [], columns: Map, focusedColumnId }
 var projectStates = new Map();
 var activeProjectKey = null;
 
-// Config
 var config = { projects: [], activeProjectIndex: -1 };
 
 var termTheme = {
@@ -52,15 +60,10 @@ var termTheme = {
 
 function connectWS() {
   ws = new WebSocket('ws://127.0.0.1:3456');
-
-  ws.onopen = function () {
-    loadProjects();
-  };
-
+  ws.onopen = function () { loadProjects(); };
   ws.onmessage = function (event) {
     var msg;
     try { msg = JSON.parse(event.data); } catch (e) { return; }
-
     if (msg.type === 'data') {
       var col = allColumns.get(msg.id);
       if (col) col.terminal.write(msg.data);
@@ -69,10 +72,7 @@ function connectWS() {
       if (col2) col2.element.appendChild(createExitOverlay(msg.id, msg.exitCode, col2));
     }
   };
-
-  ws.onclose = function () {
-    setTimeout(connectWS, 2000);
-  };
+  ws.onclose = function () { setTimeout(connectWS, 2000); };
 }
 
 function wsSend(obj) {
@@ -85,10 +85,6 @@ function wsSend(obj) {
 // Per-project state helpers
 // ============================================================
 
-function getProjectKey(index) {
-  return config.projects[index] ? config.projects[index].path : null;
-}
-
 function getOrCreateProjectState(projectKey) {
   if (projectStates.has(projectKey)) return projectStates.get(projectKey);
 
@@ -99,6 +95,7 @@ function getOrCreateProjectState(projectKey) {
 
   var state = {
     containerEl: containerEl,
+    rows: [],         // array of { id, el, columnIds: [] }
     columns: new Map(),
     focusedColumnId: null
   };
@@ -111,11 +108,6 @@ function getActiveState() {
   return projectStates.get(activeProjectKey) || null;
 }
 
-function getActiveColumns() {
-  var state = getActiveState();
-  return state ? state.columns : new Map();
-}
-
 function saveColumnCounts() {
   for (var i = 0; i < config.projects.length; i++) {
     var key = config.projects[i].path;
@@ -125,25 +117,88 @@ function saveColumnCounts() {
   saveConfig();
 }
 
+// Find which row a column belongs to
+function findRowForColumn(state, columnId) {
+  for (var i = 0; i < state.rows.length; i++) {
+    if (state.rows[i].columnIds.indexOf(columnId) !== -1) return state.rows[i];
+  }
+  return null;
+}
+
+// Get the row containing the focused column, or the last row
+function getActiveRow(state) {
+  if (state.focusedColumnId !== null) {
+    var row = findRowForColumn(state, state.focusedColumnId);
+    if (row) return row;
+  }
+  if (state.rows.length > 0) return state.rows[state.rows.length - 1];
+  return null;
+}
+
+// ============================================================
+// Row Management
+// ============================================================
+
+function addRowToProject(state) {
+  var rowId = ++globalRowId;
+
+  // Add row resize handle if there are existing rows
+  if (state.rows.length > 0) {
+    var handle = document.createElement('div');
+    handle.className = 'row-resize-handle';
+    handle.dataset.topRowId = String(state.rows[state.rows.length - 1].id);
+    handle.dataset.bottomRowId = String(rowId);
+    state.containerEl.appendChild(handle);
+    setupRowResizeHandle(handle);
+  }
+
+  var rowEl = document.createElement('div');
+  rowEl.className = 'row';
+  rowEl.dataset.rowId = String(rowId);
+  state.containerEl.appendChild(rowEl);
+
+  var row = { id: rowId, el: rowEl, columnIds: [] };
+  state.rows.push(row);
+  return row;
+}
+
+function removeRowIfEmpty(state, row) {
+  if (row.columnIds.length > 0) return;
+
+  var idx = state.rows.indexOf(row);
+  if (idx === -1) return;
+
+  // Remove the row element
+  var rowEl = row.el;
+  var prevSibling = rowEl.previousElementSibling;
+  var nextSibling = rowEl.nextElementSibling;
+
+  rowEl.remove();
+
+  // Remove adjacent row resize handle
+  if (prevSibling && prevSibling.classList.contains('row-resize-handle')) {
+    prevSibling.remove();
+  } else if (nextSibling && nextSibling.classList.contains('row-resize-handle')) {
+    nextSibling.remove();
+  }
+
+  state.rows.splice(idx, 1);
+}
+
 // ============================================================
 // Project Management
 // ============================================================
 
 function loadProjects() {
   if (!window.electronAPI) return;
-
   window.electronAPI.getProjects().then(function (cfg) {
     config = cfg || { projects: [], activeProjectIndex: -1 };
-
-    // Ensure columnCount exists on each project
     for (var i = 0; i < config.projects.length; i++) {
       if (config.projects[i].columnCount === undefined) {
         config.projects[i].columnCount = 1;
       }
     }
-
     renderProjectList();
-
     if (config.activeProjectIndex >= 0 && config.projects[config.activeProjectIndex]) {
       setActiveProject(config.activeProjectIndex, true);
     } else {
@@ -229,12 +284,9 @@ function setActiveProject(index, isStartup) {
   var prevKey = activeProjectKey;
   var newKey = project.path;
 
-  // Hide previous project's columns
   if (prevKey && prevKey !== newKey) {
     var prevState = projectStates.get(prevKey);
-    if (prevState) {
-      prevState.containerEl.style.display = 'none';
-    }
+    if (prevState) prevState.containerEl.style.display = 'none';
   }
 
   config.activeProjectIndex = index;
@@ -243,17 +295,14 @@ function setActiveProject(index, isStartup) {
   saveConfig();
   renderProjectList();
 
-  // Remove empty state if present
   var emptyState = columnsContainer.querySelector('.empty-state');
   if (emptyState) emptyState.remove();
 
-  // Show (or create) this project's columns
   var state = getOrCreateProjectState(newKey);
   state.containerEl.style.display = 'flex';
 
   if (state.columns.size === 0) {
     if (isStartup && window.electronAPI) {
-      // Try to restore previous sessions
       restoreProjectSessions(newKey, project);
     } else {
       addColumn();
@@ -269,12 +318,10 @@ function setActiveProject(index, isStartup) {
 function restoreProjectSessions(projectPath, project) {
   window.electronAPI.loadSessions(projectPath).then(function (savedSessionIds) {
     if (savedSessionIds && savedSessionIds.length > 0) {
-      // Resume each saved session
       for (var i = 0; i < savedSessionIds.length; i++) {
         addColumn(['--resume', savedSessionIds[i]]);
       }
     } else {
-      // No saved sessions, just spawn one fresh
       addColumn();
     }
   });
@@ -284,7 +331,6 @@ function addProject(folderPath) {
   var parts = folderPath.replace(/\\/g, '/').split('/');
   var name = parts[parts.length - 1] || folderPath;
 
-  // Check for duplicates
   for (var i = 0; i < config.projects.length; i++) {
     if (config.projects[i].path === folderPath) {
       setActiveProject(i, false);
@@ -302,7 +348,6 @@ function removeProject(index) {
   var project = config.projects[index];
   var key = project.path;
 
-  // Kill all columns for this project
   var state = projectStates.get(key);
   if (state) {
     var ids = Array.from(state.columns.keys());
@@ -330,30 +375,23 @@ function removeProject(index) {
       showEmptyState();
     }
   } else {
-    if (index < config.activeProjectIndex) {
-      config.activeProjectIndex--;
-    }
+    if (index < config.activeProjectIndex) config.activeProjectIndex--;
     saveConfig();
     renderProjectList();
   }
 }
 
 function showEmptyState() {
-  // Hide all project containers
   projectStates.forEach(function (state) {
     state.containerEl.style.display = 'none';
   });
-
   var empty = document.createElement('div');
   empty.className = 'empty-state';
-
   var msg = document.createElement('div');
   msg.textContent = 'No project selected';
-
   var hint = document.createElement('div');
   hint.className = 'hint';
   hint.textContent = 'Add a project from the sidebar to get started';
-
   empty.appendChild(msg);
   empty.appendChild(hint);
   columnsContainer.appendChild(empty);
@@ -366,17 +404,14 @@ function showEmptyState() {
 function createColumnHeader(id) {
   var header = document.createElement('div');
   header.className = 'column-header';
-
   var title = document.createElement('span');
   title.className = 'col-title';
   title.textContent = 'Claude #' + id;
-
   var closeBtn = document.createElement('span');
   closeBtn.className = 'col-close';
   closeBtn.dataset.id = String(id);
-  closeBtn.title = 'Kill (Ctrl+Shift+W)';
+  closeBtn.title = 'Kill';
   closeBtn.textContent = '\u00d7';
-
   header.appendChild(title);
   header.appendChild(closeBtn);
   return header;
@@ -385,14 +420,11 @@ function createColumnHeader(id) {
 function createExitOverlay(id, exitCode, col) {
   var overlay = document.createElement('div');
   overlay.className = 'exit-overlay';
-
   var msg = document.createElement('div');
   msg.textContent = 'Claude exited (code ' + exitCode + ')';
-
   var restartBtn = document.createElement('button');
   restartBtn.className = 'restart-btn';
   restartBtn.textContent = 'Respawn';
-
   var closeBtn = document.createElement('button');
   closeBtn.className = 'close-btn';
   closeBtn.textContent = 'Kill';
@@ -404,10 +436,7 @@ function createExitOverlay(id, exitCode, col) {
     wsSend({ type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: col.cwd, args: resumeArgs });
     col.terminal.clear();
   });
-
-  closeBtn.addEventListener('click', function () {
-    removeColumn(id);
-  });
+  closeBtn.addEventListener('click', function () { removeColumn(id); });
 
   overlay.appendChild(msg);
   overlay.appendChild(restartBtn);
@@ -419,22 +448,28 @@ function createExitOverlay(id, exitCode, col) {
 // Column Management
 // ============================================================
 
-function addColumn(args) {
+function addColumn(args, targetRow) {
   if (!activeProjectKey) return;
 
   var state = getActiveState();
   if (!state) return;
 
-  var id = ++globalColumnId;
-  var targetContainer = state.containerEl;
+  // Get or create the target row
+  var row = targetRow || getActiveRow(state);
+  if (!row) {
+    row = addRowToProject(state);
+  }
 
-  if (state.columns.size > 0) {
-    var lastId = Array.from(state.columns.keys()).pop();
+  var id = ++globalColumnId;
+
+  // Add column resize handle if there are existing columns in this row
+  if (row.columnIds.length > 0) {
+    var lastId = row.columnIds[row.columnIds.length - 1];
     var handle = document.createElement('div');
     handle.className = 'resize-handle';
     handle.dataset.leftColumnId = String(lastId);
     handle.dataset.rightColumnId = String(id);
-    targetContainer.appendChild(handle);
+    row.el.appendChild(handle);
     setupResizeHandle(handle);
   }
 
@@ -448,7 +483,7 @@ function addColumn(args) {
 
   col.appendChild(header);
   col.appendChild(termWrapper);
-  targetContainer.appendChild(col);
+  row.el.appendChild(col);
 
   var terminal = new Terminal({
     theme: termTheme,
@@ -465,7 +500,6 @@ function addColumn(args) {
   var cwd = activeProjectKey;
   var claudeArgs = args || [];
 
-  // Snapshot existing sessions before spawning so we can detect the new one
   var preSpawnSessionsPromise = window.electronAPI
     ? window.electronAPI.getRecentSessions(cwd)
     : Promise.resolve([]);
@@ -474,14 +508,12 @@ function addColumn(args) {
     fitAddon.fit();
     wsSend({ type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: claudeArgs });
 
-    // After a delay, detect which session this Claude created
     if (window.electronAPI) {
       preSpawnSessionsPromise.then(function (preSessions) {
         var preIds = {};
         for (var i = 0; i < preSessions.length; i++) {
           preIds[preSessions[i].sessionId] = true;
         }
-        // Poll for the new session (Claude takes a moment to create it)
         detectSession(id, cwd, preIds, 0);
       });
     }
@@ -509,6 +541,7 @@ function addColumn(args) {
     sessionId: null
   };
 
+  row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
   setFocusedColumn(id);
@@ -517,16 +550,22 @@ function addColumn(args) {
   renderProjectList();
 }
 
+function addRow() {
+  if (!activeProjectKey) return;
+  var state = getActiveState();
+  if (!state) return;
+
+  var row = addRowToProject(state);
+  addColumn(null, row);
+}
+
 // Detect which session ID was created by a newly spawned Claude
 function detectSession(columnId, projectPath, preExistingIds, attempt) {
-  if (attempt > 15) return; // give up after ~30 seconds
-
+  if (attempt > 15) return;
   setTimeout(function () {
     window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
-      // Find sessions that didn't exist before
       for (var i = 0; i < sessions.length; i++) {
         if (!preExistingIds[sessions[i].sessionId]) {
-          // New session found — assign it to this column
           var col = allColumns.get(columnId);
           if (col) {
             col.sessionId = sessions[i].sessionId;
@@ -535,37 +574,27 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
           return;
         }
       }
-
-      // Also check if the most recent session was updated (resume case)
       if (sessions.length > 0) {
-        var col = allColumns.get(columnId);
-        if (col && !col.sessionId) {
-          col.sessionId = sessions[0].sessionId;
-          persistSessions(col.projectKey);
+        var col2 = allColumns.get(columnId);
+        if (col2 && !col2.sessionId) {
+          col2.sessionId = sessions[0].sessionId;
+          persistSessions(col2.projectKey);
           return;
         }
       }
-
-      // Not found yet, retry
       detectSession(columnId, projectPath, preExistingIds, attempt + 1);
     });
   }, 2000);
 }
 
-// Save all active session IDs for a project
 function persistSessions(projectKey) {
   if (!window.electronAPI) return;
-
   var state = projectStates.get(projectKey);
   if (!state) return;
-
   var sessionIds = [];
   state.columns.forEach(function (col) {
-    if (col.sessionId) {
-      sessionIds.push(col.sessionId);
-    }
+    if (col.sessionId) sessionIds.push(col.sessionId);
   });
-
   window.electronAPI.saveSessions(projectKey, sessionIds);
 }
 
@@ -590,10 +619,19 @@ function removeColumn(id) {
   col.terminal.dispose();
   allColumns.delete(id);
 
-  // Remove from project state
   var state = projectStates.get(col.projectKey);
   if (state) {
     state.columns.delete(id);
+
+    // Remove from row
+    for (var r = 0; r < state.rows.length; r++) {
+      var idx = state.rows[r].columnIds.indexOf(id);
+      if (idx !== -1) {
+        state.rows[r].columnIds.splice(idx, 1);
+        removeRowIfEmpty(state, state.rows[r]);
+        break;
+      }
+    }
 
     if (state.focusedColumnId === id) {
       var remaining = Array.from(state.columns.keys());
@@ -614,16 +652,13 @@ function removeColumn(id) {
 function setFocusedColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
-
   var state = projectStates.get(col.projectKey);
   if (!state) return;
 
-  // Unfocus previous in this project
   if (state.focusedColumnId !== null && state.focusedColumnId !== id) {
     var prev = allColumns.get(state.focusedColumnId);
     if (prev) prev.element.classList.remove('focused');
   }
-
   state.focusedColumnId = id;
   col.element.classList.add('focused');
   col.terminal.focus();
@@ -633,18 +668,42 @@ function navigateColumn(direction) {
   var state = getActiveState();
   if (!state) return;
 
-  var ids = Array.from(state.columns.keys());
+  // Build a flat list of all column IDs across all rows (left-to-right, top-to-bottom)
+  var ids = [];
+  for (var r = 0; r < state.rows.length; r++) {
+    for (var c = 0; c < state.rows[r].columnIds.length; c++) {
+      ids.push(state.rows[r].columnIds[c]);
+    }
+  }
   if (ids.length < 2) return;
 
   var idx = ids.indexOf(state.focusedColumnId);
-  var newIdx = direction === 'left'
-    ? (idx - 1 + ids.length) % ids.length
-    : (idx + 1) % ids.length;
+  var newIdx;
+  if (direction === 'left') {
+    newIdx = (idx - 1 + ids.length) % ids.length;
+  } else if (direction === 'right') {
+    newIdx = (idx + 1) % ids.length;
+  } else if (direction === 'up' || direction === 'down') {
+    // Find current row and column position
+    var curRow = -1, curCol = -1;
+    for (var ri = 0; ri < state.rows.length; ri++) {
+      var ci = state.rows[ri].columnIds.indexOf(state.focusedColumnId);
+      if (ci !== -1) { curRow = ri; curCol = ci; break; }
+    }
+    if (curRow === -1) return;
+    var targetRow = direction === 'up'
+      ? (curRow - 1 + state.rows.length) % state.rows.length
+      : (curRow + 1) % state.rows.length;
+    var targetColIdx = Math.min(curCol, state.rows[targetRow].columnIds.length - 1);
+    setFocusedColumn(state.rows[targetRow].columnIds[targetColIdx]);
+    return;
+  }
+
   setFocusedColumn(ids[newIdx]);
 }
 
 // ============================================================
-// Resize Handles
+// Resize Handles (columns)
 // ============================================================
 
 function setupResizeHandle(handle) {
@@ -660,7 +719,6 @@ function setupResizeHandle(handle) {
 
     var leftColEl = leftCol.element;
     var rightColEl = rightCol.element;
-
     var startX = e.clientX;
     var leftStartWidth = leftColEl.getBoundingClientRect().width;
     var rightStartWidth = rightColEl.getBoundingClientRect().width;
@@ -680,13 +738,63 @@ function setupResizeHandle(handle) {
         refitAll();
       }
     }
-
     function onMouseUp() {
       handle.classList.remove('active');
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
     }
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+}
 
+// ============================================================
+// Resize Handles (rows)
+// ============================================================
+
+function setupRowResizeHandle(handle) {
+  handle.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    handle.classList.add('active');
+
+    var state = getActiveState();
+    if (!state) return;
+
+    var topRowId = parseInt(handle.dataset.topRowId);
+    var bottomRowId = parseInt(handle.dataset.bottomRowId);
+    var topRow = null, bottomRow = null;
+    for (var i = 0; i < state.rows.length; i++) {
+      if (state.rows[i].id === topRowId) topRow = state.rows[i];
+      if (state.rows[i].id === bottomRowId) bottomRow = state.rows[i];
+    }
+    if (!topRow || !bottomRow) return;
+
+    var topEl = topRow.el;
+    var bottomEl = bottomRow.el;
+    var startY = e.clientY;
+    var topStartHeight = topEl.getBoundingClientRect().height;
+    var bottomStartHeight = bottomEl.getBoundingClientRect().height;
+
+    topEl.style.flex = 'none';
+    bottomEl.style.flex = 'none';
+    topEl.style.height = topStartHeight + 'px';
+    bottomEl.style.height = bottomStartHeight + 'px';
+
+    function onMouseMove(ev) {
+      var delta = ev.clientY - startY;
+      var newTop = Math.max(100, topStartHeight + delta);
+      var newBottom = Math.max(100, bottomStartHeight - delta);
+      if (newTop >= 100 && newBottom >= 100) {
+        topEl.style.height = newTop + 'px';
+        bottomEl.style.height = newBottom + 'px';
+        refitAll();
+      }
+    }
+    function onMouseUp() {
+      handle.classList.remove('active');
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    }
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
   });
@@ -699,14 +807,11 @@ function setupResizeHandle(handle) {
 function refitAll() {
   var state = getActiveState();
   if (!state) return;
-
   state.columns.forEach(function (col, id) {
     try {
       col.fitAddon.fit();
       wsSend({ type: 'resize', id: id, cols: col.terminal.cols, rows: col.terminal.rows });
-    } catch (e) {
-      // Terminal may not be fully initialized yet
-    }
+    } catch (e) {}
   });
 }
 
@@ -726,26 +831,37 @@ document.addEventListener('keydown', function (e) {
     addColumn();
     return;
   }
-
+  if (e.ctrlKey && e.shiftKey && e.key === 'R') {
+    e.preventDefault();
+    addRow();
+    return;
+  }
   if (e.ctrlKey && e.shiftKey && e.key === 'W') {
     e.preventDefault();
     var state = getActiveState();
     if (state && state.focusedColumnId !== null) removeColumn(state.focusedColumnId);
     return;
   }
-
   if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowLeft') {
     e.preventDefault();
     navigateColumn('left');
     return;
   }
-
   if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowRight') {
     e.preventDefault();
     navigateColumn('right');
     return;
   }
-
+  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowUp') {
+    e.preventDefault();
+    navigateColumn('up');
+    return;
+  }
+  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowDown') {
+    e.preventDefault();
+    navigateColumn('down');
+    return;
+  }
   if (e.ctrlKey && !e.shiftKey && e.key === 'b') {
     e.preventDefault();
     toggleSidebar();
@@ -766,7 +882,8 @@ function toggleSidebar() {
 // Init
 // ============================================================
 
-btnAdd.addEventListener('click', addColumn);
+btnAdd.addEventListener('click', function () { addColumn(); });
+btnAddRow.addEventListener('click', addRow);
 btnToggleSidebar.addEventListener('click', toggleSidebar);
 
 btnAddProject.addEventListener('click', function () {
@@ -774,6 +891,61 @@ btnAddProject.addEventListener('click', function () {
   window.electronAPI.openDirectoryDialog().then(function (folderPath) {
     if (folderPath) addProject(folderPath);
   });
+});
+
+// ============================================================
+// Spawn Options Dropdown
+// ============================================================
+
+function toggleSpawnDropdown() {
+  spawnDropdown.classList.toggle('hidden');
+}
+
+function closeSpawnDropdown() {
+  spawnDropdown.classList.add('hidden');
+}
+
+function buildSpawnArgs() {
+  var args = [];
+  if (optSkipPermissions.checked) {
+    args.push('--dangerously-skip-permissions');
+  }
+  if (optModel.value) {
+    args.push('--model', optModel.value);
+  }
+  var custom = optCustomArgs.value.trim();
+  if (custom) {
+    var parts = custom.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+    for (var i = 0; i < parts.length; i++) {
+      args.push(parts[i].replace(/^"|"$/g, ''));
+    }
+  }
+  return args;
+}
+
+btnAddOptions.addEventListener('click', function (e) {
+  e.stopPropagation();
+  toggleSpawnDropdown();
+});
+
+btnSpawnWithOpts.addEventListener('click', function () {
+  var args = buildSpawnArgs();
+  closeSpawnDropdown();
+  addColumn(args.length > 0 ? args : null);
+});
+
+// Close dropdown when clicking outside
+document.addEventListener('click', function (e) {
+  if (!spawnDropdown.classList.contains('hidden') &&
+      !spawnDropdown.contains(e.target) &&
+      e.target !== btnAddOptions) {
+    closeSpawnDropdown();
+  }
+});
+
+// Prevent dropdown clicks from closing it
+spawnDropdown.addEventListener('click', function (e) {
+  e.stopPropagation();
 });
 
 connectWS();
