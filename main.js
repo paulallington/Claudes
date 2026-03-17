@@ -641,8 +641,13 @@ function setupAutoUpdater() {
     mainWindow?.webContents.send('update:downloaded', { version: info.version });
   });
 
+  autoUpdater.on('download-progress', (progress) => {
+    mainWindow?.webContents.send('update:progress', { percent: progress.percent });
+  });
+
   autoUpdater.on('error', (err) => {
     console.error('[auto-updater]', err.message);
+    mainWindow?.webContents.send('update:error', { message: err.message });
   });
 
   autoUpdater.checkForUpdatesAndNotify();

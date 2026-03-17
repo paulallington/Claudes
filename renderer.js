@@ -2587,16 +2587,30 @@ window.electronAPI.getVersion().then(function(v) {
   var updateAction = document.getElementById('update-action');
   var updateDismiss = document.getElementById('update-dismiss');
 
+  var updateVersion = '';
+
   window.electronAPI.onUpdateAvailable(function(info) {
+    updateVersion = info.version;
     updateMessage.textContent = 'Downloading update v' + info.version + '...';
     updateAction.style.display = 'none';
     updateBar.classList.remove('hidden');
+  });
+
+  window.electronAPI.onUpdateProgress(function(info) {
+    var pct = Math.round(info.percent);
+    updateMessage.textContent = 'Downloading update v' + updateVersion + '... ' + pct + '%';
   });
 
   window.electronAPI.onUpdateDownloaded(function(info) {
     updateMessage.textContent = 'Update v' + info.version + ' ready to install';
     updateAction.style.display = '';
     updateBar.classList.remove('hidden');
+  });
+
+  window.electronAPI.onUpdateError(function() {
+    updateMessage.textContent = 'Update download failed';
+    updateAction.style.display = 'none';
+    setTimeout(function() { updateBar.classList.add('hidden'); }, 5000);
   });
 
   updateAction.addEventListener('click', function() {
