@@ -17,6 +17,21 @@ function findClaude() {
 
 const CLAUDE_PATH = findClaude();
 
+// Run claude update at startup (non-blocking)
+try {
+  const { execFile } = require('child_process');
+  execFile(CLAUDE_PATH, ['update'], { timeout: 30000 }, (err, stdout, stderr) => {
+    if (err) {
+      console.error('claude update failed:', err.message);
+    } else {
+      const output = (stdout || '').trim();
+      if (output) console.log('claude update:', output);
+    }
+  });
+} catch (err) {
+  console.error('claude update failed:', err.message);
+}
+
 const wss = new WebSocketServer({ port: PORT, host: '127.0.0.1' }, () => {
   // Signal readiness to parent process
   console.log('READY:' + PORT);

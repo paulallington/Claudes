@@ -92,6 +92,9 @@ function startPtyServer() {
 // --- Window ---
 
 function createWindow() {
+  const config = readConfig();
+  const isLight = config.theme === 'light';
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -99,11 +102,11 @@ function createWindow() {
     minHeight: 400,
     title: 'Claudes',
     icon: path.join(__dirname, 'icon.ico'),
-    backgroundColor: '#1a1a2e',
+    backgroundColor: isLight ? '#ffffff' : '#1a1a2e',
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#16213e',
-      symbolColor: '#e0e0e0',
+      color: isLight ? '#e8ecf1' : '#16213e',
+      symbolColor: isLight ? '#1f2328' : '#e0e0e0',
       height: 40
     },
     webPreferences: {
@@ -132,6 +135,16 @@ ipcMain.handle('config:getProjects', () => {
 
 ipcMain.handle('config:saveProjects', (event, config) => {
   writeConfig(config);
+});
+
+ipcMain.handle('theme:setTitleBarOverlay', (event, colors) => {
+  if (mainWindow) {
+    mainWindow.setTitleBarOverlay({
+      color: colors.color,
+      symbolColor: colors.symbolColor,
+      height: 40
+    });
+  }
 });
 
 // --- Session Management ---

@@ -17,6 +17,8 @@ var claudeMdClose = document.getElementById('claudemd-close');
 var claudeMdSave = document.getElementById('claudemd-save');
 var claudeMdStatus = document.getElementById('claudemd-status');
 
+var btnThemeToggle = document.getElementById('btn-theme-toggle');
+
 var btnAddOptions = document.getElementById('btn-add-options');
 var spawnDropdown = document.getElementById('spawn-dropdown');
 var optSkipPermissions = document.getElementById('opt-skip-permissions');
@@ -37,7 +39,7 @@ var activeProjectKey = null;
 
 var config = { projects: [], activeProjectIndex: -1 };
 
-var termTheme = {
+var darkTermTheme = {
   background: '#1a1a2e',
   foreground: '#e0e0e0',
   cursor: '#e94560',
@@ -61,6 +63,34 @@ var termTheme = {
   brightCyan: '#70d7ff',
   brightWhite: '#ffffff'
 };
+
+var lightTermTheme = {
+  background: '#ffffff',
+  foreground: '#1f2328',
+  cursor: '#d1304a',
+  cursorAccent: '#ffffff',
+  selectionBackground: '#b6d7ff',
+  selectionForeground: '#1f2328',
+  black: '#24292f',
+  red: '#cf222e',
+  green: '#1a7f37',
+  yellow: '#9a6700',
+  blue: '#0969da',
+  magenta: '#8250df',
+  cyan: '#0550ae',
+  white: '#6e7781',
+  brightBlack: '#57606a',
+  brightRed: '#a40e26',
+  brightGreen: '#116329',
+  brightYellow: '#7d4e00',
+  brightBlue: '#218bff',
+  brightMagenta: '#a475f9',
+  brightCyan: '#3192aa',
+  brightWhite: '#8c959f'
+};
+
+var termTheme = darkTermTheme;
+var currentTheme = 'dark';
 
 // ============================================================
 // WebSocket
@@ -205,6 +235,9 @@ function loadProjects() {
       if (config.projects[i].columnCount === undefined) {
         config.projects[i].columnCount = 1;
       }
+    }
+    if (config.theme) {
+      applyTheme(config.theme);
     }
     renderProjectList();
     if (config.activeProjectIndex >= 0 && config.projects[config.activeProjectIndex]) {
@@ -556,6 +589,49 @@ function addColumn(args, targetRow, opts) {
   terminal.loadAddon(fitAddon);
   terminal.open(termWrapper);
   try { terminal.loadAddon(new WebglAddon.WebglAddon()); } catch (e) { console.warn('WebGL addon failed, using canvas renderer:', e); }
+
+  // Handle Ctrl+V paste and Shift+Enter newline
+  terminal.attachCustomKeyEventHandler(function (e) {
+    // Ctrl+V: paste from clipboard
+    if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key === 'v') {
+      e.preventDefault();
+      window.electronAPI.clipboardReadText().then(function (text) {
+        if (text) {
+          terminal.paste(text);
+        }
+      });
+      return false;
+    }
+    // Ctrl+Shift+V: also paste
+    if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
+      e.preventDefault();
+      window.electronAPI.clipboardReadText().then(function (text) {
+        if (text) {
+          terminal.paste(text);
+        }
+      });
+      return false;
+    }
+    // Ctrl+C: copy selection if there is one, otherwise send SIGINT
+    if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key === 'c') {
+      var sel = terminal.getSelection();
+      if (sel) {
+        window.electronAPI.clipboardWriteText(sel);
+        terminal.clearSelection();
+        return false;
+      }
+      // No selection — let xterm send SIGINT as normal
+      return true;
+    }
+    // Shift+Enter: send CSI u sequence so Claude CLI sees it as newline
+    if (e.type === 'keydown' && e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'Enter') {
+      e.preventDefault();
+      // CSI u encoding: ESC [ 13 ; 2 u  (keycode 13, modifier 2=Shift)
+      wsSend({ type: 'write', id: id, data: '\x1b[13;2u' });
+      return false;
+    }
+    return true;
+  });
 
   var cwd = opts.cwd || activeProjectKey;
   var claudeArgs = args || [];
@@ -1812,12 +1888,51 @@ gitCommitMsg.addEventListener('keydown', function (e) {
 });
 
 // ============================================================
+// Theme
+// ============================================================
+
+function applyTheme(theme) {
+  currentTheme = theme;
+  termTheme = theme === 'light' ? lightTermTheme : darkTermTheme;
+  if (theme === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+    btnThemeToggle.textContent = '\u2606'; // white star / sun symbol
+    btnThemeToggle.title = 'Switch to dark mode';
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+    btnThemeToggle.textContent = '\u263D'; // moon symbol
+    btnThemeToggle.title = 'Switch to light mode';
+  }
+  // Update all existing terminals
+  allColumns.forEach(function (colData) {
+    if (colData.terminal) {
+      colData.terminal.options.theme = termTheme;
+    }
+  });
+  // Update titlebar overlay
+  if (window.electronAPI && window.electronAPI.setTitleBarOverlay) {
+    var overlayColors = theme === 'light'
+      ? { color: '#e8ecf1', symbolColor: '#1f2328' }
+      : { color: '#16213e', symbolColor: '#e0e0e0' };
+    window.electronAPI.setTitleBarOverlay(overlayColors);
+  }
+}
+
+function toggleTheme() {
+  var newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  applyTheme(newTheme);
+  config.theme = newTheme;
+  saveConfig();
+}
+
+// ============================================================
 // Init
 // ============================================================
 
 btnAdd.addEventListener('click', function () { addColumn(); });
 btnAddRow.addEventListener('click', addRow);
 btnToggleSidebar.addEventListener('click', toggleSidebar);
+btnThemeToggle.addEventListener('click', toggleTheme);
 
 btnAddProject.addEventListener('click', function () {
   if (!window.electronAPI) return;
@@ -2492,10 +2607,10 @@ function renderBarChart(containerId, data, days) {
   legend.className = 'usage-chart-legend';
   var dotIn = document.createElement('span');
   dotIn.className = 'usage-legend-dot';
-  dotIn.style.background = '#0f3460';
+  dotIn.style.background = 'var(--bg-button)';
   var dotOut = document.createElement('span');
   dotOut.className = 'usage-legend-dot';
-  dotOut.style.background = '#e94560';
+  dotOut.style.background = 'var(--accent)';
   var spanIn = document.createElement('span');
   spanIn.appendChild(dotIn);
   spanIn.appendChild(document.createTextNode(' Input'));
