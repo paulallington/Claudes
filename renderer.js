@@ -835,6 +835,11 @@ function addColumn(args, targetRow, opts) {
   if (resumeSessionId && !opts.title && !cmd) {
     fetchAndSetSessionTitle(id, cwd, resumeSessionId);
   }
+
+  // Start periodic session sync for Claude columns (not custom commands)
+  if (!cmd) {
+    startSessionSync(id, cwd);
+  }
 }
 
 function addRow() {
@@ -895,6 +900,50 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
   }, 2000);
 }
 
+// Periodically re-detect session ID for a column (handles /clear, /resume inside CLI)
+var sessionSyncTimers = new Map();
+var SESSION_SYNC_INTERVAL = 5000;
+
+function startSessionSync(columnId, projectPath) {
+  if (!window.electronAPI) return;
+  stopSessionSync(columnId);
+
+  var timer = setInterval(function () {
+    var col = allColumns.get(columnId);
+    if (!col) { stopSessionSync(columnId); return; }
+
+    window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+      var col2 = allColumns.get(columnId);
+      if (!col2 || !sessions.length) return;
+
+      // Find the most recently modified session not claimed by another column
+      var claimed = getClaimedSessionIds(columnId);
+      for (var i = 0; i < sessions.length; i++) {
+        var sid = sessions[i].sessionId;
+        if (!claimed[sid]) {
+          if (col2.sessionId !== sid) {
+            col2.sessionId = sid;
+            persistSessions(col2.projectKey);
+            // Update title too
+            fetchAndSetSessionTitle(columnId, projectPath, sid);
+          }
+          return;
+        }
+      }
+    });
+  }, SESSION_SYNC_INTERVAL);
+
+  sessionSyncTimers.set(columnId, timer);
+}
+
+function stopSessionSync(columnId) {
+  var timer = sessionSyncTimers.get(columnId);
+  if (timer) {
+    clearInterval(timer);
+    sessionSyncTimers.delete(columnId);
+  }
+}
+
 function persistSessions(projectKey) {
   if (!window.electronAPI) return;
   var state = projectStates.get(projectKey);
@@ -912,10 +961,11 @@ function removeColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
 
-  // Clean up activity timer
+  // Clean up timers
   var timer = activityTimers.get(id);
   if (timer) clearTimeout(timer);
   activityTimers.delete(id);
+  stopSessionSync(id);
 
   wsSend({ type: 'kill', id: id });
 
