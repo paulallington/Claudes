@@ -3,3 +3,6 @@ dist/
 out/
 .env
 *.output
+.claude/settings.local.json
+.claudes/
+.playwright-mcp/

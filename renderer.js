@@ -2143,6 +2143,12 @@ function renderUsageSummary(data) {
   var projectSet7 = new Set(), projectSetAll = new Set();
   var earliestTs = Infinity, latestTs = 0;
 
+  function emptyModelTokens() {
+    return { opus: {input:0,output:0,cache:0}, sonnet: {input:0,output:0,cache:0}, haiku: {input:0,output:0,cache:0}, unknown: {input:0,output:0,cache:0} };
+  }
+  var allModelTokens = emptyModelTokens();
+  var week7ModelTokens = emptyModelTokens();
+
   for (var i = 0; i < data.length; i++) {
     var s = data[i];
     var sessionInput = s.inputTokens + s.cacheReadTokens + s.cacheCreationTokens;
@@ -2150,6 +2156,11 @@ function renderUsageSummary(data) {
     totalOutput += s.outputTokens;
     totalCacheRead += s.cacheReadTokens;
     projectSetAll.add(s.projectKey);
+
+    var modelClass = classifyModel(s.model);
+    allModelTokens[modelClass].input += sessionInput;
+    allModelTokens[modelClass].output += s.outputTokens;
+    allModelTokens[modelClass].cache += s.cacheReadTokens;
 
     if (s.firstTimestamp && s.firstTimestamp < earliestTs) earliestTs = s.firstTimestamp;
     if (s.lastTimestamp && s.lastTimestamp > latestTs) latestTs = s.lastTimestamp;
@@ -2160,6 +2171,9 @@ function renderUsageSummary(data) {
       week7Cache += s.cacheReadTokens;
       week7Sessions++;
       projectSet7.add(s.projectKey);
+      week7ModelTokens[modelClass].input += sessionInput;
+      week7ModelTokens[modelClass].output += s.outputTokens;
+      week7ModelTokens[modelClass].cache += s.cacheReadTokens;
     }
   }
 
@@ -2167,8 +2181,8 @@ function renderUsageSummary(data) {
   var dataSpanDays = earliestTs < Infinity ? Math.ceil((Date.now() - earliestTs) / (24 * 60 * 60 * 1000)) : 0;
 
   var periods = {
-    '7d':  { input: week7Input,  output: week7Output,  cache: week7Cache,    sessions: week7Sessions,   projects: projectSet7.size },
-    'all': { input: totalInput,   output: totalOutput,   cache: totalCacheRead, sessions: data.length,   projects: projectSetAll.size }
+    '7d':  { input: week7Input,  output: week7Output,  cache: week7Cache,    sessions: week7Sessions,   projects: projectSet7.size, modelTokens: week7ModelTokens },
+    'all': { input: totalInput,   output: totalOutput,   cache: totalCacheRead, sessions: data.length,   projects: projectSetAll.size, modelTokens: allModelTokens }
   };
 
   // Format earliest date for display
@@ -2197,7 +2211,7 @@ function renderUsageSummary(data) {
     var chartTitle = document.getElementById('usage-chart-title');
     if (chartTitle) chartTitle.textContent = periodLabels[period];
     renderBarChart('usage-chart-30d', data, chartDays[period]);
-    renderEnvironmentalImpact(p.input, p.output, p.cache, periodLabels[period]);
+    renderEnvironmentalImpact(p.modelTokens, periodLabels[period]);
   }
 
   // Wire up period toggle buttons (clone to remove prior listeners)
@@ -2219,17 +2233,57 @@ function renderUsageSummary(data) {
   renderPeriod('all');
 }
 
-function renderEnvironmentalImpact(totalInput, totalOutput, totalCacheRead, periodLabel) {
-  // Energy estimates (Wh per million tokens) — based on published LLM inference research
-  var WH_PER_M_INPUT = 1.0;
-  var WH_PER_M_OUTPUT = 5.0;
-  var WH_PER_M_CACHE = 0.2;
-  // Carbon intensity: Google Cloud average (kg CO2 per kWh)
+// Model energy profiles (Wh per million tokens)
+// Estimated from published LLM inference research (Luccioni et al. 2024, IEA 2024),
+// scaled between model tiers using Anthropic API pricing ratios as a compute proxy.
+// Output tokens cost ~5x input (autoregressive generation vs parallel input processing).
+// Cache reads skip most model computation — estimated at ~10% of input energy.
+// PUE (Power Usage Effectiveness) of 1.1 included to account for cooling/networking overhead.
+var MODEL_ENERGY_PROFILES = {
+  opus:    { input: 60,  output: 300, cache: 6   },
+  sonnet:  { input: 12,  output: 60,  cache: 1.2 },
+  haiku:   { input: 4,   output: 20,  cache: 0.4 },
+  unknown: { input: 12,  output: 60,  cache: 1.2 }  // default to sonnet
+};
+
+function classifyModel(modelStr) {
+  if (!modelStr) return 'unknown';
+  var m = modelStr.toLowerCase();
+  if (m.indexOf('opus') !== -1) return 'opus';
+  if (m.indexOf('sonnet') !== -1) return 'sonnet';
+  if (m.indexOf('haiku') !== -1) return 'haiku';
+  return 'unknown';
+}
+
+function renderEnvironmentalImpact(modelTokens, periodLabel) {
+  // Carbon intensity: Google Cloud / AWS average (kg CO2 per kWh)
   var KG_CO2_PER_KWH = 0.12;
 
-  var energyWh = (totalInput / 1e6) * WH_PER_M_INPUT
-               + (totalOutput / 1e6) * WH_PER_M_OUTPUT
-               + (totalCacheRead / 1e6) * WH_PER_M_CACHE;
+  // Calculate energy per model
+  var energyWh = 0;
+  var modelBreakdown = [];
+  var modelNames = ['opus', 'sonnet', 'haiku', 'unknown'];
+  for (var mi = 0; mi < modelNames.length; mi++) {
+    var name = modelNames[mi];
+    var tokens = modelTokens[name];
+    var profile = MODEL_ENERGY_PROFILES[name];
+    if (!tokens || (tokens.input === 0 && tokens.output === 0 && tokens.cache === 0)) continue;
+    var mWh = (tokens.input / 1e6) * profile.input
+            + (tokens.output / 1e6) * profile.output
+            + (tokens.cache / 1e6) * profile.cache;
+    energyWh += mWh;
+    modelBreakdown.push({
+      name: name === 'unknown' ? 'Unknown' : name.charAt(0).toUpperCase() + name.slice(1),
+      wh: mWh,
+      pct: 0,
+      totalTokens: tokens.input + tokens.output
+    });
+  }
+  // Calculate percentages
+  for (var bi = 0; bi < modelBreakdown.length; bi++) {
+    modelBreakdown[bi].pct = energyWh > 0 ? Math.round(modelBreakdown[bi].wh / energyWh * 100) : 0;
+  }
+
   var energyKwh = energyWh / 1000;
   var co2Kg = energyKwh * KG_CO2_PER_KWH;
   var co2G = co2Kg * 1000;
@@ -2336,8 +2390,15 @@ function renderEnvironmentalImpact(totalInput, totalOutput, totalCacheRead, peri
     return stat;
   }
 
-  grid.appendChild(buildEnvStat('Energy Used', energyStr, energyUnit, 'inference compute'));
-  grid.appendChild(buildEnvStat('CO\u2082 Emissions', co2Str, co2Unit, 'at cloud carbon intensity'));
+  // Build sub-label showing model mix
+  var modelMixParts = [];
+  for (var mi2 = 0; mi2 < modelBreakdown.length; mi2++) {
+    modelMixParts.push(modelBreakdown[mi2].name + ' ' + modelBreakdown[mi2].pct + '%');
+  }
+  var modelMixStr = modelMixParts.length > 0 ? modelMixParts.join(', ') : 'no model data';
+
+  grid.appendChild(buildEnvStat('Energy Used', energyStr, energyUnit, modelMixStr));
+  grid.appendChild(buildEnvStat('CO\u2082 Emissions', co2Str, co2Unit, KG_CO2_PER_KWH * 1000 + ' g/kWh cloud avg'));
   container.appendChild(grid);
 
   // Equivalent
@@ -2359,7 +2420,7 @@ function renderEnvironmentalImpact(totalInput, totalOutput, totalCacheRead, peri
   // Disclaimer
   var disc = document.createElement('div');
   disc.className = 'usage-env-disclaimer';
-  disc.textContent = 'Estimates based on published LLM inference energy research. Actual values depend on hardware, model, batch size, and data centre efficiency.';
+  disc.textContent = 'Energy estimated per model tier using published inference research (Luccioni et al. 2024, IEA 2024), scaled by API pricing ratios. Includes 1.1\u00D7 PUE. Actual values depend on hardware, batch size, and data centre location.';
   container.appendChild(disc);
 }
 
