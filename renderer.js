@@ -209,7 +209,7 @@ function updateSidebarActivity() {
     }
   });
 
-  // Update sidebar items
+  // Apply activity class to existing project badges
   var items = projectListEl.querySelectorAll('.project-item');
   config.projects.forEach(function (project, index) {
     var item = items[index];
@@ -219,20 +219,18 @@ function updateSidebarActivity() {
     var waiting = waitingByProject[key] || 0;
     var working = workingByProject[key] || 0;
 
-    // Remove existing pulse indicator
-    var existing = item.querySelector('.project-pulse');
-    if (existing) existing.remove();
+    var badge = item.querySelector('.project-badge');
+    if (!badge) return;
 
+    badge.classList.remove('badge-waiting', 'badge-working');
     if (waiting > 0) {
-      var pulse = document.createElement('span');
-      pulse.className = 'project-pulse pulse-waiting';
-      pulse.title = waiting + ' waiting for input';
-      item.querySelector('.project-right').insertBefore(pulse, item.querySelector('.project-right').firstChild);
+      badge.classList.add('badge-waiting');
+      badge.title = waiting + ' waiting for input';
     } else if (working > 0) {
-      var pulse2 = document.createElement('span');
-      pulse2.className = 'project-pulse pulse-working';
-      pulse2.title = working + ' working';
-      item.querySelector('.project-right').insertBefore(pulse2, item.querySelector('.project-right').firstChild);
+      badge.classList.add('badge-working');
+      badge.title = working + ' working';
+    } else {
+      badge.title = '';
     }
   });
 }
@@ -406,7 +404,6 @@ function renderProjectList() {
     if (count > 0) {
       var badge = document.createElement('span');
       badge.className = 'project-badge';
-      badge.textContent = count + ' ';
       var claudeIcon = document.createElement('img');
       claudeIcon.className = 'claude-icon';
       claudeIcon.src = './claude-small.png';

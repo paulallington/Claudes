@@ -231,7 +231,7 @@ html, body {
 }
 
 .project-item .project-remove {
-  visibility: hidden;
+  display: none;
   cursor: pointer;
   color: var(--text-dimmer);
   font-size: 14px;
@@ -241,7 +241,7 @@ html, body {
 }
 
 .project-item:hover .project-remove {
-  visibility: visible;
+  display: block;
 }
 
 .project-item .project-remove:hover {
@@ -592,24 +592,19 @@ html, body {
   50% { opacity: 1; box-shadow: 0 0 6px 2px rgba(245, 166, 35, 0.4); }
 }
 
-/* Sidebar project pulse */
+/* Sidebar badge activity states */
 
-.project-pulse {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  display: inline-block;
-  flex-shrink: 0;
+.project-badge.badge-working .claude-icon {
+  filter: drop-shadow(0 0 3px var(--color-green));
 }
 
-.project-pulse.pulse-waiting {
-  background: #f5a623;
-  animation: pulse-waiting 1.2s ease-in-out infinite;
+.project-badge.badge-waiting .claude-icon {
+  animation: pulse-icon-waiting 1.2s ease-in-out infinite;
 }
 
-.project-pulse.pulse-working {
-  background: var(--color-green);
-  animation: pulse-working 1.5s ease-in-out infinite;
+@keyframes pulse-icon-waiting {
+  0%, 100% { filter: drop-shadow(0 0 2px rgba(245, 166, 35, 0.3)); transform: scale(1); }
+  50% { filter: drop-shadow(0 0 5px rgba(245, 166, 35, 0.8)); transform: scale(1.15); }
 }
 
 .column-header .col-title {
