@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -530,6 +530,7 @@ function findLaunchSettingsConfigs(projectPath) {
               cwd: subDir,
               env: profile.environmentVariables || {},
               applicationUrl: profile.applicationUrl || '',
+              commandLineArgs: profile.commandLineArgs || '',
               _source: 'launchSettings'
             });
           }
@@ -680,6 +681,10 @@ ipcMain.handle('clipboard:readText', () => {
 
 ipcMain.handle('clipboard:writeText', (event, text) => {
   clipboard.writeText(text);
+});
+
+ipcMain.handle('shell:openExternal', (event, url) => {
+  return shell.openExternal(url);
 });
 
 // --- App Lifecycle ---

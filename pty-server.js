@@ -52,9 +52,20 @@ wss.on('connection', (ws) => {
       case 'create': {
         const { id, cols, rows, cwd, args, cmd, env } = msg;
 
+        // On Windows, wrap non-Claude commands in cmd.exe /c so conpty
+        // properly flushes output before the process exits
+        let spawnCmd, spawnArgs;
+        if (cmd && process.platform === 'win32') {
+          spawnCmd = 'cmd.exe';
+          spawnArgs = ['/c', cmd, ...(args || [])];
+        } else {
+          spawnCmd = cmd || CLAUDE_PATH;
+          spawnArgs = args || [];
+        }
+
         let p;
         try {
-          p = pty.spawn(cmd || CLAUDE_PATH, args || [], {
+          p = pty.spawn(spawnCmd, spawnArgs, {
             name: 'xterm-256color',
             cols: cols || 120,
             rows: rows || 30,
@@ -81,9 +92,12 @@ wss.on('connection', (ws) => {
         p.onExit(({ exitCode }) => {
           ptys.delete(id);
           connectionPtys.delete(id);
-          try {
-            ws.send(JSON.stringify({ type: 'exit', id, exitCode }));
-          } catch { /* ws closed */ }
+          // Small delay to allow conpty to flush remaining output
+          setTimeout(() => {
+            try {
+              ws.send(JSON.stringify({ type: 'exit', id, exitCode }));
+            } catch { /* ws closed */ }
+          }, 200);
         });
 
         break;

@@ -33,9 +33,9 @@ var ws = null;
 // All pty columns keyed by global id (for routing WS messages)
 var allColumns = new Map();
 
-// Activity state tracking per column: 'working' | 'waiting' | 'exited'
+// Activity state tracking per column: 'working' | 'attention' | 'idle' | 'exited'
 var activityTimers = new Map(); // columnId -> setTimeout handle
-var ACTIVITY_IDLE_MS = 3000; // after 3s of no data, consider Claude "waiting"
+var ACTIVITY_IDLE_MS = 3000; // after 3s of no data, transition working -> attention
 var resizeSuppressed = new Set(); // columnIds temporarily suppressed after resize
 
 // Per-project state: projectKey -> { containerEl, rows: [], columns: Map, focusedColumnId }
@@ -114,6 +114,11 @@ function connectWS() {
         if (!resizeSuppressed.has(msg.id)) {
           setColumnActivity(msg.id, 'working');
         }
+        // Auto-open browser when server starts listening
+        if (col.launchUrl && !col.launchUrlOpened && msg.data.indexOf('Now listening on') !== -1) {
+          col.launchUrlOpened = true;
+          window.electronAPI.openExternal(col.launchUrl);
+        }
       }
     } else if (msg.type === 'exit') {
       var col2 = allColumns.get(msg.id);
@@ -153,11 +158,11 @@ function setColumnActivity(id, state) {
       updateActivityIndicator(id);
       updateSidebarActivity();
     }
-    // Always reset the idle timer
+    // Always reset the idle timer: working -> attention after 3s
     activityTimers.set(id, setTimeout(function () {
       var c = allColumns.get(id);
       if (c && c.activityState === 'working') {
-        c.activityState = 'waiting';
+        c.activityState = 'attention';
         updateActivityIndicator(id);
         updateSidebarActivity();
       }
@@ -186,9 +191,12 @@ function updateActivityIndicator(id) {
   if (col.activityState === 'working') {
     dot.classList.add('activity-working');
     dot.title = 'Working...';
-  } else if (col.activityState === 'waiting') {
-    dot.classList.add('activity-waiting');
-    dot.title = 'Waiting for input';
+  } else if (col.activityState === 'attention') {
+    dot.classList.add('activity-attention');
+    dot.title = 'Needs attention';
+  } else if (col.activityState === 'idle') {
+    dot.classList.add('activity-idle');
+    dot.title = 'Idle';
   } else {
     dot.classList.add('activity-exited');
     dot.title = 'Exited';
@@ -196,13 +204,13 @@ function updateActivityIndicator(id) {
 }
 
 function updateSidebarActivity() {
-  // Count waiting columns per project
-  var waitingByProject = {};
+  // Count activity states per project
+  var attentionByProject = {};
   var workingByProject = {};
   allColumns.forEach(function (col) {
     var key = col.projectKey;
-    if (col.activityState === 'waiting') {
-      waitingByProject[key] = (waitingByProject[key] || 0) + 1;
+    if (col.activityState === 'attention') {
+      attentionByProject[key] = (attentionByProject[key] || 0) + 1;
     }
     if (col.activityState === 'working') {
       workingByProject[key] = (workingByProject[key] || 0) + 1;
@@ -216,16 +224,16 @@ function updateSidebarActivity() {
     if (!item) return;
 
     var key = project.path;
-    var waiting = waitingByProject[key] || 0;
+    var attention = attentionByProject[key] || 0;
     var working = workingByProject[key] || 0;
 
     var badge = item.querySelector('.project-badge');
     if (!badge) return;
 
-    badge.classList.remove('badge-waiting', 'badge-working');
-    if (waiting > 0) {
-      badge.classList.add('badge-waiting');
-      badge.title = waiting + ' waiting for input';
+    badge.classList.remove('badge-attention', 'badge-working');
+    if (attention > 0) {
+      badge.classList.add('badge-attention');
+      badge.title = attention + ' needs attention';
     } else if (working > 0) {
       badge.classList.add('badge-working');
       badge.title = working + ' working';
@@ -233,6 +241,18 @@ function updateSidebarActivity() {
       badge.title = '';
     }
   });
+}
+
+function clearProjectAttention(projectKey) {
+  var changed = false;
+  allColumns.forEach(function (col, id) {
+    if (col.projectKey === projectKey && col.activityState === 'attention') {
+      col.activityState = 'idle';
+      updateActivityIndicator(id);
+      changed = true;
+    }
+  });
+  if (changed) updateSidebarActivity();
 }
 
 // ============================================================
@@ -450,6 +470,10 @@ function setActiveProject(index, isStartup) {
   config.activeProjectIndex = index;
   activeProjectKey = newKey;
   activeProjectNameEl.textContent = project.name;
+
+  // Clear attention state on all columns of this project — user has looked at it
+  clearProjectAttention(newKey);
+
   saveConfig();
   renderProjectList();
 
@@ -639,6 +663,7 @@ function createExitOverlay(id, exitCode, col) {
     } else {
       sendMsg.args = col.sessionId ? ['--resume', col.sessionId] : [];
     }
+    if (col.env) sendMsg.env = col.env;
     wsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
@@ -820,7 +845,10 @@ function addColumn(args, targetRow, opts) {
     sessionId: resumeSessionId,
     customTitle: opts.title || null,
     cmd: cmd,
-    cmdArgs: claudeArgs
+    cmdArgs: claudeArgs,
+    env: opts.env || null,
+    launchUrl: opts.launchUrl || null,
+    launchUrlOpened: false
   };
 
   row.columnIds.push(id);
@@ -2016,6 +2044,10 @@ function launchConfig(config) {
       cmdArgs.push('--urls');
       cmdArgs.push(config.applicationUrl);
     }
+    if (config.commandLineArgs) {
+      cmdArgs.push('--');
+      cmdArgs = cmdArgs.concat(config.commandLineArgs.split(/\s+/));
+    }
   } else if (config.type === 'coreclr') {
     cmd = 'dotnet';
     cmdArgs = [];
@@ -2037,7 +2069,8 @@ function launchConfig(config) {
   } else {
     return;
   }
-  addColumn(cmdArgs, null, { cmd: cmd, title: config.name, cwd: cwd, env: env });
+  var launchUrl = config.applicationUrl || null;
+  addColumn(cmdArgs, null, { cmd: cmd, title: config.name, cwd: cwd, env: env, launchUrl: launchUrl });
 }
 
 function refreshExplorer() {
