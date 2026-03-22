@@ -727,6 +727,12 @@ function startHookServer() {
 ipcMain.handle('hooks:getPort', () => hookServerPort);
 ipcMain.handle('pty:getPort', () => ptyPort);
 
+ipcMain.handle('window:flashFrame', () => {
+  if (mainWindow && !mainWindow.isFocused()) {
+    mainWindow.flashFrame(true);
+  }
+});
+
 // --- App Lifecycle ---
 
 // In dev mode (not packaged), skip single-instance lock so dev can run alongside production

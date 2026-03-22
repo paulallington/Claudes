@@ -620,6 +620,16 @@ html, body {
   100% { transform: rotate(360deg); }
 }
 
+/* Attention flash for columns and sidebar items needing input */
+.attention-flash {
+  animation: attention-pulse 0.8s ease-in-out 5;
+}
+
+@keyframes attention-pulse {
+  0%, 100% { background-color: inherit; }
+  50% { background-color: rgba(245, 166, 35, 0.2); }
+}
+
 .project-badge.badge-waiting .claude-icon {
   animation: pulse-icon-waiting 1.2s ease-in-out infinite;
 }

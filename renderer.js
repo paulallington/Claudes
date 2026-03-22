@@ -170,6 +170,7 @@ function setColumnActivity(id, state) {
         c.activityState = 'waiting';
         updateActivityIndicator(id);
         updateSidebarActivity();
+        notifyAttentionNeeded(id);
       }
     }, ACTIVITY_IDLE_MS));
   } else {
@@ -241,6 +242,32 @@ function updateSidebarActivity() {
       badge.title = working + ' working';
     } else {
       badge.title = '';
+    }
+  });
+}
+
+function notifyAttentionNeeded(columnId) {
+  var col = allColumns.get(columnId);
+  if (!col) return;
+
+  // Flash taskbar if window not focused
+  if (window.electronAPI && window.electronAPI.flashFrame) {
+    window.electronAPI.flashFrame();
+  }
+
+  // Flash the column header
+  var header = col.headerEl;
+  if (header) {
+    header.classList.add('attention-flash');
+    setTimeout(function () { header.classList.remove('attention-flash'); }, 4000);
+  }
+
+  // Flash the sidebar project item
+  var items = projectListEl.querySelectorAll('.project-item');
+  config.projects.forEach(function (project, index) {
+    if (project.path === col.projectKey && items[index]) {
+      items[index].classList.add('attention-flash');
+      setTimeout(function () { items[index].classList.remove('attention-flash'); }, 4000);
     }
   });
 }
