@@ -60,29 +60,41 @@
           <button id="btn-toggle-explorer" title="Toggle Explorer (Ctrl+Shift+E)">&#9783;</button>
           <span class="app-title">Claudes</span><span id="app-version" class="app-version"></span>
           <span id="active-project-name" class="active-project-name"></span>
-          <button id="btn-claude-md" class="btn-claude-md" title="Manage project memory (CLAUDE.md)">CLAUDE.md</button>
-          <button id="btn-usage" class="btn-usage" title="View Claude usage">Usage</button>
-          <button id="btn-claude-config" class="btn-claude-md" title="Edit Claude settings (~/.claude/settings.json)">Config</button>
-          <button id="btn-settings" class="btn-claude-md" title="App settings">&#9881;</button>
-          <select id="theme-select" class="theme-select" title="Theme">
-            <option value="dark">Dark</option>
-            <option value="light">Light</option>
-            <option value="auto">Auto</option>
-          </select>
         </div>
         <div class="toolbar-actions">
+          <div class="toolbar-menu-wrap">
+            <button id="btn-toolbar-menu" class="toolbar-menu-btn" title="Tools &amp; settings">&#8943;</button>
+            <div id="toolbar-menu" class="toolbar-menu hidden">
+              <button class="toolbar-menu-item" id="btn-claude-md">CLAUDE.md</button>
+              <button class="toolbar-menu-item" id="btn-usage">Usage</button>
+              <button class="toolbar-menu-item" id="btn-claude-config">Config</button>
+              <button class="toolbar-menu-item" id="btn-settings">Settings</button>
+              <div class="spawn-divider"></div>
+              <div class="toolbar-menu-item toolbar-menu-row">
+                <span>Theme</span>
+                <select id="theme-select" class="theme-select" title="Theme">
+                  <option value="dark">Dark</option>
+                  <option value="light">Light</option>
+                  <option value="auto">Auto</option>
+                </select>
+              </div>
+            </div>
+          </div>
           <div class="spawn-split-btn">
             <button id="btn-add" title="Spawn Claude (Ctrl+Shift+T)">+ Spawn Claude</button>
             <button id="btn-add-options" title="Spawn options" class="spawn-chevron">&#9662;</button>
             <div id="spawn-dropdown" class="spawn-dropdown hidden">
               <label class="spawn-option">
                 <input type="checkbox" id="opt-skip-permissions"> Skip Permissions
+                <span class="spawn-help" title="Bypass all permission prompts (--dangerously-skip-permissions). Use with caution.">?</span>
               </label>
               <label class="spawn-option">
                 <input type="checkbox" id="opt-remote-control"> Remote Control
+                <span class="spawn-help" title="Enable remote access from claude.ai/code or the Claude mobile app (--remote-control).">?</span>
               </label>
               <label class="spawn-option">
                 <input type="checkbox" id="opt-bare"> Bare Mode
+                <span class="spawn-help" title="Lightweight mode that skips hooks, LSP, and plugins. Best for scripted/automated tasks (--bare).">?</span>
               </label>
               <div class="spawn-divider"></div>
               <div class="spawn-option spawn-model-row">

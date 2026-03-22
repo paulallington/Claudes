@@ -152,6 +152,7 @@ ipcMain.handle('theme:setTitleBarOverlay', (event, colors) => {
       symbolColor: colors.symbolColor,
       height: 40
     });
+    mainWindow.setBackgroundColor(colors.color);
   }
 });
 
@@ -656,11 +657,17 @@ autoUpdater.autoInstallOnAppQuit = true;
 
 function setupAutoUpdater() {
   autoUpdater.on('update-available', (info) => {
-    mainWindow?.webContents.send('update:available', { version: info.version });
+    mainWindow?.webContents.send('update:available', {
+      version: info.version,
+      releaseNotes: info.releaseNotes || ''
+    });
   });
 
   autoUpdater.on('update-downloaded', (info) => {
-    mainWindow?.webContents.send('update:downloaded', { version: info.version });
+    mainWindow?.webContents.send('update:downloaded', {
+      version: info.version,
+      releaseNotes: info.releaseNotes || ''
+    });
   });
 
   autoUpdater.on('download-progress', (progress) => {

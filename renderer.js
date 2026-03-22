@@ -38,7 +38,7 @@ var allColumns = new Map();
 
 // Activity state tracking per column: 'working' | 'attention' | 'idle' | 'exited'
 var activityTimers = new Map(); // columnId -> setTimeout handle
-var ACTIVITY_IDLE_MS = 3000; // after 3s of no data, transition working -> attention
+var ACTIVITY_IDLE_MS = 3000; // after 3s of no substantial data, consider Claude "waiting"
 var resizeSuppressed = new Set(); // columnIds temporarily suppressed after resize
 
 // Per-project state: projectKey -> { containerEl, rows: [], columns: Map, focusedColumnId }
@@ -102,6 +102,9 @@ var currentTheme = 'dark';
 
 var fontSize = 14;
 var FONT_SIZE_MIN = 8;
+
+// Track which projects have pending attention (survives renderProjectList rebuilds)
+var projectsNeedingAttention = new Set();
 var FONT_SIZE_MAX = 28;
 var FONT_SIZE_DEFAULT = 14;
 
@@ -129,8 +132,19 @@ function connectWS() {
       var col = allColumns.get(msg.id);
       if (col) {
         col.terminal.write(msg.data);
-        if (!resizeSuppressed.has(msg.id)) {
-          setColumnActivity(msg.id, 'working');
+          if (!resizeSuppressed.has(msg.id) && msg.data && col.hasUserInput) {
+          // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
+          var trimmed = msg.data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
+          // Detect: input prompt (> / ❯), permission prompt (Yes/No), or "Do you want to proceed"
+          var endsWithPrompt = /\n\s*[>❯]\s*$/.test(trimmed) || /^\s*[>❯]\s*$/.test(trimmed) ||
+            /Do you want to proceed/.test(trimmed) || /Esc to cancel/.test(trimmed) ||
+            /\d\.\s*(Yes|No)\s*$/.test(trimmed);
+          if (endsWithPrompt && col.activityState === 'working') {
+            setColumnActivity(msg.id, 'waiting');
+            notifyAttentionNeeded(msg.id);
+          } else if (msg.data.length > 10 && !endsWithPrompt) {
+            setColumnActivity(msg.id, 'working');
+          }
         }
         // Auto-open browser when server starts listening
         if (col.launchUrl && !col.launchUrlOpened && msg.data.indexOf('Now listening on') !== -1) {
@@ -200,7 +214,7 @@ function setColumnActivity(id, state) {
       updateActivityIndicator(id);
       updateSidebarActivity();
     }
-    // Always reset the idle timer: working -> attention after 3s
+    // Fallback idle timer — fires notification if prompt detection didn't catch it
     activityTimers.set(id, setTimeout(function () {
       var c = allColumns.get(id);
       if (c && c.activityState === 'working') {
@@ -286,32 +300,58 @@ function updateSidebarActivity() {
   });
 }
 
+// Notification settings (defaults: all on)
+var notifSettings = { taskbar: true, sidebar: true, header: true };
+
+function loadNotifSettings() {
+  if (config.notifications) {
+    notifSettings = Object.assign({ taskbar: true, sidebar: true, header: true }, config.notifications);
+  }
+  var el1 = document.getElementById('setting-notif-taskbar');
+  var el2 = document.getElementById('setting-notif-sidebar');
+  var el3 = document.getElementById('setting-notif-header');
+  if (el1) el1.checked = notifSettings.taskbar;
+  if (el2) el2.checked = notifSettings.sidebar;
+  if (el3) el3.checked = notifSettings.header;
+}
+
+function saveNotifSettings() {
+  notifSettings.taskbar = document.getElementById('setting-notif-taskbar').checked;
+  notifSettings.sidebar = document.getElementById('setting-notif-sidebar').checked;
+  notifSettings.header = document.getElementById('setting-notif-header').checked;
+  config.notifications = notifSettings;
+  saveConfig();
+}
+
 function notifyAttentionNeeded(columnId) {
   var col = allColumns.get(columnId);
   if (!col) return;
 
-  // Don't flash during startup — wait 15s for Claude to finish loading
-  if (Date.now() - col.createdAt < 15000) return;
+  // Don't flash if user hasn't interacted, or already notified for this cycle
+  if (!col.hasUserInput || col.notified) return;
+  col.notified = true;
 
   // Flash taskbar if window not focused
-  if (window.electronAPI && window.electronAPI.flashFrame) {
+  if (notifSettings.taskbar && window.electronAPI && window.electronAPI.flashFrame) {
     window.electronAPI.flashFrame();
   }
 
   // Flash the column header
-  var header = col.headerEl;
-  if (header) {
-    header.classList.add('attention-flash');
-    setTimeout(function () { header.classList.remove('attention-flash'); }, 4000);
+  if (notifSettings.header) {
+    var header = col.headerEl;
+    if (header) {
+      header.classList.add('attention-flash');
+    }
   }
 
-  // Flash the sidebar project item
+  // Track project attention (persists across renderProjectList rebuilds)
   if (notifSettings.sidebar) {
+    projectsNeedingAttention.add(col.projectKey);
+    // Apply to current DOM
     var items = projectListEl.querySelectorAll('.project-item');
     config.projects.forEach(function (project, index) {
       if (project.path === col.projectKey && items[index]) {
         items[index].classList.add('attention-flash');
-        setTimeout(function () { items[index].classList.remove('attention-flash'); }, 4000);
       }
     });
   }
@@ -452,6 +492,7 @@ function loadProjects() {
     if (config.theme) {
       setThemePreference(config.theme);
     }
+    loadNotifSettings();
     renderProjectList();
     if (config.activeProjectIndex >= 0 && config.projects[config.activeProjectIndex]) {
       setActiveProject(config.activeProjectIndex, true);
@@ -479,6 +520,7 @@ function renderProjectList() {
     var item = document.createElement('div');
     item.className = 'project-item';
     if (index === config.activeProjectIndex) item.className += ' active';
+    if (projectsNeedingAttention.has(key)) item.className += ' attention-flash';
 
     var info = document.createElement('div');
     info.style.overflow = 'hidden';
@@ -570,9 +612,6 @@ function setActiveProject(index, isStartup) {
       }
     }).catch(function () {});
   }
-
-  // Clear attention state on all columns of this project — user has looked at it
-  clearProjectAttention(newKey);
 
   saveConfig();
   renderProjectList();
@@ -874,8 +913,22 @@ function addColumn(args, targetRow, opts) {
   var termWrapper = document.createElement('div');
   termWrapper.className = 'terminal-wrapper';
 
+  // Scroll-to-bottom button
+  var scrollBtn = document.createElement('button');
+  scrollBtn.className = 'scroll-to-bottom hidden';
+  scrollBtn.textContent = '\u2193'; // down arrow
+  scrollBtn.title = 'Scroll to bottom';
+  scrollBtn.addEventListener('click', function () {
+    var c = allColumns.get(id);
+    if (c && c.terminal) {
+      c.terminal.scrollToBottom();
+      scrollBtn.classList.add('hidden');
+    }
+  });
+
   col.appendChild(header);
   col.appendChild(termWrapper);
+  col.appendChild(scrollBtn);
   row.el.appendChild(col);
 
   var terminal = new Terminal({
@@ -890,6 +943,17 @@ function addColumn(args, targetRow, opts) {
   terminal.loadAddon(fitAddon);
   terminal.open(termWrapper);
   try { terminal.loadAddon(new WebglAddon.WebglAddon()); } catch (e) { console.warn('WebGL addon failed, using canvas renderer:', e); }
+
+  // Show/hide scroll-to-bottom button based on scroll position
+  terminal.onScroll(function () {
+    var buf = terminal.buffer.active;
+    var atBottom = buf.viewportY >= buf.baseY;
+    if (atBottom) {
+      scrollBtn.classList.add('hidden');
+    } else {
+      scrollBtn.classList.remove('hidden');
+    }
+  });
 
   // Handle Ctrl+V paste and Shift+Enter newline
   terminal.attachCustomKeyEventHandler(function (e) {
@@ -963,6 +1027,13 @@ function addColumn(args, targetRow, opts) {
 
   terminal.onData(function (data) {
     wsSend({ type: 'write', id: id, data: data });
+    // Only count as user input if it's actual typing, not terminal auto-responses
+    // Auto-responses (device attributes, cursor position) start with ESC
+    var c = allColumns.get(id);
+    if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
+      c.hasUserInput = true;
+      c.notified = false; // Reset notification flag — new work cycle
+    }
   });
 
   termWrapper.addEventListener('contextmenu', function (e) {
@@ -1261,6 +1332,27 @@ function setFocusedColumn(id) {
   state.focusedColumnId = id;
   col.element.classList.add('focused');
   col.terminal.focus();
+
+  // Clear attention flash on this column's header
+  if (col.headerEl) col.headerEl.classList.remove('attention-flash');
+
+  // Only clear sidebar flash if no other columns in this project are still flashing
+  var otherFlashing = false;
+  allColumns.forEach(function (c, cid) {
+    if (cid !== id && c.projectKey === col.projectKey && c.headerEl &&
+        c.headerEl.classList.contains('attention-flash')) {
+      otherFlashing = true;
+    }
+  });
+  if (!otherFlashing) {
+    projectsNeedingAttention.delete(col.projectKey);
+    var items = projectListEl.querySelectorAll('.project-item');
+    config.projects.forEach(function (project, index) {
+      if (project.path === col.projectKey && items[index]) {
+        items[index].classList.remove('attention-flash');
+      }
+    });
+  }
 }
 
 function navigateColumn(direction) {
@@ -2515,6 +2607,21 @@ themeSelect.addEventListener('change', function () {
   saveConfig();
 });
 
+// Prevent theme select interactions from closing the toolbar menu
+themeSelect.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+themeSelect.addEventListener('click', function (e) { e.stopPropagation(); });
+
+// Keep toolbar menu visible while select is open
+var themeSelectOpen = false;
+themeSelect.addEventListener('focus', function () { themeSelectOpen = true; });
+themeSelect.addEventListener('blur', function () {
+  themeSelectOpen = false;
+  // Close menu after a short delay to let change event fire
+  setTimeout(function () {
+    if (!themeSelectOpen) toolbarMenu.classList.add('hidden');
+  }, 100);
+});
+
 btnAddProject.addEventListener('click', function () {
   if (!window.electronAPI) return;
   window.electronAPI.openDirectoryDialog().then(function (folderPath) {
@@ -2588,6 +2695,37 @@ spawnDropdown.addEventListener('click', function (e) {
 });
 
 // ============================================================
+// Toolbar Menu (three-dot)
+// ============================================================
+
+var toolbarMenu = document.getElementById('toolbar-menu');
+var btnToolbarMenu = document.getElementById('btn-toolbar-menu');
+
+btnToolbarMenu.addEventListener('click', function (e) {
+  e.stopPropagation();
+  toolbarMenu.classList.toggle('hidden');
+  // Close spawn dropdown if open
+  closeSpawnDropdown();
+});
+
+toolbarMenu.addEventListener('click', function (e) {
+  // Close menu when a button item is clicked (not the theme row)
+  if (e.target.classList.contains('toolbar-menu-item') && !e.target.classList.contains('toolbar-menu-row')) {
+    toolbarMenu.classList.add('hidden');
+  }
+});
+
+// Close toolbar menu when clicking outside (but not while theme select is open)
+document.addEventListener('click', function (e) {
+  if (!toolbarMenu.classList.contains('hidden') &&
+      !toolbarMenu.contains(e.target) &&
+      e.target !== btnToolbarMenu &&
+      !themeSelectOpen) {
+    toolbarMenu.classList.add('hidden');
+  }
+});
+
+// ============================================================
 // CLAUDE.md Modal
 // ============================================================
 
@@ -2624,6 +2762,29 @@ function saveClaudeMd() {
     }
   });
 }
+
+// ============================================================
+// Settings Modal
+// ============================================================
+
+var settingsModal = document.getElementById('settings-modal');
+
+document.getElementById('btn-settings').addEventListener('click', function () {
+  loadNotifSettings();
+  settingsModal.classList.remove('hidden');
+});
+
+document.getElementById('settings-close').addEventListener('click', function () {
+  settingsModal.classList.add('hidden');
+});
+
+settingsModal.addEventListener('click', function (e) {
+  if (e.target === settingsModal) settingsModal.classList.add('hidden');
+});
+
+document.getElementById('setting-notif-taskbar').addEventListener('change', saveNotifSettings);
+document.getElementById('setting-notif-sidebar').addEventListener('change', saveNotifSettings);
+document.getElementById('setting-notif-header').addEventListener('change', saveNotifSettings);
 
 btnClaudeMd.addEventListener('click', openClaudeMdModal);
 
@@ -3407,11 +3568,24 @@ window.electronAPI.getVersion().then(function(v) {
   var updateMessage = document.getElementById('update-message');
   var updateAction = document.getElementById('update-action');
   var updateDismiss = document.getElementById('update-dismiss');
+  var updateNotesToggle = document.getElementById('update-notes-toggle');
+  var updateNotesEl = document.getElementById('update-notes');
 
   var updateVersion = '';
+  var updateReleaseNotes = '';
+
+  function setReleaseNotes(notes) {
+    updateReleaseNotes = notes || '';
+    if (updateReleaseNotes) {
+      updateNotesToggle.classList.remove('hidden');
+    } else {
+      updateNotesToggle.classList.add('hidden');
+    }
+  }
 
   window.electronAPI.onUpdateAvailable(function(info) {
     updateVersion = info.version;
+    setReleaseNotes(info.releaseNotes);
     updateMessage.textContent = 'Downloading update v' + info.version + '...';
     updateAction.style.display = 'none';
     updateBar.classList.remove('hidden');
@@ -3423,6 +3597,7 @@ window.electronAPI.getVersion().then(function(v) {
   });
 
   window.electronAPI.onUpdateDownloaded(function(info) {
+    setReleaseNotes(info.releaseNotes);
     updateMessage.textContent = 'Update v' + info.version + ' ready to install';
     updateAction.style.display = '';
     updateBar.classList.remove('hidden');
@@ -3431,7 +3606,24 @@ window.electronAPI.getVersion().then(function(v) {
   window.electronAPI.onUpdateError(function(info) {
     updateMessage.textContent = 'Update failed: ' + (info.message || 'unknown error');
     updateAction.style.display = 'none';
+    updateNotesToggle.classList.add('hidden');
     setTimeout(function() { updateBar.classList.add('hidden'); }, 8000);
+  });
+
+  updateNotesToggle.addEventListener('click', function () {
+    if (updateNotesEl.classList.contains('hidden')) {
+      // Release notes can be HTML (from GitHub) or plain text
+      if (updateReleaseNotes.indexOf('<') !== -1) {
+        updateNotesEl.innerHTML = updateReleaseNotes;
+      } else {
+        updateNotesEl.textContent = updateReleaseNotes;
+      }
+      updateNotesEl.classList.remove('hidden');
+      updateNotesToggle.textContent = 'Hide notes';
+    } else {
+      updateNotesEl.classList.add('hidden');
+      updateNotesToggle.textContent = "What's new?";
+    }
   });
 
   updateAction.addEventListener('click', function() {
@@ -3440,5 +3632,6 @@ window.electronAPI.getVersion().then(function(v) {
 
   updateDismiss.addEventListener('click', function() {
     updateBar.classList.add('hidden');
+    updateNotesEl.classList.add('hidden');
   });
 })();
