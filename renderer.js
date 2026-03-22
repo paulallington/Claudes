@@ -1249,6 +1249,23 @@ document.addEventListener('keydown', function (e) {
     toggleExplorer();
     return;
   }
+  if (e.ctrlKey && !e.shiftKey && e.key >= '1' && e.key <= '9') {
+    var num = parseInt(e.key);
+    var state = getActiveState();
+    if (state) {
+      var ids = [];
+      for (var r = 0; r < state.rows.length; r++) {
+        for (var c = 0; c < state.rows[r].columnIds.length; c++) {
+          ids.push(state.rows[r].columnIds[c]);
+        }
+      }
+      if (num <= ids.length) {
+        e.preventDefault();
+        setFocusedColumn(ids[num - 1]);
+      }
+    }
+    return;
+  }
   if (e.ctrlKey && !e.shiftKey && (e.key === '=' || e.key === '+')) {
     e.preventDefault();
     changeFontSize(1);
