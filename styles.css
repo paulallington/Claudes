@@ -586,10 +586,16 @@ html, body {
   animation: pulse-working 1.5s ease-in-out infinite;
 }
 
-.activity-dot.activity-waiting {
+.activity-dot.activity-attention {
   background: #f5a623;
   opacity: 1;
-  animation: pulse-waiting 1.2s ease-in-out infinite;
+  animation: pulse-attention 1.2s ease-in-out infinite;
+}
+
+.activity-dot.activity-idle {
+  background: var(--text-faint);
+  opacity: 0.4;
+  animation: none;
 }
 
 .activity-dot.activity-exited {
@@ -603,7 +609,7 @@ html, body {
   50% { opacity: 1; transform: scale(1.15); }
 }
 
-@keyframes pulse-waiting {
+@keyframes pulse-attention {
   0%, 100% { opacity: 0.6; box-shadow: 0 0 0 0 rgba(245, 166, 35, 0.5); }
   50% { opacity: 1; box-shadow: 0 0 6px 2px rgba(245, 166, 35, 0.4); }
 }
@@ -630,11 +636,11 @@ html, body {
   50% { background-color: rgba(245, 166, 35, 0.2); }
 }
 
-.project-badge.badge-waiting .claude-icon {
-  animation: pulse-icon-waiting 1.2s ease-in-out infinite;
+.project-badge.badge-attention .claude-icon {
+  animation: pulse-icon-attention 1.2s ease-in-out infinite;
 }
 
-@keyframes pulse-icon-waiting {
+@keyframes pulse-icon-attention {
   0%, 100% { filter: drop-shadow(0 0 2px rgba(245, 166, 35, 0.3)); transform: scale(1); }
   50% { filter: drop-shadow(0 0 5px rgba(245, 166, 35, 0.8)); transform: scale(1.15); }
 }
@@ -642,6 +648,7 @@ html, body {
 .column-header .col-title {
   font-weight: 500;
   cursor: default;
+  max-width: calc(100% - 72px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -723,6 +730,20 @@ html, body {
   color: var(--text-bright);
 }
 
+.column-header .col-restart {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.column-header .col-restart:hover {
+  background: var(--accent);
+  color: var(--text-bright);
+}
+
 .column-header .col-close {
   cursor: pointer;
   color: var(--text-dim);
@@ -800,17 +821,19 @@ html, body {
 /* Exit overlay */
 .exit-overlay {
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 12px;
+  padding: 10px 16px;
   background: var(--exit-overlay);
   z-index: 20;
 }
 
 .exit-overlay button {
-  margin-top: 12px;
   padding: 6px 16px;
   background: var(--bg-button);
   color: var(--text-primary);

@@ -36,9 +36,9 @@ var ws = null;
 // All pty columns keyed by global id (for routing WS messages)
 var allColumns = new Map();
 
-// Activity state tracking per column: 'working' | 'waiting' | 'exited'
+// Activity state tracking per column: 'working' | 'attention' | 'idle' | 'exited'
 var activityTimers = new Map(); // columnId -> setTimeout handle
-var ACTIVITY_IDLE_MS = 3000; // after 3s of no data, consider Claude "waiting"
+var ACTIVITY_IDLE_MS = 3000; // after 3s of no data, transition working -> attention
 var resizeSuppressed = new Set(); // columnIds temporarily suppressed after resize
 
 // Per-project state: projectKey -> { containerEl, rows: [], columns: Map, focusedColumnId }
@@ -110,10 +110,18 @@ var FONT_SIZE_DEFAULT = 14;
 // ============================================================
 
 var wsPort = 3456;
+var wsHasConnectedBefore = false;
 
 function connectWS() {
   ws = new WebSocket('ws://127.0.0.1:' + wsPort);
-  ws.onopen = function () { loadProjects(); };
+  ws.onopen = function () {
+    if (wsHasConnectedBefore) {
+      reattachAllColumns();
+    } else {
+      wsHasConnectedBefore = true;
+      loadProjects();
+    }
+  };
   ws.onmessage = function (event) {
     var msg;
     try { msg = JSON.parse(event.data); } catch (e) { return; }
@@ -124,6 +132,11 @@ function connectWS() {
         if (!resizeSuppressed.has(msg.id)) {
           setColumnActivity(msg.id, 'working');
         }
+        // Auto-open browser when server starts listening
+        if (col.launchUrl && !col.launchUrlOpened && msg.data.indexOf('Now listening on') !== -1) {
+          col.launchUrlOpened = true;
+          window.electronAPI.openExternal(col.launchUrl);
+        }
       }
     } else if (msg.type === 'exit') {
       var col2 = allColumns.get(msg.id);
@@ -131,9 +144,33 @@ function connectWS() {
         col2.element.appendChild(createExitOverlay(msg.id, msg.exitCode, col2));
         setColumnActivity(msg.id, 'exited');
       }
+    } else if (msg.type === 'reattach-failed') {
+      // Pty died during sleep — show exit overlay so user can respawn
+      var col3 = allColumns.get(msg.id);
+      if (col3 && !col3.element.querySelector('.exit-overlay')) {
+        col3.element.appendChild(createExitOverlay(msg.id, null, col3));
+        setColumnActivity(msg.id, 'exited');
+      }
     }
   };
   ws.onclose = function () { setTimeout(connectWS, 2000); };
+}
+
+function reattachAllColumns() {
+  allColumns.forEach(function (col, id) {
+    // Skip columns that already have an exit overlay (already dead)
+    if (col.element.querySelector('.exit-overlay')) return;
+    // Skip columns that are marked as exited
+    if (col.activityState === 'exited') return;
+
+    col.fitAddon.fit();
+    wsSend({
+      type: 'reattach',
+      id: id,
+      cols: col.terminal.cols,
+      rows: col.terminal.rows
+    });
+  });
 }
 
 function wsSend(obj) {
@@ -163,11 +200,11 @@ function setColumnActivity(id, state) {
       updateActivityIndicator(id);
       updateSidebarActivity();
     }
-    // Always reset the idle timer
+    // Always reset the idle timer: working -> attention after 3s
     activityTimers.set(id, setTimeout(function () {
       var c = allColumns.get(id);
       if (c && c.activityState === 'working') {
-        c.activityState = 'waiting';
+        c.activityState = 'attention';
         updateActivityIndicator(id);
         updateSidebarActivity();
         notifyAttentionNeeded(id);
@@ -197,9 +234,12 @@ function updateActivityIndicator(id) {
   if (col.activityState === 'working') {
     dot.classList.add('activity-working');
     dot.title = 'Working...';
-  } else if (col.activityState === 'waiting') {
-    dot.classList.add('activity-waiting');
-    dot.title = 'Waiting for input';
+  } else if (col.activityState === 'attention') {
+    dot.classList.add('activity-attention');
+    dot.title = 'Needs attention';
+  } else if (col.activityState === 'idle') {
+    dot.classList.add('activity-idle');
+    dot.title = 'Idle';
   } else {
     dot.classList.add('activity-exited');
     dot.title = 'Exited';
@@ -207,13 +247,13 @@ function updateActivityIndicator(id) {
 }
 
 function updateSidebarActivity() {
-  // Count waiting columns per project
-  var waitingByProject = {};
+  // Count activity states per project
+  var attentionByProject = {};
   var workingByProject = {};
   allColumns.forEach(function (col) {
     var key = col.projectKey;
-    if (col.activityState === 'waiting') {
-      waitingByProject[key] = (waitingByProject[key] || 0) + 1;
+    if (col.activityState === 'attention') {
+      attentionByProject[key] = (attentionByProject[key] || 0) + 1;
     }
     if (col.activityState === 'working') {
       workingByProject[key] = (workingByProject[key] || 0) + 1;
@@ -227,16 +267,16 @@ function updateSidebarActivity() {
     if (!item) return;
 
     var key = project.path;
-    var waiting = waitingByProject[key] || 0;
+    var attention = attentionByProject[key] || 0;
     var working = workingByProject[key] || 0;
 
     var badge = item.querySelector('.project-badge');
     if (!badge) return;
 
-    badge.classList.remove('badge-waiting', 'badge-working');
-    if (waiting > 0) {
-      badge.classList.add('badge-waiting');
-      badge.title = waiting + ' waiting for input';
+    badge.classList.remove('badge-attention', 'badge-working');
+    if (attention > 0) {
+      badge.classList.add('badge-attention');
+      badge.title = attention + ' needs attention';
     } else if (working > 0) {
       badge.classList.add('badge-working');
       badge.title = working + ' working';
@@ -266,13 +306,27 @@ function notifyAttentionNeeded(columnId) {
   }
 
   // Flash the sidebar project item
-  var items = projectListEl.querySelectorAll('.project-item');
-  config.projects.forEach(function (project, index) {
-    if (project.path === col.projectKey && items[index]) {
-      items[index].classList.add('attention-flash');
-      setTimeout(function () { items[index].classList.remove('attention-flash'); }, 4000);
+  if (notifSettings.sidebar) {
+    var items = projectListEl.querySelectorAll('.project-item');
+    config.projects.forEach(function (project, index) {
+      if (project.path === col.projectKey && items[index]) {
+        items[index].classList.add('attention-flash');
+        setTimeout(function () { items[index].classList.remove('attention-flash'); }, 4000);
+      }
+    });
+  }
+}
+
+function clearProjectAttention(projectKey) {
+  var changed = false;
+  allColumns.forEach(function (col, id) {
+    if (col.projectKey === projectKey && col.activityState === 'attention') {
+      col.activityState = 'idle';
+      updateActivityIndicator(id);
+      changed = true;
     }
   });
+  if (changed) updateSidebarActivity();
 }
 
 // ============================================================
@@ -517,6 +571,9 @@ function setActiveProject(index, isStartup) {
     }).catch(function () {});
   }
 
+  // Clear attention state on all columns of this project — user has looked at it
+  clearProjectAttention(newKey);
+
   saveConfig();
   renderProjectList();
 
@@ -680,6 +737,12 @@ function createColumnHeader(id, customTitle) {
     toggleMaximizeColumn(id);
   });
 
+  var restartBtn = document.createElement('span');
+  restartBtn.className = 'col-restart';
+  restartBtn.dataset.id = String(id);
+  restartBtn.title = 'Restart';
+  restartBtn.textContent = '\u21bb';
+
   var closeBtn = document.createElement('span');
   closeBtn.className = 'col-close';
   closeBtn.dataset.id = String(id);
@@ -690,6 +753,7 @@ function createColumnHeader(id, customTitle) {
   actions.appendChild(teleportBtn);
   actions.appendChild(effortSelect);
   actions.appendChild(maximizeBtn);
+  actions.appendChild(restartBtn);
   actions.appendChild(closeBtn);
 
   header.appendChild(title);
@@ -759,6 +823,7 @@ function createExitOverlay(id, exitCode, col) {
     } else {
       sendMsg.args = col.sessionId ? ['--resume', col.sessionId] : [];
     }
+    if (col.env) sendMsg.env = col.env;
     wsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
@@ -920,6 +985,9 @@ function addColumn(args, targetRow, opts) {
     setFocusedColumn(id);
   });
 
+  header.querySelector('.col-restart').addEventListener('click', function () {
+    restartColumn(id);
+  });
   header.querySelector('.col-close').addEventListener('click', function () {
     removeColumn(id);
   });
@@ -941,7 +1009,12 @@ function addColumn(args, targetRow, opts) {
     customTitle: opts.title || null,
     cmd: cmd,
     cmdArgs: claudeArgs,
-    createdAt: Date.now()
+    env: opts.env || null,
+    launchUrl: opts.launchUrl || null,
+    launchUrlOpened: false,
+    createdAt: Date.now(),
+    hasUserInput: false,
+    notified: false
   };
 
   row.columnIds.push(id);
@@ -1147,6 +1220,32 @@ function removeColumn(id) {
   persistSessions(col.projectKey);
   renderProjectList();
   updateSidebarActivity();
+}
+
+function restartColumn(id) {
+  var col = allColumns.get(id);
+  if (!col) return;
+
+  // Kill the current process
+  wsSend({ type: 'kill', id: id });
+
+  // Remove any existing exit overlay
+  var overlay = col.element.querySelector('.exit-overlay');
+  if (overlay) overlay.remove();
+
+  // Clear and respawn
+  col.terminal.clear();
+  col.fitAddon.fit();
+  var sendMsg = { type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: col.cwd };
+  if (col.cmd) {
+    sendMsg.cmd = col.cmd;
+    sendMsg.args = col.cmdArgs || [];
+  } else {
+    sendMsg.args = col.sessionId ? ['--resume', col.sessionId] : [];
+  }
+  if (col.env) sendMsg.env = col.env;
+  wsSend(sendMsg);
+  setColumnActivity(id, 'working');
 }
 
 function setFocusedColumn(id) {
@@ -2252,6 +2351,10 @@ function launchConfig(config) {
       cmdArgs.push('--urls');
       cmdArgs.push(config.applicationUrl);
     }
+    if (config.commandLineArgs) {
+      cmdArgs.push('--');
+      cmdArgs = cmdArgs.concat(config.commandLineArgs.split(/\s+/));
+    }
   } else if (config.type === 'coreclr') {
     cmd = 'dotnet';
     cmdArgs = [];
@@ -2273,7 +2376,8 @@ function launchConfig(config) {
   } else {
     return;
   }
-  addColumn(cmdArgs, null, { cmd: cmd, title: config.name, cwd: cwd, env: env });
+  var launchUrl = config.applicationUrl || null;
+  addColumn(cmdArgs, null, { cmd: cmd, title: config.name, cwd: cwd, env: env, launchUrl: launchUrl });
 }
 
 function refreshExplorer() {

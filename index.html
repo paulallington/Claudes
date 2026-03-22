@@ -63,6 +63,7 @@
           <button id="btn-claude-md" class="btn-claude-md" title="Manage project memory (CLAUDE.md)">CLAUDE.md</button>
           <button id="btn-usage" class="btn-usage" title="View Claude usage">Usage</button>
           <button id="btn-claude-config" class="btn-claude-md" title="Edit Claude settings (~/.claude/settings.json)">Config</button>
+          <button id="btn-settings" class="btn-claude-md" title="App settings">&#9881;</button>
           <select id="theme-select" class="theme-select" title="Theme">
             <option value="dark">Dark</option>
             <option value="light">Light</option>
@@ -111,12 +112,41 @@
     </div>
   </div>
 
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-overlay hidden">
+    <div class="modal-dialog settings-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Settings</span>
+        <span id="settings-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body settings-body">
+        <div class="settings-section">
+          <h3 class="settings-section-title">Notifications</h3>
+          <label class="settings-toggle">
+            <input type="checkbox" id="setting-notif-taskbar" checked>
+            <span>Flash taskbar when Claude needs attention</span>
+          </label>
+          <label class="settings-toggle">
+            <input type="checkbox" id="setting-notif-sidebar" checked>
+            <span>Flash sidebar project when Claude needs attention</span>
+          </label>
+          <label class="settings-toggle">
+            <input type="checkbox" id="setting-notif-header" checked>
+            <span>Flash column header when Claude needs attention</span>
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Update notification -->
   <div id="update-bar" class="update-bar hidden">
     <span id="update-message"></span>
+    <button id="update-notes-toggle" class="update-notes-btn hidden">What's new?</button>
     <button id="update-action" class="update-btn">Restart &amp; Update</button>
     <button id="update-dismiss" class="update-dismiss">&times;</button>
   </div>
+  <div id="update-notes" class="update-notes hidden"></div>
 
   <!-- Usage Modal -->
   <div id="usage-modal" class="modal-overlay hidden">

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -538,6 +538,7 @@ function findLaunchSettingsConfigs(projectPath) {
               cwd: subDir,
               env: profile.environmentVariables || {},
               applicationUrl: profile.applicationUrl || '',
+              commandLineArgs: profile.commandLineArgs || '',
               _source: 'launchSettings'
             });
           }
@@ -731,6 +732,10 @@ ipcMain.handle('window:flashFrame', () => {
   if (mainWindow && !mainWindow.isFocused()) {
     mainWindow.flashFrame(true);
   }
+});
+
+ipcMain.handle('shell:openExternal', (event, url) => {
+  return shell.openExternal(url);
 });
 
 // --- App Lifecycle ---
