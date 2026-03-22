@@ -76,6 +76,12 @@
               <label class="spawn-option">
                 <input type="checkbox" id="opt-skip-permissions"> Skip Permissions
               </label>
+              <label class="spawn-option">
+                <input type="checkbox" id="opt-remote-control"> Remote Control
+              </label>
+              <label class="spawn-option">
+                <input type="checkbox" id="opt-bare"> Bare Mode
+              </label>
               <div class="spawn-divider"></div>
               <div class="spawn-option spawn-model-row">
                 <label for="opt-model">Model:</label>
@@ -87,6 +93,9 @@
                 </select>
               </div>
               <div class="spawn-divider"></div>
+              <div class="spawn-option spawn-custom-row">
+                <input type="text" id="opt-worktree" placeholder="Worktree name..." title="Spawn in isolated git worktree (--worktree)">
+              </div>
               <div class="spawn-option spawn-custom-row">
                 <input type="text" id="opt-custom-args" placeholder="Custom args..." title="Additional CLI arguments">
               </div>

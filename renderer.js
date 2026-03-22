@@ -22,7 +22,10 @@ var themeSelect = document.getElementById('theme-select');
 var btnAddOptions = document.getElementById('btn-add-options');
 var spawnDropdown = document.getElementById('spawn-dropdown');
 var optSkipPermissions = document.getElementById('opt-skip-permissions');
+var optRemoteControl = document.getElementById('opt-remote-control');
+var optBare = document.getElementById('opt-bare');
 var optModel = document.getElementById('opt-model');
+var optWorktree = document.getElementById('opt-worktree');
 var optCustomArgs = document.getElementById('opt-custom-args');
 var btnSpawnWithOpts = document.getElementById('btn-spawn-with-opts');
 
@@ -582,7 +585,6 @@ function createColumnHeader(id, customTitle) {
   title.addEventListener('dblclick', function () {
     startTitleEdit(id, title);
   });
-  var closeBtn = document.createElement('span');
   var maximizeBtn = document.createElement('span');
   maximizeBtn.className = 'col-maximize';
   maximizeBtn.title = 'Maximize';
@@ -2316,8 +2318,18 @@ function buildSpawnArgs() {
   if (optSkipPermissions.checked) {
     args.push('--dangerously-skip-permissions');
   }
+  if (optRemoteControl.checked) {
+    args.push('--remote-control');
+  }
+  if (optBare.checked) {
+    args.push('--bare');
+  }
   if (optModel.value) {
     args.push('--model', optModel.value);
+  }
+  var worktree = optWorktree.value.trim();
+  if (worktree) {
+    args.push('--worktree', worktree);
   }
   var custom = optCustomArgs.value.trim();
   if (custom) {
