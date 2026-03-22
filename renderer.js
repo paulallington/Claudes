@@ -585,21 +585,59 @@ function createColumnHeader(id, customTitle) {
   title.addEventListener('dblclick', function () {
     startTitleEdit(id, title);
   });
+  // Action buttons container (right side of header)
+  var actions = document.createElement('span');
+  actions.className = 'col-actions';
+
+  var compactBtn = document.createElement('span');
+  compactBtn.className = 'col-action';
+  compactBtn.title = 'Compact context (/compact)';
+  compactBtn.textContent = '\u229C';
+  compactBtn.addEventListener('click', function () {
+    wsSend({ type: 'write', id: id, data: '/compact\n' });
+  });
+
+  var teleportBtn = document.createElement('span');
+  teleportBtn.className = 'col-action';
+  teleportBtn.title = 'Teleport to claude.ai (/teleport)';
+  teleportBtn.textContent = '\u21F1';
+  teleportBtn.addEventListener('click', function () {
+    wsSend({ type: 'write', id: id, data: '/teleport\n' });
+  });
+
+  var effortSelect = document.createElement('select');
+  effortSelect.className = 'col-effort';
+  effortSelect.title = 'Effort level';
+  effortSelect.innerHTML = '<option value="">Effort</option><option value="low">Low</option><option value="medium">Med</option><option value="high">High</option>';
+  effortSelect.addEventListener('change', function () {
+    if (effortSelect.value) {
+      wsSend({ type: 'write', id: id, data: '/config set effort ' + effortSelect.value + '\n' });
+    }
+  });
+  effortSelect.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+
   var maximizeBtn = document.createElement('span');
   maximizeBtn.className = 'col-maximize';
   maximizeBtn.title = 'Maximize';
-  maximizeBtn.textContent = '\u25A1'; // square symbol
+  maximizeBtn.textContent = '\u25A1';
   maximizeBtn.addEventListener('click', function () {
     toggleMaximizeColumn(id);
   });
+
   var closeBtn = document.createElement('span');
   closeBtn.className = 'col-close';
   closeBtn.dataset.id = String(id);
   closeBtn.title = 'Kill';
   closeBtn.textContent = '\u00d7';
+
+  actions.appendChild(compactBtn);
+  actions.appendChild(teleportBtn);
+  actions.appendChild(effortSelect);
+  actions.appendChild(maximizeBtn);
+  actions.appendChild(closeBtn);
+
   header.appendChild(title);
-  header.appendChild(maximizeBtn);
-  header.appendChild(closeBtn);
+  header.appendChild(actions);
 
   // Double-click header (not title) to toggle maximize
   header.addEventListener('dblclick', function (e) {

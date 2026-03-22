@@ -610,10 +610,11 @@ html, body {
 .column-header .col-title {
   font-weight: 500;
   cursor: default;
-  max-width: calc(100% - 44px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .column-header .col-title.editing {
@@ -627,6 +628,49 @@ html, body {
   text-overflow: clip;
 }
 
+.col-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.col-action {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.col-action:hover {
+  background: var(--hover-strong);
+  color: var(--text-bright);
+}
+
+.col-effort {
+  background: transparent;
+  border: 1px solid var(--border-dim);
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 0 2px;
+  border-radius: 3px;
+  cursor: pointer;
+  outline: none;
+  max-width: 58px;
+}
+
+.col-effort:hover {
+  border-color: var(--accent);
+  color: var(--text-secondary);
+}
+
+.col-effort option {
+  background: var(--bg-toolbar);
+  color: var(--text-primary);
+}
+
 .column-header .col-maximize {
   cursor: pointer;
   color: var(--text-dim);
@@ -634,8 +678,6 @@ html, body {
   line-height: 1;
   padding: 2px 5px;
   border-radius: 3px;
-  margin-left: auto;
-  margin-right: 2px;
 }
 
 .column-header .col-maximize:hover {
