@@ -42,5 +42,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   installUpdate: () => ipcRenderer.invoke('update:install'),
   clipboardReadText: () => ipcRenderer.invoke('clipboard:readText'),
   clipboardWriteText: (text) => ipcRenderer.invoke('clipboard:writeText', text),
-  setTitleBarOverlay: (colors) => ipcRenderer.invoke('theme:setTitleBarOverlay', colors)
+  setTitleBarOverlay: (colors) => ipcRenderer.invoke('theme:setTitleBarOverlay', colors),
+  getOsDark: () => ipcRenderer.invoke('theme:getOsDark'),
+  onOsThemeChanged: (callback) => ipcRenderer.on('theme:osChanged', (_, isDark) => callback(isDark))
 });

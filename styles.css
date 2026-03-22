@@ -761,22 +761,32 @@ html, body {
   color: var(--accent);
 }
 
-/* --- Theme Toggle Button --- */
+/* --- Theme Select Dropdown --- */
 
-.btn-theme-toggle {
-  background: none;
+.theme-select {
+  background: var(--bg-button);
   border: 1px solid var(--border-dim);
-  color: var(--text-dim);
-  font-size: 14px;
-  padding: 1px 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 2px 4px;
   border-radius: 3px;
   cursor: pointer;
-  line-height: 1;
+  outline: none;
+  font-family: inherit;
 }
 
-.btn-theme-toggle:hover {
+.theme-select:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.theme-select:focus {
+  border-color: var(--accent);
+}
+
+.theme-select option {
+  background: var(--bg-toolbar);
+  color: var(--text-primary);
 }
 
 /* --- Modal --- */

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -93,7 +93,7 @@ function startPtyServer() {
 
 function createWindow() {
   const config = readConfig();
-  const isLight = config.theme === 'light';
+  const isLight = config.theme === 'auto' ? !nativeTheme.shouldUseDarkColors : config.theme === 'light';
 
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -117,6 +117,10 @@ function createWindow() {
   });
 
   mainWindow.loadFile('index.html');
+
+  nativeTheme.on('updated', () => {
+    mainWindow?.webContents.send('theme:osChanged', nativeTheme.shouldUseDarkColors);
+  });
 }
 
 // --- IPC Handlers ---
@@ -680,6 +684,10 @@ ipcMain.handle('clipboard:readText', () => {
 
 ipcMain.handle('clipboard:writeText', (event, text) => {
   clipboard.writeText(text);
+});
+
+ipcMain.handle('theme:getOsDark', () => {
+  return nativeTheme.shouldUseDarkColors;
 });
 
 // --- App Lifecycle ---

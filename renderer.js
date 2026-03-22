@@ -17,7 +17,7 @@ var claudeMdClose = document.getElementById('claudemd-close');
 var claudeMdSave = document.getElementById('claudemd-save');
 var claudeMdStatus = document.getElementById('claudemd-status');
 
-var btnThemeToggle = document.getElementById('btn-theme-toggle');
+var themeSelect = document.getElementById('theme-select');
 
 var btnAddOptions = document.getElementById('btn-add-options');
 var spawnDropdown = document.getElementById('spawn-dropdown');
@@ -353,7 +353,7 @@ function loadProjects() {
       }
     }
     if (config.theme) {
-      applyTheme(config.theme);
+      setThemePreference(config.theme);
     }
     renderProjectList();
     if (config.activeProjectIndex >= 0 && config.projects[config.activeProjectIndex]) {
@@ -2066,38 +2066,52 @@ gitCommitMsg.addEventListener('keydown', function (e) {
 // Theme
 // ============================================================
 
-function applyTheme(theme) {
-  currentTheme = theme;
-  termTheme = theme === 'light' ? lightTermTheme : darkTermTheme;
-  if (theme === 'light') {
+var themePreference = 'dark'; // 'dark' | 'light' | 'auto'
+
+function applyVisualTheme(visual) {
+  currentTheme = visual;
+  termTheme = visual === 'light' ? lightTermTheme : darkTermTheme;
+  if (visual === 'light') {
     document.documentElement.setAttribute('data-theme', 'light');
-    btnThemeToggle.textContent = '\u2606'; // white star / sun symbol
-    btnThemeToggle.title = 'Switch to dark mode';
   } else {
     document.documentElement.removeAttribute('data-theme');
-    btnThemeToggle.textContent = '\u263D'; // moon symbol
-    btnThemeToggle.title = 'Switch to light mode';
   }
-  // Update all existing terminals
   allColumns.forEach(function (colData) {
     if (colData.terminal) {
       colData.terminal.options.theme = termTheme;
     }
   });
-  // Update titlebar overlay
   if (window.electronAPI && window.electronAPI.setTitleBarOverlay) {
-    var overlayColors = theme === 'light'
+    var overlayColors = visual === 'light'
       ? { color: '#e8ecf1', symbolColor: '#1f2328' }
       : { color: '#16213e', symbolColor: '#e0e0e0' };
     window.electronAPI.setTitleBarOverlay(overlayColors);
   }
 }
 
-function toggleTheme() {
-  var newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-  applyTheme(newTheme);
-  config.theme = newTheme;
-  saveConfig();
+function setThemePreference(pref) {
+  themePreference = pref;
+  themeSelect.value = pref;
+  if (pref === 'auto') {
+    if (window.electronAPI && window.electronAPI.getOsDark) {
+      window.electronAPI.getOsDark().then(function (isDark) {
+        applyVisualTheme(isDark ? 'dark' : 'light');
+      });
+    } else {
+      applyVisualTheme('dark');
+    }
+  } else {
+    applyVisualTheme(pref);
+  }
+}
+
+// Listen for OS theme changes (only matters when set to auto)
+if (window.electronAPI && window.electronAPI.onOsThemeChanged) {
+  window.electronAPI.onOsThemeChanged(function (isDark) {
+    if (themePreference === 'auto') {
+      applyVisualTheme(isDark ? 'dark' : 'light');
+    }
+  });
 }
 
 // ============================================================
@@ -2107,7 +2121,11 @@ function toggleTheme() {
 btnAdd.addEventListener('click', function () { addColumn(); });
 btnAddRow.addEventListener('click', addRow);
 btnToggleSidebar.addEventListener('click', toggleSidebar);
-btnThemeToggle.addEventListener('click', toggleTheme);
+themeSelect.addEventListener('change', function () {
+  setThemePreference(themeSelect.value);
+  config.theme = themeSelect.value;
+  saveConfig();
+});
 
 btnAddProject.addEventListener('click', function () {
   if (!window.electronAPI) return;
