@@ -97,6 +97,11 @@ var lightTermTheme = {
 var termTheme = darkTermTheme;
 var currentTheme = 'dark';
 
+var fontSize = 14;
+var FONT_SIZE_MIN = 8;
+var FONT_SIZE_MAX = 28;
+var FONT_SIZE_DEFAULT = 14;
+
 // ============================================================
 // WebSocket
 // ============================================================
@@ -351,6 +356,9 @@ function loadProjects() {
       if (config.projects[i].columnCount === undefined) {
         config.projects[i].columnCount = 1;
       }
+    }
+    if (config.fontSize) {
+      fontSize = Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, config.fontSize));
     }
     if (config.theme) {
       setThemePreference(config.theme);
@@ -696,7 +704,7 @@ function addColumn(args, targetRow, opts) {
   var terminal = new Terminal({
     theme: termTheme,
     fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
-    fontSize: 14,
+    fontSize: fontSize,
     cursorBlink: true,
     allowProposedApi: true
   });
@@ -1239,6 +1247,21 @@ document.addEventListener('keydown', function (e) {
   if (e.ctrlKey && e.shiftKey && e.key === 'E') {
     e.preventDefault();
     toggleExplorer();
+    return;
+  }
+  if (e.ctrlKey && !e.shiftKey && (e.key === '=' || e.key === '+')) {
+    e.preventDefault();
+    changeFontSize(1);
+    return;
+  }
+  if (e.ctrlKey && !e.shiftKey && e.key === '-') {
+    e.preventDefault();
+    changeFontSize(-1);
+    return;
+  }
+  if (e.ctrlKey && !e.shiftKey && e.key === '0') {
+    e.preventDefault();
+    resetFontSize();
     return;
   }
 });
@@ -2061,6 +2084,32 @@ gitCommitMsg.addEventListener('keydown', function (e) {
   }
   e.stopPropagation();
 });
+
+// ============================================================
+// Font Size
+// ============================================================
+
+function applyFontSize(size) {
+  fontSize = Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, size));
+  allColumns.forEach(function (colData) {
+    if (colData.terminal) {
+      colData.terminal.options.fontSize = fontSize;
+    }
+  });
+  refitAll();
+}
+
+function changeFontSize(delta) {
+  applyFontSize(fontSize + delta);
+  config.fontSize = fontSize;
+  saveConfig();
+}
+
+function resetFontSize() {
+  applyFontSize(FONT_SIZE_DEFAULT);
+  config.fontSize = FONT_SIZE_DEFAULT;
+  saveConfig();
+}
 
 // ============================================================
 // Theme
