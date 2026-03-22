@@ -101,9 +101,19 @@ var currentTheme = 'dark';
 // WebSocket
 // ============================================================
 
+var wsHasConnectedBefore = false;
+
 function connectWS() {
   ws = new WebSocket('ws://127.0.0.1:3456');
-  ws.onopen = function () { loadProjects(); };
+  ws.onopen = function () {
+    if (wsHasConnectedBefore) {
+      // Reconnecting after a disconnect (e.g. sleep) — reattach all live columns
+      reattachAllColumns();
+    } else {
+      wsHasConnectedBefore = true;
+      loadProjects();
+    }
+  };
   ws.onmessage = function (event) {
     var msg;
     try { msg = JSON.parse(event.data); } catch (e) { return; }
@@ -126,9 +136,33 @@ function connectWS() {
         col2.element.appendChild(createExitOverlay(msg.id, msg.exitCode, col2));
         setColumnActivity(msg.id, 'exited');
       }
+    } else if (msg.type === 'reattach-failed') {
+      // Pty died during sleep — show exit overlay so user can respawn
+      var col3 = allColumns.get(msg.id);
+      if (col3 && !col3.element.querySelector('.exit-overlay')) {
+        col3.element.appendChild(createExitOverlay(msg.id, null, col3));
+        setColumnActivity(msg.id, 'exited');
+      }
     }
   };
   ws.onclose = function () { setTimeout(connectWS, 2000); };
+}
+
+function reattachAllColumns() {
+  allColumns.forEach(function (col, id) {
+    // Skip columns that already have an exit overlay (already dead)
+    if (col.element.querySelector('.exit-overlay')) return;
+    // Skip columns that are marked as exited
+    if (col.activityState === 'exited') return;
+
+    col.fitAddon.fit();
+    wsSend({
+      type: 'reattach',
+      id: id,
+      cols: col.terminal.cols,
+      rows: col.terminal.rows
+    });
+  });
 }
 
 function wsSend(obj) {
@@ -598,12 +632,18 @@ function createColumnHeader(id, customTitle) {
   title.addEventListener('dblclick', function () {
     startTitleEdit(id, title);
   });
+  var restartBtn = document.createElement('span');
+  restartBtn.className = 'col-restart';
+  restartBtn.dataset.id = String(id);
+  restartBtn.title = 'Restart';
+  restartBtn.textContent = '\u21bb';
   var closeBtn = document.createElement('span');
   closeBtn.className = 'col-close';
   closeBtn.dataset.id = String(id);
   closeBtn.title = 'Kill';
   closeBtn.textContent = '\u00d7';
   header.appendChild(title);
+  header.appendChild(restartBtn);
   header.appendChild(closeBtn);
   return header;
 }
@@ -825,6 +865,9 @@ function addColumn(args, targetRow, opts) {
     setFocusedColumn(id);
   });
 
+  header.querySelector('.col-restart').addEventListener('click', function () {
+    restartColumn(id);
+  });
   header.querySelector('.col-close').addEventListener('click', function () {
     removeColumn(id);
   });
@@ -1041,6 +1084,32 @@ function removeColumn(id) {
   persistSessions(col.projectKey);
   renderProjectList();
   updateSidebarActivity();
+}
+
+function restartColumn(id) {
+  var col = allColumns.get(id);
+  if (!col) return;
+
+  // Kill the current process
+  wsSend({ type: 'kill', id: id });
+
+  // Remove any existing exit overlay
+  var overlay = col.element.querySelector('.exit-overlay');
+  if (overlay) overlay.remove();
+
+  // Clear and respawn
+  col.terminal.clear();
+  col.fitAddon.fit();
+  var sendMsg = { type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: col.cwd };
+  if (col.cmd) {
+    sendMsg.cmd = col.cmd;
+    sendMsg.args = col.cmdArgs || [];
+  } else {
+    sendMsg.args = col.sessionId ? ['--resume', col.sessionId] : [];
+  }
+  if (col.env) sendMsg.env = col.env;
+  wsSend(sendMsg);
+  setColumnActivity(id, 'working');
 }
 
 function setFocusedColumn(id) {

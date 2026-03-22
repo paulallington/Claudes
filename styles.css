@@ -616,7 +616,7 @@ html, body {
 .column-header .col-title {
   font-weight: 500;
   cursor: default;
-  max-width: calc(100% - 44px);
+  max-width: calc(100% - 72px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -631,6 +631,20 @@ html, body {
   color: var(--text-bright);
   overflow: visible;
   text-overflow: clip;
+}
+
+.column-header .col-restart {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.column-header .col-restart:hover {
+  background: var(--accent);
+  color: var(--text-bright);
 }
 
 .column-header .col-close {
