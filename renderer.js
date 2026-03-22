@@ -250,6 +250,9 @@ function notifyAttentionNeeded(columnId) {
   var col = allColumns.get(columnId);
   if (!col) return;
 
+  // Don't flash during startup — wait 15s for Claude to finish loading
+  if (Date.now() - col.createdAt < 15000) return;
+
   // Flash taskbar if window not focused
   if (window.electronAPI && window.electronAPI.flashFrame) {
     window.electronAPI.flashFrame();
@@ -937,7 +940,8 @@ function addColumn(args, targetRow, opts) {
     sessionId: resumeSessionId,
     customTitle: opts.title || null,
     cmd: cmd,
-    cmdArgs: claudeArgs
+    cmdArgs: claudeArgs,
+    createdAt: Date.now()
   };
 
   row.columnIds.push(id);
