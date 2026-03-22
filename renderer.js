@@ -331,8 +331,8 @@ function notifyAttentionNeeded(columnId) {
   if (!col.hasUserInput || col.notified) return;
   col.notified = true;
 
-  // Flash taskbar if window not focused
-  if (notifSettings.taskbar && window.electronAPI && window.electronAPI.flashFrame) {
+  // Flash taskbar only if window is not focused (check renderer side too)
+  if (notifSettings.taskbar && !document.hasFocus() && window.electronAPI && window.electronAPI.flashFrame) {
     window.electronAPI.flashFrame();
   }
 
@@ -3558,7 +3558,15 @@ if (window.electronAPI && window.electronAPI.getPtyPort) {
 // --- App Version ---
 
 window.electronAPI.getVersion().then(function(v) {
-  document.getElementById('app-version').textContent = 'v' + v;
+  var versionEl = document.getElementById('app-version');
+  versionEl.textContent = 'v' + v;
+  versionEl.title = 'View release history';
+  versionEl.style.cursor = 'pointer';
+  versionEl.addEventListener('click', function () {
+    if (window.electronAPI && window.electronAPI.openExternal) {
+      window.electronAPI.openExternal('https://github.com/paulallington/Claudes/releases');
+    }
+  });
 });
 
 // --- Auto Update Notifications ---
@@ -3634,4 +3642,13 @@ window.electronAPI.getVersion().then(function(v) {
     updateBar.classList.add('hidden');
     updateNotesEl.classList.add('hidden');
   });
+
+  // Dev-only: expose test function to simulate update notification
+  // Usage in DevTools console: window.__testUpdate()
+  window.__testUpdate = function () {
+    setReleaseNotes('## What\'s new in v1.2.0\n\n- Theme dropdown with dark/light/auto OS sync\n- Column maximize/restore\n- Font size control (Ctrl+=/-)  \n- Notification settings\n- Toolbar menu reorganization\n- Scroll-to-bottom button');
+    updateMessage.textContent = 'Update v1.2.0 ready to install';
+    updateAction.style.display = '';
+    updateBar.classList.remove('hidden');
+  };
 })();

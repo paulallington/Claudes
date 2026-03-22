@@ -345,7 +345,12 @@ html, body {
   font-size: 10px;
   color: var(--text-dimmer);
   margin-left: 4px;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
+  cursor: pointer;
+}
+
+.app-version:hover {
+  color: var(--accent);
 }
 
 .active-project-name {
