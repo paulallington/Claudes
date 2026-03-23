@@ -539,11 +539,13 @@ ipcMain.handle('git:commitDetail', (event, projectPath, hash) => {
 
 ipcMain.handle('git:diffCommit', (event, projectPath, hash, filePath) => {
   try {
-    // git show reliably gets the diff for any commit (including initial, merges)
+    // git show with --pretty suppresses commit metadata, leaving only the diff
     const args = filePath
-      ? ['show', '--format=', hash, '--', filePath]
-      : ['show', '--format=', hash];
-    return execFileSync('git', args, { cwd: projectPath, encoding: 'utf8', timeout: 10000 });
+      ? ['show', '--pretty=format:', '-p', hash, '--', filePath]
+      : ['show', '--pretty=format:', '-p', hash];
+    const output = execFileSync('git', args, { cwd: projectPath, encoding: 'utf8', timeout: 10000 });
+    // Strip leading blank lines that --pretty=format: sometimes produces
+    return output.replace(/^\n+/, '');
   } catch {
     return '';
   }

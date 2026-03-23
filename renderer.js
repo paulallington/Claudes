@@ -1813,7 +1813,7 @@ function setFocusedColumn(id) {
   }
   state.focusedColumnId = id;
   col.element.classList.add('focused');
-  col.terminal.focus();
+  if (col.terminal) col.terminal.focus();
 
   // Clear attention flash on this column's header
   if (col.headerEl) col.headerEl.classList.remove('attention-flash');
