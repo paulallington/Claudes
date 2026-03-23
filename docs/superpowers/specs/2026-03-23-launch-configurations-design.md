@@ -25,8 +25,14 @@ A dedicated launch configuration panel with auto-discovery, a config editor, env
   - If multiple `.csproj` found, create one config entry per (profile x csproj) combination
   - Config name becomes `"ProfileName (ProjectFile.csproj)"`
   - `dotnet run` gets `--project path/to/Specific.csproj`
-- Auto-discovered configs display with a source badge (e.g. "launchSettings", "launch.json")
-- A "Clone" action lets you copy an auto-discovered config into custom configs for editing
+  - Even for single-`.csproj` directories, the `project` field is always populated and `--project` is always passed — this is safer and more predictable
+- Auto-discovered configs use type `dotnet-run` (replacing the old `dotnet-project` type name — the existing `launchConfig()` switch will be updated in the same change)
+- Auto-discovered configs display with a source badge via a `_source` field on each config (e.g. `"launchSettings"`, `"launch.json"`)
+- A "Clone" action copies an auto-discovered config into `.claudes/launch.json` for editing:
+  - Name gets suffixed with `" (Copy)"`
+  - All fields are copied, type is preserved as `dotnet-run`
+  - The editor opens immediately for the cloned config
+  - `launchSettings.json` `environmentVariables` are copied into the config's `env` field
 
 ### Custom configs
 
@@ -76,6 +82,8 @@ Stored in `<project>/.claudes/env-profiles.json`:
 - Profiles are project-wide — any config can reference any profile by name
 - When launching, env profile vars are merged with config-level env vars (config vars take precedence)
 - `.env` file support: profiles can include `"_envFile": "path/to/.env"` to load from a file
+- Full env merge chain (highest priority first): `config.env` > `config.envFile` > `profile key-value pairs` > `profile._envFile`
+- Example: if profile sets `PORT=3000` and config sets `PORT=5000`, the process gets `PORT=5000`
 
 ---
 
@@ -88,12 +96,12 @@ Stored in `<project>/.claudes/env-profiles.json`:
 | `dotnet-run` | `dotnet run` | Scans for `.csproj` files in project, shows dropdown. Auto-populates `applicationUrl` from `launchSettings.json` if present. Adds `--project` flag. |
 | `dotnet-exec` | `dotnet <dll>` | Browse for `.dll` in `bin/` directories |
 | `node` | `node` / custom runtime | Detects `package.json` scripts, can pick a script or specify entry file |
-| `python` | `python` | Detects `venv`/`.venv`, auto-activates. Pick script file. |
+| `python` | `python` | Detects `venv`/`.venv`, uses venv's Python binary directly (`.venv/bin/python` or `.venv\Scripts\python.exe`) rather than activating. Pick script file. |
 | `custom` | Any command | Fully manual — command, args, cwd, env. No auto-detection. |
 
 ### Type-specific fields
 
-- **`dotnet-run`**: project (`.csproj` picker), applicationUrl, framework, commandLineArgs, envProfile
+- **`dotnet-run`**: project (`.csproj` picker), applicationUrl, framework (maps to `dotnet run --framework <tfm>`), commandLineArgs, envProfile
 - **`dotnet-exec`**: program (`.dll` path), args, envProfile
 - **`node`**: program or script name, runtimeExecutable, runtimeArgs, args, envProfile
 - **`python`**: script, interpreter path, args, envProfile
@@ -146,7 +154,7 @@ The Run tab in the explorer panel gets replaced with a two-state layout.
 
 ### Env Profile Manager (sub-view from editor)
 
-- List of profiles on the left, key-value editor on the right
+- Stacked layout (sidebar is narrow): profile list at top, key-value editor below
 - Add/rename/delete profiles
 - Each profile is a key-value table + optional `.env` file reference
 - Back button returns to the config editor
@@ -157,7 +165,7 @@ The Run tab in the explorer panel gets replaced with a two-state layout.
 
 ### When the user clicks Play
 
-1. Resolve the config: merge env profile vars + config-level env vars + `.env` file vars (priority: config > env file > profile)
+1. Resolve the config: merge env vars using the full chain (highest priority first): `config.env` > `config.envFile` > `profile key-value pairs` > `profile._envFile`
 2. Build the command based on type:
    - `dotnet-run`: `dotnet run --project <csproj> [--urls <url>] [-- <args>]`
    - `dotnet-exec`: `dotnet <dll> [<args>]`
@@ -178,6 +186,13 @@ The Run tab in the explorer panel gets replaced with a two-state layout.
 - If the command fails to spawn (e.g. `dotnet` not on PATH), show an error notification (using existing notification system)
 - If a `.csproj` or program path doesn't exist, show an error before attempting to spawn
 
+### Validation & malformed configs
+
+- If `.claudes/launch.json` or `.claudes/env-profiles.json` contain invalid JSON, show a notification and fall back to an empty list for that source
+- Required fields per type: all types require `name` and `type`; `dotnet-run` requires `project`; `custom` requires `command`
+- Configs with unknown `type` values are shown in the list with a warning badge but can still be launched if they have a `command` field (treated as `custom`); otherwise they are skipped
+- Args are always stored as arrays internally; string values in config files are split on whitespace when loaded
+
 ---
 
 ## Section 5: Data Flow & Architecture
@@ -188,7 +203,8 @@ The Run tab in the explorer panel gets replaced with a two-state layout.
   - Read `.claudes/launch.json` for custom configs
   - Read `.claudes/env-profiles.json` for profiles
   - Enhanced `.csproj` scanning: find all `.csproj` files in each `launchSettings.json` directory and create per-project entries
-  - Return `{ configs: [...], envProfiles: {...}, sources: {...} }` instead of just an array
+  - Return `{ configs: [...], envProfiles: {...} }` instead of just an array (each config carries its own `_source` field)
+  - **Breaking change**: the renderer must be updated in the same step to destructure `{ configs, envProfiles }` from the response
 - New IPC handlers:
   - `launch:saveConfigs` — write custom configs to `.claudes/launch.json`
   - `launch:saveEnvProfiles` — write profiles to `.claudes/env-profiles.json`
