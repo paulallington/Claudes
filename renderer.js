@@ -730,7 +730,8 @@ function showEmptyState() {
 // DOM helpers
 // ============================================================
 
-function createColumnHeader(id, customTitle) {
+function createColumnHeader(id, customTitle, opts) {
+  opts = opts || {};
   var header = document.createElement('div');
   header.className = 'column-header';
   var title = document.createElement('span');
@@ -739,36 +740,41 @@ function createColumnHeader(id, customTitle) {
   title.addEventListener('dblclick', function () {
     startTitleEdit(id, title);
   });
-  // Action buttons container (right side of header)
   var actions = document.createElement('span');
   actions.className = 'col-actions';
 
-  var compactBtn = document.createElement('span');
-  compactBtn.className = 'col-action';
-  compactBtn.title = 'Compact context (/compact)';
-  compactBtn.textContent = '\u229C';
-  compactBtn.addEventListener('click', function () {
-    wsSend({ type: 'write', id: id, data: '/compact\n' });
-  });
+  if (!opts.isDiff) {
+    var compactBtn = document.createElement('span');
+    compactBtn.className = 'col-action';
+    compactBtn.title = 'Compact context (/compact)';
+    compactBtn.textContent = '\u229C';
+    compactBtn.addEventListener('click', function () {
+      wsSend({ type: 'write', id: id, data: '/compact\n' });
+    });
 
-  var teleportBtn = document.createElement('span');
-  teleportBtn.className = 'col-action';
-  teleportBtn.title = 'Teleport to claude.ai (/teleport)';
-  teleportBtn.textContent = '\u21F1';
-  teleportBtn.addEventListener('click', function () {
-    wsSend({ type: 'write', id: id, data: '/teleport\n' });
-  });
+    var teleportBtn = document.createElement('span');
+    teleportBtn.className = 'col-action';
+    teleportBtn.title = 'Teleport to claude.ai (/teleport)';
+    teleportBtn.textContent = '\u21F1';
+    teleportBtn.addEventListener('click', function () {
+      wsSend({ type: 'write', id: id, data: '/teleport\n' });
+    });
 
-  var effortSelect = document.createElement('select');
-  effortSelect.className = 'col-effort';
-  effortSelect.title = 'Effort level';
-  effortSelect.innerHTML = '<option value="">Effort</option><option value="low">Low</option><option value="medium">Med</option><option value="high">High</option>';
-  effortSelect.addEventListener('change', function () {
-    if (effortSelect.value) {
-      wsSend({ type: 'write', id: id, data: '/config set effort ' + effortSelect.value + '\n' });
-    }
-  });
-  effortSelect.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+    var effortSelect = document.createElement('select');
+    effortSelect.className = 'col-effort';
+    effortSelect.title = 'Effort level';
+    effortSelect.innerHTML = '<option value="">Effort</option><option value="low">Low</option><option value="medium">Med</option><option value="high">High</option>';
+    effortSelect.addEventListener('change', function () {
+      if (effortSelect.value) {
+        wsSend({ type: 'write', id: id, data: '/config set effort ' + effortSelect.value + '\n' });
+      }
+    });
+    effortSelect.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+
+    actions.appendChild(compactBtn);
+    actions.appendChild(teleportBtn);
+    actions.appendChild(effortSelect);
+  }
 
   var maximizeBtn = document.createElement('span');
   maximizeBtn.className = 'col-maximize';
@@ -777,32 +783,29 @@ function createColumnHeader(id, customTitle) {
   maximizeBtn.addEventListener('click', function () {
     toggleMaximizeColumn(id);
   });
+  actions.appendChild(maximizeBtn);
 
-  var restartBtn = document.createElement('span');
-  restartBtn.className = 'col-restart';
-  restartBtn.dataset.id = String(id);
-  restartBtn.title = 'Restart';
-  restartBtn.textContent = '\u21bb';
+  if (!opts.isDiff) {
+    var restartBtn = document.createElement('span');
+    restartBtn.className = 'col-restart';
+    restartBtn.dataset.id = String(id);
+    restartBtn.title = 'Restart';
+    restartBtn.textContent = '\u21bb';
+    actions.appendChild(restartBtn);
+  }
 
   var closeBtn = document.createElement('span');
   closeBtn.className = 'col-close';
   closeBtn.dataset.id = String(id);
-  closeBtn.title = 'Kill';
+  closeBtn.title = opts.isDiff ? 'Close' : 'Kill';
   closeBtn.textContent = '\u00d7';
-
-  actions.appendChild(compactBtn);
-  actions.appendChild(teleportBtn);
-  actions.appendChild(effortSelect);
-  actions.appendChild(maximizeBtn);
-  actions.appendChild(restartBtn);
   actions.appendChild(closeBtn);
 
   header.appendChild(title);
   header.appendChild(actions);
 
-  // Double-click header (not title) to toggle maximize
   header.addEventListener('dblclick', function (e) {
-    if (e.target === title || title.contains(e.target)) return; // title dblclick is rename
+    if (e.target === title || title.contains(e.target)) return;
     toggleMaximizeColumn(id);
   });
 
@@ -1239,7 +1242,7 @@ function removeColumn(id) {
   activityTimers.delete(id);
   stopSessionSync(id);
 
-  wsSend({ type: 'kill', id: id });
+  if (!col.isDiff) wsSend({ type: 'kill', id: id });
 
   var colElement = col.element;
   var prevSibling = colElement.previousElementSibling;
@@ -1253,7 +1256,7 @@ function removeColumn(id) {
     nextSibling.remove();
   }
 
-  col.terminal.dispose();
+  if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
 
   var state = projectStates.get(col.projectKey);
@@ -1298,6 +1301,7 @@ function removeColumn(id) {
 function restartColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
+  if (col.isDiff) return;
 
   // Kill the current process
   wsSend({ type: 'kill', id: id });
@@ -1563,6 +1567,7 @@ function refitAll() {
   var state = getActiveState();
   if (!state) return;
   state.columns.forEach(function (col, id) {
+    if (col.isDiff) return;
     try {
       col.fitAddon.fit();
       // Suppress activity tracking for redraw data after resize
