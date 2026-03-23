@@ -2102,6 +2102,90 @@ html, body {
   font-size: 14px;
 }
 
+/* Commit file list */
+
+.diff-commit-info {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.diff-commit-msg {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.diff-commit-meta {
+  font-size: 11px;
+  color: var(--text-dimmer);
+}
+
+.diff-file-list {
+  padding: 8px 0;
+}
+
+.diff-file-list-header {
+  padding: 4px 16px;
+  font-size: 11px;
+  color: var(--text-dimmer);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.diff-file-list-item {
+  display: flex;
+  align-items: center;
+  padding: 6px 16px;
+  cursor: pointer;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.diff-file-list-item:hover {
+  background: var(--hover-subtle);
+}
+
+.diff-file-list-name {
+  flex: 1;
+  color: var(--text-body);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-file-list-stats {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+/* Back button */
+
+.diff-back-bar {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.diff-back-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: inherit;
+}
+
+.diff-back-btn:hover {
+  background: var(--hover-subtle);
+  color: var(--text-primary);
+}
+
 /* Light theme overrides */
 
 [data-theme="light"] .diff-line-add {

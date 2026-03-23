@@ -1168,8 +1168,10 @@ function addDiffColumn(diffData, opts) {
   opts = opts || {};
   if (!activeProjectKey) return;
 
-  var state = getActiveState();
+  var state = getOrCreateProjectState(activeProjectKey);
   if (!state) return;
+  // Ensure container is visible
+  state.containerEl.style.display = 'flex';
 
   // Deduplication check
   var existingId = null;
@@ -1283,20 +1285,91 @@ function loadCommitDiff(diffBody, colData) {
       renderDiffContent(diffBody, colData);
     });
   } else {
+    // Full commit — show file list first, click to view individual diffs
     window.electronAPI.gitCommitDetail(activeProjectKey, hash).then(function (detail) {
       colData.diffData.commitDetail = detail;
       colData.diffData.files = detail.files || [];
-      if (detail.files.length > 0) {
-        colData.diffData.activeFile = detail.files[0].file;
-        return window.electronAPI.gitDiffCommit(activeProjectKey, hash, detail.files[0].file);
-      }
-      return '';
-    }).then(function (text) {
-      colData.diffData.diffText = text;
-      colData.diffData.parsed = parseDiff(text);
-      renderDiffContent(diffBody, colData);
+      renderCommitFileList(diffBody, colData);
     });
   }
+}
+
+function renderCommitFileList(diffBody, colData) {
+  while (diffBody.firstChild) diffBody.removeChild(diffBody.firstChild);
+  var detail = colData.diffData.commitDetail;
+  var files = colData.diffData.files || [];
+
+  // Commit info header
+  var info = document.createElement('div');
+  info.className = 'diff-commit-info';
+  var msgEl = document.createElement('div');
+  msgEl.className = 'diff-commit-msg';
+  msgEl.textContent = detail.message;
+  var metaEl = document.createElement('div');
+  metaEl.className = 'diff-commit-meta';
+  metaEl.textContent = detail.author + ' \u00B7 ' + detail.date;
+  info.appendChild(msgEl);
+  info.appendChild(metaEl);
+  diffBody.appendChild(info);
+
+  if (files.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'diff-empty';
+    empty.textContent = '(no files changed)';
+    diffBody.appendChild(empty);
+    return;
+  }
+
+  // File list
+  var fileList = document.createElement('div');
+  fileList.className = 'diff-file-list';
+  var listHeader = document.createElement('div');
+  listHeader.className = 'diff-file-list-header';
+  listHeader.textContent = files.length + ' file' + (files.length !== 1 ? 's' : '') + ' changed';
+  fileList.appendChild(listHeader);
+
+  for (var i = 0; i < files.length; i++) {
+    (function (fileInfo) {
+      var row = document.createElement('div');
+      row.className = 'diff-file-list-item';
+      row.addEventListener('click', function () {
+        // Load this file's diff
+        colData.diffData.activeFile = fileInfo.file;
+        colData.diffData.filePath = fileInfo.file;
+        diffBody.textContent = 'Loading...';
+        window.electronAPI.gitDiffCommit(activeProjectKey, colData.diffData.commitHash, fileInfo.file).then(function (text) {
+          colData.diffData.diffText = text;
+          colData.diffData.parsed = parseDiff(text);
+          renderDiffContent(diffBody, colData);
+        });
+      });
+
+      var nameEl = document.createElement('span');
+      nameEl.className = 'diff-file-list-name';
+      nameEl.textContent = fileInfo.file;
+
+      var statsEl = document.createElement('span');
+      statsEl.className = 'diff-file-list-stats';
+      if (fileInfo.insertions > 0) {
+        var addEl = document.createElement('span');
+        addEl.className = 'git-stat-add';
+        addEl.textContent = '+' + fileInfo.insertions;
+        statsEl.appendChild(addEl);
+      }
+      if (fileInfo.deletions > 0) {
+        var delEl = document.createElement('span');
+        delEl.className = 'git-stat-del';
+        delEl.textContent = '\u2212' + fileInfo.deletions;
+        statsEl.appendChild(delEl);
+      }
+
+      row.appendChild(nameEl);
+      row.appendChild(statsEl);
+      fileList.appendChild(row);
+    })(files[i]);
+  }
+
+  diffBody.appendChild(fileList);
 }
 
 function renderDiffContent(diffBody, colData) {
@@ -1308,6 +1381,24 @@ function renderDiffContent(diffBody, colData) {
     empty.textContent = '(no changes)';
     diffBody.appendChild(empty);
     return;
+  }
+
+  // Back button for commit diffs (return to file list)
+  if (colData.diffData.commitDetail && colData.diffData.files) {
+    var backBar = document.createElement('div');
+    backBar.className = 'diff-back-bar';
+    var backBtn = document.createElement('button');
+    backBtn.className = 'diff-back-btn';
+    backBtn.textContent = '\u2190 Back to files';
+    backBtn.addEventListener('click', function () {
+      colData.diffData.filePath = null;
+      colData.diffData.activeFile = null;
+      colData.diffData.diffText = null;
+      colData.diffData.parsed = null;
+      renderCommitFileList(diffBody, colData);
+    });
+    backBar.appendChild(backBtn);
+    diffBody.appendChild(backBar);
   }
 
   // File tabs for multi-file commit diffs
