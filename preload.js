@@ -55,5 +55,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   flashFrame: () => ipcRenderer.invoke('window:flashFrame'),
   getHookServerPort: () => ipcRenderer.invoke('hooks:getPort'),
   onHookEvent: (callback) => ipcRenderer.on('hook:event', (_, event) => callback(event)),
-  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url)
+  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+  showItemInFolder: (fullPath) => ipcRenderer.invoke('shell:showItemInFolder', fullPath)
 });

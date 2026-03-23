@@ -1393,6 +1393,28 @@ html, body {
   color: var(--text-primary);
 }
 
+.file-tree-context-menu {
+  position: fixed;
+  z-index: 10000;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 4px 0;
+  min-width: 160px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.file-tree-context-item {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.file-tree-context-item:hover {
+  background: var(--accent-color);
+}
+
 /* Git Changes */
 
 .git-branch-row {

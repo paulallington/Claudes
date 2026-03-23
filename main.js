@@ -823,6 +823,10 @@ ipcMain.handle('shell:openExternal', (event, url) => {
   return shell.openExternal(url);
 });
 
+ipcMain.handle('shell:showItemInFolder', (event, fullPath) => {
+  shell.showItemInFolder(fullPath);
+});
+
 // --- App Lifecycle ---
 
 // In dev mode (not packaged), skip single-instance lock so dev can run alongside production
