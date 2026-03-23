@@ -157,6 +157,8 @@ function connectWS() {
       if (col2) {
         col2.element.appendChild(createExitOverlay(msg.id, msg.exitCode, col2));
         setColumnActivity(msg.id, 'exited');
+        // Refresh run configs to update stop/restart controls
+        if (col2.cmd) setTimeout(refreshRunConfigs, 300);
       }
     } else if (msg.type === 'reattach-failed') {
       // Pty died during sleep — show exit overlay so user can respawn
@@ -3180,8 +3182,9 @@ function launchConfig(config) {
     var launchUrl = (config.openBrowserOnLaunch !== false && config.applicationUrl) ? config.applicationUrl : null;
     addColumn(cmdArgs, null, { cmd: cmd, title: config.name, cwd: cwd, env: env, launchUrl: launchUrl });
 
-    // Track in recent launches
+    // Track in recent launches and refresh list to show stop/restart controls
     trackRecentLaunch(config);
+    setTimeout(refreshRunConfigs, 500);
   });
 }
 
