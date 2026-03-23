@@ -593,7 +593,19 @@ ipcMain.handle('launch:getConfigs', (event, projectPath) => {
   try {
     envProfiles = JSON.parse(fs.readFileSync(profilesPath, 'utf8'));
   } catch { /* no profiles or parse error */ }
-  return { configs, envProfiles };
+  // Recent launches
+  let recentLaunches = [];
+  const recentPath = path.join(projectPath, '.claudes', 'recent-launches.json');
+  try {
+    recentLaunches = JSON.parse(fs.readFileSync(recentPath, 'utf8'));
+  } catch { /* no recent launches */ }
+  return { configs, envProfiles, recentLaunches };
+});
+
+ipcMain.handle('launch:saveRecentLaunches', (event, projectPath, recentLaunches) => {
+  const dirPath = path.join(projectPath, '.claudes');
+  try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
+  fs.writeFileSync(path.join(dirPath, 'recent-launches.json'), JSON.stringify(recentLaunches, null, 2), 'utf8');
 });
 
 ipcMain.handle('launch:saveConfigs', (event, projectPath, configurations) => {
@@ -825,6 +837,10 @@ ipcMain.handle('shell:openExternal', (event, url) => {
 
 ipcMain.handle('shell:showItemInFolder', (event, fullPath) => {
   shell.showItemInFolder(fullPath);
+});
+
+ipcMain.handle('shell:openPath', (event, fullPath) => {
+  return shell.openPath(fullPath);
 });
 
 // --- App Lifecycle ---

@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scanCsproj: (dirPath) => ipcRenderer.invoke('launch:scanCsproj', dirPath),
   browseFile: (filters) => ipcRenderer.invoke('launch:browseFile', filters),
   readEnvFile: (filePath) => ipcRenderer.invoke('launch:readEnvFile', filePath),
+  saveRecentLaunches: (projectPath, recent) => ipcRenderer.invoke('launch:saveRecentLaunches', projectPath, recent),
   getUsage: () => ipcRenderer.invoke('usage:getAll'),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   onUpdateAvailable: (callback) => ipcRenderer.on('update:available', (_, info) => callback(info)),
@@ -56,5 +57,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getHookServerPort: () => ipcRenderer.invoke('hooks:getPort'),
   onHookEvent: (callback) => ipcRenderer.on('hook:event', (_, event) => callback(event)),
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
-  showItemInFolder: (fullPath) => ipcRenderer.invoke('shell:showItemInFolder', fullPath)
+  showItemInFolder: (fullPath) => ipcRenderer.invoke('shell:showItemInFolder', fullPath),
+  openPath: (fullPath) => ipcRenderer.invoke('shell:openPath', fullPath)
 });

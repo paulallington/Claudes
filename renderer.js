@@ -2452,15 +2452,28 @@ function refreshRunConfigs() {
       runConfigsEl.appendChild(empty);
       return;
     }
+    // Build recent configs group from saved recent launches
+    var recentLaunches = data.recentLaunches || [];
+    var recentConfigs = [];
+    for (var ri = 0; ri < recentLaunches.length && ri < 5; ri++) {
+      var rKey = recentLaunches[ri];
+      for (var ci = 0; ci < configs.length; ci++) {
+        if (configs[ci].name === rKey.name && configs[ci].type === rKey.type) {
+          recentConfigs.push(configs[ci]);
+          break;
+        }
+      }
+    }
+
     // Group by _source
-    var groups = { custom: [], launchSettings: [], 'launch.json': [] };
+    var groups = { recent: recentConfigs, custom: [], launchSettings: [], 'launch.json': [] };
     for (var i = 0; i < configs.length; i++) {
       var src = configs[i]._source || 'custom';
       if (!groups[src]) groups[src] = [];
       groups[src].push(configs[i]);
     }
-    var groupLabels = { custom: 'Custom', launchSettings: 'Launch Settings', 'launch.json': 'VS Code' };
-    var groupOrder = ['custom', 'launchSettings', 'launch.json'];
+    var groupLabels = { recent: 'Recent', custom: 'Custom', launchSettings: 'Launch Settings', 'launch.json': 'VS Code' };
+    var groupOrder = ['recent', 'custom', 'launchSettings', 'launch.json'];
     for (var g = 0; g < groupOrder.length; g++) {
       var key = groupOrder[g];
       var items = groups[key];
@@ -2469,8 +2482,10 @@ function refreshRunConfigs() {
       group.className = 'run-source-group';
       var hdr = document.createElement('div');
       hdr.className = 'run-source-header';
+      // Recent and Custom start expanded, others start collapsed
+      var startExpanded = (key === 'recent' || key === 'custom');
       var arrow = document.createElement('span');
-      arrow.className = 'run-source-arrow expanded';
+      arrow.className = 'run-source-arrow' + (startExpanded ? ' expanded' : '');
       arrow.textContent = '\u25B8';
       var label = document.createElement('span');
       label.textContent = (groupLabels[key] || key) + ' (' + items.length + ')';
@@ -2478,7 +2493,7 @@ function refreshRunConfigs() {
       hdr.appendChild(label);
       group.appendChild(hdr);
       var list = document.createElement('div');
-      list.className = 'run-source-items';
+      list.className = 'run-source-items' + (startExpanded ? '' : ' collapsed');
       hdr.addEventListener('click', (function (a, l) {
         return function () {
           a.classList.toggle('expanded');
@@ -2497,6 +2512,14 @@ function refreshRunConfigs() {
           var nameEl = document.createElement('span');
           nameEl.className = 'run-config-name';
           nameEl.textContent = config.name;
+          nameEl.style.cursor = 'pointer';
+          nameEl.addEventListener('click', function () {
+            if (config._readonly) {
+              openConfigViewer(config);
+            } else {
+              openConfigEditor(config);
+            }
+          });
           var typeEl = document.createElement('span');
           var knownTypes = ['dotnet-run', 'dotnet-exec', 'coreclr', 'node', 'pwa-node', 'python', 'custom'];
           var isUnknown = config.type && knownTypes.indexOf(config.type) === -1;
@@ -2558,6 +2581,18 @@ function showRunProfilesView() {
   runProfilesView.classList.remove('hidden');
 }
 
+function openConfigViewer(config) {
+  runEditingConfig = JSON.parse(JSON.stringify(config));
+  runEditingIndex = -1;
+  runEditingOriginalName = null;
+  runEditingOriginalType = null;
+  runEditorTitle.textContent = config.name;
+  document.getElementById('btn-run-delete').classList.add('hidden');
+  document.getElementById('btn-run-save').classList.add('hidden');
+  buildEditorForm(true); // true = read-only
+  showRunEditorView();
+}
+
 function openConfigEditor(config, isNew) {
   runEditingConfig = config ? JSON.parse(JSON.stringify(config)) : {
     name: '',
@@ -2584,6 +2619,7 @@ function openConfigEditor(config, isNew) {
   }
   runEditorTitle.textContent = isNew ? 'New Configuration' : 'Edit: ' + config.name;
   document.getElementById('btn-run-delete').classList.toggle('hidden', runEditingIndex < 0);
+  document.getElementById('btn-run-save').classList.remove('hidden');
   buildEditorForm();
   showRunEditorView();
 }
@@ -2597,7 +2633,7 @@ function findCustomConfigIndex(config) {
   return -1;
 }
 
-function buildEditorForm() {
+function buildEditorForm(readOnly) {
   var form = runEditorForm;
   while (form.firstChild) form.removeChild(form.firstChild);
   var cfg = runEditingConfig;
@@ -2690,6 +2726,14 @@ function buildEditorForm() {
     cbRow.appendChild(cbLabel);
     urlSection.body.appendChild(cbRow);
     form.appendChild(urlSection.el);
+  }
+
+  // Disable all inputs in read-only mode
+  if (readOnly) {
+    var inputs = form.querySelectorAll('input, select, button');
+    for (var ri = 0; ri < inputs.length; ri++) {
+      inputs[ri].disabled = true;
+    }
   }
 }
 
@@ -3102,7 +3146,24 @@ function launchConfig(config) {
 
     var launchUrl = (config.openBrowserOnLaunch !== false && config.applicationUrl) ? config.applicationUrl : null;
     addColumn(cmdArgs, null, { cmd: cmd, title: config.name, cwd: cwd, env: env, launchUrl: launchUrl });
+
+    // Track in recent launches
+    trackRecentLaunch(config);
   });
+}
+
+function trackRecentLaunch(config) {
+  if (!activeProjectKey || !runCachedData) return;
+  var entry = { name: config.name, type: config.type };
+  var recent = runCachedData.recentLaunches || [];
+  // Remove existing entry for this config
+  recent = recent.filter(function (r) { return !(r.name === entry.name && r.type === entry.type); });
+  // Add to front
+  recent.unshift(entry);
+  // Keep only last 10
+  if (recent.length > 10) recent = recent.slice(0, 10);
+  runCachedData.recentLaunches = recent;
+  window.electronAPI.saveRecentLaunches(activeProjectKey, recent);
 }
 
 function findRunningColumn(configName) {
@@ -3128,6 +3189,9 @@ function refreshExplorer() {
 
 btnToggleExplorer.addEventListener('click', toggleExplorer);
 document.getElementById('btn-refresh-files').addEventListener('click', refreshFileTree);
+document.getElementById('btn-reveal-explorer').addEventListener('click', function () {
+  if (activeProjectKey) window.electronAPI.openPath(activeProjectKey);
+});
 document.getElementById('btn-refresh-git').addEventListener('click', function () { refreshGitStatus(true); });
 document.getElementById('btn-refresh-run').addEventListener('click', refreshRunConfigs);
 document.getElementById('btn-add-run-config').addEventListener('click', function () {
