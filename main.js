@@ -531,20 +531,36 @@ function findLaunchSettingsConfigs(projectPath) {
         try {
           const data = JSON.parse(fs.readFileSync(lsPath, 'utf8'));
           if (!data.profiles) continue;
-          for (const [name, profile] of Object.entries(data.profiles)) {
+          // Scan for .csproj files in this directory
+          const csprojFiles = [];
+          try {
+            const dirEntries = fs.readdirSync(subDir);
+            for (const f of dirEntries) {
+              if (f.endsWith('.csproj')) csprojFiles.push(f);
+            }
+          } catch { /* can't read dir */ }
+          // If no .csproj found, fall back to directory name
+          if (csprojFiles.length === 0) csprojFiles.push(null);
+          for (const [profileName, profile] of Object.entries(data.profiles)) {
             if (profile.commandName === 'IISExpress') continue;
-            configs.push({
-              name: name,
-              type: 'dotnet-project',
-              cwd: subDir,
-              env: profile.environmentVariables || {},
-              applicationUrl: profile.applicationUrl || '',
-              commandLineArgs: profile.commandLineArgs || '',
-              _source: 'launchSettings'
-            });
+            for (const csproj of csprojFiles) {
+              const name = csprojFiles.length > 1 && csproj
+                ? profileName + ' (' + csproj + ')'
+                : profileName;
+              configs.push({
+                name: name,
+                type: 'dotnet-run',
+                project: csproj ? path.join(subDir, csproj) : null,
+                cwd: subDir,
+                env: profile.environmentVariables || {},
+                applicationUrl: profile.applicationUrl || '',
+                commandLineArgs: profile.commandLineArgs || '',
+                _source: 'launchSettings',
+                _readonly: true
+              });
+            }
           }
         } catch { /* no launchSettings here, scan children */ }
-        // Recurse one more level (e.g. src/Project/Properties/...)
         if (dir === projectPath) scanDir(subDir);
       }
     } catch { /* can't read dir */ }
@@ -559,11 +575,73 @@ ipcMain.handle('launch:getConfigs', (event, projectPath) => {
   const launchPath = path.join(projectPath, '.vscode', 'launch.json');
   try {
     const data = parseJsonc(launchPath);
-    configs = configs.concat(data.configurations || []);
+    const vsConfigs = (data.configurations || []).map(c => Object.assign({}, c, { _source: 'launch.json', _readonly: true }));
+    configs = configs.concat(vsConfigs);
   } catch { /* no launch.json or parse error */ }
   // .NET launchSettings.json
   configs = configs.concat(findLaunchSettingsConfigs(projectPath));
-  return configs;
+  // Custom configs from .claudes/launch.json
+  const customPath = path.join(projectPath, '.claudes', 'launch.json');
+  try {
+    const customData = JSON.parse(fs.readFileSync(customPath, 'utf8'));
+    const customConfigs = (customData.configurations || []).map(c => Object.assign({}, c, { _source: 'custom', _readonly: false }));
+    configs = configs.concat(customConfigs);
+  } catch { /* no custom config or parse error */ }
+  // Env profiles from .claudes/env-profiles.json
+  let envProfiles = {};
+  const profilesPath = path.join(projectPath, '.claudes', 'env-profiles.json');
+  try {
+    envProfiles = JSON.parse(fs.readFileSync(profilesPath, 'utf8'));
+  } catch { /* no profiles or parse error */ }
+  return { configs, envProfiles };
+});
+
+ipcMain.handle('launch:saveConfigs', (event, projectPath, configurations) => {
+  const dirPath = path.join(projectPath, '.claudes');
+  try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
+  fs.writeFileSync(path.join(dirPath, 'launch.json'), JSON.stringify({ configurations }, null, 2), 'utf8');
+});
+
+ipcMain.handle('launch:saveEnvProfiles', (event, projectPath, profiles) => {
+  const dirPath = path.join(projectPath, '.claudes');
+  try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
+  fs.writeFileSync(path.join(dirPath, 'env-profiles.json'), JSON.stringify(profiles, null, 2), 'utf8');
+});
+
+ipcMain.handle('launch:scanCsproj', (event, dirPath) => {
+  try {
+    return fs.readdirSync(dirPath).filter(f => f.endsWith('.csproj'));
+  } catch { return []; }
+});
+
+ipcMain.handle('launch:browseFile', async (event, filters) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: filters || []
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle('launch:readEnvFile', (event, filePath) => {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const env = {};
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.substring(0, eqIdx).trim();
+      let val = trimmed.substring(eqIdx + 1).trim();
+      // Strip surrounding quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      env[key] = val;
+    }
+    return env;
+  } catch { return {}; }
 });
 
 // --- Usage ---
