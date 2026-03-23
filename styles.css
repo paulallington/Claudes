@@ -1820,6 +1820,419 @@ html, body {
   flex-shrink: 0;
 }
 
+/* Launch Config - Source Groups */
+
+.run-source-group {
+  margin-bottom: 4px;
+}
+
+.run-source-header {
+  display: flex;
+  align-items: center;
+  padding: 4px 12px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dimmer);
+  cursor: pointer;
+  user-select: none;
+}
+
+.run-source-header:hover {
+  background: var(--hover-subtle);
+}
+
+.run-source-arrow {
+  width: 14px;
+  font-size: 10px;
+  flex-shrink: 0;
+  transition: transform 0.1s;
+}
+
+.run-source-arrow.expanded {
+  transform: rotate(90deg);
+}
+
+.run-source-items.collapsed {
+  display: none;
+}
+
+.run-config-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.run-config-item:hover .run-config-actions {
+  opacity: 1;
+}
+
+.run-config-action-btn {
+  background: none;
+  border: none;
+  color: var(--text-dimmer);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.run-config-action-btn:hover {
+  background: var(--hover-intense);
+  color: var(--text-primary);
+}
+
+.run-config-badge {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--hover-subtle);
+  color: var(--text-dimmer);
+  flex-shrink: 0;
+}
+
+.run-config-badge.warning {
+  background: var(--hover-yellow, rgba(255,200,0,0.15));
+  color: var(--color-yellow, #e2b93d);
+}
+
+/* Launch Config - Editor & Profiles Views */
+
+#tab-run.active {
+  display: flex;
+  flex-direction: column;
+}
+
+#run-list-view,
+#run-editor-view,
+#run-profiles-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+#run-editor-view.hidden,
+#run-profiles-view.hidden {
+  display: none;
+}
+
+.run-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.run-editor-back {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.run-editor-back:hover {
+  background: var(--hover-intense);
+  color: var(--text-primary);
+}
+
+.run-editor-form {
+  padding: 8px 12px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.run-editor-section {
+  margin-bottom: 12px;
+}
+
+.run-editor-section-header {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dimmer);
+  margin-bottom: 6px;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.run-editor-section-header:hover {
+  color: var(--text-secondary);
+}
+
+.run-editor-section-body.collapsed {
+  display: none;
+}
+
+.run-editor-field {
+  margin-bottom: 8px;
+}
+
+.run-editor-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+.run-editor-input,
+.run-editor-select {
+  width: 100%;
+  padding: 4px 8px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  color: var(--text-body);
+  font-size: 12px;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+.run-editor-input:focus,
+.run-editor-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.run-editor-input-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.run-editor-input-row .run-editor-input {
+  flex: 1;
+}
+
+.run-editor-browse-btn {
+  background: var(--hover-subtle);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.run-editor-browse-btn:hover {
+  background: var(--hover-intense);
+  color: var(--text-primary);
+}
+
+.run-editor-footer {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.run-editor-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--hover-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.run-editor-btn:hover {
+  background: var(--hover-intense);
+  color: var(--text-primary);
+}
+
+.run-editor-save {
+  background: var(--accent-muted, rgba(230,57,70,0.2));
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.run-editor-save:hover {
+  background: var(--accent);
+  color: var(--text-bright);
+}
+
+.run-editor-delete {
+  margin-left: auto;
+  color: var(--accent);
+  border-color: transparent;
+}
+
+.run-editor-delete:hover {
+  background: rgba(230,57,70,0.15);
+}
+
+.run-editor-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.run-editor-link:hover {
+  color: var(--text-primary);
+}
+
+/* Env Key-Value Table */
+
+.run-env-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.run-env-table th {
+  text-align: left;
+  padding: 2px 4px;
+  font-size: 10px;
+  color: var(--text-dimmer);
+  font-weight: 600;
+}
+
+.run-env-table td {
+  padding: 2px 4px;
+}
+
+.run-env-table input {
+  width: 100%;
+  padding: 2px 4px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  color: var(--text-body);
+  font-size: 11px;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+.run-env-table input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.run-env-remove-btn {
+  background: none;
+  border: none;
+  color: var(--text-dimmer);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 4px;
+}
+
+.run-env-remove-btn:hover {
+  color: var(--accent);
+}
+
+.run-env-add-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.run-env-add-btn:hover {
+  color: var(--text-primary);
+}
+
+/* Env Profile Manager */
+
+.run-profile-item {
+  display: flex;
+  align-items: center;
+  padding: 4px 12px;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-body);
+}
+
+.run-profile-item:hover {
+  background: var(--hover-subtle);
+}
+
+.run-profile-item.active {
+  background: var(--hover-intense);
+  color: var(--text-primary);
+}
+
+.run-profile-actions {
+  display: flex;
+  gap: 4px;
+  padding: 6px 12px;
+}
+
+.run-profile-add-btn {
+  background: none;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 3px 8px;
+}
+
+.run-profile-add-btn:hover {
+  background: var(--hover-subtle);
+  color: var(--text-primary);
+}
+
+#run-profile-editor {
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Checkbox row */
+.run-editor-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.run-editor-checkbox-row input[type="checkbox"] {
+  margin: 0;
+}
+
+/* Run status message (like git-status-msg) */
+.run-status-msg {
+  font-size: 11px;
+  color: var(--color-green);
+  padding: 4px 12px;
+  min-height: 14px;
+  word-break: break-word;
+}
+
+.run-status-msg:empty {
+  display: none;
+}
+
+.run-status-msg.run-status-error {
+  color: var(--accent);
+}
+
 /* --- Update Bar --- */
 
 .update-bar {
