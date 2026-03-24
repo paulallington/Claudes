@@ -3502,25 +3502,25 @@ html, body {
   gap: 6px;
 }
 
-.loop-detail-copy-btn {
+.loop-detail-icon-btn {
   background: none;
-  border: 1px solid var(--border-primary);
-  color: var(--text-secondary);
+  border: 1px solid transparent;
+  color: var(--text-faint);
   cursor: pointer;
-  padding: 2px 6px;
+  padding: 2px 5px;
   border-radius: 3px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
 }
 
-.loop-detail-copy-btn:hover {
+.loop-detail-icon-btn:hover {
   background: var(--hover-strong);
-  color: var(--text-primary);
+  color: var(--accent);
+  border-color: var(--border-primary);
 }
 
-.loop-detail-copy-btn.copied {
+.loop-detail-icon-btn.copied {
   color: #22c55e;
-  border-color: #22c55e;
 }
 
 .loop-detail-run-select {

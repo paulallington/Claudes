@@ -5915,6 +5915,25 @@ function updateLoopSidebarBadges() {
 // ============================================================
 
 // Copy output button
+document.getElementById('btn-loop-open-claude').addEventListener('click', function () {
+  if (!activeLoopDetailId) return;
+  var outputEl = document.getElementById('loop-detail-output');
+  var nameEl = document.getElementById('loop-detail-name');
+  var loopName = nameEl ? nameEl.textContent : 'Loop';
+  var output = outputEl.textContent || '';
+
+  if (!output || output === 'Loading...' || output.indexOf('Processing...') === 0) {
+    alert('No output to continue with.');
+    return;
+  }
+
+  var context = 'You are continuing work from a background loop called "' + loopName + '". ' +
+    'Below is the output from the most recent run. The user wants to discuss, investigate, or action these findings.\n\n' +
+    '--- LOOP OUTPUT ---\n' + output + '\n--- END LOOP OUTPUT ---';
+
+  addColumn(['--append-system-prompt', context], null, { title: loopName });
+});
+
 document.getElementById('btn-loop-copy-output').addEventListener('click', function () {
   var outputEl = document.getElementById('loop-detail-output');
   var text = outputEl.textContent;
