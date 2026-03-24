@@ -1082,6 +1082,261 @@ ipcMain.handle('loops:getHistory', (event, loopId, count) => {
   return getLoopHistory(loopId, count);
 });
 
+// --- Loop Scheduler & Execution ---
+
+const runningLoops = new Map(); // loopId -> child process
+const loopQueue = []; // loopIds waiting for a slot
+
+const LOOP_PROMPT_SUFFIX = '\n\nEnd your response with a JSON block wrapped in :::loop-result markers like this:\n:::loop-result\n{"summary": "Brief one-line summary", "attentionItems": [{"summary": "Short description", "detail": "Full context"}]}\n:::loop-result\nIf there are no issues, use an empty attentionItems array.';
+
+function findClaudePath() {
+  try {
+    const result = execFileSync('where', ['claude'], { encoding: 'utf8' });
+    return result.trim().split(/\r?\n/)[0];
+  } catch {
+    return 'claude';
+  }
+}
+
+let claudePath = null;
+
+function getClaudePath() {
+  if (!claudePath) claudePath = findClaudePath();
+  return claudePath;
+}
+
+function parseLoopResult(output) {
+  const result = { summary: '', attentionItems: [] };
+  // Try structured :::loop-result block first
+  const match = output.match(/:::loop-result\s*\n([\s\S]*?)\n\s*:::loop-result/);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[1]);
+      result.summary = parsed.summary || '';
+      result.attentionItems = parsed.attentionItems || [];
+      return result;
+    } catch { /* fall through to heuristic */ }
+  }
+  // Heuristic fallback: extract last paragraph as summary
+  const lines = output.trim().split('\n');
+  result.summary = lines[lines.length - 1].substring(0, 200);
+  // Look for attention patterns
+  const patterns = [/ACTION NEEDED:\s*(.+)/gi, /WARNING:\s*(.+)/gi, /FAILING:\s*(.+)/gi, /ERROR:\s*(.+)/gi];
+  patterns.forEach((pat) => {
+    let m;
+    while ((m = pat.exec(output)) !== null) {
+      result.attentionItems.push({ summary: m[1].substring(0, 200), detail: '' });
+    }
+  });
+  return result;
+}
+
+function shouldRunLoop(loop, now) {
+  if (!loop.enabled) return false;
+  if (loop.currentRunStartedAt) return false;
+
+  if (loop.schedule.type === 'interval') {
+    if (!loop.lastRunAt) return true;
+    const elapsed = now - new Date(loop.lastRunAt).getTime();
+    return elapsed >= loop.schedule.minutes * 60000;
+  }
+
+  if (loop.schedule.type === 'time_of_day') {
+    const date = new Date(now);
+    const dayNames = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+    const today = dayNames[date.getDay()];
+    if (loop.schedule.days && loop.schedule.days.indexOf(today) === -1) return false;
+    const nowMinutes = date.getHours() * 60 + date.getMinutes();
+    const schedMinutes = loop.schedule.hour * 60 + (loop.schedule.minute || 0);
+    if (nowMinutes < schedMinutes) return false;
+    if (loop.lastRunAt) {
+      const lastRun = new Date(loop.lastRunAt);
+      if (lastRun.toDateString() === date.toDateString()) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+function runLoop(loopId) {
+  let data = readLoops();
+  const loop = data.loops.find((l) => l.id === loopId);
+  if (!loop) return;
+  if (runningLoops.has(loopId)) return;
+
+  // Check concurrency limit
+  if (runningLoops.size >= (data.maxConcurrentRuns || 3)) {
+    if (loopQueue.indexOf(loopId) === -1) loopQueue.push(loopId);
+    return;
+  }
+
+  // Validate project path
+  if (!fs.existsSync(loop.projectPath)) {
+    loop.lastRunStatus = 'error';
+    loop.lastError = 'Project path not found: ' + loop.projectPath;
+    loop.enabled = false;
+    writeLoops(data);
+    if (mainWindow) mainWindow.webContents.send('loops:run-completed', {
+      loopId: loopId, status: 'error', error: loop.lastError
+    });
+    return;
+  }
+
+  // Mark as running
+  loop.currentRunStartedAt = new Date().toISOString();
+  writeLoops(data);
+
+  if (mainWindow) mainWindow.webContents.send('loops:run-started', { loopId: loopId });
+
+  const startedAt = new Date().toISOString();
+  const outputChunks = [];
+  const fullPrompt = loop.prompt + LOOP_PROMPT_SUFFIX;
+
+  const args = ['--print', fullPrompt];
+  if (loop.budgetPerRun) args.push('--max-budget-usd', String(loop.budgetPerRun));
+
+  const child = spawn(getClaudePath(), args, {
+    cwd: loop.projectPath,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: Object.assign({}, process.env)
+  });
+
+  runningLoops.set(loopId, child);
+
+  child.stdout.on('data', (chunk) => {
+    outputChunks.push(chunk.toString());
+  });
+
+  child.stderr.on('data', (chunk) => {
+    outputChunks.push(chunk.toString());
+  });
+
+  child.on('close', (exitCode) => {
+    runningLoops.delete(loopId);
+
+    const completedAt = new Date().toISOString();
+    const output = outputChunks.join('');
+    const parsed = parseLoopResult(output);
+
+    const runData = {
+      loopId: loopId,
+      startedAt: startedAt,
+      completedAt: completedAt,
+      durationMs: new Date(completedAt).getTime() - new Date(startedAt).getTime(),
+      exitCode: exitCode,
+      status: exitCode === 0 ? 'completed' : 'error',
+      summary: parsed.summary,
+      output: output,
+      attentionItems: parsed.attentionItems,
+      costUsd: null
+    };
+
+    saveLoopRun(loopId, runData);
+
+    // Update loop config
+    const freshData = readLoops();
+    const freshLoop = freshData.loops.find((l) => l.id === loopId);
+    if (freshLoop) {
+      freshLoop.currentRunStartedAt = null;
+      freshLoop.lastRunAt = completedAt;
+      freshLoop.lastRunStatus = runData.status;
+      freshLoop.lastError = exitCode === 0 ? null : 'Exit code: ' + exitCode;
+      writeLoops(freshData);
+    }
+
+    // Notify renderer
+    if (mainWindow) {
+      mainWindow.webContents.send('loops:run-completed', {
+        loopId: loopId,
+        status: runData.status,
+        summary: parsed.summary,
+        attentionItems: parsed.attentionItems,
+        exitCode: exitCode
+      });
+
+      if (parsed.attentionItems.length > 0) {
+        mainWindow.flashFrame(true);
+      }
+    }
+
+    // Process queue
+    if (loopQueue.length > 0) {
+      const nextId = loopQueue.shift();
+      runLoop(nextId);
+    }
+  });
+
+  child.on('error', (err) => {
+    runningLoops.delete(loopId);
+    const freshData = readLoops();
+    const freshLoop = freshData.loops.find((l) => l.id === loopId);
+    if (freshLoop) {
+      freshLoop.currentRunStartedAt = null;
+      freshLoop.lastRunStatus = 'error';
+      freshLoop.lastError = err.message;
+      writeLoops(freshData);
+    }
+    if (mainWindow) mainWindow.webContents.send('loops:run-completed', {
+      loopId: loopId, status: 'error', error: err.message
+    });
+    if (loopQueue.length > 0) {
+      const nextId = loopQueue.shift();
+      runLoop(nextId);
+    }
+  });
+}
+
+let loopSchedulerTimer = null;
+
+function startLoopScheduler() {
+  // Startup recovery: clear stale "running" states
+  const data = readLoops();
+  let changed = false;
+  data.loops.forEach((loop) => {
+    if (loop.currentRunStartedAt) {
+      loop.currentRunStartedAt = null;
+      loop.lastRunStatus = 'interrupted';
+      loop.lastError = 'App closed during run';
+      changed = true;
+    }
+  });
+  if (changed) writeLoops(data);
+
+  // Check every 30 seconds
+  loopSchedulerTimer = setInterval(() => {
+    const loopData = readLoops();
+    if (!loopData.globalEnabled) return;
+    const now = Date.now();
+    loopData.loops.forEach((loop) => {
+      if (shouldRunLoop(loop, now)) {
+        runLoop(loop.id);
+      }
+    });
+  }, 30000);
+}
+
+function stopLoopScheduler() {
+  if (loopSchedulerTimer) {
+    clearInterval(loopSchedulerTimer);
+    loopSchedulerTimer = null;
+  }
+  runningLoops.forEach((child) => {
+    try { child.kill(); } catch { /* ignore */ }
+  });
+  runningLoops.clear();
+  const data = readLoops();
+  let changed = false;
+  data.loops.forEach((loop) => {
+    if (loop.currentRunStartedAt) {
+      loop.currentRunStartedAt = null;
+      loop.lastRunStatus = 'interrupted';
+      loop.lastError = 'App closed during run';
+      changed = true;
+    }
+  });
+  if (changed) writeLoops(data);
+}
+
 // --- App Lifecycle ---
 
 // In dev mode (not packaged), skip single-instance lock so dev can run alongside production
@@ -1104,10 +1359,12 @@ if (!gotLock) {
     startHookServer();
     createWindow();
     setupAutoUpdater();
+    startLoopScheduler();
   });
 }
 
 app.on('window-all-closed', () => {
+  stopLoopScheduler();
   if (ptyServerProcess) {
     ptyServerProcess.kill();
   }
@@ -1115,6 +1372,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  stopLoopScheduler();
   if (ptyServerProcess) {
     ptyServerProcess.kill();
   }
