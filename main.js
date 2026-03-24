@@ -14,6 +14,8 @@ let ptyServerProcess;
 
 const CONFIG_DIR = path.join(os.homedir(), '.claudes');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'projects.json');
+const LOOPS_FILE = path.join(CONFIG_DIR, 'loops.json');
+const LOOPS_RUNS_DIR = path.join(CONFIG_DIR, 'loop-runs');
 
 // --- Config ---
 
@@ -35,6 +37,77 @@ function readConfig() {
 function writeConfig(config) {
   ensureConfigDir();
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
+}
+
+// --- Loops Persistence ---
+
+function readLoops() {
+  ensureConfigDir();
+  try {
+    return JSON.parse(fs.readFileSync(LOOPS_FILE, 'utf8'));
+  } catch {
+    return { globalEnabled: true, maxConcurrentRuns: 3, loops: [] };
+  }
+}
+
+function writeLoops(data) {
+  ensureConfigDir();
+  fs.writeFileSync(LOOPS_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+function ensureLoopRunsDir(loopId) {
+  const dir = path.join(LOOPS_RUNS_DIR, loopId);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+function saveLoopRun(loopId, runData) {
+  const dir = ensureLoopRunsDir(loopId);
+  const filename = new Date(runData.startedAt).toISOString().replace(/[:.]/g, '-') + '.json';
+  if (runData.output && runData.output.length > 50000) {
+    runData.output = runData.output.substring(0, 50000) + '\n...[truncated]';
+  }
+  fs.writeFileSync(path.join(dir, filename), JSON.stringify(runData, null, 2), 'utf8');
+  pruneLoopRuns(loopId, dir);
+}
+
+function pruneLoopRuns(loopId, dir) {
+  try {
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort();
+    while (files.length > 50) {
+      fs.unlinkSync(path.join(dir, files.shift()));
+    }
+  } catch { /* ignore */ }
+}
+
+function getLoopHistory(loopId, count) {
+  const dir = path.join(LOOPS_RUNS_DIR, loopId);
+  try {
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse();
+    const results = [];
+    for (let i = 0; i < Math.min(count || 5, files.length); i++) {
+      const data = JSON.parse(fs.readFileSync(path.join(dir, files[i]), 'utf8'));
+      results.push({
+        startedAt: data.startedAt,
+        completedAt: data.completedAt,
+        durationMs: data.durationMs,
+        status: data.status,
+        summary: data.summary,
+        attentionItems: data.attentionItems || [],
+        costUsd: data.costUsd,
+        exitCode: data.exitCode
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+function generateLoopId() {
+  return 'loop_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
 }
 
 // --- Pty Server ---
@@ -932,6 +1005,81 @@ ipcMain.handle('shell:showItemInFolder', (event, fullPath) => {
 
 ipcMain.handle('shell:openPath', (event, fullPath) => {
   return shell.openPath(fullPath);
+});
+
+// --- Loop Management IPC ---
+
+ipcMain.handle('loops:getAll', () => {
+  return readLoops();
+});
+
+ipcMain.handle('loops:getForProject', (event, projectPath) => {
+  const data = readLoops();
+  const normalized = projectPath.replace(/\\/g, '/');
+  return data.loops.filter(l => l.projectPath.replace(/\\/g, '/') === normalized);
+});
+
+ipcMain.handle('loops:create', (event, loopConfig) => {
+  const data = readLoops();
+  const loop = Object.assign({
+    id: generateLoopId(),
+    enabled: true,
+    createdAt: new Date().toISOString(),
+    lastRunAt: null,
+    lastRunStatus: null,
+    lastError: null,
+    currentRunStartedAt: null
+  }, loopConfig);
+  data.loops.push(loop);
+  writeLoops(data);
+  return loop;
+});
+
+ipcMain.handle('loops:update', (event, loopId, updates) => {
+  const data = readLoops();
+  const loop = data.loops.find(l => l.id === loopId);
+  if (!loop) return null;
+  const safeFields = ['name', 'prompt', 'schedule', 'budgetPerRun', 'maxTurns', 'enabled'];
+  safeFields.forEach(field => {
+    if (updates[field] !== undefined) loop[field] = updates[field];
+  });
+  writeLoops(data);
+  return loop;
+});
+
+ipcMain.handle('loops:delete', (event, loopId) => {
+  const data = readLoops();
+  data.loops = data.loops.filter(l => l.id !== loopId);
+  writeLoops(data);
+  const runDir = path.join(LOOPS_RUNS_DIR, loopId);
+  try { fs.rmSync(runDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  return true;
+});
+
+ipcMain.handle('loops:toggle', (event, loopId) => {
+  const data = readLoops();
+  const loop = data.loops.find(l => l.id === loopId);
+  if (!loop) return null;
+  loop.enabled = !loop.enabled;
+  if (loop.enabled) loop.lastError = null;
+  writeLoops(data);
+  return loop;
+});
+
+ipcMain.handle('loops:toggleGlobal', () => {
+  const data = readLoops();
+  data.globalEnabled = !data.globalEnabled;
+  writeLoops(data);
+  return data.globalEnabled;
+});
+
+ipcMain.handle('loops:runNow', (event, loopId) => {
+  runLoop(loopId);
+  return true;
+});
+
+ipcMain.handle('loops:getHistory', (event, loopId, count) => {
+  return getLoopHistory(loopId, count);
 });
 
 // --- App Lifecycle ---
