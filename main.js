@@ -1217,7 +1217,11 @@ function runLoop(loopId) {
   const startedAt = new Date().toISOString();
   const outputChunks = [];
   const textChunks = []; // Human-readable text for display
-  const fullPrompt = loop.prompt + LOOP_PROMPT_SUFFIX;
+  let promptPrefix = '';
+  if (loop.dbConnectionString && loop.dbReadOnly !== false) {
+    promptPrefix = 'CRITICAL CONSTRAINT: This loop has READ-ONLY database access. You MUST NOT attempt to write, update, insert, delete, drop, rename, or modify any data in the database. This includes using $merge, $out, or any write stages in aggregation pipelines. Do NOT attempt to bypass this restriction by using shell commands (mongosh, mongo, etc.) or any other method. If the task requires writing to the database, report it as an attention item explaining what write would be needed, but do not perform it.\n\n';
+  }
+  const fullPrompt = promptPrefix + loop.prompt + LOOP_PROMPT_SUFFIX;
 
   const args = ['--print', fullPrompt, '--output-format', 'stream-json', '--verbose'];
   if (loop.skipPermissions) args.push('--dangerously-skip-permissions');
@@ -1243,21 +1247,28 @@ function runLoop(loopId) {
     fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig), 'utf8');
     args.push('--mcp-config', mcpConfigPath);
 
-    // Block write operations when read-only
+    // Allowlist-only mode when read-only: deny everything except safe read tools.
+    // A blocklist is insufficient — Claude can bypass via Bash (e.g. mongosh).
     if (loop.dbReadOnly !== false) {
-      const writeTools = [
-        'mcp__mongodb__insert-many',
-        'mcp__mongodb__update-many',
-        'mcp__mongodb__delete-many',
-        'mcp__mongodb__drop-collection',
-        'mcp__mongodb__drop-database',
-        'mcp__mongodb__drop-index',
-        'mcp__mongodb__create-collection',
-        'mcp__mongodb__create-index',
-        'mcp__mongodb__rename-collection',
-        'mcp__mongodb__aggregate'
+      const allowedTools = [
+        // Read-only MongoDB MCP tools
+        'mcp__mongodb__find',
+        'mcp__mongodb__count',
+        'mcp__mongodb__collection-indexes',
+        'mcp__mongodb__collection-schema',
+        'mcp__mongodb__collection-storage-size',
+        'mcp__mongodb__db-stats',
+        'mcp__mongodb__explain',
+        'mcp__mongodb__export',
+        'mcp__mongodb__list-collections',
+        'mcp__mongodb__list-databases',
+        'mcp__mongodb__mongodb-logs',
+        'mcp__mongodb__list-knowledge-sources',
+        'mcp__mongodb__search-knowledge',
+        // Safe file/code reading tools
+        'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'
       ];
-      args.push('--disallowedTools', writeTools.join(','));
+      args.push('--allowedTools', allowedTools.join(','));
     }
   }
 
