@@ -5451,17 +5451,26 @@ function escapeHtml(str) {
 function refreshLoops() {
   var listEl = document.getElementById('loops-list');
   var noProjectEl = document.getElementById('loops-no-project');
+  var searchBar = document.getElementById('loops-search-bar');
   if (!listEl) return;
 
   if (!activeProjectKey) {
     listEl.innerHTML = '';
     if (noProjectEl) noProjectEl.style.display = '';
+    if (searchBar) searchBar.style.display = 'none';
     return;
   }
   if (noProjectEl) noProjectEl.style.display = 'none';
 
   window.electronAPI.getLoopsForProject(activeProjectKey).then(function (loops) {
     loopsForProject = loops;
+    if (searchBar) searchBar.style.display = loops.length > 0 ? '' : 'none';
+    var query = document.getElementById('loops-search-input').value.toLowerCase().trim();
+    if (query) {
+      loops = loops.filter(function (l) {
+        return l.name.toLowerCase().indexOf(query) !== -1 || l.prompt.toLowerCase().indexOf(query) !== -1;
+      });
+    }
     renderLoopCards(loops, listEl);
   });
   updateLoopsTabIndicator();
@@ -5614,7 +5623,8 @@ function renderLoopCards(loops, container) {
       actionsHtml += '<button class="loop-btn-run" title="Run Now">&#9655;</button>';
     }
 
-    actionsHtml += '<button class="loop-btn-edit" title="Edit">&#9998;</button>' +
+    actionsHtml += '<button class="loop-btn-export" title="Export">&#8613;</button>' +
+      '<button class="loop-btn-edit" title="Edit">&#9998;</button>' +
       '<button class="loop-btn-delete" title="Delete">&times;</button>' +
       '</span>';
 
@@ -5666,6 +5676,10 @@ function renderLoopCards(loops, container) {
         refreshLoops();
       });
     }
+    card.querySelector('.loop-btn-export').addEventListener('click', function (e) {
+      e.stopPropagation();
+      window.electronAPI.exportLoop(loop.id);
+    });
     card.querySelector('.loop-btn-edit').addEventListener('click', function (e) {
       e.stopPropagation();
       openLoopModal(loop);
@@ -5907,6 +5921,7 @@ function openLoopModal(existingLoop) {
   document.getElementById('loop-db-readonly').checked = existingLoop ? (existingLoop.dbReadOnly !== false) : true;
   document.getElementById('loop-db-show').checked = false;
 
+  document.getElementById('loop-prompt-find-bar').classList.add('hidden');
   document.getElementById('loop-modal-overlay').classList.remove('hidden');
   document.getElementById('loop-name').focus();
 }
@@ -5952,6 +5967,8 @@ function renderLoopTimeChips() {
 
 function closeLoopModal() {
   document.getElementById('loop-modal-overlay').classList.add('hidden');
+  document.getElementById('loop-prompt').readOnly = false;
+  document.getElementById('loop-prompt-find-bar').classList.add('hidden');
   loopEditingId = null;
 }
 
@@ -6031,6 +6048,113 @@ document.getElementById('loop-db-show').addEventListener('change', function () {
   document.getElementById('loop-db-connection').type = this.checked ? 'text' : 'password';
 });
 
+// --- Loop prompt find-in-text ---
+var loopPromptFindMatches = [];
+var loopPromptFindIndex = -1;
+
+function toggleLoopPromptFind() {
+  var bar = document.getElementById('loop-prompt-find-bar');
+  if (bar.classList.contains('hidden')) {
+    bar.classList.remove('hidden');
+    document.getElementById('loop-prompt-find-input').value = '';
+    document.getElementById('loop-prompt-find-count').textContent = '';
+    loopPromptFindMatches = [];
+    loopPromptFindIndex = -1;
+    document.getElementById('loop-prompt').readOnly = true;
+    document.getElementById('loop-prompt-find-input').focus();
+  } else {
+    bar.classList.add('hidden');
+    document.getElementById('loop-prompt').readOnly = false;
+    document.getElementById('loop-prompt').focus();
+  }
+}
+
+function searchLoopPrompt() {
+  var input = document.getElementById('loop-prompt-find-input');
+  var textarea = document.getElementById('loop-prompt');
+  var countEl = document.getElementById('loop-prompt-find-count');
+  var query = input.value;
+  loopPromptFindMatches = [];
+  loopPromptFindIndex = -1;
+
+  if (!query) {
+    countEl.textContent = '';
+    return;
+  }
+
+  var text = textarea.value;
+  var lowerText = text.toLowerCase();
+  var lowerQuery = query.toLowerCase();
+  var idx = 0;
+  while (true) {
+    var found = lowerText.indexOf(lowerQuery, idx);
+    if (found === -1) break;
+    loopPromptFindMatches.push(found);
+    idx = found + 1;
+  }
+
+  if (loopPromptFindMatches.length === 0) {
+    countEl.textContent = '0/0';
+  } else {
+    loopPromptFindIndex = 0;
+    countEl.textContent = '1/' + loopPromptFindMatches.length;
+  }
+}
+
+function highlightLoopPromptMatch() {
+  if (loopPromptFindIndex < 0 || loopPromptFindIndex >= loopPromptFindMatches.length) return;
+  var textarea = document.getElementById('loop-prompt');
+  var pos = loopPromptFindMatches[loopPromptFindIndex];
+  var query = document.getElementById('loop-prompt-find-input').value;
+  textarea.focus();
+  textarea.setSelectionRange(pos, pos + query.length);
+  // Scroll the match into view
+  var lineHeight = parseInt(getComputedStyle(textarea).lineHeight) || 16;
+  var textBefore = textarea.value.substring(0, pos);
+  var lineNum = (textBefore.match(/\n/g) || []).length;
+  textarea.scrollTop = Math.max(0, lineNum * lineHeight - textarea.clientHeight / 2);
+}
+
+function loopPromptFindNext() {
+  if (loopPromptFindMatches.length === 0) return;
+  loopPromptFindIndex = (loopPromptFindIndex + 1) % loopPromptFindMatches.length;
+  document.getElementById('loop-prompt-find-count').textContent = (loopPromptFindIndex + 1) + '/' + loopPromptFindMatches.length;
+  highlightLoopPromptMatch();
+}
+
+function loopPromptFindPrev() {
+  if (loopPromptFindMatches.length === 0) return;
+  loopPromptFindIndex = (loopPromptFindIndex - 1 + loopPromptFindMatches.length) % loopPromptFindMatches.length;
+  document.getElementById('loop-prompt-find-count').textContent = (loopPromptFindIndex + 1) + '/' + loopPromptFindMatches.length;
+  highlightLoopPromptMatch();
+}
+
+document.getElementById('btn-loop-prompt-find').addEventListener('click', toggleLoopPromptFind);
+document.getElementById('btn-loop-prompt-find-close').addEventListener('click', toggleLoopPromptFind);
+document.getElementById('loop-prompt-find-input').addEventListener('input', searchLoopPrompt);
+document.getElementById('loop-prompt-find-input').addEventListener('keydown', function (e) {
+  e.stopPropagation();
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (e.shiftKey) loopPromptFindPrev();
+    else loopPromptFindNext();
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    toggleLoopPromptFind();
+  }
+});
+document.getElementById('btn-loop-prompt-find-next').addEventListener('click', loopPromptFindNext);
+document.getElementById('btn-loop-prompt-find-prev').addEventListener('click', loopPromptFindPrev);
+
+// Ctrl+F in the prompt textarea opens the find bar
+document.getElementById('loop-prompt').addEventListener('keydown', function (e) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+    e.preventDefault();
+    toggleLoopPromptFind();
+  }
+});
+
 document.getElementById('btn-loop-modal-close').addEventListener('click', closeLoopModal);
 document.getElementById('btn-loop-cancel').addEventListener('click', closeLoopModal);
 document.getElementById('btn-loop-save').addEventListener('click', saveLoop);
@@ -6042,6 +6166,36 @@ document.getElementById('btn-add-loop').addEventListener('click', function () {
   openLoopModal(null);
 });
 document.getElementById('btn-refresh-loops').addEventListener('click', refreshLoops);
+
+document.getElementById('btn-export-loops').addEventListener('click', function () {
+  if (!activeProjectKey) { alert('Select a project first.'); return; }
+  if (loopsForProject.length === 0) { alert('No loops to export.'); return; }
+  window.electronAPI.exportLoops(activeProjectKey);
+});
+
+document.getElementById('btn-import-loops').addEventListener('click', function () {
+  if (!activeProjectKey) { alert('Select a project first.'); return; }
+  window.electronAPI.importLoops(activeProjectKey).then(function (result) {
+    if (result && result.error) { alert(result.error); return; }
+    if (result && result.count) refreshLoops();
+  });
+});
+
+document.getElementById('loops-search-input').addEventListener('input', function () {
+  var query = this.value.toLowerCase().trim();
+  var listEl = document.getElementById('loops-list');
+  var filtered = loopsForProject;
+  if (query) {
+    filtered = loopsForProject.filter(function (l) {
+      return l.name.toLowerCase().indexOf(query) !== -1 || l.prompt.toLowerCase().indexOf(query) !== -1;
+    });
+  }
+  renderLoopCards(filtered, listEl);
+});
+
+document.getElementById('loops-search-input').addEventListener('keydown', function (e) {
+  e.stopPropagation();
+});
 
 // ============================================================
 // Loops Flyout Dashboard

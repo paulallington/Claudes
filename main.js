@@ -1113,6 +1113,82 @@ ipcMain.handle('loops:getRunDetail', (event, loopId, startedAt) => {
   return null;
 });
 
+ipcMain.handle('loops:export', (event, projectPath) => {
+  const data = readLoops();
+  const normalized = projectPath.replace(/\\/g, '/');
+  const loops = data.loops
+    .filter(l => l.projectPath.replace(/\\/g, '/') === normalized)
+    .map(l => ({ name: l.name, prompt: l.prompt, schedule: l.schedule, skipPermissions: l.skipPermissions || false, firstStartOnly: l.firstStartOnly || false, dbConnectionString: l.dbConnectionString || null, dbReadOnly: l.dbReadOnly !== false }));
+  if (loops.length === 0) return { cancelled: true };
+  const result = dialog.showSaveDialogSync(mainWindow, {
+    title: 'Export Loops',
+    defaultPath: 'loops-export.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (!result) return { cancelled: true };
+  const payload = { exportedAt: new Date().toISOString(), source: projectPath, loops };
+  fs.writeFileSync(result, JSON.stringify(payload, null, 2), 'utf8');
+  return { path: result, count: loops.length };
+});
+
+ipcMain.handle('loops:exportOne', (event, loopId) => {
+  const data = readLoops();
+  const loop = data.loops.find(l => l.id === loopId);
+  if (!loop) return { cancelled: true };
+  const exported = { name: loop.name, prompt: loop.prompt, schedule: loop.schedule, skipPermissions: loop.skipPermissions || false, firstStartOnly: loop.firstStartOnly || false, dbConnectionString: loop.dbConnectionString || null, dbReadOnly: loop.dbReadOnly !== false };
+  const safeName = loop.name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+  const result = dialog.showSaveDialogSync(mainWindow, {
+    title: 'Export Loop',
+    defaultPath: 'loop-' + safeName + '.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (!result) return { cancelled: true };
+  const payload = { exportedAt: new Date().toISOString(), loops: [exported] };
+  fs.writeFileSync(result, JSON.stringify(payload, null, 2), 'utf8');
+  return { path: result, count: 1 };
+});
+
+ipcMain.handle('loops:import', (event, projectPath) => {
+  const result = dialog.showOpenDialogSync(mainWindow, {
+    title: 'Import Loops',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile']
+  });
+  if (!result || result.length === 0) return { cancelled: true };
+  try {
+    const raw = JSON.parse(fs.readFileSync(result[0], 'utf8'));
+    const loops = raw.loops || (raw.name && raw.prompt ? [raw] : []);
+    if (loops.length === 0) return { error: 'No loops found in file' };
+    const data = readLoops();
+    const created = [];
+    loops.forEach(l => {
+      const loop = {
+        id: generateLoopId(),
+        name: l.name,
+        prompt: l.prompt,
+        schedule: l.schedule,
+        projectPath: projectPath,
+        skipPermissions: l.skipPermissions || false,
+        firstStartOnly: l.firstStartOnly || false,
+        dbConnectionString: l.dbConnectionString || null,
+        dbReadOnly: l.dbReadOnly !== false,
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        lastRunAt: null,
+        lastRunStatus: null,
+        lastError: null,
+        currentRunStartedAt: null
+      };
+      data.loops.push(loop);
+      created.push(loop);
+    });
+    writeLoops(data);
+    return { count: created.length };
+  } catch (err) {
+    return { error: 'Failed to import: ' + err.message };
+  }
+});
+
 ipcMain.handle('loops:getLiveOutput', (event, loopId) => {
   // Return accumulated output for a currently running loop
   const liveChunks = liveOutputBuffers.get(loopId);

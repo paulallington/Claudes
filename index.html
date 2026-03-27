@@ -90,8 +90,13 @@
             <span>LOOPS</span>
             <div style="display:flex;gap:4px;">
               <button class="explorer-refresh" id="btn-add-loop" title="New Loop">+</button>
+              <button class="explorer-refresh" id="btn-import-loops" title="Import Loops">&#8615;</button>
+              <button class="explorer-refresh" id="btn-export-loops" title="Export All Loops">&#8613;</button>
               <button class="explorer-refresh" id="btn-refresh-loops" title="Refresh">&#8635;</button>
             </div>
+          </div>
+          <div id="loops-search-bar" style="display:none;">
+            <input type="text" id="loops-search-input" class="loops-search-input" placeholder="Search loops..." spellcheck="false">
           </div>
           <div id="loops-no-project" class="loops-placeholder" style="display:none;">
             <p style="opacity:0.5;text-align:center;padding:2rem 1rem;font-size:12px;">Select a project to see its loops</p>
@@ -336,7 +341,14 @@
             <input type="text" id="loop-name" class="loop-input" placeholder="e.g. Check failing tests" spellcheck="false">
           </div>
           <div class="loop-form-group">
-            <label for="loop-prompt">Prompt</label>
+            <label for="loop-prompt">Prompt <button type="button" id="btn-loop-prompt-find" class="loop-prompt-find-btn" title="Find in prompt (Ctrl+F)">&#128269;</button></label>
+            <div id="loop-prompt-find-bar" class="loop-prompt-find-bar hidden">
+              <input type="text" id="loop-prompt-find-input" class="loop-prompt-find-input" placeholder="Find..." spellcheck="false">
+              <span id="loop-prompt-find-count" class="loop-prompt-find-count"></span>
+              <button type="button" id="btn-loop-prompt-find-prev" class="loop-prompt-find-nav" title="Previous">&uarr;</button>
+              <button type="button" id="btn-loop-prompt-find-next" class="loop-prompt-find-nav" title="Next">&darr;</button>
+              <button type="button" id="btn-loop-prompt-find-close" class="loop-prompt-find-nav" title="Close">&times;</button>
+            </div>
             <textarea id="loop-prompt" class="loop-textarea" rows="6" placeholder="What should Claude do each time this runs?" spellcheck="false"></textarea>
           </div>
           <div class="loop-form-group">

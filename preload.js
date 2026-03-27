@@ -76,6 +76,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLoopHistory: (loopId, count) => ipcRenderer.invoke('loops:getHistory', loopId, count),
   getLoopRunDetail: (loopId, startedAt) => ipcRenderer.invoke('loops:getRunDetail', loopId, startedAt),
   getLoopLiveOutput: (loopId) => ipcRenderer.invoke('loops:getLiveOutput', loopId),
+  exportLoops: (projectPath) => ipcRenderer.invoke('loops:export', projectPath),
+  exportLoop: (loopId) => ipcRenderer.invoke('loops:exportOne', loopId),
+  importLoops: (projectPath) => ipcRenderer.invoke('loops:import', projectPath),
   onLoopRunStarted: (callback) => ipcRenderer.on('loops:run-started', (_, data) => callback(data)),
   onLoopRunCompleted: (callback) => ipcRenderer.on('loops:run-completed', (_, data) => callback(data)),
   onLoopOutput: (callback) => ipcRenderer.on('loops:output', (_, data) => callback(data))
