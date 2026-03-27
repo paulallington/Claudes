@@ -5476,6 +5476,9 @@ function formatLoopScheduleText(loop) {
     var mins = loop.schedule.minutes;
     return mins >= 60 ? 'Every ' + (mins / 60) + 'h' : 'Every ' + mins + 'm';
   }
+  if (loop.schedule.type === 'app_startup') {
+    return loop.firstStartOnly ? 'First start of day' : 'App startup';
+  }
   // time_of_day with multiple times
   var times = loop.schedule.times || [{ hour: loop.schedule.hour, minute: loop.schedule.minute || 0 }];
   if (times.length === 1) {
@@ -5562,7 +5565,7 @@ function renderLoopCards(loops, container) {
     card.classList.add(statusClass);
 
     var schedText = formatLoopScheduleText(loop);
-    if (loop.runOnStart) schedText += ' + on start';
+
 
     var lastRunText = '';
     if (loop.lastRunAt) {
@@ -5576,7 +5579,9 @@ function renderLoopCards(loops, container) {
     }
 
     var nextRunText = '';
-    if (loop.enabled && loop.schedule.type === 'interval') {
+    if (loop.enabled && loop.schedule.type === 'app_startup') {
+      nextRunText = 'Next: app restart';
+    } else if (loop.enabled && loop.schedule.type === 'interval') {
       if (loop.lastRunAt) {
         var nextMs = new Date(loop.lastRunAt).getTime() + loop.schedule.minutes * 60000 - Date.now();
         if (nextMs <= 0) nextRunText = 'Due now';
@@ -5713,7 +5718,6 @@ function openLoopDetail(loop) {
 
   // Meta info
   var schedText = formatLoopScheduleText(loop);
-  if (loop.runOnStart) schedText += ' + on start';
   var metaEl = document.getElementById('loop-detail-meta');
   metaEl.innerHTML = '<span>' + schedText + '</span>' +
     (loop.lastRunAt ? '<span>Last: ' + new Date(loop.lastRunAt).toLocaleTimeString() + '</span>' : '<span>Never run</span>') +
@@ -5896,7 +5900,7 @@ function openLoopModal(existingLoop) {
   document.getElementById('loop-tod-time').value = '09:00';
   renderLoopTimeChips();
 
-  document.getElementById('loop-run-on-start').checked = existingLoop ? !!existingLoop.runOnStart : false;
+  document.getElementById('loop-first-start-only').checked = existingLoop ? !!existingLoop.firstStartOnly : false;
   document.getElementById('loop-skip-permissions').checked = existingLoop ? !!existingLoop.skipPermissions : false;
   document.getElementById('loop-db-connection').value = existingLoop ? (existingLoop.dbConnectionString || '') : '';
   document.getElementById('loop-db-connection').type = 'password';
@@ -5954,6 +5958,7 @@ function closeLoopModal() {
 function toggleScheduleFields(type) {
   document.getElementById('loop-interval-fields').style.display = type === 'interval' ? '' : 'none';
   document.getElementById('loop-tod-fields').style.display = type === 'time_of_day' ? '' : 'none';
+  document.getElementById('loop-startup-fields').style.display = type === 'app_startup' ? '' : 'none';
 }
 
 function saveLoop() {
@@ -5968,6 +5973,8 @@ function saveLoop() {
     var val = parseInt(document.getElementById('loop-interval-value').value) || 60;
     var unit = document.getElementById('loop-interval-unit').value;
     schedule = { type: 'interval', minutes: unit === 'hours' ? val * 60 : val };
+  } else if (schedType === 'app_startup') {
+    schedule = { type: 'app_startup' };
   } else {
     if (loopModalTimes.length === 0) { alert('Add at least one scheduled time.'); return; }
     var days = [];
@@ -5977,14 +5984,14 @@ function saveLoop() {
     schedule = { type: 'time_of_day', times: loopModalTimes.slice(), days: days };
   }
 
-  var runOnStart = document.getElementById('loop-run-on-start').checked;
+  var firstStartOnly = document.getElementById('loop-first-start-only').checked;
   var skipPermissions = document.getElementById('loop-skip-permissions').checked;
   var dbConnectionString = document.getElementById('loop-db-connection').value.trim() || null;
   var dbReadOnly = document.getElementById('loop-db-readonly').checked;
 
   if (loopEditingId) {
     window.electronAPI.updateLoop(loopEditingId, {
-      name: name, prompt: prompt, schedule: schedule, runOnStart: runOnStart,
+      name: name, prompt: prompt, schedule: schedule, firstStartOnly: firstStartOnly,
       skipPermissions: skipPermissions, dbConnectionString: dbConnectionString, dbReadOnly: dbReadOnly
     }).then(function () {
       closeLoopModal();
@@ -5994,7 +6001,7 @@ function saveLoop() {
   } else {
     window.electronAPI.createLoop({
       name: name, prompt: prompt, projectPath: activeProjectKey, schedule: schedule,
-      runOnStart: runOnStart, skipPermissions: skipPermissions,
+      firstStartOnly: firstStartOnly, skipPermissions: skipPermissions,
       dbConnectionString: dbConnectionString, dbReadOnly: dbReadOnly, createdBy: 'ui'
     }).then(function () {
       closeLoopModal();

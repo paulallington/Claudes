@@ -345,6 +345,7 @@
               <select id="loop-schedule-type">
                 <option value="interval">Every</option>
                 <option value="time_of_day">At specific times</option>
+                <option value="app_startup">On app startup</option>
               </select>
               <div id="loop-interval-fields">
                 <input type="number" id="loop-interval-value" min="1" value="60" style="width:60px">
@@ -369,15 +370,14 @@
                   <label><input type="checkbox" value="sun"> Sun</label>
                 </div>
               </div>
-            </div>
-          </div>
-          <div class="loop-form-group">
-            <label>Triggers</label>
-            <div class="loop-permissions">
-              <label class="loop-permission-option">
-                <input type="checkbox" id="loop-run-on-start">
-                <span>Run on app start</span>
-              </label>
+              <div id="loop-startup-fields" style="display:none;">
+                <div class="loop-permissions" style="margin-top:4px;">
+                  <label class="loop-permission-option">
+                    <input type="checkbox" id="loop-first-start-only">
+                    <span>Only on first start of the day <span class="loop-permission-hint">(won't re-run if app restarts)</span></span>
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
           <div class="loop-form-group">

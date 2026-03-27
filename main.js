@@ -1052,7 +1052,7 @@ ipcMain.handle('loops:update', (event, loopId, updates) => {
   const data = readLoops();
   const loop = data.loops.find(l => l.id === loopId);
   if (!loop) return null;
-  const safeFields = ['name', 'prompt', 'schedule', 'enabled', 'runOnStart', 'skipPermissions', 'dbConnectionString', 'dbReadOnly'];
+  const safeFields = ['name', 'prompt', 'schedule', 'enabled', 'firstStartOnly', 'skipPermissions', 'dbConnectionString', 'dbReadOnly'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) loop[field] = updates[field];
   });
@@ -1173,6 +1173,7 @@ function parseLoopResult(output) {
 function shouldRunLoop(loop, now) {
   if (!loop.enabled) return false;
   if (loop.currentRunStartedAt) return false;
+  if (loop.schedule.type === 'app_startup') return false; // only triggered on app start
 
   if (loop.schedule.type === 'interval') {
     if (!loop.lastRunAt) return true;
@@ -1444,14 +1445,20 @@ function startLoopScheduler() {
   });
   if (changed) writeLoops(data);
 
-  // Run loops flagged with runOnStart
+  // Run loops scheduled as app_startup
   setTimeout(() => {
     const startupData = readLoops();
     if (!startupData.globalEnabled) return;
+    const todayStr = new Date().toDateString();
     startupData.loops.forEach((loop) => {
-      if (loop.enabled && loop.runOnStart) {
-        runLoop(loop.id);
+      if (!loop.enabled) return;
+      if (!loop.schedule || loop.schedule.type !== 'app_startup') return;
+
+      if (loop.firstStartOnly && loop.lastRunAt) {
+        const lastRunDate = new Date(loop.lastRunAt).toDateString();
+        if (lastRunDate === todayStr) return; // already ran today
       }
+      runLoop(loop.id);
     });
   }, 5000); // slight delay to let the app fully initialize
 
