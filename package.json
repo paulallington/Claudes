@@ -31,6 +31,8 @@
     "asar": true,
     "asarUnpack": [
       "pty-server.js",
+      "icon-tray.ico",
+      "icon-tray.png",
       "node_modules/node-pty/**/*",
       "node_modules/ws/**/*"
     ],

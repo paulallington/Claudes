@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray, Menu, nativeImage } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -7,6 +7,8 @@ const { spawn, execFileSync } = require('child_process');
 const http = require('http');
 
 let mainWindow;
+let tray;
+let isQuitting = false;
 let hookServer;
 let hookServerPort;
 const ptyPort = app.isPackaged ? 3456 : 3457;
@@ -195,6 +197,16 @@ function createWindow() {
   });
 
   mainWindow.loadFile('index.html');
+
+  mainWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+      if (process.platform === 'darwin') {
+        app.dock.hide();
+      }
+    }
+  });
 
   nativeTheme.on('updated', () => {
     mainWindow?.webContents.send('theme:osChanged', nativeTheme.shouldUseDarkColors);
@@ -1457,6 +1469,46 @@ function stopLoopScheduler() {
   if (changed) writeLoops(data);
 }
 
+// --- Tray ---
+
+function createTray() {
+  const iconFile = process.platform === 'win32' ? 'icon-tray.ico' : 'icon-tray.png';
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'app.asar.unpacked', iconFile)
+    : path.join(__dirname, iconFile);
+  const trayIcon = nativeImage.createFromPath(iconPath);
+  tray = new Tray(process.platform === 'darwin' ? trayIcon.resize({ width: 18, height: 18 }) : trayIcon);
+  tray.setToolTip('Claudes');
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Show Claudes',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+
+  tray.setContextMenu(contextMenu);
+  tray.on('double-click', () => {
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
 // --- App Lifecycle ---
 
 // In dev mode (not packaged), skip single-instance lock so dev can run alongside production
@@ -1477,21 +1529,36 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     await startPtyServer();
     startHookServer();
+    createTray();
     createWindow();
     setupAutoUpdater();
     startLoopScheduler();
   });
+
+  app.on('activate', () => {
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+      if (process.platform === 'darwin') {
+        app.dock.show();
+      }
+    }
+  });
 }
 
 app.on('window-all-closed', () => {
-  stopLoopScheduler();
-  if (ptyServerProcess) {
-    ptyServerProcess.kill();
+  // On close-to-tray, windows are hidden not closed, so this only fires on actual quit
+  if (process.platform !== 'darwin') {
+    stopLoopScheduler();
+    if (ptyServerProcess) {
+      ptyServerProcess.kill();
+    }
+    app.quit();
   }
-  app.quit();
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   stopLoopScheduler();
   if (ptyServerProcess) {
     ptyServerProcess.kill();
