@@ -6028,7 +6028,7 @@ document.getElementById('btn-loop-modal-close').addEventListener('click', closeL
 document.getElementById('btn-loop-cancel').addEventListener('click', closeLoopModal);
 document.getElementById('btn-loop-save').addEventListener('click', saveLoop);
 document.getElementById('loop-modal-overlay').addEventListener('click', function (e) {
-  if (e.target === this) closeLoopModal();
+  // Only cancel/close buttons should dismiss the loop modal
 });
 document.getElementById('btn-add-loop').addEventListener('click', function () {
   if (!activeProjectKey) { alert('Select a project first.'); return; }
