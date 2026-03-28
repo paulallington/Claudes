@@ -5503,8 +5503,12 @@ function refreshAutomations() {
     if (searchBar) searchBar.style.display = automations.length > 0 ? '' : 'none';
     var query = document.getElementById('automations-search-input').value.toLowerCase().trim();
     if (query) {
-      automations = automations.filter(function (l) {
-        return l.name.toLowerCase().indexOf(query) !== -1 || l.prompt.toLowerCase().indexOf(query) !== -1;
+      automations = automations.filter(function (a) {
+        var nameMatch = a.name.toLowerCase().indexOf(query) !== -1;
+        var agentMatch = a.agents.some(function (ag) {
+          return ag.name.toLowerCase().indexOf(query) !== -1 || ag.prompt.toLowerCase().indexOf(query) !== -1;
+        });
+        return nameMatch || agentMatch;
       });
     }
     renderAutomationCards(automations, listEl);
@@ -6454,8 +6458,12 @@ document.getElementById('automations-search-input').addEventListener('input', fu
   var listEl = document.getElementById('automations-list');
   var filtered = automationsForProject;
   if (query) {
-    filtered = automationsForProject.filter(function (l) {
-      return l.name.toLowerCase().indexOf(query) !== -1 || l.prompt.toLowerCase().indexOf(query) !== -1;
+    filtered = automationsForProject.filter(function (a) {
+      var nameMatch = a.name.toLowerCase().indexOf(query) !== -1;
+      var agentMatch = a.agents.some(function (ag) {
+        return ag.name.toLowerCase().indexOf(query) !== -1 || ag.prompt.toLowerCase().indexOf(query) !== -1;
+      });
+      return nameMatch || agentMatch;
     });
   }
   renderAutomationCards(filtered, listEl);
