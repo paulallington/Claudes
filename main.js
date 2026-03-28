@@ -18,6 +18,8 @@ const CONFIG_DIR = path.join(os.homedir(), '.claudes');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'projects.json');
 const LOOPS_FILE = path.join(CONFIG_DIR, 'loops.json');
 const LOOPS_RUNS_DIR = path.join(CONFIG_DIR, 'loop-runs');
+const AUTOMATIONS_FILE = path.join(CONFIG_DIR, 'automations.json');
+const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, 'automation-runs');
 
 // --- Config ---
 
@@ -110,6 +112,14 @@ function getLoopHistory(loopId, count) {
 
 function generateLoopId() {
   return 'loop_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
+}
+
+function generateAutomationId() {
+  return 'auto_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7);
+}
+
+function generateAgentId() {
+  return 'agent_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7);
 }
 
 // --- Pty Server ---
