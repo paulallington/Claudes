@@ -54,11 +54,6 @@ function readLoops() {
   }
 }
 
-function writeLoops(data) {
-  ensureConfigDir();
-  fs.writeFileSync(LOOPS_FILE, JSON.stringify(data, null, 2), 'utf8');
-}
-
 // --- Automations Persistence ---
 
 function readAutomations() {
@@ -199,61 +194,6 @@ function migrateLoopsToAutomations() {
 
   writeAutomations(automationsData);
   console.log('[Migration] Created automations.json with ' + automationsData.automations.length + ' automations');
-}
-
-function ensureLoopRunsDir(loopId) {
-  const dir = path.join(LOOPS_RUNS_DIR, loopId);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  return dir;
-}
-
-function saveLoopRun(loopId, runData) {
-  const dir = ensureLoopRunsDir(loopId);
-  const filename = new Date(runData.startedAt).toISOString().replace(/[:.]/g, '-') + '.json';
-  if (runData.output && runData.output.length > 50000) {
-    runData.output = runData.output.substring(0, 50000) + '\n...[truncated]';
-  }
-  fs.writeFileSync(path.join(dir, filename), JSON.stringify(runData, null, 2), 'utf8');
-  pruneLoopRuns(loopId, dir);
-}
-
-function pruneLoopRuns(loopId, dir) {
-  try {
-    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort();
-    while (files.length > 50) {
-      fs.unlinkSync(path.join(dir, files.shift()));
-    }
-  } catch { /* ignore */ }
-}
-
-function getLoopHistory(loopId, count) {
-  const dir = path.join(LOOPS_RUNS_DIR, loopId);
-  try {
-    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse();
-    const results = [];
-    for (let i = 0; i < Math.min(count || 5, files.length); i++) {
-      const data = JSON.parse(fs.readFileSync(path.join(dir, files[i]), 'utf8'));
-      results.push({
-        startedAt: data.startedAt,
-        completedAt: data.completedAt,
-        durationMs: data.durationMs,
-        status: data.status,
-        summary: data.summary,
-        attentionItems: data.attentionItems || [],
-        costUsd: data.costUsd,
-        exitCode: data.exitCode
-      });
-    }
-    return results;
-  } catch {
-    return [];
-  }
-}
-
-function generateLoopId() {
-  return 'loop_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
 }
 
 function generateAutomationId() {
@@ -1703,13 +1643,11 @@ ipcMain.handle('automations:updateSettings', (event, settings) => {
 
 // --- Loop Scheduler & Execution ---
 
-const runningLoops = new Map(); // loopId -> child process
-const liveOutputBuffers = new Map(); // loopId -> string[] chunks
 const agentLiveOutputBuffers = new Map(); // 'automationId:agentId' -> string[] chunks
 const runningAgents = new Map(); // 'automationId:agentId' -> child process
 const agentQueue = []; // {automationId, agentId} objects waiting for a slot
 
-const LOOP_PROMPT_SUFFIX = '\n\nEnd your response with a JSON block wrapped in :::loop-result markers like this:\n:::loop-result\n{"summary": "Brief one-line summary", "attentionItems": [{"summary": "Short description", "detail": "Full context"}]}\n:::loop-result\nIf there are no issues, use an empty attentionItems array.';
+const AGENT_PROMPT_SUFFIX = '\n\nEnd your response with a JSON block wrapped in :::loop-result markers like this:\n:::loop-result\n{"summary": "Brief one-line summary", "attentionItems": [{"summary": "Short description", "detail": "Full context"}]}\n:::loop-result\nIf there are no issues, use an empty attentionItems array.';
 
 function findClaudePath() {
   try {
@@ -1727,7 +1665,7 @@ function getClaudePath() {
   return claudePath;
 }
 
-function parseLoopResult(output) {
+function parseAgentResult(output) {
   const result = { summary: '', attentionItems: [] };
   // Try structured :::loop-result block first
   const match = output.match(/:::loop-result\s*\n([\s\S]*?)\n\s*:::loop-result/);
@@ -1824,7 +1762,7 @@ async function runAgent(automationId, agentId) {
   if (runningAgents.has(key)) return;
 
   // Check concurrency limit (shared across loops and agents)
-  const totalRunning = runningLoops.size + runningAgents.size;
+  const totalRunning = runningAgents.size;
   if (totalRunning >= (data.maxConcurrentRuns || 3)) {
     if (!agentQueue.some(q => q.automationId === automationId && q.agentId === agentId)) {
       agentQueue.push({ automationId, agentId });
@@ -1894,7 +1832,7 @@ async function runAgent(automationId, agentId) {
   if (agent.dbConnectionString && agent.dbReadOnly !== false) {
     promptPrefix = 'CRITICAL CONSTRAINT: This agent has READ-ONLY database access. You MUST NOT attempt to write, update, insert, delete, drop, rename, or modify any data in the database. This includes using $merge, $out, or any write stages in aggregation pipelines. Do NOT attempt to bypass this restriction by using shell commands (mongosh, mongo, etc.) or any other method. If the task requires writing to the database, report it as an attention item explaining what write would be needed, but do not perform it.\n\n';
   }
-  const fullPrompt = promptPrefix + agent.prompt + LOOP_PROMPT_SUFFIX;
+  const fullPrompt = promptPrefix + agent.prompt + AGENT_PROMPT_SUFFIX;
 
   const args = ['--print', fullPrompt, '--output-format', 'stream-json', '--verbose'];
   if (agent.skipPermissions) args.push('--dangerously-skip-permissions');
@@ -1989,7 +1927,7 @@ async function runAgent(automationId, agentId) {
 
     const completedAt = new Date().toISOString();
     const displayOutput = textChunks.join('');
-    const parsed = parseLoopResult(displayOutput);
+    const parsed = parseAgentResult(displayOutput);
 
     const runData = {
       automationId, agentId,
@@ -2228,12 +2166,6 @@ function stopAutomationScheduler() {
     try { child.kill(); } catch { /* ignore */ }
   });
   runningAgents.clear();
-
-  // Kill running loops (legacy)
-  runningLoops.forEach((child) => {
-    try { child.kill(); } catch { /* ignore */ }
-  });
-  runningLoops.clear();
 
   // Mark all running agents as interrupted
   const data = readAutomations();
