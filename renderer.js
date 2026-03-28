@@ -6001,6 +6001,7 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
   var name = agent ? (agent.name || '') : '';
   var prompt = agent ? (agent.prompt || '') : '';
   var schedType = agent && agent.schedule ? agent.schedule.type : 'interval';
+  var checkedDays = agent && agent.schedule && agent.schedule.days ? agent.schedule.days : ['mon', 'tue', 'wed', 'thu', 'fri'];
   var runMode = agent ? (agent.runMode || 'independent') : 'independent';
 
   var header = '';
@@ -6033,6 +6034,10 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
     runAfterHtml = '<div class="automation-form-group agent-runafter-group" style="' + (runMode === 'run_after' ? '' : 'display:none;') + '">' +
       '<label>Run after</label>' +
       '<div class="agent-runafter-chips">' + chipOptions + '</div>' +
+      '<label class="automation-permission-option" style="margin-top:6px;">' +
+        '<input type="checkbox" class="agent-run-on-failure"' + (agent && agent.runOnUpstreamFailure ? ' checked' : '') + '>' +
+        '<span>Run even if upstream fails <span class="automation-permission-hint">(skip if unchecked)</span></span>' +
+      '</label>' +
       '</div>';
   }
 
@@ -6104,6 +6109,15 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
                 '<button type="button" class="agent-btn-add-time" title="Add time">+</button>' +
               '</div>' +
               '<div class="agent-tod-times-list automation-times-chips"></div>' +
+              '<div class="automation-days-row agent-tod-days">' +
+                '<label><input type="checkbox" value="mon"' + (checkedDays.indexOf("mon") !== -1 ? ' checked' : '') + '> Mon</label>' +
+                '<label><input type="checkbox" value="tue"' + (checkedDays.indexOf("tue") !== -1 ? ' checked' : '') + '> Tue</label>' +
+                '<label><input type="checkbox" value="wed"' + (checkedDays.indexOf("wed") !== -1 ? ' checked' : '') + '> Wed</label>' +
+                '<label><input type="checkbox" value="thu"' + (checkedDays.indexOf("thu") !== -1 ? ' checked' : '') + '> Thu</label>' +
+                '<label><input type="checkbox" value="fri"' + (checkedDays.indexOf("fri") !== -1 ? ' checked' : '') + '> Fri</label>' +
+                '<label><input type="checkbox" value="sat"' + (checkedDays.indexOf("sat") !== -1 ? ' checked' : '') + '> Sat</label>' +
+                '<label><input type="checkbox" value="sun"' + (checkedDays.indexOf("sun") !== -1 ? ' checked' : '') + '> Sun</label>' +
+              '</div>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -6256,6 +6270,9 @@ function syncAgentFromCard(card, agentIndex) {
     if (targetAgent) agent.runAfter.push(targetAgent.id || 'temp_' + targetIdx);
   });
 
+  var runOnFailureEl = card.querySelector('.agent-run-on-failure');
+  if (runOnFailureEl) agent.runOnUpstreamFailure = runOnFailureEl.checked;
+
   var isoCheckbox = card.querySelector('.agent-isolation-checkbox');
   if (isoCheckbox) {
     agent.isolation = agent.isolation || {};
@@ -6306,6 +6323,42 @@ function saveAutomation() {
     }
   }
   if (!activeProjectKey) { alert('Select a project first.'); return; }
+
+  // Validate dependencies for circular references
+  var hasRunAfter = modalAgents.some(function (ag) { return ag.runMode === 'run_after' && ag.runAfter && ag.runAfter.length > 0; });
+  if (hasRunAfter) {
+    // Build agent objects with temp IDs for validation
+    var validationAgents = modalAgents.map(function (ag, idx) {
+      return { id: ag.id || ('temp_' + idx), runAfter: (ag.runAfter || []).slice() };
+    });
+    // Synchronous cycle check (same logic as backend)
+    var hasCycle = (function () {
+      var visited = {};
+      var inStack = {};
+      function dfs(agentId) {
+        if (inStack[agentId]) return true;
+        if (visited[agentId]) return false;
+        visited[agentId] = true;
+        inStack[agentId] = true;
+        var agent = validationAgents.find(function (a) { return a.id === agentId; });
+        if (agent && agent.runAfter) {
+          for (var i = 0; i < agent.runAfter.length; i++) {
+            if (dfs(agent.runAfter[i])) return true;
+          }
+        }
+        delete inStack[agentId];
+        return false;
+      }
+      for (var i = 0; i < validationAgents.length; i++) {
+        if (dfs(validationAgents[i].id)) return true;
+      }
+      return false;
+    })();
+    if (hasCycle) {
+      alert('Circular dependency detected in agent run-after chain. Please fix before saving.');
+      return;
+    }
+  }
 
   var hasIsolated = modalAgents.some(function (ag) { return ag.isolation && ag.isolation.enabled; });
 
@@ -6545,10 +6598,24 @@ function refreshAutomationsFlyout() {
 
         var displayName = isSimple ? auto.agents[0].name : auto.name;
 
+        var pipelineDotsHtml = '';
+        if (!isSimple) {
+          pipelineDotsHtml = '<div class="automation-pipeline-mini" style="padding:2px 0 0 0;">';
+          auto.agents.forEach(function (ag) {
+            var dotClass = 'pipeline-dot-idle';
+            if (ag.currentRunStartedAt) dotClass = 'pipeline-dot-running';
+            else if (ag.lastRunStatus === 'error') dotClass = 'pipeline-dot-error';
+            else if (ag.lastRunStatus === 'skipped' || !ag.enabled) dotClass = 'pipeline-dot-waiting';
+            pipelineDotsHtml += '<span class="pipeline-dot ' + dotClass + '" title="' + escapeHtml(ag.name) + '"></span>';
+          });
+          pipelineDotsHtml += '</div>';
+        }
+
         row.innerHTML = '<div class="automations-flyout-row-header">' +
           '<span>' + escapeHtml(displayName) + (isSimple ? '' : ' <span style="opacity:0.5">(' + auto.agents.length + ' agents)</span>') + '</span>' +
           '<span class="automations-flyout-row-status" style="color:' + statusColor + '">' + statusText + '</span>' +
           '</div>' +
+          pipelineDotsHtml +
           '<div class="automations-flyout-row-expanded">' +
             '<div class="automations-flyout-row-summary">Loading...</div>' +
             '<div class="automations-flyout-history"></div>' +
