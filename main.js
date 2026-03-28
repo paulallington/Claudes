@@ -1611,6 +1611,249 @@ ipcMain.handle('automations:runAutomationNow', (event, automationId) => {
   return true;
 });
 
+ipcMain.handle('automations:setupAgentClone', async (event, automationId, agentId) => {
+  const data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (!automation) return { error: 'Automation not found' };
+  const agent = automation.agents.find(ag => ag.id === agentId);
+  if (!agent) return { error: 'Agent not found' };
+  if (!agent.isolation || !agent.isolation.enabled) return { error: 'Agent does not have isolation enabled' };
+
+  // Determine clone path
+  const baseDir = data.agentReposBaseDir || path.join(os.homedir(), '.claudes', 'agents');
+  const projectName = automation.projectPath.split(/[/\\]/).pop();
+  const agentDirName = agent.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  const clonePath = path.join(baseDir, projectName, agentDirName);
+
+  // Check if clone already exists with correct remote
+  if (fs.existsSync(clonePath)) {
+    try {
+      const existingRemote = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: clonePath, encoding: 'utf8' }).trim();
+      let sourceRemote = '';
+      try {
+        sourceRemote = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: automation.projectPath, encoding: 'utf8' }).trim();
+      } catch { /* no remote */ }
+      if (existingRemote === sourceRemote || existingRemote === automation.projectPath) {
+        agent.isolation.clonePath = clonePath;
+        writeAutomations(data);
+        return { clonePath, status: 'reused' };
+      }
+      return { error: 'Directory exists but has different remote: ' + existingRemote };
+    } catch {
+      return { error: 'Directory exists but is not a git repository: ' + clonePath };
+    }
+  }
+
+  // Get remote URL from project
+  let remoteUrl = '';
+  try {
+    remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: automation.projectPath, encoding: 'utf8' }).trim();
+  } catch {
+    remoteUrl = automation.projectPath;
+    if (mainWindow) mainWindow.webContents.send('automations:clone-progress', {
+      automationId, agentId, line: 'WARNING: No git remote configured. Cloning from local path.\n'
+    });
+  }
+
+  // Ensure parent directory exists
+  fs.mkdirSync(path.dirname(clonePath), { recursive: true });
+
+  // Clone
+  return new Promise((resolve) => {
+    const child = spawn('git', ['clone', remoteUrl, clonePath], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    child.stdout.on('data', (chunk) => {
+      if (mainWindow) mainWindow.webContents.send('automations:clone-progress', {
+        automationId, agentId, line: chunk.toString()
+      });
+    });
+    child.stderr.on('data', (chunk) => {
+      if (mainWindow) mainWindow.webContents.send('automations:clone-progress', {
+        automationId, agentId, line: chunk.toString()
+      });
+    });
+
+    child.on('close', (exitCode) => {
+      if (exitCode === 0) {
+        const freshData = readAutomations();
+        const freshAuto = freshData.automations.find(a => a.id === automationId);
+        if (freshAuto) {
+          const freshAgent = freshAuto.agents.find(ag => ag.id === agentId);
+          if (freshAgent) {
+            freshAgent.isolation.clonePath = clonePath;
+            writeAutomations(freshData);
+          }
+        }
+        resolve({ clonePath, status: 'cloned' });
+      } else {
+        resolve({ error: 'git clone failed with exit code ' + exitCode });
+      }
+    });
+
+    child.on('error', (err) => {
+      resolve({ error: 'git clone error: ' + err.message });
+    });
+  });
+});
+
+ipcMain.handle('automations:getCloneStatus', (event, automationId) => {
+  const data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (!automation) return {};
+  const status = {};
+  automation.agents.forEach(agent => {
+    if (agent.isolation && agent.isolation.enabled) {
+      if (agent.isolation.clonePath && fs.existsSync(agent.isolation.clonePath)) {
+        status[agent.id] = 'ready';
+      } else if (agent.isolation.clonePath) {
+        status[agent.id] = 'missing';
+      } else {
+        status[agent.id] = 'pending';
+      }
+    } else {
+      status[agent.id] = 'not-isolated';
+    }
+  });
+  return status;
+});
+
+ipcMain.handle('automations:export', (event, projectPath) => {
+  const data = readAutomations();
+  const normalized = projectPath.replace(/\\/g, '/');
+  const automations = data.automations
+    .filter(a => a.projectPath.replace(/\\/g, '/') === normalized)
+    .map(a => ({
+      name: a.name,
+      agents: a.agents.map(ag => ({
+        name: ag.name, prompt: ag.prompt, schedule: ag.schedule,
+        runMode: ag.runMode, runAfter: ag.runAfter, runOnUpstreamFailure: ag.runOnUpstreamFailure,
+        isolation: { enabled: ag.isolation ? ag.isolation.enabled : false },
+        skipPermissions: ag.skipPermissions || false, firstStartOnly: ag.firstStartOnly || false,
+        dbConnectionString: ag.dbConnectionString || null, dbReadOnly: ag.dbReadOnly !== false
+      }))
+    }));
+  if (automations.length === 0) return { cancelled: true };
+  const result = dialog.showSaveDialogSync(mainWindow, {
+    title: 'Export Automations',
+    defaultPath: 'automations-export.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (!result) return { cancelled: true };
+  const payload = { exportedAt: new Date().toISOString(), source: projectPath, automations };
+  fs.writeFileSync(result, JSON.stringify(payload, null, 2), 'utf8');
+  return { path: result, count: automations.length };
+});
+
+ipcMain.handle('automations:exportOne', (event, automationId) => {
+  const data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (!automation) return { cancelled: true };
+  const exported = {
+    name: automation.name,
+    agents: automation.agents.map(ag => ({
+      name: ag.name, prompt: ag.prompt, schedule: ag.schedule,
+      runMode: ag.runMode, runAfter: ag.runAfter, runOnUpstreamFailure: ag.runOnUpstreamFailure,
+      isolation: { enabled: ag.isolation ? ag.isolation.enabled : false },
+      skipPermissions: ag.skipPermissions || false, firstStartOnly: ag.firstStartOnly || false,
+      dbConnectionString: ag.dbConnectionString || null, dbReadOnly: ag.dbReadOnly !== false
+    }))
+  };
+  const safeName = automation.name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+  const result = dialog.showSaveDialogSync(mainWindow, {
+    title: 'Export Automation',
+    defaultPath: 'automation-' + safeName + '.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (!result) return { cancelled: true };
+  const payload = { exportedAt: new Date().toISOString(), automations: [exported] };
+  fs.writeFileSync(result, JSON.stringify(payload, null, 2), 'utf8');
+  return { path: result, count: 1 };
+});
+
+ipcMain.handle('automations:import', (event, projectPath) => {
+  const result = dialog.showOpenDialogSync(mainWindow, {
+    title: 'Import Automations',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile']
+  });
+  if (!result || result.length === 0) return { cancelled: true };
+  try {
+    const raw = JSON.parse(fs.readFileSync(result[0], 'utf8'));
+
+    // Support both old loops format and new automations format
+    let automations = raw.automations || [];
+    if (automations.length === 0 && raw.loops) {
+      automations = raw.loops.map(l => ({
+        name: l.name,
+        agents: [{
+          name: l.name, prompt: l.prompt, schedule: l.schedule,
+          skipPermissions: l.skipPermissions || false, firstStartOnly: l.firstStartOnly || false,
+          dbConnectionString: l.dbConnectionString || null, dbReadOnly: l.dbReadOnly !== false
+        }]
+      }));
+    }
+    if (automations.length === 0 && raw.name && raw.agents) {
+      automations = [raw];
+    }
+    if (automations.length === 0 && raw.name && raw.prompt) {
+      automations = [{
+        name: raw.name,
+        agents: [{
+          name: raw.name, prompt: raw.prompt, schedule: raw.schedule,
+          skipPermissions: raw.skipPermissions || false, firstStartOnly: raw.firstStartOnly || false,
+          dbConnectionString: raw.dbConnectionString || null, dbReadOnly: raw.dbReadOnly !== false
+        }]
+      }];
+    }
+    if (automations.length === 0) return { error: 'No automations found in file' };
+
+    const data = readAutomations();
+    let count = 0;
+
+    automations.forEach(imported => {
+      const automationId = generateAutomationId();
+      const agents = (imported.agents || []).map(ag => {
+        const newId = generateAgentId();
+        return Object.assign({
+          id: newId,
+          runMode: 'independent',
+          runAfter: [],
+          runOnUpstreamFailure: false,
+          isolation: { enabled: false, clonePath: null },
+          enabled: true,
+          skipPermissions: false,
+          firstStartOnly: false,
+          dbConnectionString: null,
+          dbReadOnly: true,
+          lastRunAt: null,
+          lastRunStatus: null,
+          lastError: null,
+          lastSummary: null,
+          lastAttentionItems: null,
+          currentRunStartedAt: null
+        }, ag, { id: newId, isolation: { enabled: ag.isolation ? ag.isolation.enabled : false, clonePath: null } });
+      });
+
+      data.automations.push({
+        id: automationId,
+        name: imported.name,
+        projectPath: projectPath,
+        agents: agents,
+        enabled: true,
+        createdAt: new Date().toISOString()
+      });
+      count++;
+    });
+
+    writeAutomations(data);
+    return { count };
+  } catch (err) {
+    return { error: 'Failed to import: ' + err.message };
+  }
+});
+
 // --- Loop Scheduler & Execution ---
 
 const runningLoops = new Map(); // loopId -> child process
