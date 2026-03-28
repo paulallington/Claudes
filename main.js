@@ -1792,18 +1792,20 @@ function shouldRunAgent(agent, now) {
 
 function preRunPull(clonePath) {
   return new Promise((resolve) => {
+    let branch = 'master';
     try {
       execFileSync('git', ['checkout', 'master'], { cwd: clonePath, encoding: 'utf8', stdio: 'pipe' });
     } catch {
       try {
         execFileSync('git', ['checkout', 'main'], { cwd: clonePath, encoding: 'utf8', stdio: 'pipe' });
+        branch = 'main';
       } catch (e) {
         resolve({ error: 'Failed to checkout master/main: ' + e.message });
         return;
       }
     }
     try {
-      execFileSync('git', ['pull', 'origin'], { cwd: clonePath, encoding: 'utf8', stdio: 'pipe', timeout: 60000 });
+      execFileSync('git', ['pull', 'origin', branch], { cwd: clonePath, encoding: 'utf8', stdio: 'pipe', timeout: 60000 });
       resolve({ ok: true });
     } catch (e) {
       resolve({ error: 'git pull failed: ' + e.message });
@@ -2340,7 +2342,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
-  stopLoopScheduler();
+  stopAutomationScheduler();
   if (ptyServerProcess) {
     ptyServerProcess.kill();
   }
