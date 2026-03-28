@@ -1380,6 +1380,190 @@ ipcMain.handle('loops:getLiveOutput', (event, loopId) => {
   return null;
 });
 
+// --- Automations IPC Handlers ---
+
+ipcMain.handle('automations:getAll', () => {
+  return readAutomations();
+});
+
+ipcMain.handle('automations:getForProject', (event, projectPath) => {
+  const data = readAutomations();
+  const normalized = projectPath.replace(/\\/g, '/');
+  return data.automations.filter(a => a.projectPath.replace(/\\/g, '/') === normalized);
+});
+
+ipcMain.handle('automations:create', (event, config) => {
+  const data = readAutomations();
+  const automationId = generateAutomationId();
+
+  const agents = (config.agents || []).map(agentConfig => {
+    return Object.assign({
+      id: generateAgentId(),
+      runMode: 'independent',
+      runAfter: [],
+      runOnUpstreamFailure: false,
+      isolation: { enabled: false, clonePath: null },
+      enabled: true,
+      skipPermissions: false,
+      firstStartOnly: false,
+      dbConnectionString: null,
+      dbReadOnly: true,
+      lastRunAt: null,
+      lastRunStatus: null,
+      lastError: null,
+      lastSummary: null,
+      lastAttentionItems: null,
+      currentRunStartedAt: null
+    }, agentConfig);
+  });
+
+  const automation = {
+    id: automationId,
+    name: config.name,
+    projectPath: config.projectPath,
+    agents: agents,
+    enabled: true,
+    createdAt: new Date().toISOString()
+  };
+
+  data.automations.push(automation);
+  writeAutomations(data);
+  return automation;
+});
+
+ipcMain.handle('automations:update', (event, automationId, updates) => {
+  const data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (!automation) return null;
+  const safeFields = ['name', 'enabled'];
+  safeFields.forEach(field => {
+    if (updates[field] !== undefined) automation[field] = updates[field];
+  });
+  writeAutomations(data);
+  return automation;
+});
+
+ipcMain.handle('automations:updateAgent', (event, automationId, agentId, updates) => {
+  const data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (!automation) return null;
+  const agent = automation.agents.find(ag => ag.id === agentId);
+  if (!agent) return null;
+  const safeFields = ['name', 'prompt', 'schedule', 'runMode', 'runAfter', 'runOnUpstreamFailure',
+    'isolation', 'enabled', 'skipPermissions', 'firstStartOnly', 'dbConnectionString', 'dbReadOnly'];
+  safeFields.forEach(field => {
+    if (updates[field] !== undefined) agent[field] = updates[field];
+  });
+  writeAutomations(data);
+  return agent;
+});
+
+ipcMain.handle('automations:addAgent', (event, automationId, agentConfig) => {
+  const data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (!automation) return null;
+  const agent = Object.assign({
+    id: generateAgentId(),
+    runMode: 'independent',
+    runAfter: [],
+    runOnUpstreamFailure: false,
+    isolation: { enabled: false, clonePath: null },
+    enabled: true,
+    skipPermissions: false,
+    firstStartOnly: false,
+    dbConnectionString: null,
+    dbReadOnly: true,
+    lastRunAt: null,
+    lastRunStatus: null,
+    lastError: null,
+    lastSummary: null,
+    lastAttentionItems: null,
+    currentRunStartedAt: null
+  }, agentConfig);
+  automation.agents.push(agent);
+  writeAutomations(data);
+  return agent;
+});
+
+ipcMain.handle('automations:removeAgent', (event, automationId, agentId) => {
+  const data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (!automation) return null;
+  const agent = automation.agents.find(ag => ag.id === agentId);
+  if (!agent) return { removed: false };
+
+  // Clean up clone directory if isolated
+  if (agent.isolation && agent.isolation.enabled && agent.isolation.clonePath) {
+    try { fs.rmSync(agent.isolation.clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
+  // Clean up run history
+  const runDir = path.join(AUTOMATIONS_RUNS_DIR, automationId, agentId);
+  try { fs.rmSync(runDir, { recursive: true, force: true }); } catch { /* ignore */ }
+
+  // Remove references from other agents' runAfter arrays
+  automation.agents.forEach(ag => {
+    if (ag.runAfter) {
+      ag.runAfter = ag.runAfter.filter(id => id !== agentId);
+      if (ag.runAfter.length === 0 && ag.runMode === 'run_after') {
+        ag.runMode = 'independent';
+      }
+    }
+  });
+
+  automation.agents = automation.agents.filter(ag => ag.id !== agentId);
+  writeAutomations(data);
+  return { removed: true };
+});
+
+ipcMain.handle('automations:delete', (event, automationId) => {
+  const data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (automation) {
+    automation.agents.forEach(agent => {
+      if (agent.isolation && agent.isolation.enabled && agent.isolation.clonePath) {
+        try { fs.rmSync(agent.isolation.clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+    });
+  }
+  data.automations = data.automations.filter(a => a.id !== automationId);
+  writeAutomations(data);
+  const runDir = path.join(AUTOMATIONS_RUNS_DIR, automationId);
+  try { fs.rmSync(runDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  return true;
+});
+
+ipcMain.handle('automations:toggle', (event, automationId) => {
+  const data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (!automation) return null;
+  automation.enabled = !automation.enabled;
+  if (automation.enabled) {
+    automation.agents.forEach(ag => { ag.lastError = null; });
+  }
+  writeAutomations(data);
+  return automation;
+});
+
+ipcMain.handle('automations:toggleAgent', (event, automationId, agentId) => {
+  const data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (!automation) return null;
+  const agent = automation.agents.find(ag => ag.id === agentId);
+  if (!agent) return null;
+  agent.enabled = !agent.enabled;
+  if (agent.enabled) agent.lastError = null;
+  writeAutomations(data);
+  return agent;
+});
+
+ipcMain.handle('automations:toggleGlobal', () => {
+  const data = readAutomations();
+  data.globalEnabled = !data.globalEnabled;
+  writeAutomations(data);
+  return data.globalEnabled;
+});
+
 // --- Loop Scheduler & Execution ---
 
 const runningLoops = new Map(); // loopId -> child process
