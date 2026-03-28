@@ -5765,6 +5765,10 @@ function renderSimpleDetail(automation, agent) {
 }
 
 function renderMultiAgentDetail(automation) {
+  // Reset agent-level state so live output events don't corrupt the pipeline view
+  activeAgentDetailId = null;
+  agentDetailViewingLive = false;
+
   document.getElementById('automation-detail-name').textContent = automation.name;
   var badge = document.getElementById('automation-detail-status-badge');
   badge.className = 'automation-status-badge';
