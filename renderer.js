@@ -5520,19 +5520,19 @@ function formatTimeHHMM(h, m) {
   return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
 }
 
-function formatScheduleText(automation) {
-  if (automation.schedule.type === 'manual') {
+function formatScheduleText(agent) {
+  if (agent.schedule.type === 'manual') {
     return 'Manual';
   }
-  if (automation.schedule.type === 'interval') {
-    var mins = automation.schedule.minutes;
+  if (agent.schedule.type === 'interval') {
+    var mins = agent.schedule.minutes;
     return mins >= 60 ? 'Every ' + (mins / 60) + 'h' : 'Every ' + mins + 'm';
   }
-  if (automation.schedule.type === 'app_startup') {
-    return automation.firstStartOnly ? 'First start of day' : 'App startup';
+  if (agent.schedule.type === 'app_startup') {
+    return agent.firstStartOnly ? 'First start of day' : 'App startup';
   }
   // time_of_day with multiple times
-  var times = automation.schedule.times || [{ hour: automation.schedule.hour, minute: automation.schedule.minute || 0 }];
+  var times = agent.schedule.times || [{ hour: agent.schedule.hour, minute: agent.schedule.minute || 0 }];
   if (times.length === 1) {
     return 'Daily ' + formatTimeHHMM(times[0].hour, times[0].minute);
   }
@@ -5966,6 +5966,7 @@ document.getElementById('automation-detail-run-select').addEventListener('change
 
 var automationEditingId = null;
 var modalAgents = []; // Tracks agent data for the modal
+var activeCloneAutomationId = null;
 
 function openAutomationModal(existingAutomation) {
   automationEditingId = existingAutomation ? existingAutomation.id : null;
@@ -6006,6 +6007,7 @@ function closeAutomationModal() {
   document.getElementById('btn-automation-save').onclick = null;
   automationEditingId = null;
   modalAgents = [];
+  activeCloneAutomationId = null;
 }
 
 function renderModalAgentCards() {
@@ -6372,6 +6374,7 @@ function syncAllAgentsFromCards() {
 }
 
 function saveAutomation() {
+  if (modalAgents.length === 0) return;
   syncAllAgentsFromCards();
 
   var isMulti = modalAgents.length > 1;
@@ -6430,7 +6433,21 @@ function saveAutomation() {
   });
 
   if (automationEditingId) {
-    window.electronAPI.updateAutomation(automationEditingId, { name: automationName }).then(function () {
+    // Get current automation to find agents that were removed
+    window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
+      var existing = automations.find(function (a) { return a.id === automationEditingId; });
+      var existingAgentIds = existing ? existing.agents.map(function (ag) { return ag.id; }) : [];
+      var currentAgentIds = agents.filter(function (ag) { return ag.id && ag.id.indexOf('temp_') !== 0; }).map(function (ag) { return ag.id; });
+
+      // Remove agents that were deleted in the modal
+      var removePromises = existingAgentIds
+        .filter(function (id) { return currentAgentIds.indexOf(id) === -1; })
+        .map(function (id) { return window.electronAPI.removeAgent(automationEditingId, id); });
+
+      return Promise.all(removePromises);
+    }).then(function () {
+      return window.electronAPI.updateAutomation(automationEditingId, { name: automationName });
+    }).then(function () {
       var promises = agents.map(function (ag) {
         if (ag.id && ag.id.indexOf('temp_') !== 0) {
           return window.electronAPI.updateAgent(automationEditingId, ag.id, ag);
@@ -6495,11 +6512,7 @@ function startCloneSetup(automationId) {
       setupAgents.appendChild(row);
     });
 
-    window.electronAPI.onCloneProgress(function (data) {
-      if (data.automationId !== automationId) return;
-      setupLog.textContent += data.line;
-      setupLog.scrollTop = setupLog.scrollHeight;
-    });
+    activeCloneAutomationId = automationId;
 
     var cloneNext = function (index) {
       if (index >= isolatedAgents.length) {
@@ -6543,6 +6556,15 @@ function startCloneSetup(automationId) {
 document.getElementById('btn-automation-modal-close').addEventListener('click', closeAutomationModal);
 document.getElementById('btn-automation-cancel').addEventListener('click', closeAutomationModal);
 document.getElementById('btn-automation-save').addEventListener('click', saveAutomation);
+window.electronAPI.onCloneProgress(function (data) {
+  if (activeCloneAutomationId && data.automationId === activeCloneAutomationId) {
+    var setupLog = document.getElementById('automation-setup-log');
+    if (setupLog) {
+      setupLog.textContent += data.line;
+      setupLog.scrollTop = setupLog.scrollHeight;
+    }
+  }
+});
 document.getElementById('btn-add-automation').addEventListener('click', function () {
   if (!activeProjectKey) { alert('Select a project first.'); return; }
   openAutomationModal(null);
@@ -6629,6 +6651,12 @@ function refreshAutomationsFlyout() {
       });
     });
     countsEl.textContent = activeCount + ' active' + (attentionCount > 0 ? ' \u00b7 ' + attentionCount + ' need attention' : '');
+
+    var flyoutBtn = document.getElementById('btn-automations-flyout');
+    if (flyoutBtn) {
+      if (attentionCount > 0) flyoutBtn.classList.add('has-attention');
+      else flyoutBtn.classList.remove('has-attention');
+    }
 
     var byProject = {};
     data.automations.forEach(function (auto) {
