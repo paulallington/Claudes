@@ -4191,3 +4191,306 @@ html, body {
 .automations-placeholder p {
   margin: 0;
 }
+
+/* Agent Cards (Modal) */
+.agent-card {
+  border: 1px solid #333;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  background: rgba(255,255,255,0.02);
+}
+
+.agent-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.agent-card-header:hover {
+  background: rgba(255,255,255,0.04);
+}
+
+.agent-card-collapse-icon {
+  font-size: 10px;
+  opacity: 0.5;
+  width: 12px;
+}
+
+.agent-card-title {
+  font-weight: 500;
+  flex: 1;
+}
+
+.agent-card-remove {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0 4px;
+}
+
+.agent-card-remove:hover {
+  color: #ef4444;
+}
+
+.agent-card-body {
+  padding: 0 12px 12px 12px;
+}
+
+.agent-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.agent-badge-chained {
+  background: rgba(99, 102, 241, 0.2);
+  color: #818cf8;
+}
+
+.agent-badge-isolated {
+  background: rgba(34, 197, 94, 0.2);
+  color: #4ade80;
+}
+
+.agent-runafter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.agent-runafter-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #444;
+  cursor: pointer;
+  user-select: none;
+}
+
+.agent-runafter-chip.selected {
+  border-color: #6366f1;
+  background: rgba(99, 102, 241, 0.15);
+}
+
+.agent-runafter-chip input { display: none; }
+
+.automation-add-agent-row {
+  padding: 4px 0;
+}
+
+.automation-add-agent-btn {
+  background: none;
+  border: 1px dashed #444;
+  color: #888;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  width: 100%;
+  font-size: 12px;
+}
+
+.automation-add-agent-btn:hover {
+  border-color: #6366f1;
+  color: #a5b4fc;
+}
+
+/* Clone Setup Panel */
+.automation-setup-panel {
+  padding: 8px 0;
+}
+
+.automation-setup-header {
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+
+.automation-setup-agent-row {
+  padding: 4px 8px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.automation-setup-agent-icon {
+  width: 16px;
+  text-align: center;
+}
+
+.automation-setup-log {
+  background: rgba(0,0,0,0.3);
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 11px;
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 8px;
+  color: #888;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Pipeline Mini (List View) */
+.automation-pipeline-mini {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+}
+
+.pipeline-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.pipeline-dot-idle { background: #22c55e; }
+.pipeline-dot-running { background: #3b82f6; animation: pulse-working 1.5s infinite; }
+.pipeline-dot-error { background: #ef4444; }
+.pipeline-dot-waiting { background: #666; }
+
+.pipeline-arrow {
+  font-size: 10px;
+  opacity: 0.4;
+}
+
+/* Pipeline Detail View */
+.automation-pipeline-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.automation-pipeline-agent {
+  border-left: 3px solid #666;
+  padding: 8px 12px;
+  margin-left: 8px;
+}
+
+.pipeline-agent-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.pipeline-agent-name {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.pipeline-agent-status {
+  font-size: 11px;
+}
+
+.pipeline-agent-meta {
+  font-size: 11px;
+  opacity: 0.5;
+  margin-top: 2px;
+}
+
+.pipeline-agent-summary {
+  font-size: 12px;
+  margin-top: 4px;
+  opacity: 0.8;
+}
+
+.pipeline-agent-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.pipeline-agent-actions button {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.pipeline-agent-actions button:hover {
+  background: rgba(255,255,255,0.1);
+  border-color: #6366f1;
+}
+
+.pipeline-connector {
+  margin-left: 16px;
+  padding: 2px 0;
+  font-size: 10px;
+  opacity: 0.4;
+  border-left: 1px dashed #444;
+  padding-left: 8px;
+}
+
+/* Detail view run-all/pause-all buttons */
+.automation-detail-run-all,
+.automation-detail-pause-all {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  margin-right: 6px;
+}
+
+.automation-detail-run-all:hover { border-color: #22c55e; color: #22c55e; }
+.automation-detail-pause-all:hover { border-color: #f59e0b; color: #f59e0b; }
+
+/* Settings - Agent repos dir */
+.settings-field {
+  margin-bottom: 12px;
+}
+
+.settings-field label {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 4px;
+  opacity: 0.8;
+}
+
+.settings-path-row {
+  display: flex;
+  gap: 4px;
+}
+
+.settings-input {
+  flex: 1;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.settings-browse-btn {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.settings-browse-btn:hover {
+  border-color: #6366f1;
+}
+
+.settings-hint {
+  font-size: 10px;
+  opacity: 0.4;
+  margin-top: 2px;
+  display: block;
+}
