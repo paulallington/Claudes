@@ -1860,6 +1860,8 @@ const runningLoops = new Map(); // loopId -> child process
 const liveOutputBuffers = new Map(); // loopId -> string[] chunks
 const agentLiveOutputBuffers = new Map(); // 'automationId:agentId' -> string[] chunks
 const loopQueue = []; // loopIds waiting for a slot
+const runningAgents = new Map(); // 'automationId:agentId' -> child process
+const agentQueue = []; // {automationId, agentId} objects waiting for a slot
 
 const LOOP_PROMPT_SUFFIX = '\n\nEnd your response with a JSON block wrapped in :::loop-result markers like this:\n:::loop-result\n{"summary": "Brief one-line summary", "attentionItems": [{"summary": "Short description", "detail": "Full context"}]}\n:::loop-result\nIf there are no issues, use an empty attentionItems array.';
 
@@ -2161,6 +2163,284 @@ function runLoop(loopId) {
     if (loopQueue.length > 0) {
       const nextId = loopQueue.shift();
       runLoop(nextId);
+    }
+  });
+}
+
+function preRunPull(clonePath) {
+  return new Promise((resolve) => {
+    try {
+      execFileSync('git', ['checkout', 'master'], { cwd: clonePath, encoding: 'utf8', stdio: 'pipe' });
+    } catch {
+      try {
+        execFileSync('git', ['checkout', 'main'], { cwd: clonePath, encoding: 'utf8', stdio: 'pipe' });
+      } catch (e) {
+        resolve({ error: 'Failed to checkout master/main: ' + e.message });
+        return;
+      }
+    }
+    try {
+      execFileSync('git', ['pull', 'origin'], { cwd: clonePath, encoding: 'utf8', stdio: 'pipe', timeout: 60000 });
+      resolve({ ok: true });
+    } catch (e) {
+      resolve({ error: 'git pull failed: ' + e.message });
+    }
+  });
+}
+
+async function runAgent(automationId, agentId) {
+  let data = readAutomations();
+  const automation = data.automations.find(a => a.id === automationId);
+  if (!automation) return;
+  const agent = automation.agents.find(ag => ag.id === agentId);
+  if (!agent) return;
+
+  const key = automationId + ':' + agentId;
+  if (runningAgents.has(key)) return;
+
+  // Check concurrency limit (shared across loops and agents)
+  const totalRunning = runningLoops.size + runningAgents.size;
+  if (totalRunning >= (data.maxConcurrentRuns || 3)) {
+    if (!agentQueue.some(q => q.automationId === automationId && q.agentId === agentId)) {
+      agentQueue.push({ automationId, agentId });
+    }
+    return;
+  }
+
+  // Determine working directory
+  let cwd = automation.projectPath;
+  if (agent.isolation && agent.isolation.enabled) {
+    if (!agent.isolation.clonePath || !fs.existsSync(agent.isolation.clonePath)) {
+      agent.lastRunStatus = 'error';
+      agent.lastError = 'Working directory not found — run setup again';
+      writeAutomations(data);
+      if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
+        automationId, agentId, status: 'error', error: agent.lastError
+      });
+      return;
+    }
+    cwd = agent.isolation.clonePath;
+
+    // Pre-run pull
+    const pullResult = await preRunPull(cwd);
+    if (pullResult.error) {
+      agent.lastRunStatus = 'error';
+      agent.lastError = pullResult.error;
+      writeAutomations(data);
+      if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
+        automationId, agentId, status: 'error', error: agent.lastError
+      });
+      return;
+    }
+    // Re-read data after async pull
+    data = readAutomations();
+  }
+
+  // Validate working directory
+  if (!fs.existsSync(cwd)) {
+    agent.lastRunStatus = 'error';
+    agent.lastError = 'Working directory not found: ' + cwd;
+    agent.enabled = false;
+    writeAutomations(data);
+    if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
+      automationId, agentId, status: 'error', error: agent.lastError
+    });
+    return;
+  }
+
+  // Mark as running
+  const freshData1 = readAutomations();
+  const freshAuto1 = freshData1.automations.find(a => a.id === automationId);
+  if (freshAuto1) {
+    const freshAgent1 = freshAuto1.agents.find(ag => ag.id === agentId);
+    if (freshAgent1) {
+      freshAgent1.currentRunStartedAt = new Date().toISOString();
+      writeAutomations(freshData1);
+    }
+  }
+
+  if (mainWindow) mainWindow.webContents.send('automations:agent-started', { automationId, agentId });
+
+  const startedAt = new Date().toISOString();
+  const outputChunks = [];
+  const textChunks = [];
+
+  let promptPrefix = '';
+  if (agent.dbConnectionString && agent.dbReadOnly !== false) {
+    promptPrefix = 'CRITICAL CONSTRAINT: This agent has READ-ONLY database access. You MUST NOT attempt to write, update, insert, delete, drop, rename, or modify any data in the database. This includes using $merge, $out, or any write stages in aggregation pipelines. Do NOT attempt to bypass this restriction by using shell commands (mongosh, mongo, etc.) or any other method. If the task requires writing to the database, report it as an attention item explaining what write would be needed, but do not perform it.\n\n';
+  }
+  const fullPrompt = promptPrefix + agent.prompt + LOOP_PROMPT_SUFFIX;
+
+  const args = ['--print', fullPrompt, '--output-format', 'stream-json', '--verbose'];
+  if (agent.skipPermissions) args.push('--dangerously-skip-permissions');
+
+  // Database MCP config
+  let mcpConfigPath = null;
+  if (agent.dbConnectionString) {
+    const mcpArgs = ['-y', 'mongodb-mcp-server@latest'];
+    if (agent.dbReadOnly !== false) mcpArgs.push('--readOnly');
+    const mcpConfig = {
+      mcpServers: {
+        mongodb: {
+          command: 'npx',
+          args: mcpArgs,
+          env: { MDB_MCP_CONNECTION_STRING: agent.dbConnectionString }
+        }
+      }
+    };
+    mcpConfigPath = path.join(AUTOMATIONS_RUNS_DIR, automationId + '_' + agentId + '_mcp.json');
+    fs.mkdirSync(path.dirname(mcpConfigPath), { recursive: true });
+    fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig), 'utf8');
+    args.push('--mcp-config', mcpConfigPath);
+
+    if (agent.dbReadOnly !== false) {
+      const allowedTools = [
+        'mcp__mongodb__find', 'mcp__mongodb__count', 'mcp__mongodb__collection-indexes',
+        'mcp__mongodb__collection-schema', 'mcp__mongodb__collection-storage-size',
+        'mcp__mongodb__db-stats', 'mcp__mongodb__explain', 'mcp__mongodb__export',
+        'mcp__mongodb__list-collections', 'mcp__mongodb__list-databases',
+        'mcp__mongodb__mongodb-logs', 'mcp__mongodb__list-knowledge-sources',
+        'mcp__mongodb__search-knowledge',
+        'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'
+      ];
+      args.push('--allowedTools', allowedTools.join(','));
+    }
+  }
+
+  const child = spawn(getClaudePath(), args, {
+    cwd: cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: Object.assign({}, process.env)
+  });
+
+  runningAgents.set(key, child);
+  agentLiveOutputBuffers.set(key, textChunks);
+
+  let streamBuffer = '';
+  child.stdout.on('data', (chunk) => {
+    const raw = chunk.toString();
+    outputChunks.push(raw);
+    streamBuffer += raw;
+    const lines = streamBuffer.split('\n');
+    streamBuffer = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const evt = JSON.parse(line);
+        let text = '';
+        if (evt.type === 'assistant' && evt.message && evt.message.content) {
+          evt.message.content.forEach(block => {
+            if (block.type === 'text') text += block.text;
+          });
+        } else if (evt.type === 'content_block_delta' && evt.delta) {
+          if (evt.delta.type === 'text_delta') text = evt.delta.text;
+        } else if (evt.type === 'result' && evt.result) {
+          if (typeof evt.result === 'string') {
+            text = evt.result;
+          } else if (Array.isArray(evt.result)) {
+            evt.result.forEach(block => {
+              if (block.type === 'text') text += block.text;
+            });
+          }
+        }
+        if (text) {
+          textChunks.push(text);
+          if (mainWindow) mainWindow.webContents.send('automations:agent-output', { automationId, agentId, chunk: text });
+        }
+      } catch { /* skip non-JSON lines */ }
+    }
+  });
+
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString();
+    textChunks.push(text);
+    if (mainWindow) mainWindow.webContents.send('automations:agent-output', { automationId, agentId, chunk: text });
+  });
+
+  child.on('close', (exitCode) => {
+    runningAgents.delete(key);
+    agentLiveOutputBuffers.delete(key);
+    if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
+
+    const completedAt = new Date().toISOString();
+    const displayOutput = textChunks.join('');
+    const parsed = parseLoopResult(displayOutput);
+
+    const runData = {
+      automationId, agentId,
+      startedAt, completedAt,
+      durationMs: new Date(completedAt).getTime() - new Date(startedAt).getTime(),
+      exitCode,
+      status: exitCode === 0 ? 'completed' : 'error',
+      summary: parsed.summary,
+      output: displayOutput,
+      attentionItems: parsed.attentionItems,
+      costUsd: null
+    };
+
+    saveAgentRun(automationId, agentId, runData);
+
+    // Update agent config
+    const freshData = readAutomations();
+    const freshAuto = freshData.automations.find(a => a.id === automationId);
+    if (freshAuto) {
+      const freshAgent = freshAuto.agents.find(ag => ag.id === agentId);
+      if (freshAgent) {
+        freshAgent.currentRunStartedAt = null;
+        freshAgent.lastRunAt = completedAt;
+        freshAgent.lastRunStatus = runData.status;
+        freshAgent.lastError = exitCode === 0 ? null : 'Exit code: ' + exitCode;
+        freshAgent.lastSummary = parsed.summary || null;
+        freshAgent.lastAttentionItems = parsed.attentionItems || [];
+        writeAutomations(freshData);
+      }
+
+      // Trigger dependent agents
+      triggerDependentAgents(automationId, agentId, runData.status, freshData);
+    }
+
+    // Notify renderer
+    if (mainWindow) {
+      mainWindow.webContents.send('automations:agent-completed', {
+        automationId, agentId,
+        status: runData.status,
+        summary: parsed.summary,
+        attentionItems: parsed.attentionItems,
+        exitCode
+      });
+
+      if (parsed.attentionItems.length > 0) {
+        mainWindow.flashFrame(true);
+      }
+    }
+
+    // Process queue
+    if (agentQueue.length > 0) {
+      const next = agentQueue.shift();
+      runAgent(next.automationId, next.agentId);
+    }
+  });
+
+  child.on('error', (err) => {
+    runningAgents.delete(key);
+    if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
+    const freshData = readAutomations();
+    const freshAuto = freshData.automations.find(a => a.id === automationId);
+    if (freshAuto) {
+      const freshAgent = freshAuto.agents.find(ag => ag.id === agentId);
+      if (freshAgent) {
+        freshAgent.currentRunStartedAt = null;
+        freshAgent.lastRunStatus = 'error';
+        freshAgent.lastError = err.message;
+        writeAutomations(freshData);
+      }
+    }
+    if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
+      automationId, agentId, status: 'error', error: err.message
+    });
+    if (agentQueue.length > 0) {
+      const next = agentQueue.shift();
+      runAgent(next.automationId, next.agentId);
     }
   });
 }
