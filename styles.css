@@ -3649,7 +3649,8 @@ html, body {
   border-bottom: 1px solid var(--border-primary);
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
+  gap: 4px 6px;
+  align-items: center;
 }
 
 .automation-detail-output-header {
@@ -4518,7 +4519,7 @@ html, body {
   border-radius: 4px;
   font-size: 12px;
   cursor: pointer;
-  margin-left: auto;
+  margin-left: 6px;
 }
 
 .automation-detail-manager-btn.needs-you {

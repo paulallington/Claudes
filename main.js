@@ -1704,6 +1704,30 @@ ipcMain.handle('automations:getManagerStatus', (event, automationId) => {
   };
 });
 
+ipcMain.handle('automations:getManagerHistory', (event, automationId, count) => {
+  const dir = path.join(AUTOMATIONS_RUNS_DIR, automationId, '_manager');
+  try {
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse();
+    const results = [];
+    for (let i = 0; i < Math.min(count || 5, files.length); i++) {
+      const data = JSON.parse(fs.readFileSync(path.join(dir, files[i]), 'utf8'));
+      results.push({
+        startedAt: data.startedAt,
+        completedAt: data.completedAt,
+        durationMs: data.durationMs,
+        status: data.status,
+        summary: data.summary,
+        needsHuman: data.needsHuman,
+        actions: data.actions,
+        output: data.output
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+});
+
 // --- Automations Scheduler & Execution ---
 
 const agentLiveOutputBuffers = new Map(); // 'automationId:agentId' -> string[] chunks
@@ -2257,7 +2281,59 @@ async function runManager(automationId) {
   if (runningManagers.has(automationId)) return;
 
   const manager = automation.manager;
-  const cwd = automation.projectPath;
+  let cwd = automation.projectPath;
+
+  // Use isolated clone if configured
+  if (manager.isolation && manager.isolation.enabled) {
+    if (!manager.isolation.clonePath || !fs.existsSync(manager.isolation.clonePath)) {
+      // Auto-setup clone for manager
+      const baseDir = data.agentReposBaseDir || path.join(os.homedir(), '.claudes', 'agents');
+      const projectName = automation.projectPath.split(/[/\\]/).pop();
+      const clonePath = path.join(baseDir, projectName, '_manager');
+
+      if (!fs.existsSync(clonePath)) {
+        // Clone the repo
+        let remoteUrl = '';
+        try {
+          remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: automation.projectPath, encoding: 'utf8' }).trim();
+        } catch {
+          remoteUrl = automation.projectPath;
+        }
+        fs.mkdirSync(path.dirname(clonePath), { recursive: true });
+        try {
+          execFileSync('git', ['clone', remoteUrl, clonePath], { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
+        } catch (e) {
+          console.error('[Manager] Clone failed:', e.message);
+          // Fall back to project path
+          cwd = automation.projectPath;
+        }
+      }
+
+      if (fs.existsSync(clonePath)) {
+        // Update the stored clone path
+        const freshCloneData = readAutomations();
+        const freshCloneAuto = freshCloneData.automations.find(a => a.id === automationId);
+        if (freshCloneAuto && freshCloneAuto.manager) {
+          freshCloneAuto.manager.isolation.clonePath = clonePath;
+          writeAutomations(freshCloneData);
+        }
+        cwd = clonePath;
+      }
+    } else {
+      cwd = manager.isolation.clonePath;
+    }
+
+    // Pre-run pull if using isolated clone
+    if (cwd !== automation.projectPath) {
+      const pullResult = await preRunPull(cwd);
+      if (pullResult.error) {
+        console.error('[Manager] Pre-run pull failed:', pullResult.error);
+        // Continue anyway — stale code is better than no investigation
+      }
+      data = readAutomations(); // Re-read after async
+    }
+  }
+
   if (!fs.existsSync(cwd)) return;
 
   // Build the prompt

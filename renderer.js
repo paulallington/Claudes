@@ -5797,6 +5797,57 @@ function launchManagerTerminal(automation) {
   refreshAutomations();
 }
 
+function showManagerOutput(automation) {
+  viewingAgentInPipeline = true; // So back button returns to pipeline
+  var outputHeader = document.querySelector('.automation-detail-output-header');
+  if (outputHeader) outputHeader.style.display = '';
+  document.getElementById('automation-detail-name').textContent = automation.name + ' — Manager';
+  document.getElementById('automation-detail-run-select').style.display = 'none';
+
+  var metaEl = document.getElementById('automation-detail-meta');
+  metaEl.textContent = 'Manager last ran: ' + (automation.manager.lastRunAt ? new Date(automation.manager.lastRunAt).toLocaleString() : 'never') +
+    ' · Status: ' + (automation.manager.lastRunStatus || 'idle');
+
+  window.electronAPI.getManagerHistory(automation.id, 1).then(function (history) {
+    var outputEl = document.getElementById('automation-detail-output');
+    var summaryEl = document.getElementById('automation-detail-summary');
+    var attentionEl = document.getElementById('automation-detail-attention');
+
+    if (history.length > 0) {
+      var run = history[0];
+      outputEl.textContent = run.output || 'No output recorded.';
+      if (run.summary) { summaryEl.textContent = run.summary; summaryEl.style.display = ''; }
+      else { summaryEl.style.display = 'none'; }
+      if (run.actions && run.actions.length > 0) {
+        attentionEl.innerHTML = '';
+        run.actions.forEach(function (action) {
+          var div = document.createElement('div');
+          div.className = 'automation-detail-attention-item';
+          div.innerHTML = '<strong>Action: ' + escapeHtml(action.type) + '</strong>' +
+            (action.agentId ? '<div>Agent: ' + escapeHtml(action.agentId) + '</div>' : '');
+          attentionEl.appendChild(div);
+        });
+        if (run.attentionItems && run.attentionItems.length > 0) {
+          run.attentionItems.forEach(function (item) {
+            var div = document.createElement('div');
+            div.className = 'automation-detail-attention-item';
+            div.innerHTML = '<strong>&#9888; ' + escapeHtml(item.summary) + '</strong>' +
+              (item.detail ? '<div>' + escapeHtml(item.detail) + '</div>' : '');
+            attentionEl.appendChild(div);
+          });
+        }
+        attentionEl.style.display = '';
+      } else {
+        attentionEl.style.display = 'none';
+      }
+    } else {
+      outputEl.textContent = 'No manager runs recorded.';
+      summaryEl.style.display = 'none';
+      attentionEl.style.display = 'none';
+    }
+  });
+}
+
 function renderMultiAgentDetail(automation) {
   // Reset agent-level state so live output events don't corrupt the pipeline view
   activeAgentDetailId = null;
@@ -5846,8 +5897,9 @@ function renderMultiAgentDetail(automation) {
     mgrBtn.addEventListener('click', function () {
       if (automation.manager.needsHuman) {
         launchManagerTerminal(automation);
-      } else if (automation.manager.lastRunStatus === 'resolved' || automation.manager.lastRunStatus === 'acted') {
-        alert('Manager summary: ' + (automation.manager.lastSummary || 'No details'));
+      } else if (automation.manager.lastRunStatus === 'resolved' || automation.manager.lastRunStatus === 'acted' || automation.manager.lastRunStatus === 'error' || automation.manager.lastRunStatus === 'escalated') {
+        // Show manager output
+        showManagerOutput(automation);
       } else {
         window.electronAPI.runManager(automation.id);
       }
@@ -6141,6 +6193,7 @@ function openAutomationModal(existingAutomation) {
     document.getElementById('automation-manager-db').value = mgr.dbConnectionString || '';
     document.getElementById('automation-manager-db-readonly').checked = mgr.dbReadOnly !== false;
     document.getElementById('automation-manager-skip-permissions').checked = mgr.skipPermissions || false;
+    document.getElementById('automation-manager-isolation').checked = mgr.isolation ? mgr.isolation.enabled : false;
   } else {
     managerSection.style.display = 'none';
   }
@@ -6653,6 +6706,7 @@ function saveAutomation() {
       dbConnectionString: document.getElementById('automation-manager-db').value.trim() || null,
       dbReadOnly: document.getElementById('automation-manager-db-readonly').checked,
       maxRetries: parseInt(document.getElementById('automation-manager-retries').value) || 1,
+      isolation: { enabled: document.getElementById('automation-manager-isolation').checked, clonePath: null },
       lastRunAt: null,
       lastRunStatus: null,
       lastSummary: null,
