@@ -5727,7 +5727,38 @@ function renderSimpleDetail(automation, agent) {
   else { badge.classList.add('badge-idle'); badge.textContent = 'idle'; }
 
   var metaEl = document.getElementById('automation-detail-meta');
-  metaEl.textContent = formatScheduleText(agent) + (agent.lastRunAt ? ' \u00b7 Last: ' + new Date(agent.lastRunAt).toLocaleString() : '');
+  var metaText = formatScheduleText(agent) + (agent.lastRunAt ? ' \u00b7 Last: ' + new Date(agent.lastRunAt).toLocaleString() : '');
+
+  // Add manager status for single-agent automations
+  if (automation.manager && automation.manager.enabled) {
+    var mgrBtnHtml = '';
+    if (automation.manager.needsHuman) {
+      mgrBtnHtml = '<button class="automation-detail-manager-btn needs-you" title="Manager needs your attention">Needs You &#9888;</button>';
+    } else if (automation.manager.lastRunStatus === 'running') {
+      mgrBtnHtml = '<button class="automation-detail-manager-btn running" title="Manager is investigating">Investigating...</button>';
+    } else if (automation.manager.lastRunStatus === 'resolved' || automation.manager.lastRunStatus === 'acted' || automation.manager.lastRunStatus === 'error' || automation.manager.lastRunStatus === 'escalated') {
+      mgrBtnHtml = '<button class="automation-detail-manager-btn resolved" title="' + escapeHtml(automation.manager.lastSummary || '') + '">Manager: ' + automation.manager.lastRunStatus + '</button>';
+    } else {
+      mgrBtnHtml = '<button class="automation-detail-manager-btn idle" title="Run manager">Manager</button>';
+    }
+    metaEl.innerHTML = metaText + mgrBtnHtml;
+    var mgrBtn = metaEl.querySelector('.automation-detail-manager-btn');
+    if (mgrBtn) {
+      mgrBtn.addEventListener('click', function () {
+        if (automation.manager.needsHuman) {
+          launchManagerTerminal(automation);
+        } else if (automation.manager.lastRunStatus === 'running') {
+          showManagerLiveOutput(automation);
+        } else if (automation.manager.lastRunStatus === 'resolved' || automation.manager.lastRunStatus === 'acted' || automation.manager.lastRunStatus === 'error' || automation.manager.lastRunStatus === 'escalated') {
+          showManagerOutput(automation);
+        } else {
+          window.electronAPI.runManager(automation.id);
+        }
+      });
+    }
+  } else {
+    metaEl.textContent = metaText;
+  }
 
   if (agent.isolation && agent.isolation.enabled && agent.lastError && agent.lastError.indexOf('Working directory not found') !== -1) {
     var recloneBtn = document.createElement('button');
@@ -6226,26 +6257,22 @@ function openAutomationModal(existingAutomation) {
 
   renderModalAgentCards();
 
-  // Manager section — only show for multi-agent
+  // Manager section — available for all automations (single or multi-agent)
   var managerSection = document.getElementById('automation-manager-section');
   var managerEnabled = document.getElementById('automation-manager-enabled');
   var managerFields = document.getElementById('automation-manager-fields');
-  if (isMulti) {
-    managerSection.style.display = '';
-    var mgr = existingAutomation && existingAutomation.manager ? existingAutomation.manager : {};
-    managerEnabled.checked = mgr.enabled || false;
-    managerFields.style.display = mgr.enabled ? '' : 'none';
-    document.getElementById('automation-manager-prompt').value = mgr.prompt || '';
-    document.getElementById('automation-manager-trigger').value = mgr.triggerOn || 'failure';
-    document.getElementById('automation-manager-retries').value = mgr.maxRetries || 1;
-    document.getElementById('automation-manager-full-output').checked = mgr.includeFullOutput || false;
-    document.getElementById('automation-manager-db').value = mgr.dbConnectionString || '';
-    document.getElementById('automation-manager-db-readonly').checked = mgr.dbReadOnly !== false;
-    document.getElementById('automation-manager-skip-permissions').checked = mgr.skipPermissions || false;
-    document.getElementById('automation-manager-isolation').checked = mgr.isolation ? mgr.isolation.enabled : false;
-  } else {
-    managerSection.style.display = 'none';
-  }
+  managerSection.style.display = '';
+  var mgr = existingAutomation && existingAutomation.manager ? existingAutomation.manager : {};
+  managerEnabled.checked = mgr.enabled || false;
+  managerFields.style.display = mgr.enabled ? '' : 'none';
+  document.getElementById('automation-manager-prompt').value = mgr.prompt || '';
+  document.getElementById('automation-manager-trigger').value = mgr.triggerOn || 'failure';
+  document.getElementById('automation-manager-retries').value = mgr.maxRetries || 1;
+  document.getElementById('automation-manager-full-output').checked = mgr.includeFullOutput || false;
+  document.getElementById('automation-manager-db').value = mgr.dbConnectionString || '';
+  document.getElementById('automation-manager-db-readonly').checked = mgr.dbReadOnly !== false;
+  document.getElementById('automation-manager-skip-permissions').checked = mgr.skipPermissions || false;
+  document.getElementById('automation-manager-isolation').checked = mgr.isolation ? mgr.isolation.enabled : false;
 
   document.getElementById('automation-modal-overlay').classList.remove('hidden');
   var firstNameInput = document.querySelector('.agent-name');
@@ -6747,7 +6774,7 @@ function saveAutomation() {
 
   // Build manager config
   var managerConfig = null;
-  if (modalAgents.length > 1 && document.getElementById('automation-manager-enabled').checked) {
+  if (document.getElementById('automation-manager-enabled').checked) {
     managerConfig = {
       enabled: true,
       prompt: document.getElementById('automation-manager-prompt').value.trim(),
