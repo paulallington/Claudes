@@ -4624,3 +4624,62 @@ html, body {
 .project-context-item:hover {
   background: var(--hover-subtle);
 }
+
+/* Drag to reorder projects */
+.project-item[draggable="true"] {
+  cursor: grab;
+}
+
+.project-item.dragging {
+  opacity: 0.4;
+}
+
+.project-item.drag-over {
+  border-top: 2px solid var(--accent);
+}
+
+/* Import Progress */
+.import-progress-panel {
+  padding: 12px;
+}
+
+.import-progress-header {
+  margin-bottom: 12px;
+}
+
+.import-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.import-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.import-progress-icon {
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.import-progress-name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.import-progress-status {
+  font-size: 11px;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.import-progress-footer {
+  margin-top: 12px;
+  text-align: center;
+}

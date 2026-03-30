@@ -611,6 +611,48 @@ function renderProjectList() {
       setActiveProject(index, false);
     });
 
+    // Drag to reorder
+    item.setAttribute('draggable', 'true');
+    item.addEventListener('dragstart', function (e) {
+      e.dataTransfer.setData('text/plain', String(index));
+      item.classList.add('dragging');
+    });
+    item.addEventListener('dragend', function () {
+      item.classList.remove('dragging');
+      document.querySelectorAll('.project-item.drag-over').forEach(function (el) {
+        el.classList.remove('drag-over');
+      });
+    });
+    item.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      var draggingIdx = parseInt(e.dataTransfer.getData('text/plain') || '-1');
+      if (draggingIdx !== index) {
+        item.classList.add('drag-over');
+      }
+    });
+    item.addEventListener('dragleave', function () {
+      item.classList.remove('drag-over');
+    });
+    item.addEventListener('drop', function (e) {
+      e.preventDefault();
+      item.classList.remove('drag-over');
+      var fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
+      if (isNaN(fromIdx) || fromIdx === index) return;
+      // Reorder the projects array
+      var moved = config.projects.splice(fromIdx, 1)[0];
+      config.projects.splice(index, 0, moved);
+      // Update activeProjectIndex
+      if (config.activeProjectIndex === fromIdx) {
+        config.activeProjectIndex = index;
+      } else if (fromIdx < config.activeProjectIndex && index >= config.activeProjectIndex) {
+        config.activeProjectIndex--;
+      } else if (fromIdx > config.activeProjectIndex && index <= config.activeProjectIndex) {
+        config.activeProjectIndex++;
+      }
+      window.electronAPI.saveProjects(config);
+      renderProjectList();
+    });
+
     item.addEventListener('contextmenu', function (e) {
       e.preventDefault();
       var menu = document.getElementById('project-context-menu');
@@ -622,9 +664,7 @@ function renderProjectList() {
       }
       var projIndex = index;
       var isHidden = project.hidden || false;
-      menu.innerHTML = '<div class="project-context-item" data-action="toggle-hide">' + (isHidden ? 'Show Project' : 'Hide Project') + '</div>' +
-        (projIndex > 0 ? '<div class="project-context-item" data-action="move-up">Move Up</div>' : '') +
-        (projIndex < config.projects.length - 1 ? '<div class="project-context-item" data-action="move-down">Move Down</div>' : '');
+      menu.innerHTML = '<div class="project-context-item" data-action="toggle-hide">' + (isHidden ? 'Show Project' : 'Hide Project') + '</div>';
       menu.style.left = e.clientX + 'px';
       menu.style.top = e.clientY + 'px';
       menu.style.display = 'block';
@@ -633,22 +673,6 @@ function renderProjectList() {
         var action = ev.target.dataset.action;
         if (action === 'toggle-hide') {
           config.projects[projIndex].hidden = !config.projects[projIndex].hidden;
-          window.electronAPI.saveProjects(config);
-          renderProjectList();
-        } else if (action === 'move-up' && projIndex > 0) {
-          var temp = config.projects[projIndex];
-          config.projects[projIndex] = config.projects[projIndex - 1];
-          config.projects[projIndex - 1] = temp;
-          if (config.activeProjectIndex === projIndex) config.activeProjectIndex = projIndex - 1;
-          else if (config.activeProjectIndex === projIndex - 1) config.activeProjectIndex = projIndex;
-          window.electronAPI.saveProjects(config);
-          renderProjectList();
-        } else if (action === 'move-down' && projIndex < config.projects.length - 1) {
-          var temp = config.projects[projIndex];
-          config.projects[projIndex] = config.projects[projIndex + 1];
-          config.projects[projIndex + 1] = temp;
-          if (config.activeProjectIndex === projIndex) config.activeProjectIndex = projIndex + 1;
-          else if (config.activeProjectIndex === projIndex + 1) config.activeProjectIndex = projIndex;
           window.electronAPI.saveProjects(config);
           renderProjectList();
         }
@@ -7076,56 +7100,113 @@ document.getElementById('btn-import-automations').addEventListener('click', func
       // Step 5: Check if any imported automations need cloning
       var needsClone = (result.importedIds || []).filter(function (a) { return a.needsClone; });
       if (needsClone.length > 0) {
-        var cloneMsg = result.count + ' automations imported (paused).\n\n' +
-          needsClone.length + ' automation(s) need repo cloning:\n' +
-          needsClone.map(function (a) { return '  - ' + a.name; }).join('\n') +
-          '\n\nSet up clones now?';
-        if (confirm(cloneMsg)) {
-          // Run clone setup for each automation that needs it
-          var cloneNext = function (idx) {
-            if (idx >= needsClone.length) {
-              alert('All clones set up. You can now enable the automations.');
-              refreshAutomations();
-              return;
-            }
-            var autoId = needsClone[idx].id;
-            // Clone all isolated agents in this automation
-            window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
-              var auto = automations.find(function (a) { return a.id === autoId; });
-              if (!auto) { cloneNext(idx + 1); return; }
-
-              var isolatedAgents = auto.agents.filter(function (ag) { return ag.isolation && ag.isolation.enabled; });
-              var hasManagerIso = auto.manager && auto.manager.isolation && auto.manager.isolation.enabled;
-
-              var cloneAgent = function (agIdx) {
-                if (agIdx >= isolatedAgents.length) {
-                  // Clone manager if needed
-                  if (hasManagerIso) {
-                    window.electronAPI.setupManagerClone(autoId).then(function () {
-                      cloneNext(idx + 1);
-                    });
-                  } else {
-                    cloneNext(idx + 1);
-                  }
-                  return;
-                }
-                window.electronAPI.setupAgentClone(autoId, isolatedAgents[agIdx].id).then(function () {
-                  cloneAgent(agIdx + 1);
-                });
-              };
-              cloneAgent(0);
-            });
-          };
-          cloneNext(0);
-        } else {
-          alert(result.count + ' automations imported (paused). Clones can be set up later by editing each automation.');
-        }
-      } else {
-        alert(result.count + ' automations imported (paused).');
+        showImportProgress(result, needsClone);
       }
     });
   });
 });
+
+function showImportProgress(importResult, needsClone) {
+  var listEl = document.getElementById('automations-list');
+  listEl.innerHTML = '';
+
+  var panel = document.createElement('div');
+  panel.className = 'import-progress-panel';
+  panel.innerHTML = '<div class="import-progress-header">' +
+    '<strong>Imported ' + importResult.count + ' automations (paused)</strong>' +
+    '<div style="font-size:11px;opacity:0.6;margin-top:4px;">Setting up ' + needsClone.length + ' repo clone(s)...</div>' +
+    '</div>' +
+    '<div class="import-progress-list"></div>' +
+    '<div class="import-progress-footer" style="display:none;">' +
+    '<button class="automation-detail-run-all import-progress-done">Done</button>' +
+    '</div>';
+
+  var progressList = panel.querySelector('.import-progress-list');
+
+  // Build rows for ALL imported automations
+  importResult.importedIds.forEach(function (auto) {
+    var row = document.createElement('div');
+    row.className = 'import-progress-row';
+    row.id = 'import-row-' + auto.id;
+    var statusIcon = auto.needsClone ? '&#9711;' : '&#10003;';
+    var statusColor = auto.needsClone ? '' : 'color:#22c55e;';
+    row.innerHTML = '<span class="import-progress-icon" style="' + statusColor + '">' + statusIcon + '</span>' +
+      '<span class="import-progress-name">' + auto.name + '</span>' +
+      '<span class="import-progress-status">' + (auto.needsClone ? 'Pending clone...' : 'Ready') + '</span>';
+    progressList.appendChild(row);
+  });
+
+  listEl.appendChild(panel);
+
+  // Process clones sequentially
+  var cloneNext = function (idx) {
+    if (idx >= needsClone.length) {
+      // All done
+      panel.querySelector('.import-progress-header div').textContent = 'All clones complete. Automations are paused — enable them when ready.';
+      panel.querySelector('.import-progress-footer').style.display = '';
+      panel.querySelector('.import-progress-done').addEventListener('click', function () {
+        refreshAutomations();
+      });
+      return;
+    }
+
+    var auto = needsClone[idx];
+    var row = document.getElementById('import-row-' + auto.id);
+    if (row) {
+      row.querySelector('.import-progress-icon').innerHTML = '&#8987;';
+      row.querySelector('.import-progress-icon').style.color = '#3b82f6';
+      row.querySelector('.import-progress-status').textContent = 'Cloning...';
+    }
+
+    window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
+      var automation = automations.find(function (a) { return a.id === auto.id; });
+      if (!automation) { cloneNext(idx + 1); return; }
+
+      var isolatedAgents = automation.agents.filter(function (ag) { return ag.isolation && ag.isolation.enabled; });
+      var hasManagerIso = automation.manager && automation.manager.isolation && automation.manager.isolation.enabled;
+      var totalSteps = isolatedAgents.length + (hasManagerIso ? 1 : 0);
+      var stepsDone = 0;
+
+      var updateRowStatus = function () {
+        if (row) row.querySelector('.import-progress-status').textContent = 'Cloning (' + stepsDone + '/' + totalSteps + ')...';
+      };
+
+      var cloneAgentStep = function (agIdx) {
+        if (agIdx >= isolatedAgents.length) {
+          if (hasManagerIso) {
+            updateRowStatus();
+            window.electronAPI.setupManagerClone(auto.id).then(function (result) {
+              stepsDone++;
+              if (row) {
+                row.querySelector('.import-progress-icon').innerHTML = result && result.error ? '&#10007;' : '&#10003;';
+                row.querySelector('.import-progress-icon').style.color = result && result.error ? '#ef4444' : '#22c55e';
+                row.querySelector('.import-progress-status').textContent = result && result.error ? 'Clone error' : 'Ready';
+              }
+              cloneNext(idx + 1);
+            });
+          } else {
+            if (row) {
+              row.querySelector('.import-progress-icon').innerHTML = '&#10003;';
+              row.querySelector('.import-progress-icon').style.color = '#22c55e';
+              row.querySelector('.import-progress-status').textContent = 'Ready';
+            }
+            cloneNext(idx + 1);
+          }
+          return;
+        }
+        updateRowStatus();
+        window.electronAPI.setupAgentClone(auto.id, isolatedAgents[agIdx].id).then(function () {
+          stepsDone++;
+          cloneAgentStep(agIdx + 1);
+        });
+      };
+
+      cloneAgentStep(0);
+    });
+  };
+
+  cloneNext(0);
+}
 
 document.getElementById('btn-clear-automations').addEventListener('click', function () {
   if (!activeProjectKey) { alert('Select a project first.'); return; }

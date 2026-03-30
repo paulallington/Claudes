@@ -1445,9 +1445,11 @@ ipcMain.handle('automations:setupAgentClone', async (event, automationId, agentI
         writeAutomations(data);
         return { clonePath, status: 'reused' };
       }
-      return { error: 'Directory exists but has different remote: ' + existingRemote };
+      // Different remote — clean up and re-clone
+      fs.rmSync(clonePath, { recursive: true, force: true });
     } catch {
-      return { error: 'Directory exists but is not a git repository: ' + clonePath };
+      // Not a valid git repo — clean up and re-clone
+      fs.rmSync(clonePath, { recursive: true, force: true });
     }
   }
 
@@ -1901,13 +1903,27 @@ ipcMain.handle('automations:setupManagerClone', async (event, automationId) => {
   const clonePath = path.join(baseDir, projectName, '_manager');
 
   if (fs.existsSync(clonePath)) {
-    const freshData = readAutomations();
-    const freshAuto = freshData.automations.find(a => a.id === automationId);
-    if (freshAuto && freshAuto.manager) {
-      freshAuto.manager.isolation.clonePath = clonePath;
-      writeAutomations(freshData);
+    try {
+      const existingRemote = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: clonePath, encoding: 'utf8' }).trim();
+      let sourceRemote = '';
+      try {
+        sourceRemote = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: automation.projectPath, encoding: 'utf8' }).trim();
+      } catch { /* no remote */ }
+      if (existingRemote === sourceRemote || existingRemote === automation.projectPath) {
+        const freshData = readAutomations();
+        const freshAuto = freshData.automations.find(a => a.id === automationId);
+        if (freshAuto && freshAuto.manager) {
+          freshAuto.manager.isolation.clonePath = clonePath;
+          writeAutomations(freshData);
+        }
+        return { clonePath, status: 'reused' };
+      }
+      // Different remote — clean up and re-clone
+      fs.rmSync(clonePath, { recursive: true, force: true });
+    } catch {
+      // Not a valid git repo — clean up and re-clone
+      fs.rmSync(clonePath, { recursive: true, force: true });
     }
-    return { clonePath, status: 'reused' };
   }
 
   let remoteUrl = '';
