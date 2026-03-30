@@ -18,7 +18,7 @@
         <button class="explorer-tab active" data-tab="files">Files</button>
         <button class="explorer-tab" data-tab="git">Git</button>
         <button class="explorer-tab" data-tab="run">Run</button>
-        <button class="explorer-tab" data-tab="loops">Loops</button>
+        <button class="explorer-tab" data-tab="automations">Automations</button>
       </div>
       <div class="explorer-content">
         <div id="tab-files" class="tab-content active">
@@ -85,41 +85,41 @@
             <div id="run-profile-editor"></div>
           </div>
         </div>
-        <div id="tab-loops" class="tab-content">
+        <div id="tab-automations" class="tab-content">
           <div class="explorer-section-header">
-            <span>LOOPS</span>
+            <span>AUTOMATIONS</span>
             <div style="display:flex;gap:4px;">
-              <button class="explorer-refresh" id="btn-add-loop" title="New Loop">+</button>
-              <button class="explorer-refresh" id="btn-import-loops" title="Import Loops">&#8615;</button>
-              <button class="explorer-refresh" id="btn-export-loops" title="Export All Loops">&#8613;</button>
-              <button class="explorer-refresh" id="btn-refresh-loops" title="Refresh">&#8635;</button>
+              <button class="explorer-refresh" id="btn-add-automation" title="New Automation">+</button>
+              <button class="explorer-refresh" id="btn-import-automations" title="Import Automations">&#8615;</button>
+              <button class="explorer-refresh" id="btn-export-automations" title="Export All">&#8613;</button>
+              <button class="explorer-refresh" id="btn-refresh-automations" title="Refresh">&#8635;</button>
             </div>
           </div>
-          <div id="loops-search-bar" style="display:none;">
-            <input type="text" id="loops-search-input" class="loops-search-input" placeholder="Search loops..." spellcheck="false">
+          <div id="automations-search-bar" style="display:none;">
+            <input type="text" id="automations-search-input" class="automations-search-input" placeholder="Search automations..." spellcheck="false">
           </div>
-          <div id="loops-no-project" class="loops-placeholder" style="display:none;">
-            <p style="opacity:0.5;text-align:center;padding:2rem 1rem;font-size:12px;">Select a project to see its loops</p>
+          <div id="automations-no-project" class="automations-placeholder" style="display:none;">
+            <p style="opacity:0.5;text-align:center;padding:2rem 1rem;font-size:12px;">Select a project to see its automations</p>
           </div>
-          <div id="loops-list"></div>
-          <div id="loop-detail-panel" class="loop-detail-panel" style="display:none;">
-            <div class="loop-detail-header">
-              <button id="btn-loop-detail-back" class="loop-detail-back" title="Back to list">&larr;</button>
-              <span id="loop-detail-name" class="loop-detail-name"></span>
-              <span id="loop-detail-status-badge" class="loop-status-badge"></span>
+          <div id="automations-list"></div>
+          <div id="automation-detail-panel" class="automation-detail-panel" style="display:none;">
+            <div class="automation-detail-header">
+              <button id="btn-automation-detail-back" class="automation-detail-back" title="Back to list">&larr;</button>
+              <span id="automation-detail-name" class="automation-detail-name"></span>
+              <span id="automation-detail-status-badge" class="automation-status-badge"></span>
             </div>
-            <div class="loop-detail-meta" id="loop-detail-meta"></div>
-            <div id="loop-detail-summary" class="loop-detail-summary" style="display:none;"></div>
-            <div id="loop-detail-attention" class="loop-detail-attention" style="display:none;"></div>
-            <div class="loop-detail-output-header">
+            <div class="automation-detail-meta" id="automation-detail-meta"></div>
+            <div id="automation-detail-summary" class="automation-detail-summary" style="display:none;"></div>
+            <div id="automation-detail-attention" class="automation-detail-attention" style="display:none;"></div>
+            <div class="automation-detail-output-header">
               <span>Output</span>
-              <div class="loop-detail-output-controls">
-                <button id="btn-loop-open-claude" class="loop-detail-icon-btn" title="Open in Claude (uses spawn options)">&#8599;</button>
-                <button id="btn-loop-copy-output" class="loop-detail-icon-btn" title="Copy output">&#128203;</button>
-                <select id="loop-detail-run-select" class="loop-detail-run-select"></select>
+              <div class="automation-detail-output-controls">
+                <button id="btn-automation-open-claude" class="automation-detail-icon-btn" title="Open in Claude (uses spawn options)">&#8599;</button>
+                <button id="btn-automation-copy-output" class="automation-detail-icon-btn" title="Copy output">&#128203;</button>
+                <select id="automation-detail-run-select" class="automation-detail-run-select"></select>
               </div>
             </div>
-            <pre id="loop-detail-output" class="loop-detail-output"></pre>
+            <pre id="automation-detail-output" class="automation-detail-output"></pre>
           </div>
         </div>
       </div>
@@ -134,7 +134,7 @@
           <span id="active-project-name" class="active-project-name"></span>
         </div>
         <div class="toolbar-actions">
-          <button id="btn-loops-flyout" class="toolbar-btn" title="Loop Manager">&#8634;</button>
+          <button id="btn-automations-flyout" class="toolbar-btn" title="Automations">&#8634;</button>
           <div class="toolbar-menu-wrap">
             <button id="btn-toolbar-menu" class="toolbar-menu-btn" title="Tools &amp; settings">&#8943;</button>
             <div id="toolbar-menu" class="toolbar-menu hidden">
@@ -195,18 +195,18 @@
       </div>
       <div id="columns-container"></div>
     </div>
-    <div id="loops-flyout" class="loops-flyout hidden">
-      <div class="loops-flyout-header">
-        <div class="loops-flyout-title">
-          <span>Loop Manager</span>
-          <span id="loops-flyout-counts" class="loops-flyout-counts"></span>
+    <div id="automations-flyout" class="automations-flyout hidden">
+      <div class="automations-flyout-header">
+        <div class="automations-flyout-title">
+          <span>Automations</span>
+          <span id="automations-flyout-counts" class="automations-flyout-counts"></span>
         </div>
-        <div class="loops-flyout-actions">
-          <button id="btn-loops-global-toggle" class="loops-global-toggle" title="Pause/Resume all loops">&#9654;</button>
-          <button id="btn-loops-flyout-close" class="loops-flyout-close" title="Close">&times;</button>
+        <div class="automations-flyout-actions">
+          <button id="btn-automations-global-toggle" class="automations-global-toggle" title="Pause/Resume all automations">&#9654;</button>
+          <button id="btn-automations-flyout-close" class="automations-flyout-close" title="Close">&times;</button>
         </div>
       </div>
-      <div id="loops-flyout-list" class="loops-flyout-list"></div>
+      <div id="automations-flyout-list" class="automations-flyout-list"></div>
     </div>
   </div>
 
@@ -239,6 +239,17 @@
             <input type="checkbox" id="setting-notif-header" checked>
             <span>Flash column header when Claude needs attention</span>
           </label>
+        </div>
+        <div class="settings-section">
+          <h3 class="settings-section-title">Automations</h3>
+          <div class="settings-field">
+            <label for="setting-agent-repos-dir">Agent repos directory</label>
+            <div class="settings-path-row">
+              <input type="text" id="setting-agent-repos-dir" class="settings-input" placeholder="~/.claudes/agents/" spellcheck="false">
+              <button id="btn-browse-agent-repos" class="settings-browse-btn" title="Browse...">...</button>
+            </div>
+            <span class="settings-hint">Base directory for isolated agent repository clones</span>
+          </div>
         </div>
       </div>
     </div>
@@ -336,97 +347,92 @@
     </div>
   </div>
 
-    <div id="loop-modal-overlay" class="modal-overlay hidden">
-      <div class="modal-dialog loop-modal">
+    <div id="automation-modal-overlay" class="modal-overlay hidden">
+      <div class="modal-dialog automation-modal">
         <div class="modal-header">
-          <span class="modal-title" id="loop-modal-title">New Loop</span>
-          <button class="modal-close" id="btn-loop-modal-close">&times;</button>
+          <span class="modal-title" id="automation-modal-title">New Automation</span>
+          <button class="modal-close" id="btn-automation-modal-close">&times;</button>
         </div>
-        <div class="modal-body loop-modal-body">
-          <div class="loop-form-group">
-            <label for="loop-name">Name</label>
-            <input type="text" id="loop-name" class="loop-input" placeholder="e.g. Check failing tests" spellcheck="false">
+        <div class="modal-body automation-modal-body">
+          <!-- Automation-level name (shown in multi-agent mode) -->
+          <div id="automation-name-group" class="automation-form-group" style="display:none;">
+            <label for="automation-name">Automation Name</label>
+            <input type="text" id="automation-name" class="automation-input" placeholder="e.g. TaskBoard Pipeline" spellcheck="false">
           </div>
-          <div class="loop-form-group">
-            <label for="loop-prompt">Prompt <button type="button" id="btn-loop-prompt-find" class="loop-prompt-find-btn" title="Find in prompt (Ctrl+F)">&#128269;</button></label>
-            <div id="loop-prompt-find-bar" class="loop-prompt-find-bar hidden">
-              <input type="text" id="loop-prompt-find-input" class="loop-prompt-find-input" placeholder="Find..." spellcheck="false">
-              <span id="loop-prompt-find-count" class="loop-prompt-find-count"></span>
-              <button type="button" id="btn-loop-prompt-find-prev" class="loop-prompt-find-nav" title="Previous">&uarr;</button>
-              <button type="button" id="btn-loop-prompt-find-next" class="loop-prompt-find-nav" title="Next">&darr;</button>
-              <button type="button" id="btn-loop-prompt-find-close" class="loop-prompt-find-nav" title="Close">&times;</button>
-            </div>
-            <textarea id="loop-prompt" class="loop-textarea" rows="6" placeholder="What should Claude do each time this runs?" spellcheck="false"></textarea>
+
+          <!-- Agent cards container -->
+          <div id="automation-agents-list"></div>
+
+          <!-- Add Agent link -->
+          <div id="automation-add-agent-row" class="automation-add-agent-row">
+            <button type="button" id="btn-add-agent" class="automation-add-agent-btn">+ Add Agent</button>
           </div>
-          <div class="loop-form-group">
-            <label>Schedule</label>
-            <div class="loop-schedule-row">
-              <select id="loop-schedule-type">
-                <option value="manual">Manual</option>
-                <option value="interval">Every</option>
-                <option value="time_of_day">At specific times</option>
-                <option value="app_startup">On app startup</option>
-              </select>
-              <div id="loop-interval-fields">
-                <input type="number" id="loop-interval-value" min="1" value="60" style="width:60px">
-                <select id="loop-interval-unit">
-                  <option value="minutes">minutes</option>
-                  <option value="hours">hours</option>
-                </select>
-              </div>
-              <div id="loop-tod-fields" style="display:none;">
-                <div class="loop-time-add-row">
-                  <input type="time" id="loop-tod-time" value="09:00">
-                  <button type="button" id="btn-loop-add-time" class="loop-btn-add-time" title="Add time">+</button>
-                </div>
-                <div id="loop-tod-times-list" class="loop-times-chips"></div>
-                <div class="loop-days-row" id="loop-tod-days">
-                  <label><input type="checkbox" value="mon" checked> Mon</label>
-                  <label><input type="checkbox" value="tue" checked> Tue</label>
-                  <label><input type="checkbox" value="wed" checked> Wed</label>
-                  <label><input type="checkbox" value="thu" checked> Thu</label>
-                  <label><input type="checkbox" value="fri" checked> Fri</label>
-                  <label><input type="checkbox" value="sat"> Sat</label>
-                  <label><input type="checkbox" value="sun"> Sun</label>
-                </div>
-              </div>
-              <div id="loop-startup-fields" style="display:none;">
-                <div class="loop-permissions" style="margin-top:4px;">
-                  <label class="loop-permission-option">
-                    <input type="checkbox" id="loop-first-start-only">
-                    <span>Only on first start of the day <span class="loop-permission-hint">(won't re-run if app restarts)</span></span>
-                  </label>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="loop-form-group">
-            <label>Database <span class="loop-permission-hint">(optional)</span></label>
-            <input type="password" id="loop-db-connection" class="loop-input" placeholder="mongodb+srv://readonly_user:pass@cluster.mongodb.net/dbname" spellcheck="false" autocomplete="off">
-            <div class="loop-permissions" style="margin-top:6px;">
-              <label class="loop-permission-option">
-                <input type="checkbox" id="loop-db-readonly" checked>
-                <span>Read-only <span class="loop-permission-hint">(block all write/delete/drop operations)</span></span>
-              </label>
-              <label class="loop-permission-option">
-                <input type="checkbox" id="loop-db-show">
-                <span>Show connection string</span>
+
+          <!-- Manager configuration -->
+          <div id="automation-manager-section" class="automation-manager-section" style="display:none;">
+            <div class="automation-manager-header">
+              <label class="automation-permission-option">
+                <input type="checkbox" id="automation-manager-enabled">
+                <span class="automation-manager-title">Automation Manager</span>
               </label>
             </div>
-          </div>
-          <div class="loop-form-group">
-            <label>Permissions</label>
-            <div class="loop-permissions">
-              <label class="loop-permission-option">
-                <input type="checkbox" id="loop-skip-permissions">
-                <span>Skip permissions <span class="loop-permission-hint">(allow file edits, bash, etc.)</span></span>
-              </label>
+            <div id="automation-manager-fields" style="display:none;">
+              <div class="automation-form-group">
+                <label>Manager Prompt <span class="automation-permission-hint">(optional — appended to investigation instructions)</span></label>
+                <textarea id="automation-manager-prompt" class="automation-textarea" rows="3" placeholder="Additional instructions for the manager..." spellcheck="false"></textarea>
+              </div>
+              <div class="automation-form-group automation-manager-row">
+                <div>
+                  <label>Trigger</label>
+                  <select id="automation-manager-trigger">
+                    <option value="failure">On failure</option>
+                    <option value="always">Always</option>
+                    <option value="manual">Manual only</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Max retries</label>
+                  <input type="number" id="automation-manager-retries" min="0" max="5" value="1" style="width:50px;">
+                </div>
+              </div>
+              <div class="automation-form-group">
+                <label class="automation-permission-option">
+                  <input type="checkbox" id="automation-manager-full-output">
+                  <span>Include full agent output <span class="automation-permission-hint">(increases cost)</span></span>
+                </label>
+              </div>
+              <div class="automation-form-group">
+                <label>Database <span class="automation-permission-hint">(optional)</span></label>
+                <input type="password" id="automation-manager-db" class="automation-input" placeholder="mongodb+srv://..." spellcheck="false" autocomplete="off">
+                <div class="automation-permissions" style="margin-top:6px;">
+                  <label class="automation-permission-option"><input type="checkbox" id="automation-manager-db-readonly" checked><span>Read-only</span></label>
+                </div>
+              </div>
+              <div class="automation-form-group">
+                <label class="automation-permission-option">
+                  <input type="checkbox" id="automation-manager-isolation">
+                  <span>Repo isolation <span class="automation-permission-hint">(clone into separate directory — prevents branch conflicts)</span></span>
+                </label>
+              </div>
+              <div class="automation-form-group">
+                <label>Permissions</label>
+                <div class="automation-permissions">
+                  <label class="automation-permission-option"><input type="checkbox" id="automation-manager-skip-permissions"><span>Skip permissions</span></label>
+                </div>
+              </div>
             </div>
+          </div>
+
+          <!-- Clone setup progress (Stage 3) -->
+          <div id="automation-setup-panel" class="automation-setup-panel" style="display:none;">
+            <div class="automation-setup-header">Setting up agent repositories...</div>
+            <div id="automation-setup-agents" class="automation-setup-agents"></div>
+            <pre id="automation-setup-log" class="automation-setup-log"></pre>
           </div>
         </div>
         <div class="modal-footer">
-          <button id="btn-loop-save" class="modal-btn-save">Create Loop</button>
-          <button id="btn-loop-cancel" class="modal-btn-save">Cancel</button>
+          <button id="btn-automation-save" class="modal-btn-save">Create Automation</button>
+          <button id="btn-automation-cancel" class="modal-btn-save">Cancel</button>
         </div>
       </div>
     </div>
