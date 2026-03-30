@@ -7042,9 +7042,88 @@ document.getElementById('btn-export-automations').addEventListener('click', func
 
 document.getElementById('btn-import-automations').addEventListener('click', function () {
   if (!activeProjectKey) { alert('Select a project first.'); return; }
-  window.electronAPI.importAutomations(activeProjectKey).then(function (result) {
-    if (result && result.error) { alert(result.error); return; }
-    if (result && result.count) refreshAutomations();
+
+  // Step 1: Preview the file
+  window.electronAPI.previewImport().then(function (preview) {
+    if (!preview || preview.cancelled) return;
+    if (preview.error) { alert(preview.error); return; }
+
+    // Step 2: Build confirmation message
+    var msg = 'Import Summary:\n\n';
+    msg += preview.automationCount + ' automations, ' + preview.totalAgents + ' agents';
+    if (preview.totalManagers > 0) msg += ', ' + preview.totalManagers + ' managers';
+    if (preview.totalIsolated > 0) msg += '\n' + preview.totalIsolated + ' repo clone(s) will be set up';
+    msg += '\n\n';
+    preview.automations.forEach(function (a) {
+      msg += '  ' + a.name + ': ' + a.agentNames.join(', ');
+      if (a.hasManager) msg += ' + Manager';
+      if (a.hasChaining) msg += ' (chained)';
+      msg += '\n';
+    });
+    msg += '\nAutomations will be imported as PAUSED.\nProceed?';
+
+    // Step 3: Confirm
+    if (!confirm(msg)) return;
+
+    // Step 4: Import using the previewed file path
+    window.electronAPI.importAutomations(activeProjectKey, preview.filePath).then(function (result) {
+      if (result && result.error) { alert(result.error); return; }
+      if (!result || !result.count) return;
+
+      refreshAutomations();
+      refreshAutomationsFlyout();
+
+      // Step 5: Check if any imported automations need cloning
+      var needsClone = (result.importedIds || []).filter(function (a) { return a.needsClone; });
+      if (needsClone.length > 0) {
+        var cloneMsg = result.count + ' automations imported (paused).\n\n' +
+          needsClone.length + ' automation(s) need repo cloning:\n' +
+          needsClone.map(function (a) { return '  - ' + a.name; }).join('\n') +
+          '\n\nSet up clones now?';
+        if (confirm(cloneMsg)) {
+          // Run clone setup for each automation that needs it
+          var cloneNext = function (idx) {
+            if (idx >= needsClone.length) {
+              alert('All clones set up. You can now enable the automations.');
+              refreshAutomations();
+              return;
+            }
+            var autoId = needsClone[idx].id;
+            // Clone all isolated agents in this automation
+            window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
+              var auto = automations.find(function (a) { return a.id === autoId; });
+              if (!auto) { cloneNext(idx + 1); return; }
+
+              var isolatedAgents = auto.agents.filter(function (ag) { return ag.isolation && ag.isolation.enabled; });
+              var hasManagerIso = auto.manager && auto.manager.isolation && auto.manager.isolation.enabled;
+
+              var cloneAgent = function (agIdx) {
+                if (agIdx >= isolatedAgents.length) {
+                  // Clone manager if needed
+                  if (hasManagerIso) {
+                    window.electronAPI.setupManagerClone(autoId).then(function () {
+                      cloneNext(idx + 1);
+                    });
+                  } else {
+                    cloneNext(idx + 1);
+                  }
+                  return;
+                }
+                window.electronAPI.setupAgentClone(autoId, isolatedAgents[agIdx].id).then(function () {
+                  cloneAgent(agIdx + 1);
+                });
+              };
+              cloneAgent(0);
+            });
+          };
+          cloneNext(0);
+        } else {
+          alert(result.count + ' automations imported (paused). Clones can be set up later by editing each automation.');
+        }
+      } else {
+        alert(result.count + ' automations imported (paused).');
+      }
+    });
   });
 });
 

@@ -1623,12 +1623,67 @@ ipcMain.handle('automations:exportOne', (event, automationId) => {
   return { path: result, count: 1 };
 });
 
-ipcMain.handle('automations:import', (event, projectPath) => {
+ipcMain.handle('automations:previewImport', (event) => {
   const result = dialog.showOpenDialogSync(mainWindow, {
-    title: 'Import Automations',
+    title: 'Select Automations File',
     filters: [{ name: 'JSON', extensions: ['json'] }],
     properties: ['openFile']
   });
+  if (!result || result.length === 0) return { cancelled: true };
+  try {
+    const raw = JSON.parse(fs.readFileSync(result[0], 'utf8'));
+    let automations = raw.automations || [];
+    if (automations.length === 0 && raw.loops) {
+      automations = raw.loops.map(l => ({ name: l.name, agents: [{ name: l.name }] }));
+    }
+    if (automations.length === 0 && raw.name && raw.agents) automations = [raw];
+    if (automations.length === 0 && raw.name && raw.prompt) automations = [{ name: raw.name, agents: [{ name: raw.name }] }];
+    if (automations.length === 0) return { error: 'No automations found in file' };
+
+    const summary = automations.map(a => {
+      const agentNames = (a.agents || []).map(ag => ag.name || 'unnamed');
+      const hasManager = a.manager && a.manager.enabled;
+      const isolatedCount = (a.agents || []).filter(ag => ag.isolation && ag.isolation.enabled).length;
+      const managerIsolated = hasManager && a.manager.isolation && a.manager.isolation.enabled;
+      return {
+        name: a.name,
+        agentCount: agentNames.length,
+        agentNames: agentNames,
+        hasManager: hasManager,
+        isolatedCount: isolatedCount + (managerIsolated ? 1 : 0),
+        hasChaining: (a.agents || []).some(ag => ag.runMode === 'run_after')
+      };
+    });
+
+    const totalAgents = summary.reduce((s, a) => s + a.agentCount, 0);
+    const totalManagers = summary.filter(a => a.hasManager).length;
+    const totalIsolated = summary.reduce((s, a) => s + a.isolatedCount, 0);
+
+    return {
+      filePath: result[0],
+      automationCount: automations.length,
+      totalAgents: totalAgents,
+      totalManagers: totalManagers,
+      totalIsolated: totalIsolated,
+      automations: summary
+    };
+  } catch (err) {
+    return { error: 'Failed to parse file: ' + err.message };
+  }
+});
+
+ipcMain.handle('automations:import', (event, projectPath, filePath) => {
+  let result;
+  if (filePath) {
+    // Use provided file path (from preview flow)
+    result = [filePath];
+  } else {
+    result = dialog.showOpenDialogSync(mainWindow, {
+      title: 'Import Automations',
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+      properties: ['openFile']
+    });
+  }
   if (!result || result.length === 0) return { cancelled: true };
   try {
     const raw = JSON.parse(fs.readFileSync(result[0], 'utf8'));
@@ -1662,6 +1717,7 @@ ipcMain.handle('automations:import', (event, projectPath) => {
 
     const data = readAutomations();
     let count = 0;
+    const importedIds = [];
 
     automations.forEach(imported => {
       const automationId = generateAutomationId();
@@ -1725,6 +1781,9 @@ ipcMain.handle('automations:import', (event, projectPath) => {
         });
       }
 
+      const hasIsolation = agents.some(ag => ag.isolation && ag.isolation.enabled) ||
+        (managerConfig.enabled && managerConfig.isolation && managerConfig.isolation.enabled);
+
       data.automations.push({
         id: automationId,
         name: imported.name,
@@ -1734,11 +1793,12 @@ ipcMain.handle('automations:import', (event, projectPath) => {
         enabled: false,
         createdAt: new Date().toISOString()
       });
+      importedIds.push({ id: automationId, name: imported.name, needsClone: hasIsolation });
       count++;
     });
 
     writeAutomations(data);
-    return { count };
+    return { count, importedIds };
   } catch (err) {
     return { error: 'Failed to import: ' + err.message };
   }
