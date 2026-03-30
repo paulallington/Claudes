@@ -435,6 +435,31 @@ function saveColumnCounts() {
   saveConfig();
 }
 
+function updateProjectBadges() {
+  var items = document.querySelectorAll('.project-item');
+  config.projects.forEach(function (project, index) {
+    if (index >= items.length) return;
+    var item = items[index];
+    var rightSide = item.querySelector('.project-right');
+    if (!rightSide) return;
+    var existingBadge = rightSide.querySelector('.project-badge');
+    var state = projectStates.get(project.path);
+    var count = state ? state.columns.size : 0;
+    if (count > 0 && !existingBadge) {
+      var badge = document.createElement('span');
+      badge.className = 'project-badge';
+      var icon = document.createElement('img');
+      icon.className = 'claude-icon';
+      icon.src = './claude-small.png';
+      icon.alt = '';
+      badge.appendChild(icon);
+      rightSide.insertBefore(badge, rightSide.firstChild);
+    } else if (count === 0 && existingBadge) {
+      existingBadge.remove();
+    }
+  });
+}
+
 // Find which row a column belongs to
 function findRowForColumn(state, columnId) {
   for (var i = 0; i < state.rows.length; i++) {
@@ -1224,7 +1249,7 @@ function addColumn(args, targetRow, opts) {
   setFocusedColumn(id);
   refitAll();
   saveColumnCounts();
-  renderProjectList();
+  updateProjectBadges();
 
   // Auto-fetch title from session if resuming without a saved title
   if (resumeSessionId && !opts.title && !cmd) {
@@ -1410,7 +1435,7 @@ function addDiffColumn(diffData, opts) {
 
   setFocusedColumn(id);
   saveColumnCounts();
-  renderProjectList();
+  updateProjectBadges();
 }
 
 function loadWorkingDiff(diffBody, colData) {
@@ -1897,7 +1922,7 @@ function removeColumn(id) {
   refitAll();
   saveColumnCounts();
   persistSessions(col.projectKey);
-  renderProjectList();
+  updateProjectBadges();
   updateSidebarActivity();
 }
 
