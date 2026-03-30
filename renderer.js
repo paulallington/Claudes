@@ -832,6 +832,9 @@ function removeProject(index) {
     projectStates.delete(key);
   }
 
+  // Clean up automations for this project
+  window.electronAPI.deleteAllAutomations(key);
+
   config.projects.splice(index, 1);
 
   if (config.activeProjectIndex === index) {
