@@ -6291,6 +6291,7 @@ document.getElementById('automation-detail-run-select').addEventListener('change
 // ============================================================
 
 var automationEditingId = null;
+var automationEditingData = null; // Store the existing automation for preserving clone paths
 var modalAgents = []; // Tracks agent data for the modal
 var activeCloneAutomationId = null;
 
@@ -6354,6 +6355,7 @@ function updateRunAfterChipStates() {
 
 function openAutomationModal(existingAutomation) {
   automationEditingId = existingAutomation ? existingAutomation.id : null;
+  automationEditingData = existingAutomation || null;
   var title = existingAutomation ? 'Edit Automation' : 'New Automation';
   document.getElementById('automation-modal-title').textContent = title;
   document.getElementById('btn-automation-save').textContent = existingAutomation ? 'Save Changes' : 'Create Automation';
@@ -6409,6 +6411,7 @@ function closeAutomationModal() {
   document.getElementById('btn-automation-save').disabled = false;
   document.getElementById('btn-automation-save').onclick = null;
   automationEditingId = null;
+  automationEditingData = null;
   modalAgents = [];
   activeCloneAutomationId = null;
 }
@@ -6881,9 +6884,12 @@ function saveAutomation() {
     }
   }
 
-  var hasIsolated = modalAgents.some(function (ag) { return ag.isolation && ag.isolation.enabled; });
-  var hasManagerIsolation = managerConfig && managerConfig.isolation && managerConfig.isolation.enabled;
-  var needsCloneSetup = hasIsolated || hasManagerIsolation;
+  // Only trigger clone setup for NEW isolation — agents/managers that need isolation but don't have a clonePath yet
+  var needsNewClone = modalAgents.some(function (ag) {
+    return ag.isolation && ag.isolation.enabled && !ag.isolation.clonePath;
+  });
+  var needsManagerClone = managerConfig && managerConfig.isolation && managerConfig.isolation.enabled && !managerConfig.isolation.clonePath;
+  var needsCloneSetup = needsNewClone || needsManagerClone;
 
   var agents = modalAgents.map(function (ag) {
     var clean = Object.assign({}, ag);
@@ -6903,7 +6909,7 @@ function saveAutomation() {
       dbConnectionString: document.getElementById('automation-manager-db').value.trim() || null,
       dbReadOnly: document.getElementById('automation-manager-db-readonly').checked,
       maxRetries: parseInt(document.getElementById('automation-manager-retries').value) || 1,
-      isolation: { enabled: document.getElementById('automation-manager-isolation').checked, clonePath: null },
+      isolation: { enabled: document.getElementById('automation-manager-isolation').checked, clonePath: (automationEditingData && automationEditingData.manager && automationEditingData.manager.isolation ? automationEditingData.manager.isolation.clonePath : null) },
       lastRunAt: null,
       lastRunStatus: null,
       lastSummary: null,
