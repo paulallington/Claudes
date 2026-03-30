@@ -4679,6 +4679,27 @@ html, body {
   flex-shrink: 0;
 }
 
+.import-progress-log {
+  background: var(--bg-main);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 10px;
+  max-height: 120px;
+  overflow-y: auto;
+  margin-top: 8px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.import-progress-subtitle {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-top: 4px;
+}
+
 .import-progress-footer {
   margin-top: 12px;
   text-align: center;

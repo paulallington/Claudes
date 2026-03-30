@@ -51,6 +51,7 @@ var projectDragFromIndex = -1; // For sidebar drag-to-reorder
 // Automations state
 var automationsForProject = [];
 var allAutomationsData = null;
+var importInProgress = false;
 
 var darkTermTheme = {
   background: '#1a1a2e',
@@ -2499,6 +2500,12 @@ document.querySelectorAll('.explorer-tab').forEach(function (tab) {
   panel.addEventListener('mousedown', function (e) {
     var tag = e.target.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    // Allow drag on draggable elements (project reorder)
+    var el = e.target;
+    while (el && el !== panel) {
+      if (el.getAttribute && el.getAttribute('draggable') === 'true') return;
+      el = el.parentElement;
+    }
     e.preventDefault();
   });
 });
@@ -5569,6 +5576,7 @@ function escapeHtml(str) {
 // ============================================================
 
 function refreshAutomations() {
+  if (importInProgress) return; // Don't overwrite import progress panel
   var listEl = document.getElementById('automations-list');
   var noProjectEl = document.getElementById('automations-no-project');
   var searchBar = document.getElementById('automations-search-bar');
@@ -7081,6 +7089,7 @@ document.getElementById('btn-import-automations').addEventListener('click', func
 });
 
 function showImportPreview(preview) {
+  importInProgress = true;
   var listEl = document.getElementById('automations-list');
   var searchBar = document.getElementById('automations-search-bar');
   var noProject = document.getElementById('automations-no-project');
@@ -7132,6 +7141,7 @@ function showImportPreview(preview) {
 
   // Cancel — go back to normal list
   panel.querySelector('.import-cancel-btn').addEventListener('click', function () {
+    importInProgress = false;
     refreshAutomations();
   });
 
@@ -7170,6 +7180,7 @@ function showImportPreview(preview) {
 }
 
 function showImportProgress(importResult, needsClone) {
+  importInProgress = true;
   var listEl = document.getElementById('automations-list');
   listEl.innerHTML = '';
 
@@ -7177,14 +7188,16 @@ function showImportProgress(importResult, needsClone) {
   panel.className = 'import-progress-panel';
   panel.innerHTML = '<div class="import-progress-header">' +
     '<strong>Imported ' + importResult.count + ' automations (paused)</strong>' +
-    '<div style="font-size:11px;opacity:0.6;margin-top:4px;">Setting up ' + needsClone.length + ' repo clone(s)...</div>' +
+    '<div class="import-progress-subtitle">Setting up ' + needsClone.length + ' repo clone(s)...</div>' +
     '</div>' +
     '<div class="import-progress-list"></div>' +
+    '<pre class="import-progress-log"></pre>' +
     '<div class="import-progress-footer" style="display:none;">' +
     '<button class="automation-detail-run-all import-progress-done">Done</button>' +
     '</div>';
 
   var progressList = panel.querySelector('.import-progress-list');
+  var logEl = panel.querySelector('.import-progress-log');
 
   // Build rows for ALL imported automations
   importResult.importedIds.forEach(function (auto) {
@@ -7201,13 +7214,24 @@ function showImportProgress(importResult, needsClone) {
 
   listEl.appendChild(panel);
 
+  // Listen for clone progress events and show in the log
+  var importCloneHandler = function (data) {
+    if (logEl) {
+      logEl.textContent += data.line;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  };
+  window.electronAPI.onCloneProgress(importCloneHandler);
+
   // Process clones sequentially
   var cloneNext = function (idx) {
     if (idx >= needsClone.length) {
       // All done
-      panel.querySelector('.import-progress-header div').textContent = 'All clones complete. Automations are paused — enable them when ready.';
+      importInProgress = false;
+      panel.querySelector('.import-progress-subtitle').textContent = 'All clones complete. Automations are paused — enable them when ready.';
       panel.querySelector('.import-progress-footer').style.display = '';
       panel.querySelector('.import-progress-done').addEventListener('click', function () {
+        importInProgress = false;
         refreshAutomations();
       });
       return;
@@ -7220,6 +7244,8 @@ function showImportProgress(importResult, needsClone) {
       row.querySelector('.import-progress-icon').style.color = '#3b82f6';
       row.querySelector('.import-progress-status').textContent = 'Cloning...';
     }
+    // Show which automation is being cloned in the log
+    if (logEl) logEl.textContent += '\n--- Cloning: ' + auto.name + ' ---\n';
 
     window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
       var automation = automations.find(function (a) { return a.id === auto.id; });
@@ -7243,7 +7269,7 @@ function showImportProgress(importResult, needsClone) {
               if (row) {
                 row.querySelector('.import-progress-icon').innerHTML = result && result.error ? '&#10007;' : '&#10003;';
                 row.querySelector('.import-progress-icon').style.color = result && result.error ? '#ef4444' : '#22c55e';
-                row.querySelector('.import-progress-status').textContent = result && result.error ? 'Clone error' : 'Ready';
+                row.querySelector('.import-progress-status').textContent = result && result.error ? 'Error: ' + result.error : 'Ready';
               }
               cloneNext(idx + 1);
             });
@@ -7258,8 +7284,11 @@ function showImportProgress(importResult, needsClone) {
           return;
         }
         updateRowStatus();
-        window.electronAPI.setupAgentClone(auto.id, isolatedAgents[agIdx].id).then(function () {
+        window.electronAPI.setupAgentClone(auto.id, isolatedAgents[agIdx].id).then(function (result) {
           stepsDone++;
+          if (result && result.error && row) {
+            row.querySelector('.import-progress-status').textContent = 'Error: ' + result.error;
+          }
           cloneAgentStep(agIdx + 1);
         });
       };
