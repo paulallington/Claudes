@@ -4473,6 +4473,85 @@ html, body {
 .automation-detail-run-all:hover { border-color: #22c55e; color: #22c55e; }
 .automation-detail-pause-all:hover { border-color: #f59e0b; color: #f59e0b; }
 
+/* Manager Section (Modal) */
+.automation-manager-section {
+  border-top: 1px solid var(--border-primary);
+  padding-top: 12px;
+  margin-top: 8px;
+}
+
+.automation-manager-header {
+  margin-bottom: 8px;
+}
+
+.automation-manager-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.automation-manager-row {
+  display: flex;
+  gap: 16px;
+}
+
+.automation-manager-row > div {
+  flex: 1;
+}
+
+.automation-manager-row select,
+.automation-manager-row input[type="number"] {
+  background: var(--bg-main);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  width: 100%;
+}
+
+/* Manager Status Button (Detail View) */
+.automation-detail-manager-btn {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  margin-left: auto;
+}
+
+.automation-detail-manager-btn.needs-you {
+  border-color: #f59e0b;
+  color: #f59e0b;
+  animation: manager-pulse 1.5s infinite;
+}
+
+.automation-detail-manager-btn.running {
+  border-color: #3b82f6;
+  color: #3b82f6;
+  animation: manager-pulse 1.5s infinite;
+}
+
+.automation-detail-manager-btn.resolved {
+  border-color: #22c55e;
+  color: #22c55e;
+}
+
+.automation-detail-manager-btn.acted {
+  border-color: #8b5cf6;
+  color: #8b5cf6;
+}
+
+.automation-detail-manager-btn:hover {
+  background: rgba(255,255,255,0.1);
+}
+
+@keyframes manager-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 /* Settings - Agent repos dir */
 .settings-field {
   margin-bottom: 12px;
