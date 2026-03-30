@@ -5690,6 +5690,7 @@ var activeAutomationDetailId = null;
 var activeDetailAutomation = null;
 var activeAgentDetailId = null;
 var agentDetailViewingLive = false;
+var viewingAgentInPipeline = false;
 
 function openAutomationDetail(automation) {
   activeAutomationDetailId = automation.id;
@@ -5709,6 +5710,9 @@ function openAutomationDetail(automation) {
 }
 
 function renderSimpleDetail(automation, agent) {
+  var outputHeader = document.querySelector('.automation-detail-output-header');
+  if (outputHeader) outputHeader.style.display = '';
+
   document.getElementById('automation-detail-name').textContent = agent.name;
   var badge = document.getElementById('automation-detail-status-badge');
   badge.className = 'automation-status-badge';
@@ -5768,6 +5772,10 @@ function renderMultiAgentDetail(automation) {
   // Reset agent-level state so live output events don't corrupt the pipeline view
   activeAgentDetailId = null;
   agentDetailViewingLive = false;
+  viewingAgentInPipeline = false;
+
+  var outputHeader = document.querySelector('.automation-detail-output-header');
+  if (outputHeader) outputHeader.style.display = 'none';
 
   document.getElementById('automation-detail-name').textContent = automation.name;
   var badge = document.getElementById('automation-detail-status-badge');
@@ -5830,17 +5838,41 @@ function renderMultiAgentDetail(automation) {
       '<div class="pipeline-agent-meta">' + schedText + (agent.isolation && agent.isolation.enabled ? ' \u00b7 Isolated' : '') + '</div>' +
       (agent.lastSummary ? '<div class="pipeline-agent-summary">' + escapeHtml(agent.lastSummary) + '</div>' : '') +
       '<div class="pipeline-agent-actions">' +
+        '<button class="pipeline-btn-run" title="Run agent">&#9655;</button>' +
         '<button class="pipeline-btn-view-output" title="View Output">Output</button>' +
+        '<button class="pipeline-btn-open-claude" title="Open in Claude">&#8599;</button>' +
         '<button class="pipeline-btn-history" title="History">History</button>' +
         recloneHtml +
       '</div>';
 
+    row.querySelector('.pipeline-btn-run').addEventListener('click', function () {
+      window.electronAPI.runAgentNow(automation.id, agent.id);
+    });
     row.querySelector('.pipeline-btn-view-output').addEventListener('click', function () {
+      viewingAgentInPipeline = true;
       activeAgentDetailId = agent.id;
       document.getElementById('automation-detail-run-select').style.display = '';
       renderSimpleDetail(automation, agent);
     });
+    row.querySelector('.pipeline-btn-open-claude').addEventListener('click', function () {
+      var agentName = agent.name || 'Agent';
+      var output = agent.lastSummary || '';
+      if (agent.lastAttentionItems && agent.lastAttentionItems.length > 0) {
+        output += '\nAttention items: ' + agent.lastAttentionItems.map(function (i) { return i.summary; }).join('; ');
+      }
+      if (!output) {
+        alert('No output to continue with.');
+        return;
+      }
+      var context = 'You are continuing work from a background agent called "' + agentName + '". ' +
+        'Below is the output from the most recent run. The user wants to discuss, investigate, or action these findings.\n\n' +
+        '--- AGENT OUTPUT ---\n' + output + '\n--- END AGENT OUTPUT ---';
+      var spawnArgs = buildSpawnArgs();
+      spawnArgs.push('--append-system-prompt', context);
+      addColumn(spawnArgs, null, { title: agentName });
+    });
     row.querySelector('.pipeline-btn-history').addEventListener('click', function () {
+      viewingAgentInPipeline = true;
       activeAgentDetailId = agent.id;
       document.getElementById('automation-detail-run-select').style.display = '';
       renderSimpleDetail(automation, agent);
@@ -5904,12 +5936,31 @@ function closeAutomationDetail() {
   activeDetailAutomation = null;
   activeAgentDetailId = null;
   agentDetailViewingLive = false;
+  viewingAgentInPipeline = false;
   document.getElementById('automation-detail-panel').style.display = 'none';
   document.getElementById('automations-list').style.display = '';
   document.getElementById('automation-detail-run-select').style.display = '';
+  var outputHeader = document.querySelector('.automation-detail-output-header');
+  if (outputHeader) outputHeader.style.display = '';
 }
 
-document.getElementById('btn-automation-detail-back').addEventListener('click', closeAutomationDetail);
+document.getElementById('btn-automation-detail-back').addEventListener('click', function () {
+  if (viewingAgentInPipeline && activeDetailAutomation && activeDetailAutomation.agents.length > 1) {
+    viewingAgentInPipeline = false;
+    // Re-fetch fresh data and show pipeline
+    window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
+      var auto = automations.find(function (a) { return a.id === activeAutomationDetailId; });
+      if (auto) {
+        activeDetailAutomation = auto;
+        renderMultiAgentDetail(auto);
+      } else {
+        closeAutomationDetail();
+      }
+    });
+  } else {
+    closeAutomationDetail();
+  }
+});
 
 document.getElementById('automation-detail-run-select').addEventListener('change', function () {
   if (this.value === 'live') {
@@ -6095,6 +6146,10 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
       '<label class="automation-permission-option" style="margin-top:6px;">' +
         '<input type="checkbox" class="agent-run-on-failure"' + (agent && agent.runOnUpstreamFailure ? ' checked' : '') + '>' +
         '<span>Run even if upstream fails <span class="automation-permission-hint">(skip if unchecked)</span></span>' +
+      '</label>' +
+      '<label class="automation-permission-option" style="margin-top:6px;">' +
+        '<input type="checkbox" class="agent-pass-context"' + (agent && agent.passUpstreamContext ? ' checked' : '') + '>' +
+        '<span>Pass upstream output as context <span class="automation-permission-hint">(prepend summary to prompt)</span></span>' +
       '</label>' +
       '</div>';
   }
@@ -6404,6 +6459,9 @@ function syncAgentFromCard(card, agentIndex) {
 
   var runOnFailureEl = card.querySelector('.agent-run-on-failure');
   if (runOnFailureEl) agent.runOnUpstreamFailure = runOnFailureEl.checked;
+
+  var passContextEl = card.querySelector('.agent-pass-context');
+  if (passContextEl) agent.passUpstreamContext = passContextEl.checked;
 
   var isoCheckbox = card.querySelector('.agent-isolation-checkbox');
   if (isoCheckbox) {

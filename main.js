@@ -154,6 +154,7 @@ function migrateLoopsToAutomations() {
       runMode: 'independent',
       runAfter: [],
       runOnUpstreamFailure: false,
+      passUpstreamContext: false,
       isolation: { enabled: false, clonePath: null },
       enabled: loop.enabled !== undefined ? loop.enabled : true,
       skipPermissions: loop.skipPermissions || false,
@@ -1172,6 +1173,7 @@ ipcMain.handle('automations:create', (event, config) => {
       runMode: 'independent',
       runAfter: [],
       runOnUpstreamFailure: false,
+      passUpstreamContext: false,
       isolation: { enabled: false, clonePath: null },
       enabled: true,
       skipPermissions: false,
@@ -1227,7 +1229,7 @@ ipcMain.handle('automations:updateAgent', (event, automationId, agentId, updates
   const agent = automation.agents.find(ag => ag.id === agentId);
   if (!agent) return null;
   const safeFields = ['name', 'prompt', 'schedule', 'runMode', 'runAfter', 'runOnUpstreamFailure',
-    'isolation', 'enabled', 'skipPermissions', 'firstStartOnly', 'dbConnectionString', 'dbReadOnly'];
+    'passUpstreamContext', 'isolation', 'enabled', 'skipPermissions', 'firstStartOnly', 'dbConnectionString', 'dbReadOnly'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) agent[field] = updates[field];
   });
@@ -1244,6 +1246,7 @@ ipcMain.handle('automations:addAgent', (event, automationId, agentConfig) => {
     runMode: 'independent',
     runAfter: [],
     runOnUpstreamFailure: false,
+    passUpstreamContext: false,
     isolation: { enabled: false, clonePath: null },
     enabled: true,
     skipPermissions: false,
@@ -1602,6 +1605,7 @@ ipcMain.handle('automations:import', (event, projectPath) => {
           runMode: 'independent',
           runAfter: [],
           runOnUpstreamFailure: false,
+          passUpstreamContext: false,
           isolation: { enabled: false, clonePath: null },
           enabled: true,
           skipPermissions: false,
@@ -1855,7 +1859,26 @@ async function runAgent(automationId, agentId) {
   if (agent.dbConnectionString && agent.dbReadOnly !== false) {
     promptPrefix = 'CRITICAL CONSTRAINT: This agent has READ-ONLY database access. You MUST NOT attempt to write, update, insert, delete, drop, rename, or modify any data in the database. This includes using $merge, $out, or any write stages in aggregation pipelines. Do NOT attempt to bypass this restriction by using shell commands (mongosh, mongo, etc.) or any other method. If the task requires writing to the database, report it as an attention item explaining what write would be needed, but do not perform it.\n\n';
   }
-  const fullPrompt = promptPrefix + agent.prompt + AGENT_PROMPT_SUFFIX;
+  let fullPrompt = promptPrefix + agent.prompt + AGENT_PROMPT_SUFFIX;
+
+  // If passUpstreamContext is enabled, prepend upstream agents' summaries
+  if (agent.passUpstreamContext && agent.runMode === 'run_after' && agent.runAfter && agent.runAfter.length > 0) {
+    const upstreamParts = [];
+    agent.runAfter.forEach(upstreamId => {
+      const upstreamAgent = automation.agents.find(ag => ag.id === upstreamId);
+      if (upstreamAgent) {
+        let info = '';
+        if (upstreamAgent.lastSummary) info = upstreamAgent.lastSummary;
+        if (upstreamAgent.lastAttentionItems && upstreamAgent.lastAttentionItems.length > 0) {
+          info += '\nAttention items: ' + upstreamAgent.lastAttentionItems.map(i => i.summary).join('; ');
+        }
+        if (info) upstreamParts.push('--- Output from "' + upstreamAgent.name + '" ---\n' + info);
+      }
+    });
+    if (upstreamParts.length > 0) {
+      fullPrompt = 'CONTEXT FROM UPSTREAM AGENTS:\n' + upstreamParts.join('\n\n') + '\n\n---\n\nYOUR TASK:\n' + fullPrompt;
+    }
+  }
 
   const args = ['--print', fullPrompt, '--output-format', 'stream-json', '--verbose'];
   if (agent.skipPermissions) args.push('--dangerously-skip-permissions');
