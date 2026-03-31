@@ -815,11 +815,13 @@ function addProject(folderPath) {
   config.projects.push({ name: name, path: folderPath, columnCount: 1 });
   var newIndex = config.projects.length - 1;
   saveConfig();
+  renderProjectList();
   setActiveProject(newIndex, false);
 }
 
 function removeProject(index) {
   var project = config.projects[index];
+  if (!confirm('Remove project "' + project.name + '"? This will also delete its automations.')) return;
   var key = project.path;
 
   var state = projectStates.get(key);
