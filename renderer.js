@@ -5751,7 +5751,7 @@ function renderAutomationCards(automations, container) {
       var toggleIcon = automation.enabled ? '&#10074;&#10074;' : '&#9654;';
       var actionsHtml = '<span class="automation-card-actions">' +
         '<button class="automation-btn-toggle" title="' + (automation.enabled ? 'Pause' : 'Enable') + '">' + toggleIcon + '</button>';
-      if (!agent.currentRunStartedAt) actionsHtml += '<button class="automation-btn-run" title="Run Now">&#9655;</button>';
+      if (!agent.currentRunStartedAt && automation.enabled) actionsHtml += '<button class="automation-btn-run" title="Run Now">&#9655;</button>';
       actionsHtml += '<button class="automation-btn-export" title="Export">&#8613;</button>' +
         '<button class="automation-btn-edit" title="Edit">&#9998;</button>' +
         '<button class="automation-btn-delete" title="Delete">&times;</button></span>';
@@ -5784,7 +5784,7 @@ function renderAutomationCards(automations, container) {
       var toggleIcon2 = automation.enabled ? '&#10074;&#10074;' : '&#9654;';
       var actionsHtml2 = '<span class="automation-card-actions">' +
         '<button class="automation-btn-toggle" title="' + (automation.enabled ? 'Pause' : 'Enable') + '">' + toggleIcon2 + '</button>' +
-        '<button class="automation-btn-run" title="Run All">&#9655;</button>' +
+        (automation.enabled ? '<button class="automation-btn-run" title="Run All">&#9655;</button>' : '') +
         '<button class="automation-btn-export" title="Export">&#8613;</button>' +
         '<button class="automation-btn-edit" title="Edit">&#9998;</button>' +
         '<button class="automation-btn-delete" title="Delete">&times;</button></span>';
