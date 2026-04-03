@@ -1367,6 +1367,21 @@ ipcMain.handle('automations:toggleAgent', (event, automationId, agentId) => {
   return agent;
 });
 
+ipcMain.handle('automations:setAllEnabled', (event, projectPath, enabled) => {
+  const data = readAutomations();
+  const normalized = projectPath.replace(/\\/g, '/');
+  let count = 0;
+  data.automations.forEach(a => {
+    if (a.projectPath.replace(/\\/g, '/') === normalized) {
+      a.enabled = enabled;
+      if (enabled) a.agents.forEach(ag => { ag.lastError = null; });
+      count++;
+    }
+  });
+  writeAutomations(data);
+  return { count };
+});
+
 ipcMain.handle('automations:toggleGlobal', () => {
   const data = readAutomations();
   data.globalEnabled = !data.globalEnabled;

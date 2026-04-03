@@ -5619,6 +5619,8 @@ function refreshAutomations() {
     listEl.innerHTML = '';
     if (noProjectEl) noProjectEl.style.display = '';
     if (searchBar) searchBar.style.display = 'none';
+    document.getElementById('btn-pause-all-automations').style.display = 'none';
+    document.getElementById('btn-resume-all-automations').style.display = 'none';
     return;
   }
   if (noProjectEl) noProjectEl.style.display = 'none';
@@ -5626,6 +5628,19 @@ function refreshAutomations() {
   window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
     automationsForProject = automations;
     if (searchBar) searchBar.style.display = automations.length > 0 ? '' : 'none';
+
+    var pauseBtn = document.getElementById('btn-pause-all-automations');
+    var resumeBtn = document.getElementById('btn-resume-all-automations');
+    if (automations.length === 0) {
+      pauseBtn.style.display = 'none';
+      resumeBtn.style.display = 'none';
+    } else {
+      var allDisabled = automations.every(function (a) { return !a.enabled; });
+      var anyDisabled = automations.some(function (a) { return !a.enabled; });
+      pauseBtn.style.display = allDisabled ? 'none' : '';
+      resumeBtn.style.display = anyDisabled ? '' : 'none';
+    }
+
     var query = document.getElementById('automations-search-input').value.toLowerCase().trim();
     if (query) {
       automations = automations.filter(function (a) {
@@ -7170,6 +7185,18 @@ document.getElementById('automation-manager-enabled').addEventListener('change',
   document.getElementById(id).addEventListener('keydown', function (e) { e.stopPropagation(); });
 });
 document.getElementById('btn-refresh-automations').addEventListener('click', refreshAutomations);
+
+document.getElementById('btn-pause-all-automations').addEventListener('click', function () {
+  if (!activeProjectKey) { alert('Select a project first.'); return; }
+  if (automationsForProject.length === 0) return;
+  window.electronAPI.setAllAutomationsEnabled(activeProjectKey, false).then(function () { refreshAutomations(); });
+});
+
+document.getElementById('btn-resume-all-automations').addEventListener('click', function () {
+  if (!activeProjectKey) { alert('Select a project first.'); return; }
+  if (automationsForProject.length === 0) return;
+  window.electronAPI.setAllAutomationsEnabled(activeProjectKey, true).then(function () { refreshAutomations(); });
+});
 
 document.getElementById('btn-export-automations').addEventListener('click', function () {
   if (!activeProjectKey) { alert('Select a project first.'); return; }

@@ -77,6 +77,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   removeAgent: (automationId, agentId) => ipcRenderer.invoke('automations:removeAgent', automationId, agentId),
   toggleAutomation: (automationId) => ipcRenderer.invoke('automations:toggle', automationId),
   toggleAgent: (automationId, agentId) => ipcRenderer.invoke('automations:toggleAgent', automationId, agentId),
+  setAllAutomationsEnabled: (projectPath, enabled) => ipcRenderer.invoke('automations:setAllEnabled', projectPath, enabled),
   toggleAutomationsGlobal: () => ipcRenderer.invoke('automations:toggleGlobal'),
   runAgentNow: (automationId, agentId) => ipcRenderer.invoke('automations:runAgentNow', automationId, agentId),
   runAutomationNow: (automationId) => ipcRenderer.invoke('automations:runAutomationNow', automationId),
