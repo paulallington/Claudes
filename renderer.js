@@ -312,12 +312,11 @@ function updateSidebarActivity() {
   });
 
   // Apply activity class to existing project badges
-  var items = projectListEl.querySelectorAll('.project-item');
-  config.projects.forEach(function (project, index) {
-    var item = items[index];
+  config.projects.forEach(function (project) {
+    var key = project.path;
+    var item = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(key) + '"]');
     if (!item) return;
 
-    var key = project.path;
     var attention = attentionByProject[key] || 0;
     var working = workingByProject[key] || 0;
 
@@ -399,12 +398,8 @@ function notifyAttentionNeeded(columnId) {
   if (notifSettings.sidebar) {
     projectsNeedingAttention.add(col.projectKey);
     // Apply to current DOM
-    var items = projectListEl.querySelectorAll('.project-item');
-    config.projects.forEach(function (project, index) {
-      if (project.path === col.projectKey && items[index]) {
-        items[index].classList.add('attention-flash');
-      }
-    });
+    var item = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(col.projectKey) + '"]');
+    if (item) item.classList.add('attention-flash');
   }
 }
 
@@ -581,6 +576,7 @@ function loadProjects() {
     }
     syncPanelToggleStates();
     loadNotifSettings();
+    updateSortButton();
     renderProjectList();
     if (config.activeProjectIndex >= 0 && config.projects[config.activeProjectIndex]) {
       setActiveProject(config.activeProjectIndex, true);
@@ -619,8 +615,10 @@ function buildProjectItem(project, index) {
 
   var item = document.createElement('div');
   item.className = 'project-item';
+  item.dataset.projectPath = key;
   if (index === config.activeProjectIndex) item.className += ' active';
   if (projectsNeedingAttention.has(key)) item.className += ' attention-flash';
+  if (project.pinned) item.className += ' is-pinned';
 
   var info = document.createElement('div');
   info.style.overflow = 'hidden';
@@ -664,6 +662,16 @@ function buildProjectItem(project, index) {
     rightSide.appendChild(badge);
   }
 
+  var pinBtn = document.createElement('span');
+  pinBtn.className = 'project-pin';
+  pinBtn.textContent = '\u272F'; // ✯ sparkle star — matches pinned accent colour
+  pinBtn.title = project.pinned ? 'Unpin' : 'Pin to top';
+  pinBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    togglePinProject(index);
+  });
+  rightSide.appendChild(pinBtn);
+
   var removeBtn = document.createElement('span');
   removeBtn.className = 'project-remove';
   removeBtn.textContent = '\u00d7';
@@ -682,7 +690,8 @@ function buildProjectItem(project, index) {
     setActiveProject(index, false);
   });
 
-  item.setAttribute('draggable', 'true');
+  var sortMode = config.projectSortMode || 'manual';
+  if (sortMode === 'manual') item.setAttribute('draggable', 'true');
   item.addEventListener('dragstart', function (e) {
     projectDragFromIndex = index;
     e.dataTransfer.effectAllowed = 'move';
@@ -748,6 +757,7 @@ function buildProjectItem(project, index) {
       mi.textContent = label;
       menu.appendChild(mi);
     }
+    addMenuItem(project.pinned ? 'Unpin' : 'Pin to top', 'toggle-pin');
     addMenuItem(isHidden ? 'Show Project' : 'Hide Project', 'toggle-hide');
     if (inGroup) {
       addMenuItem('Remove from "' + groupKey + '" group', 'ungroup');
@@ -761,7 +771,9 @@ function buildProjectItem(project, index) {
 
     menu.onclick = function (ev) {
       var action = ev.target.dataset.action;
-      if (action === 'toggle-hide') {
+      if (action === 'toggle-pin') {
+        togglePinProject(projIndex);
+      } else if (action === 'toggle-hide') {
         config.projects[projIndex].hidden = !config.projects[projIndex].hidden;
         window.electronAPI.saveProjects(config);
         renderProjectList();
@@ -791,33 +803,37 @@ function buildProjectItem(project, index) {
   return item;
 }
 
-function renderProjectList() {
-  while (projectListEl.firstChild) {
-    projectListEl.removeChild(projectListEl.firstChild);
-  }
-
-  if (!config.collapsedGroups) config.collapsedGroups = {};
-  var groupCounts = computeProjectGroups();
+function renderProjectEntries(entries, parent, sectionSuffix) {
+  var groupCounts = Object.create(null);
+  entries.forEach(function (e) {
+    var k = projectGroupKey(e.project);
+    if (k) groupCounts[k] = (groupCounts[k] || 0) + 1;
+  });
   var renderedGroups = Object.create(null);
   var groupContainers = Object.create(null);
+  var collapseKeyOf = function (k) { return sectionSuffix ? k + sectionSuffix : k; };
 
-  config.projects.forEach(function (project, index) {
+  entries.forEach(function (entry) {
+    var project = entry.project;
+    var index = entry.index;
     var groupKey = projectGroupKey(project);
     var inGroup = groupKey && groupCounts[groupKey] >= 2;
 
     if (inGroup && !renderedGroups[groupKey]) {
       renderedGroups[groupKey] = true;
       var hasActiveChild = false;
-      config.projects.forEach(function (p, i) {
-        if (projectGroupKey(p) === groupKey && i === config.activeProjectIndex) {
+      entries.forEach(function (e2) {
+        if (projectGroupKey(e2.project) === groupKey && e2.index === config.activeProjectIndex) {
           hasActiveChild = true;
         }
       });
-      var collapsed = !!config.collapsedGroups[groupKey] && !hasActiveChild;
+      var collapseKey = collapseKeyOf(groupKey);
+      var collapsed = !!config.collapsedGroups[collapseKey] && !hasActiveChild;
 
       var header = document.createElement('div');
       header.className = 'project-group-header';
       if (collapsed) header.className += ' collapsed';
+      if (sectionSuffix === '::pinned') header.className += ' pinned-group';
 
       var chev = document.createElement('span');
       chev.className = 'project-group-chevron';
@@ -835,17 +851,25 @@ function renderProjectList() {
       header.appendChild(countEl);
 
       header.addEventListener('click', function () {
-        config.collapsedGroups[groupKey] = !config.collapsedGroups[groupKey];
+        config.collapsedGroups[collapseKey] = !config.collapsedGroups[collapseKey];
         saveConfig();
         renderProjectList();
       });
 
-      projectListEl.appendChild(header);
+      (function (gk) {
+        header.addEventListener('contextmenu', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          showGroupContextMenu(e, gk);
+        });
+      })(groupKey);
+
+      parent.appendChild(header);
 
       var children = document.createElement('div');
       children.className = 'project-group-children';
       if (collapsed) children.className += ' collapsed';
-      projectListEl.appendChild(children);
+      parent.appendChild(children);
       groupContainers[groupKey] = children;
     }
 
@@ -854,11 +878,74 @@ function renderProjectList() {
       item.classList.add('in-group');
       var container = groupContainers[groupKey];
       if (container) container.appendChild(item);
-      else projectListEl.appendChild(item);
+      else parent.appendChild(item);
     } else {
-      projectListEl.appendChild(item);
+      parent.appendChild(item);
     }
   });
+}
+
+function renderProjectList() {
+  while (projectListEl.firstChild) {
+    projectListEl.removeChild(projectListEl.firstChild);
+  }
+
+  if (!config.collapsedGroups) config.collapsedGroups = {};
+  var sortMode = config.projectSortMode || 'manual';
+
+  var allEntries = config.projects.map(function (p, i) { return { project: p, index: i }; });
+  var pinnedEntries = allEntries.filter(function (e) { return e.project.pinned; });
+  var unpinnedEntries = allEntries.filter(function (e) { return !e.project.pinned; });
+
+  function byName(a, b) {
+    return (a.project.name || '').toLowerCase().localeCompare((b.project.name || '').toLowerCase());
+  }
+  if (sortMode === 'alpha') {
+    pinnedEntries.sort(byName);
+    unpinnedEntries.sort(byName);
+  }
+
+  if (pinnedEntries.length > 0) {
+    var pinnedHeader = document.createElement('div');
+    pinnedHeader.className = 'project-pinned-header';
+    pinnedHeader.textContent = '\u272F Pinned';
+    projectListEl.appendChild(pinnedHeader);
+    renderProjectEntries(pinnedEntries, projectListEl, '::pinned');
+  }
+
+  if (pinnedEntries.length > 0 && unpinnedEntries.length > 0) {
+    var otherCollapsed = !!config.unpinnedCollapsed;
+    var otherHeader = document.createElement('div');
+    otherHeader.className = 'project-section-header';
+    if (otherCollapsed) otherHeader.className += ' collapsed';
+
+    var otherChev = document.createElement('span');
+    otherChev.className = 'project-section-chevron';
+    otherChev.textContent = '\u25BE';
+    otherHeader.appendChild(otherChev);
+
+    var otherLabel = document.createElement('span');
+    otherLabel.textContent = 'Other';
+    otherHeader.appendChild(otherLabel);
+
+    var otherCount = document.createElement('span');
+    otherCount.className = 'project-section-count';
+    otherCount.textContent = String(unpinnedEntries.length);
+    otherHeader.appendChild(otherCount);
+
+    otherHeader.addEventListener('click', function () {
+      config.unpinnedCollapsed = !config.unpinnedCollapsed;
+      saveConfig();
+      renderProjectList();
+    });
+    projectListEl.appendChild(otherHeader);
+
+    if (!otherCollapsed) {
+      renderProjectEntries(unpinnedEntries, projectListEl, '');
+    }
+  } else {
+    renderProjectEntries(unpinnedEntries, projectListEl, '');
+  }
 
   updateAutomationSidebarBadges();
 }
@@ -892,8 +979,8 @@ function setActiveProject(index, isStartup) {
 
   saveConfig();
   // Update active highlight without full re-render (avoids jitter)
-  document.querySelectorAll('.project-item').forEach(function (el, i) {
-    el.classList.toggle('active', i === index);
+  document.querySelectorAll('.project-item').forEach(function (el) {
+    el.classList.toggle('active', el.dataset.projectPath === newKey);
   });
 
   var emptyState = columnsContainer.querySelector('.empty-state');
@@ -955,6 +1042,94 @@ function addProject(folderPath) {
   saveConfig();
   renderProjectList();
   setActiveProject(newIndex, false);
+}
+
+function togglePinProject(index) {
+  var project = config.projects[index];
+  if (!project) return;
+  project.pinned = !project.pinned;
+  saveConfig();
+  renderProjectList();
+}
+
+function setGroupPinned(groupKey, pinned) {
+  var changed = false;
+  config.projects.forEach(function (p) {
+    if (projectGroupKey(p) === groupKey && !!p.pinned !== pinned) {
+      p.pinned = pinned;
+      changed = true;
+    }
+  });
+  if (changed) {
+    saveConfig();
+    renderProjectList();
+  }
+}
+
+function showGroupContextMenu(event, groupKey) {
+  var menu = document.getElementById('project-context-menu');
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.id = 'project-context-menu';
+    menu.className = 'project-context-menu';
+    document.body.appendChild(menu);
+  }
+  while (menu.firstChild) menu.removeChild(menu.firstChild);
+
+  var members = config.projects.filter(function (p) { return projectGroupKey(p) === groupKey; });
+  var allPinned = members.length > 0 && members.every(function (p) { return p.pinned; });
+
+  function addItem(label, action) {
+    var mi = document.createElement('div');
+    mi.className = 'project-context-item';
+    mi.dataset.action = action;
+    mi.textContent = label;
+    menu.appendChild(mi);
+  }
+  addItem(allPinned ? 'Unpin group' : 'Pin group to top', 'toggle-group-pin');
+
+  menu.style.left = event.clientX + 'px';
+  menu.style.top = event.clientY + 'px';
+  menu.style.display = 'block';
+
+  menu.onclick = function (ev) {
+    var action = ev.target.dataset.action;
+    if (action === 'toggle-group-pin') {
+      setGroupPinned(groupKey, !allPinned);
+    }
+    menu.style.display = 'none';
+  };
+
+  setTimeout(function () {
+    document.addEventListener('click', function closeMenu() {
+      menu.style.display = 'none';
+      document.removeEventListener('click', closeMenu);
+    });
+  }, 0);
+}
+
+function toggleProjectSortMode() {
+  var current = config.projectSortMode || 'manual';
+  config.projectSortMode = current === 'alpha' ? 'manual' : 'alpha';
+  saveConfig();
+  updateSortButton();
+  renderProjectList();
+}
+
+function updateSortButton() {
+  var btn = document.getElementById('btn-toggle-sort');
+  var icon = document.getElementById('sort-icon');
+  if (!btn || !icon) return;
+  var mode = config.projectSortMode || 'manual';
+  if (mode === 'alpha') {
+    btn.classList.add('active');
+    btn.title = 'Sorted A-Z (click for manual order)';
+    icon.textContent = 'A\u2193';
+  } else {
+    btn.classList.remove('active');
+    btn.title = 'Manual order (click to sort A-Z)';
+    icon.textContent = '\u21C5';
+  }
 }
 
 function removeProject(index) {
@@ -2157,12 +2332,8 @@ function setFocusedColumn(id) {
   });
   if (!otherFlashing) {
     projectsNeedingAttention.delete(col.projectKey);
-    var items = projectListEl.querySelectorAll('.project-item');
-    config.projects.forEach(function (project, index) {
-      if (project.path === col.projectKey && items[index]) {
-        items[index].classList.remove('attention-flash');
-      }
-    });
+    var item = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(col.projectKey) + '"]');
+    if (item) item.classList.remove('attention-flash');
   }
 }
 
@@ -4796,6 +4967,11 @@ btnAddProject.addEventListener('click', function () {
     if (folderPath) addProject(folderPath);
   });
 });
+
+var btnToggleSort = document.getElementById('btn-toggle-sort');
+if (btnToggleSort) {
+  btnToggleSort.addEventListener('click', toggleProjectSortMode);
+}
 
 // ============================================================
 // Spawn Options Dropdown

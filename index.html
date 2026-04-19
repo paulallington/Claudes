@@ -9,7 +9,14 @@
 <body>
   <div id="app">
     <div id="sidebar">
-      <div class="sidebar-header">Projects</div>
+      <div class="sidebar-header">
+        <span>Projects</span>
+        <div class="sidebar-header-actions">
+          <button class="sidebar-header-btn" id="btn-toggle-sort" title="Sort order">
+            <span id="sort-icon">&#8645;</span>
+          </button>
+        </div>
+      </div>
       <div id="project-list"></div>
       <button id="btn-add-project">+ Add Project</button>
     </div>

@@ -180,6 +180,133 @@ html, body {
   /* Leave room for the native title bar overlay */
   margin-top: 8px;
   -webkit-app-region: drag;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sidebar-header-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 3px;
+}
+
+.sidebar-header-btn:hover {
+  background: var(--hover-light);
+  color: var(--text-primary);
+}
+
+.sidebar-header-btn.active {
+  color: var(--accent);
+}
+
+.project-pinned-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dimmer);
+}
+
+.project-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 4px;
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dimmer);
+  cursor: pointer;
+  user-select: none;
+}
+
+.project-section-header:hover {
+  color: var(--text-secondary);
+}
+
+.project-section-chevron {
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.project-section-header.collapsed .project-section-chevron {
+  transform: rotate(-90deg);
+}
+
+.project-section-count {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dimmer);
+}
+
+.project-item .project-pin {
+  display: none;
+  color: var(--text-dimmer);
+  font-size: 11px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.project-item:hover .project-pin,
+.project-item.is-pinned .project-pin {
+  display: block;
+}
+
+.project-item.is-pinned .project-pin {
+  color: var(--accent);
+}
+
+.project-item .project-pin:hover {
+  color: var(--text-bright);
+}
+
+.project-item.is-pinned {
+  background: var(--hover-light);
+  border-left: 2px solid var(--accent);
+  padding-left: 12px;
+}
+
+.project-item.is-pinned .project-name {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.project-item.is-pinned.active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.project-item.is-pinned.in-group {
+  padding-left: 20px;
+}
+
+.project-group-header.pinned-group {
+  color: var(--accent);
+  border-left: 2px solid var(--accent);
+  padding-left: 4px;
+}
+
+.project-group-header.pinned-group .project-group-count {
+  color: var(--accent);
 }
 
 #sidebar {
@@ -194,6 +321,7 @@ html, body {
   flex: 1;
   overflow-y: auto;
   padding: 4px 0;
+  -webkit-app-region: no-drag;
 }
 
 .project-item {
