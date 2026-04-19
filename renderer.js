@@ -167,15 +167,44 @@ function connectWS() {
         if (col2.cmd) setTimeout(refreshRunConfigs, 300);
       }
     } else if (msg.type === 'reattach-failed') {
-      // Pty died during sleep — show exit overlay so user can respawn
+      // Pty died during sleep — auto-respawn with --resume if we have a session,
+      // otherwise fall back to the exit overlay so the user can decide.
       var col3 = allColumns.get(msg.id);
       if (col3 && !col3.element.querySelector('.exit-overlay')) {
-        col3.element.appendChild(createExitOverlay(msg.id, null, col3));
-        setColumnActivity(msg.id, 'exited');
+        if (!col3.cmd && col3.sessionId) {
+          col3.fitAddon.fit();
+          var respawnMsg = {
+            type: 'create',
+            id: msg.id,
+            cols: col3.terminal.cols,
+            rows: col3.terminal.rows,
+            cwd: col3.cwd,
+            args: ['--resume', col3.sessionId]
+          };
+          if (col3.env) respawnMsg.env = col3.env;
+          col3.terminal.clear();
+          wsSend(respawnMsg);
+          setColumnActivity(msg.id, 'working');
+        } else {
+          col3.element.appendChild(createExitOverlay(msg.id, null, col3));
+          setColumnActivity(msg.id, 'exited');
+        }
       }
     }
   };
   ws.onclose = function () { setTimeout(connectWS, 2000); };
+}
+
+if (window.electronAPI && window.electronAPI.onPowerResume) {
+  window.electronAPI.onPowerResume(function () {
+    // System just woke — proactively reattach all live ptys before any stale
+    // socket state trips a disconnect.
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      reattachAllColumns();
+    } else if (ws) {
+      try { ws.close(); } catch (e) { /* ignore */ }
+    }
+  });
 }
 
 function reattachAllColumns() {
@@ -547,6 +576,10 @@ function loadProjects() {
     if (config.theme) {
       setThemePreference(config.theme);
     }
+    if (config.sidebarWidth) {
+      applySidebarWidth(config.sidebarWidth);
+    }
+    syncPanelToggleStates();
     loadNotifSettings();
     renderProjectList();
     if (config.activeProjectIndex >= 0 && config.projects[config.activeProjectIndex]) {
@@ -562,166 +595,271 @@ function saveConfig() {
   window.electronAPI.saveProjects(config);
 }
 
+function projectGroupKey(project) {
+  if (!project || project.ungrouped) return null;
+  var name = project.name || '';
+  if (!name) return null;
+  var i = name.indexOf('-');
+  return i <= 0 ? name : name.slice(0, i);
+}
+
+function computeProjectGroups() {
+  var counts = Object.create(null);
+  config.projects.forEach(function (p) {
+    var k = projectGroupKey(p);
+    if (k) counts[k] = (counts[k] || 0) + 1;
+  });
+  return counts;
+}
+
+function buildProjectItem(project, index) {
+  var key = project.path;
+  var state = projectStates.get(key);
+  var count = state ? state.columns.size : 0;
+
+  var item = document.createElement('div');
+  item.className = 'project-item';
+  if (index === config.activeProjectIndex) item.className += ' active';
+  if (projectsNeedingAttention.has(key)) item.className += ' attention-flash';
+
+  var info = document.createElement('div');
+  info.style.overflow = 'hidden';
+  info.style.flex = '1';
+
+  var name = document.createElement('div');
+  name.className = 'project-name';
+  name.textContent = project.name;
+
+  var pathEl = document.createElement('div');
+  pathEl.className = 'project-path';
+  pathEl.textContent = project.path;
+
+  var branchEl = document.createElement('div');
+  branchEl.className = 'project-branch';
+  branchEl.textContent = '';
+
+  if (window.electronAPI && window.electronAPI.gitBranch) {
+    (function (el, projectPath) {
+      window.electronAPI.gitBranch(projectPath).then(function (branch) {
+        if (branch) el.textContent = '\u2387 ' + branch.trim();
+      }).catch(function () {});
+    })(branchEl, project.path);
+  }
+
+  info.appendChild(name);
+  info.appendChild(branchEl);
+  info.appendChild(pathEl);
+
+  var rightSide = document.createElement('div');
+  rightSide.className = 'project-right';
+
+  if (count > 0) {
+    var badge = document.createElement('span');
+    badge.className = 'project-badge';
+    var claudeIcon = document.createElement('img');
+    claudeIcon.className = 'claude-icon';
+    claudeIcon.src = './claude-small.png';
+    claudeIcon.alt = '';
+    badge.appendChild(claudeIcon);
+    rightSide.appendChild(badge);
+  }
+
+  var removeBtn = document.createElement('span');
+  removeBtn.className = 'project-remove';
+  removeBtn.textContent = '\u00d7';
+  removeBtn.title = 'Remove project';
+
+  removeBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    removeProject(index);
+  });
+
+  if (project.hidden) {
+    item.style.opacity = '0.4';
+  }
+
+  item.addEventListener('click', function () {
+    setActiveProject(index, false);
+  });
+
+  item.setAttribute('draggable', 'true');
+  item.addEventListener('dragstart', function (e) {
+    projectDragFromIndex = index;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', '');
+    setTimeout(function () { item.classList.add('dragging'); }, 0);
+  });
+  item.addEventListener('dragend', function () {
+    item.classList.remove('dragging');
+    projectDragFromIndex = -1;
+    document.querySelectorAll('.project-item.drag-over').forEach(function (el) {
+      el.classList.remove('drag-over');
+    });
+  });
+  item.addEventListener('dragover', function (e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (projectDragFromIndex !== -1 && projectDragFromIndex !== index) {
+      item.classList.add('drag-over');
+    }
+  });
+  item.addEventListener('dragleave', function () {
+    item.classList.remove('drag-over');
+  });
+  item.addEventListener('drop', function (e) {
+    e.preventDefault();
+    item.classList.remove('drag-over');
+    var fromIdx = projectDragFromIndex;
+    projectDragFromIndex = -1;
+    if (fromIdx === -1 || fromIdx === index) return;
+    var moved = config.projects.splice(fromIdx, 1)[0];
+    config.projects.splice(index, 0, moved);
+    if (config.activeProjectIndex === fromIdx) {
+      config.activeProjectIndex = index;
+    } else if (fromIdx < config.activeProjectIndex && index >= config.activeProjectIndex) {
+      config.activeProjectIndex--;
+    } else if (fromIdx > config.activeProjectIndex && index <= config.activeProjectIndex) {
+      config.activeProjectIndex++;
+    }
+    window.electronAPI.saveProjects(config);
+    renderProjectList();
+  });
+
+  item.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    var menu = document.getElementById('project-context-menu');
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'project-context-menu';
+      menu.className = 'project-context-menu';
+      document.body.appendChild(menu);
+    }
+    while (menu.firstChild) menu.removeChild(menu.firstChild);
+    var projIndex = index;
+    var isHidden = project.hidden || false;
+    var groupKey = projectGroupKey(project);
+    var groupCounts = computeProjectGroups();
+    var inGroup = groupKey && groupCounts[groupKey] >= 2;
+
+    function addMenuItem(label, action) {
+      var mi = document.createElement('div');
+      mi.className = 'project-context-item';
+      mi.dataset.action = action;
+      mi.textContent = label;
+      menu.appendChild(mi);
+    }
+    addMenuItem(isHidden ? 'Show Project' : 'Hide Project', 'toggle-hide');
+    if (inGroup) {
+      addMenuItem('Remove from "' + groupKey + '" group', 'ungroup');
+    } else if (project.ungrouped && groupKey) {
+      addMenuItem('Re-add to "' + groupKey + '" group', 'regroup');
+    }
+
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+    menu.style.display = 'block';
+
+    menu.onclick = function (ev) {
+      var action = ev.target.dataset.action;
+      if (action === 'toggle-hide') {
+        config.projects[projIndex].hidden = !config.projects[projIndex].hidden;
+        window.electronAPI.saveProjects(config);
+        renderProjectList();
+      } else if (action === 'ungroup') {
+        config.projects[projIndex].ungrouped = true;
+        window.electronAPI.saveProjects(config);
+        renderProjectList();
+      } else if (action === 'regroup') {
+        delete config.projects[projIndex].ungrouped;
+        window.electronAPI.saveProjects(config);
+        renderProjectList();
+      }
+      menu.style.display = 'none';
+    };
+
+    setTimeout(function () {
+      document.addEventListener('click', function closeMenu() {
+        menu.style.display = 'none';
+        document.removeEventListener('click', closeMenu);
+      });
+    }, 0);
+  });
+
+  rightSide.appendChild(removeBtn);
+  item.appendChild(info);
+  item.appendChild(rightSide);
+  return item;
+}
+
 function renderProjectList() {
   while (projectListEl.firstChild) {
     projectListEl.removeChild(projectListEl.firstChild);
   }
 
+  if (!config.collapsedGroups) config.collapsedGroups = {};
+  var groupCounts = computeProjectGroups();
+  var renderedGroups = Object.create(null);
+  var groupContainers = Object.create(null);
+
   config.projects.forEach(function (project, index) {
-    var key = project.path;
-    var state = projectStates.get(key);
-    var count = state ? state.columns.size : 0;
+    var groupKey = projectGroupKey(project);
+    var inGroup = groupKey && groupCounts[groupKey] >= 2;
 
-    var item = document.createElement('div');
-    item.className = 'project-item';
-    if (index === config.activeProjectIndex) item.className += ' active';
-    if (projectsNeedingAttention.has(key)) item.className += ' attention-flash';
-
-    var info = document.createElement('div');
-    info.style.overflow = 'hidden';
-    info.style.flex = '1';
-
-    var name = document.createElement('div');
-    name.className = 'project-name';
-    name.textContent = project.name;
-
-    var pathEl = document.createElement('div');
-    pathEl.className = 'project-path';
-    pathEl.textContent = project.path;
-
-    var branchEl = document.createElement('div');
-    branchEl.className = 'project-branch';
-    branchEl.textContent = '';
-
-    // Fetch branch asynchronously
-    if (window.electronAPI && window.electronAPI.gitBranch) {
-      (function (el, projectPath) {
-        window.electronAPI.gitBranch(projectPath).then(function (branch) {
-          if (branch) el.textContent = '\u2387 ' + branch.trim();
-        }).catch(function () {});
-      })(branchEl, project.path);
-    }
-
-    info.appendChild(name);
-    info.appendChild(branchEl);
-    info.appendChild(pathEl);
-
-    var rightSide = document.createElement('div');
-    rightSide.className = 'project-right';
-
-    if (count > 0) {
-      var badge = document.createElement('span');
-      badge.className = 'project-badge';
-      var claudeIcon = document.createElement('img');
-      claudeIcon.className = 'claude-icon';
-      claudeIcon.src = './claude-small.png';
-      claudeIcon.alt = '';
-      badge.appendChild(claudeIcon);
-      rightSide.appendChild(badge);
-    }
-
-    var removeBtn = document.createElement('span');
-    removeBtn.className = 'project-remove';
-    removeBtn.textContent = '\u00d7';
-    removeBtn.title = 'Remove project';
-
-    removeBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      removeProject(index);
-    });
-
-    if (project.hidden) {
-      item.style.opacity = '0.4';
-    }
-
-    item.addEventListener('click', function () {
-      setActiveProject(index, false);
-    });
-
-    // Drag to reorder — use module-level var since dataTransfer.getData is blocked in dragover
-    item.setAttribute('draggable', 'true');
-    item.addEventListener('dragstart', function (e) {
-      projectDragFromIndex = index;
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', ''); // Required for Firefox
-      setTimeout(function () { item.classList.add('dragging'); }, 0);
-    });
-    item.addEventListener('dragend', function () {
-      item.classList.remove('dragging');
-      projectDragFromIndex = -1;
-      document.querySelectorAll('.project-item.drag-over').forEach(function (el) {
-        el.classList.remove('drag-over');
-      });
-    });
-    item.addEventListener('dragover', function (e) {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      if (projectDragFromIndex !== -1 && projectDragFromIndex !== index) {
-        item.classList.add('drag-over');
-      }
-    });
-    item.addEventListener('dragleave', function () {
-      item.classList.remove('drag-over');
-    });
-    item.addEventListener('drop', function (e) {
-      e.preventDefault();
-      item.classList.remove('drag-over');
-      var fromIdx = projectDragFromIndex;
-      projectDragFromIndex = -1;
-      if (fromIdx === -1 || fromIdx === index) return;
-      var moved = config.projects.splice(fromIdx, 1)[0];
-      config.projects.splice(index, 0, moved);
-      if (config.activeProjectIndex === fromIdx) {
-        config.activeProjectIndex = index;
-      } else if (fromIdx < config.activeProjectIndex && index >= config.activeProjectIndex) {
-        config.activeProjectIndex--;
-      } else if (fromIdx > config.activeProjectIndex && index <= config.activeProjectIndex) {
-        config.activeProjectIndex++;
-      }
-      window.electronAPI.saveProjects(config);
-      renderProjectList();
-    });
-
-    item.addEventListener('contextmenu', function (e) {
-      e.preventDefault();
-      var menu = document.getElementById('project-context-menu');
-      if (!menu) {
-        menu = document.createElement('div');
-        menu.id = 'project-context-menu';
-        menu.className = 'project-context-menu';
-        document.body.appendChild(menu);
-      }
-      var projIndex = index;
-      var isHidden = project.hidden || false;
-      menu.innerHTML = '<div class="project-context-item" data-action="toggle-hide">' + (isHidden ? 'Show Project' : 'Hide Project') + '</div>';
-      menu.style.left = e.clientX + 'px';
-      menu.style.top = e.clientY + 'px';
-      menu.style.display = 'block';
-
-      menu.onclick = function (ev) {
-        var action = ev.target.dataset.action;
-        if (action === 'toggle-hide') {
-          config.projects[projIndex].hidden = !config.projects[projIndex].hidden;
-          window.electronAPI.saveProjects(config);
-          renderProjectList();
+    if (inGroup && !renderedGroups[groupKey]) {
+      renderedGroups[groupKey] = true;
+      var hasActiveChild = false;
+      config.projects.forEach(function (p, i) {
+        if (projectGroupKey(p) === groupKey && i === config.activeProjectIndex) {
+          hasActiveChild = true;
         }
-        menu.style.display = 'none';
-      };
+      });
+      var collapsed = !!config.collapsedGroups[groupKey] && !hasActiveChild;
 
-      // Close on click outside
-      setTimeout(function () {
-        document.addEventListener('click', function closeMenu() {
-          menu.style.display = 'none';
-          document.removeEventListener('click', closeMenu);
-        });
-      }, 0);
-    });
+      var header = document.createElement('div');
+      header.className = 'project-group-header';
+      if (collapsed) header.className += ' collapsed';
 
-    rightSide.appendChild(removeBtn);
-    item.appendChild(info);
-    item.appendChild(rightSide);
-    projectListEl.appendChild(item);
+      var chev = document.createElement('span');
+      chev.className = 'project-group-chevron';
+      chev.textContent = '\u25BE';
+      header.appendChild(chev);
+
+      var nameEl = document.createElement('span');
+      nameEl.className = 'project-group-name';
+      nameEl.textContent = groupKey;
+      header.appendChild(nameEl);
+
+      var countEl = document.createElement('span');
+      countEl.className = 'project-group-count';
+      countEl.textContent = String(groupCounts[groupKey]);
+      header.appendChild(countEl);
+
+      header.addEventListener('click', function () {
+        config.collapsedGroups[groupKey] = !config.collapsedGroups[groupKey];
+        saveConfig();
+        renderProjectList();
+      });
+
+      projectListEl.appendChild(header);
+
+      var children = document.createElement('div');
+      children.className = 'project-group-children';
+      if (collapsed) children.className += ' collapsed';
+      projectListEl.appendChild(children);
+      groupContainers[groupKey] = children;
+    }
+
+    var item = buildProjectItem(project, index);
+    if (inGroup) {
+      item.classList.add('in-group');
+      var container = groupContainers[groupKey];
+      if (container) container.appendChild(item);
+      else projectListEl.appendChild(item);
+    } else {
+      projectListEl.appendChild(item);
+    }
   });
+
   updateAutomationSidebarBadges();
 }
 
@@ -1187,6 +1325,7 @@ function addColumn(args, targetRow, opts) {
     wsSend({ type: 'write', id: id, data: data });
     var c = allColumns.get(id);
     if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
+      c.lastInputAt = Date.now();
       // Only set hasUserInput when user actually submits (Enter key = \r or \n)
       // Not on typing/pasting, which happens before submission
       if (data.indexOf('\r') !== -1 || data.indexOf('\n') !== -1) {
@@ -1237,6 +1376,7 @@ function addColumn(args, targetRow, opts) {
     cwd: cwd,
     projectKey: activeProjectKey,
     sessionId: resumeSessionId,
+    sessionMtime: 0,
     customTitle: opts.title || null,
     cmd: cmd,
     cmdArgs: claudeArgs,
@@ -1244,6 +1384,7 @@ function addColumn(args, targetRow, opts) {
     launchUrl: opts.launchUrl || null,
     launchUrlOpened: false,
     createdAt: Date.now(),
+    lastInputAt: 0,
     hasUserInput: false,
     notified: false
   };
@@ -1792,6 +1933,7 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
           var col = allColumns.get(columnId);
           if (col) {
             col.sessionId = sid;
+            col.sessionMtime = sessions[i].modified || 0;
             persistSessions(col.projectKey);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
           }
@@ -1803,9 +1945,13 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
   }, 2000);
 }
 
-// Periodically re-detect session ID for a column (handles /clear, /resume inside CLI)
+// Periodically re-detect session ID for a column (handles /clear, /resume inside CLI).
+// Pinning rule: each column tracks sessionMtime of its current file. A newer session
+// only replaces it if THIS column has had user input recently — so an idle column
+// can't steal a sibling's freshly-created (post-/clear) session.
 var sessionSyncTimers = new Map();
 var SESSION_SYNC_INTERVAL = 5000;
+var SESSION_REASSIGN_INPUT_WINDOW_MS = 30000;
 
 function startSessionSync(columnId, projectPath) {
   if (!window.electronAPI) return;
@@ -1819,18 +1965,44 @@ function startSessionSync(columnId, projectPath) {
       var col2 = allColumns.get(columnId);
       if (!col2 || !sessions.length) return;
 
-      // Find the most recently modified session not claimed by another column
       var claimed = getClaimedSessionIds(columnId);
-      for (var i = 0; i < sessions.length; i++) {
-        var sid = sessions[i].sessionId;
-        if (!claimed[sid]) {
-          if (col2.sessionId !== sid) {
-            col2.sessionId = sid;
-            persistSessions(col2.projectKey);
-            // Update title too
-            fetchAndSetSessionTitle(columnId, projectPath, sid);
+      var now = Date.now();
+      var hasRecentInput = col2.lastInputAt && (now - col2.lastInputAt < SESSION_REASSIGN_INPUT_WINDOW_MS);
+
+      var currentEntry = null;
+      for (var j = 0; j < sessions.length; j++) {
+        if (sessions[j].sessionId === col2.sessionId) { currentEntry = sessions[j]; break; }
+      }
+
+      if (currentEntry) {
+        // Current session file still exists. Only consider a reassignment if
+        // THIS column has had recent input AND there's a newer unclaimed file.
+        if (hasRecentInput) {
+          for (var i = 0; i < sessions.length; i++) {
+            var s = sessions[i];
+            if (s.sessionId === col2.sessionId) break; // nothing newer than current
+            if (!claimed[s.sessionId] && s.modified > (col2.sessionMtime || 0)) {
+              col2.sessionId = s.sessionId;
+              col2.sessionMtime = s.modified;
+              persistSessions(col2.projectKey);
+              fetchAndSetSessionTitle(columnId, projectPath, s.sessionId);
+              return;
+            }
           }
-          return;
+        }
+        col2.sessionMtime = currentEntry.modified;
+      } else if (hasRecentInput) {
+        // Pinned file is gone — fall back to the most recent unclaimed session,
+        // but only if this column was actively being typed into.
+        for (var k = 0; k < sessions.length; k++) {
+          var sid = sessions[k].sessionId;
+          if (!claimed[sid]) {
+            col2.sessionId = sid;
+            col2.sessionMtime = sessions[k].modified;
+            persistSessions(col2.projectKey);
+            fetchAndSetSessionTitle(columnId, projectPath, sid);
+            return;
+          }
         }
       }
     });
@@ -2482,8 +2654,54 @@ document.addEventListener('keydown', function (e) {
 
 function toggleSidebar() {
   sidebar.classList.toggle('collapsed');
+  var handle = document.getElementById('sidebar-resize-handle');
+  if (handle) handle.classList.toggle('hidden', sidebar.classList.contains('collapsed'));
+  syncPanelToggleStates();
   setTimeout(refitAll, 250);
 }
+
+function syncPanelToggleStates() {
+  if (btnToggleSidebar) {
+    btnToggleSidebar.classList.toggle('active-panel', !sidebar.classList.contains('collapsed'));
+  }
+  var btnExp = document.getElementById('btn-toggle-explorer');
+  var explorerEl = document.getElementById('explorer-panel');
+  if (btnExp && explorerEl) {
+    btnExp.classList.toggle('active-panel', !explorerEl.classList.contains('collapsed'));
+  }
+}
+
+function applySidebarWidth(width) {
+  var w = Math.max(140, Math.min(400, width));
+  sidebar.style.width = w + 'px';
+  sidebar.style.setProperty('--sidebar-collapse-margin', '-' + w + 'px');
+  sidebar.classList.toggle('compact', w < 180);
+}
+
+(function () {
+  var handle = document.getElementById('sidebar-resize-handle');
+  if (!handle) return;
+  handle.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    handle.classList.add('active');
+    var startX = e.clientX;
+    var startWidth = sidebar.getBoundingClientRect().width;
+    function onMouseMove(ev) {
+      var delta = ev.clientX - startX;
+      applySidebarWidth(startWidth + delta);
+      refitAll();
+    }
+    function onMouseUp() {
+      handle.classList.remove('active');
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      config.sidebarWidth = sidebar.getBoundingClientRect().width;
+      saveConfig();
+    }
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+})();
 
 // ============================================================
 // Explorer Panel
@@ -2546,6 +2764,7 @@ document.querySelectorAll('.explorer-tab').forEach(function (tab) {
 function toggleExplorer() {
   explorerPanel.classList.toggle('collapsed');
   explorerResizeHandle.classList.toggle('hidden');
+  syncPanelToggleStates();
   setTimeout(refitAll, 200);
   if (isGitTabActive()) startGitPolling(); else stopGitPolling();
 }

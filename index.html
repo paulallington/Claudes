@@ -13,6 +13,7 @@
       <div id="project-list"></div>
       <button id="btn-add-project">+ Add Project</button>
     </div>
+    <div id="sidebar-resize-handle"></div>
     <div id="explorer-panel">
       <div class="explorer-tabs">
         <button class="explorer-tab active" data-tab="files">Files</button>
@@ -131,8 +132,18 @@
     <div id="main-area">
       <div id="toolbar">
         <div class="toolbar-left">
-          <button id="btn-toggle-sidebar" title="Toggle sidebar">&#9776;</button>
-          <button id="btn-toggle-explorer" title="Toggle Explorer (Ctrl+Shift+E)">&#9783;</button>
+          <button id="btn-toggle-sidebar" class="panel-toggle-btn" title="Toggle Projects (Ctrl+B)" aria-label="Toggle projects sidebar">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2" y="3" width="12" height="10" rx="1.5"/>
+              <line x1="6" y1="3" x2="6" y2="13"/>
+            </svg>
+          </button>
+          <button id="btn-toggle-explorer" class="panel-toggle-btn" title="Toggle Explorer (Ctrl+Shift+E)" aria-label="Toggle explorer panel">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2" y="3" width="12" height="10" rx="1.5"/>
+              <line x1="10" y1="3" x2="10" y2="13"/>
+            </svg>
+          </button>
           <span class="app-title">Claudes</span><span id="app-version" class="app-version"></span>
           <span id="active-project-name" class="active-project-name"></span>
         </div>
