@@ -1465,21 +1465,45 @@ ipcMain.handle('automations:getAgentLiveOutput', (event, automationId, agentId) 
   return null;
 });
 
-ipcMain.handle('automations:runAgentNow', (event, automationId, agentId) => {
-  runAgent(automationId, agentId);
+ipcMain.handle('automations:runAgentNow', async (event, automationId, agentId) => {
+  try {
+    await runAgent(automationId, agentId);
+  } catch (err) {
+    // Ensure currentRunStartedAt is cleared if runAgent threw unexpectedly
+    try {
+      const data = readAutomations();
+      const auto = data.automations.find(a => a.id === automationId);
+      if (auto) {
+        const ag = auto.agents.find(a => a.id === agentId);
+        if (ag && ag.currentRunStartedAt) {
+          ag.currentRunStartedAt = null;
+          ag.lastRunStatus = 'error';
+          ag.lastError = err.message || 'Unexpected error starting agent';
+          writeAutomations(data);
+        }
+      }
+    } catch { /* avoid double-fault */ }
+    const key = automationId + ':' + agentId;
+    runningAgents.delete(key);
+    if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
+      automationId, agentId, status: 'error', error: err.message || 'Unexpected error starting agent'
+    });
+  }
   return true;
 });
 
-ipcMain.handle('automations:runAutomationNow', (event, automationId) => {
+ipcMain.handle('automations:runAutomationNow', async (event, automationId) => {
   const data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
   if (!automation) return false;
   // Run all independent agents — dependents will cascade
+  const promises = [];
   automation.agents.forEach(agent => {
     if (agent.enabled && agent.runMode === 'independent') {
-      runAgent(automation.id, agent.id);
+      promises.push(runAgent(automation.id, agent.id).catch(() => {}));
     }
   });
+  await Promise.all(promises);
   return true;
 });
 
@@ -2448,50 +2472,57 @@ async function runAgent(automationId, agentId) {
     if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
 
     const completedAt = new Date().toISOString();
-    const displayOutput = textChunks.join('');
-    const parsed = parseAgentResult(displayOutput);
+    let runStatus = exitCode === 0 ? 'completed' : 'error';
+    let parsed = { summary: '', attentionItems: [] };
 
-    const runData = {
-      automationId, agentId,
-      startedAt, completedAt,
-      durationMs: new Date(completedAt).getTime() - new Date(startedAt).getTime(),
-      exitCode,
-      status: exitCode === 0 ? 'completed' : 'error',
-      summary: parsed.summary,
-      output: displayOutput,
-      attentionItems: parsed.attentionItems,
-      costUsd: null
-    };
+    try {
+      const displayOutput = textChunks.join('');
+      parsed = parseAgentResult(displayOutput);
 
-    saveAgentRun(automationId, agentId, runData);
+      const runData = {
+        automationId, agentId,
+        startedAt, completedAt,
+        durationMs: new Date(completedAt).getTime() - new Date(startedAt).getTime(),
+        exitCode,
+        status: runStatus,
+        summary: parsed.summary,
+        output: displayOutput,
+        attentionItems: parsed.attentionItems,
+        costUsd: null
+      };
 
-    // Update agent config
-    const freshData = readAutomations();
-    const freshAuto = freshData.automations.find(a => a.id === automationId);
-    if (freshAuto) {
-      const freshAgent = freshAuto.agents.find(ag => ag.id === agentId);
-      if (freshAgent) {
-        freshAgent.currentRunStartedAt = null;
-        freshAgent.lastRunAt = completedAt;
-        freshAgent.lastRunStatus = runData.status;
-        freshAgent.lastError = exitCode === 0 ? null : 'Exit code: ' + exitCode;
-        freshAgent.lastSummary = parsed.summary || null;
-        freshAgent.lastAttentionItems = parsed.attentionItems || [];
-        writeAutomations(freshData);
+      saveAgentRun(automationId, agentId, runData);
+    } catch { /* don't let save failure prevent state cleanup below */ }
+
+    // Always clear currentRunStartedAt — this is critical to prevent stuck state
+    try {
+      const freshData = readAutomations();
+      const freshAuto = freshData.automations.find(a => a.id === automationId);
+      if (freshAuto) {
+        const freshAgent = freshAuto.agents.find(ag => ag.id === agentId);
+        if (freshAgent) {
+          freshAgent.currentRunStartedAt = null;
+          freshAgent.lastRunAt = completedAt;
+          freshAgent.lastRunStatus = runStatus;
+          freshAgent.lastError = exitCode === 0 ? null : 'Exit code: ' + exitCode;
+          freshAgent.lastSummary = parsed.summary || null;
+          freshAgent.lastAttentionItems = parsed.attentionItems || [];
+          writeAutomations(freshData);
+        }
+
+        // Trigger dependent agents
+        triggerDependentAgents(automationId, agentId, runStatus, freshData);
+
+        // Check if pipeline is fully complete — trigger manager if configured
+        checkPipelineComplete(automationId);
       }
+    } catch { /* avoid crashing the close handler */ }
 
-      // Trigger dependent agents
-      triggerDependentAgents(automationId, agentId, runData.status, freshData);
-
-      // Check if pipeline is fully complete — trigger manager if configured
-      checkPipelineComplete(automationId);
-    }
-
-    // Notify renderer
+    // Always notify renderer
     if (mainWindow) {
       mainWindow.webContents.send('automations:agent-completed', {
         automationId, agentId,
-        status: runData.status,
+        status: runStatus,
         summary: parsed.summary,
         attentionItems: parsed.attentionItems,
         exitCode
@@ -2511,18 +2542,21 @@ async function runAgent(automationId, agentId) {
 
   child.on('error', (err) => {
     runningAgents.delete(key);
+    agentLiveOutputBuffers.delete(key);
     if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
-    const freshData = readAutomations();
-    const freshAuto = freshData.automations.find(a => a.id === automationId);
-    if (freshAuto) {
-      const freshAgent = freshAuto.agents.find(ag => ag.id === agentId);
-      if (freshAgent) {
-        freshAgent.currentRunStartedAt = null;
-        freshAgent.lastRunStatus = 'error';
-        freshAgent.lastError = err.message;
-        writeAutomations(freshData);
+    try {
+      const freshData = readAutomations();
+      const freshAuto = freshData.automations.find(a => a.id === automationId);
+      if (freshAuto) {
+        const freshAgent = freshAuto.agents.find(ag => ag.id === agentId);
+        if (freshAgent) {
+          freshAgent.currentRunStartedAt = null;
+          freshAgent.lastRunStatus = 'error';
+          freshAgent.lastError = err.message;
+          writeAutomations(freshData);
+        }
       }
-    }
+    } catch { /* avoid crashing the error handler */ }
     if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
       automationId, agentId, status: 'error', error: err.message
     });
