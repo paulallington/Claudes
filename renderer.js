@@ -564,6 +564,12 @@ function loadProjects() {
       if (config.projects[i].columnCount === undefined) {
         config.projects[i].columnCount = 1;
       }
+      if (config.projects[i].poppedOut === undefined) {
+        config.projects[i].poppedOut = false;
+      }
+      if (config.projects[i].popoutBounds === undefined) {
+        config.projects[i].popoutBounds = null;
+      }
     }
     if (config.fontSize) {
       fontSize = Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, config.fontSize));
