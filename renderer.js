@@ -635,6 +635,22 @@ if (window.electronAPI && window.electronAPI.onConfigUpdated) {
       }
     } else {
       renderProjectList();
+      if (config.activeProjectIndex >= 0) {
+        var cur = config.projects[config.activeProjectIndex];
+        if (cur && cur.poppedOut) {
+          var prevKey = activeProjectKey;
+          var prevState = prevKey ? projectStates.get(prevKey) : null;
+          if (prevState) prevState.containerEl.style.display = 'none';
+          var next = config.projects.findIndex(function (p) { return !p.poppedOut; });
+          if (next >= 0) {
+            setActiveProject(next, false);
+          } else {
+            activeProjectKey = null;
+            activeProjectNameEl.textContent = '';
+            showEmptyState();
+          }
+        }
+      }
     }
   });
 }
@@ -817,6 +833,7 @@ function buildProjectItem(project, index) {
     } else if (project.ungrouped && groupKey) {
       addMenuItem('Re-add to "' + groupKey + '" group', 'regroup');
     }
+    addMenuItem('Open in new window', 'pop-out');
 
     menu.style.left = e.clientX + 'px';
     menu.style.top = e.clientY + 'px';
@@ -838,6 +855,10 @@ function buildProjectItem(project, index) {
         delete config.projects[projIndex].ungrouped;
         window.electronAPI.saveProjects(config);
         renderProjectList();
+      } else if (action === 'pop-out') {
+        if (window.electronAPI && window.electronAPI.popOutProject) {
+          window.electronAPI.popOutProject(config.projects[projIndex].path);
+        }
       }
       menu.style.display = 'none';
     };
