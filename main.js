@@ -462,7 +462,10 @@ function debouncePopoutBounds(projectKey, win) {
       if (!p) return;
       p.popoutBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
       scheduleWriteConfig(cfg);
-      broadcastConfigUpdated(cfg);
+      // Intentionally no broadcastConfigUpdated here — bounds changes are
+      // internal to the popout. Broadcasting would race with pending renderer
+      // edits (like project removal) and overwrite them with readConfig()'s
+      // pre-debounce disk state.
     }, POPOUT_BOUNDS_DEBOUNCE_MS);
   };
 }
@@ -518,6 +521,15 @@ ipcMain.handle('project:popIn', (event, projectKey) => {
   if (win && !win.isDestroyed()) {
     win.close();
   }
+  return true;
+});
+
+ipcMain.handle('project:focusPopoutWindow', (event, projectKey) => {
+  const win = popoutWindows.get(projectKey);
+  if (!win || win.isDestroyed()) return false;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
   return true;
 });
 

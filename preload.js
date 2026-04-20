@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveProjects: (config) => ipcRenderer.invoke('config:saveProjects', config),
   popOutProject: (projectKey) => ipcRenderer.invoke('project:popOut', projectKey),
   popInProject: (projectKey) => ipcRenderer.invoke('project:popIn', projectKey),
+  focusPopoutWindow: (projectKey) => ipcRenderer.invoke('project:focusPopoutWindow', projectKey),
   closePopoutWindow: (projectKey) => ipcRenderer.invoke('project:closePopoutWindow', projectKey),
   onConfigUpdated: (callback) => ipcRenderer.on('config:updated', (_, cfg) => callback(cfg)),
   getRecentSessions: (projectPath) => ipcRenderer.invoke('sessions:getRecent', projectPath),

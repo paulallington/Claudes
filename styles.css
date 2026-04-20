@@ -4979,3 +4979,22 @@ body.mode-popout #sidebar-resize-handle,
 body.mode-popout #btn-add-project {
   display: none !important;
 }
+
+/* Popped-out project indicator in the sidebar */
+
+.project-item.popped-out .project-name {
+  color: var(--accent, #7aa2f7);
+}
+
+.project-popout-badge {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 0.85em;
+  opacity: 0.75;
+  color: var(--accent, #7aa2f7);
+  vertical-align: baseline;
+}
+
+.project-item.popped-out:hover {
+  cursor: pointer;
+}

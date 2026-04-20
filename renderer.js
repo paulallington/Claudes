@@ -693,9 +693,13 @@ function buildProjectItem(project, index) {
   var item = document.createElement('div');
   item.className = 'project-item';
   item.dataset.projectPath = key;
-  if (index === config.activeProjectIndex) item.className += ' active';
+  if (index === config.activeProjectIndex && !project.poppedOut) item.className += ' active';
   if (projectsNeedingAttention.has(key)) item.className += ' attention-flash';
   if (project.pinned) item.className += ' is-pinned';
+  if (project.poppedOut) {
+    item.className += ' popped-out';
+    item.title = 'Open in separate window (click to focus)';
+  }
 
   var info = document.createElement('div');
   info.style.overflow = 'hidden';
@@ -704,6 +708,14 @@ function buildProjectItem(project, index) {
   var name = document.createElement('div');
   name.className = 'project-name';
   name.textContent = project.name;
+  if (project.poppedOut) {
+    var badge = document.createElement('span');
+    badge.className = 'project-popout-badge';
+    badge.textContent = '\u29C9'; // two joined squares
+    badge.title = 'In separate window';
+    name.appendChild(document.createTextNode(' '));
+    name.appendChild(badge);
+  }
 
   var pathEl = document.createElement('div');
   pathEl.className = 'project-path';
@@ -764,6 +776,10 @@ function buildProjectItem(project, index) {
   }
 
   item.addEventListener('click', function () {
+    if (project.poppedOut && window.electronAPI && window.electronAPI.focusPopoutWindow) {
+      window.electronAPI.focusPopoutWindow(project.path);
+      return;
+    }
     setActiveProject(index, false);
   });
 
@@ -841,7 +857,11 @@ function buildProjectItem(project, index) {
     } else if (project.ungrouped && groupKey) {
       addMenuItem('Re-add to "' + groupKey + '" group', 'regroup');
     }
-    addMenuItem('Open in new window', 'pop-out');
+    if (project.poppedOut) {
+      addMenuItem('Close separate window', 'pop-in');
+    } else {
+      addMenuItem('Open in new window', 'pop-out');
+    }
 
     menu.style.left = e.clientX + 'px';
     menu.style.top = e.clientY + 'px';
@@ -866,6 +886,10 @@ function buildProjectItem(project, index) {
       } else if (action === 'pop-out') {
         if (window.electronAPI && window.electronAPI.popOutProject) {
           window.electronAPI.popOutProject(config.projects[projIndex].path);
+        }
+      } else if (action === 'pop-in') {
+        if (window.electronAPI && window.electronAPI.popInProject) {
+          window.electronAPI.popInProject(config.projects[projIndex].path);
         }
       }
       menu.style.display = 'none';
@@ -975,9 +999,7 @@ function renderProjectList() {
   if (!config.collapsedGroups) config.collapsedGroups = {};
   var sortMode = config.projectSortMode || 'manual';
 
-  var allEntries = config.projects
-    .map(function (p, i) { return { project: p, index: i }; })
-    .filter(function (e) { return !e.project.poppedOut; });
+  var allEntries = config.projects.map(function (p, i) { return { project: p, index: i }; });
   var pinnedEntries = allEntries.filter(function (e) { return e.project.pinned; });
   var unpinnedEntries = allEntries.filter(function (e) { return !e.project.pinned; });
 
@@ -1116,7 +1138,11 @@ function addProject(folderPath) {
 
   for (var i = 0; i < config.projects.length; i++) {
     if (config.projects[i].path === folderPath) {
-      setActiveProject(i, false);
+      if (config.projects[i].poppedOut && window.electronAPI && window.electronAPI.focusPopoutWindow) {
+        window.electronAPI.focusPopoutWindow(config.projects[i].path);
+      } else {
+        setActiveProject(i, false);
+      }
       return;
     }
   }
@@ -1240,11 +1266,18 @@ function removeProject(index) {
   config.projects.splice(index, 1);
 
   if (config.activeProjectIndex === index) {
-    if (config.projects.length > 0) {
-      config.activeProjectIndex = Math.min(index, config.projects.length - 1);
+    var nextAvail = -1;
+    for (var n = Math.min(index, config.projects.length - 1); n >= 0; n--) {
+      if (!config.projects[n].poppedOut) { nextAvail = n; break; }
+    }
+    if (nextAvail < 0) {
+      nextAvail = config.projects.findIndex(function (p) { return !p.poppedOut; });
+    }
+    if (nextAvail >= 0) {
+      config.activeProjectIndex = nextAvail;
       activeProjectKey = null;
       saveConfig();
-      setActiveProject(config.activeProjectIndex, false);
+      setActiveProject(nextAvail, false);
     } else {
       config.activeProjectIndex = -1;
       activeProjectKey = null;
