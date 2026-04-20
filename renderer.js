@@ -29,6 +29,10 @@ var optWorktree = document.getElementById('opt-worktree');
 var optCustomArgs = document.getElementById('opt-custom-args');
 
 
+// Each window has its own counter for new column/pty ids. Give popouts a high
+// offset so they can't collide with main when both windows spawn after a
+// transfer. Reattached ids from a transfer bump the counter above themselves
+// in addColumn; this just sets the initial floor.
 var globalColumnId = 0;
 var globalRowId = 0;
 var ws = null;
@@ -57,6 +61,8 @@ var popoutProjectKey = null;
       popoutMode = true;
       popoutProjectKey = params.get('projectKey');
       document.body.classList.add('mode-popout');
+      // Separate id space from main to avoid post-transfer collisions on pty-server.
+      globalColumnId = 100000;
     }
   } catch {}
 })();
