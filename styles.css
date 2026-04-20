@@ -3457,6 +3457,112 @@ html, body {
   font-style: italic;
 }
 
+/* Shared block: tokens-in-perspective + environmental-equivalents */
+.usage-equiv-block {
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 16px 18px;
+  margin-bottom: 20px;
+}
+
+.usage-equiv-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.usage-equiv-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.usage-equiv-reroll {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: transform 0.2s ease, background 0.15s ease;
+}
+
+.usage-equiv-reroll:hover {
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+  transform: rotate(30deg);
+}
+
+.usage-equiv-reroll:active {
+  transform: rotate(180deg);
+}
+
+.usage-equiv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.usage-equiv-tile {
+  background: var(--bg-sidebar);
+  border-radius: 4px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 54px;
+}
+
+.usage-equiv-tile-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.1;
+}
+
+.usage-equiv-tile-unit {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.35;
+}
+
+.usage-equiv-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 10px 12px;
+  font-style: italic;
+}
+
+.usage-equiv-footnote {
+  font-size: 10px;
+  color: var(--text-faint);
+  margin-top: 10px;
+  font-style: italic;
+}
+
+/* Re-use the equivalents block skin for the environmental wrapper so the two
+   sit as visual siblings. The old .usage-environmental keeps padding/bg rules
+   above; add the header + grid children from the shared block. */
+.usage-environmental .usage-equiv-header,
+.usage-environmental .usage-equiv-grid {
+  /* inherit from shared block, nothing extra */
+}
+
+.usage-env-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
 /* Chart */
 
 .usage-chart-container {

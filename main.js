@@ -1222,90 +1222,190 @@ ipcMain.handle('launch:readEnvFile', (event, filePath) => {
 
 // --- Usage ---
 
+const readline = require('readline');
+const USAGE_CACHE_FILE = path.join(CONFIG_DIR, 'usage-cache.json');
+const USAGE_PARSE_CONCURRENCY = 8;
+
+function readUsageCache() {
+  try {
+    return JSON.parse(fs.readFileSync(USAGE_CACHE_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function writeUsageCache(cache) {
+  try {
+    ensureConfigDir();
+    fs.writeFileSync(USAGE_CACHE_FILE, JSON.stringify(cache), 'utf8');
+  } catch { /* ignore */ }
+}
+
+// Parse a single jsonl session file, streaming line by line and cheap-rejecting
+// lines that don't carry usage/timestamp data before JSON.parse. Returns the
+// per-session digest or null if the file has no assistant usage events.
+function parseSessionFile(filePath) {
+  return new Promise((resolve) => {
+    let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheCreationTokens = 0;
+    let model = '';
+    let firstTimestamp = null, lastTimestamp = null;
+    let messageCount = 0;
+    let lastTurn = null; // { input, output, cacheRead, cacheCreation, total }
+
+    let stream;
+    try {
+      stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+    } catch {
+      resolve(null);
+      return;
+    }
+    stream.on('error', () => resolve(null));
+
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    rl.on('line', (line) => {
+      // Most lines are tool calls / user prompts we don't aggregate from.
+      // Skip the JSON.parse cost unless the line is plausibly relevant.
+      const hasUsage = line.indexOf('"usage"') !== -1;
+      const hasTimestamp = line.indexOf('"timestamp"') !== -1;
+      if (!hasUsage && !hasTimestamp) return;
+
+      let entry;
+      try { entry = JSON.parse(line); } catch { return; }
+
+      if (entry.type === 'assistant' && entry.message && entry.message.usage) {
+        const u = entry.message.usage;
+        const i = u.input_tokens || 0;
+        const o = u.output_tokens || 0;
+        const cr = u.cache_read_input_tokens || 0;
+        const cc = u.cache_creation_input_tokens || 0;
+        inputTokens += i;
+        outputTokens += o;
+        cacheReadTokens += cr;
+        cacheCreationTokens += cc;
+        if (!model && entry.message.model) model = entry.message.model;
+        messageCount++;
+        // Overwrite each turn — final value is the last assistant message's usage.
+        lastTurn = {
+          input: i,
+          output: o,
+          cacheRead: cr,
+          cacheCreation: cc,
+          total: i + o + cr + cc
+        };
+      }
+
+      if (entry.timestamp) {
+        const ts = typeof entry.timestamp === 'number' ? entry.timestamp : new Date(entry.timestamp).getTime();
+        if (!firstTimestamp || ts < firstTimestamp) firstTimestamp = ts;
+        if (!lastTimestamp || ts > lastTimestamp) lastTimestamp = ts;
+      }
+    });
+    rl.on('close', () => {
+      if (messageCount === 0) {
+        resolve(null);
+        return;
+      }
+      resolve({
+        inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens,
+        model, firstTimestamp, lastTimestamp, messageCount, lastTurn
+      });
+    });
+    rl.on('error', () => resolve(null));
+  });
+}
+
+// Run an async function with limited concurrency over an input array.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  const workers = [];
+  for (let w = 0; w < Math.min(limit, items.length); w++) workers.push(worker());
+  await Promise.all(workers);
+  return out;
+}
+
 ipcMain.handle('usage:getAll', async () => {
   const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
   const results = [];
+  const cache = readUsageCache();
+  const nextCache = {};
 
+  let projectDirs;
   try {
-    let projectDirs;
-    try {
-      projectDirs = await fs.promises.readdir(claudeProjectsDir);
-    } catch {
-      return results; // doesn't exist or unreadable
+    projectDirs = await fs.promises.readdir(claudeProjectsDir);
+  } catch {
+    return results;
+  }
+
+  // Enumerate all jsonl files up front so we can parse in parallel.
+  const jobs = [];
+  for (const dir of projectDirs) {
+    const projectDir = path.join(claudeProjectsDir, dir);
+    let dirStat;
+    try { dirStat = await fs.promises.stat(projectDir); } catch { continue; }
+    if (!dirStat.isDirectory()) continue;
+
+    let entries;
+    try { entries = await fs.promises.readdir(projectDir); } catch { continue; }
+
+    for (const file of entries) {
+      if (!file.endsWith('.jsonl')) continue;
+      const filePath = path.join(projectDir, file);
+      let fileStat;
+      try { fileStat = await fs.promises.stat(filePath); } catch { continue; }
+      const sessionId = file.replace('.jsonl', '');
+      jobs.push({
+        cacheKey: dir + '/' + sessionId,
+        projectKey: dir,
+        sessionId,
+        filePath,
+        size: fileStat.size,
+        mtimeMs: fileStat.mtimeMs
+      });
     }
+  }
 
-    for (const dir of projectDirs) {
-      const projectDir = path.join(claudeProjectsDir, dir);
-      let stat;
-      try { stat = await fs.promises.stat(projectDir); } catch { continue; }
-      if (!stat.isDirectory()) continue;
-
-      let jsonlFiles;
-      try {
-        const entries = await fs.promises.readdir(projectDir);
-        jsonlFiles = entries.filter(f => f.endsWith('.jsonl'));
-      } catch { continue; }
-
-      for (const file of jsonlFiles) {
-        const filePath = path.join(projectDir, file);
-        let fileStat;
-        try { fileStat = await fs.promises.stat(filePath); } catch { continue; }
-
-        const sessionId = file.replace('.jsonl', '');
-        let inputTokens = 0;
-        let outputTokens = 0;
-        let cacheReadTokens = 0;
-        let cacheCreationTokens = 0;
-        let model = '';
-        let firstTimestamp = null;
-        let lastTimestamp = null;
-        let messageCount = 0;
-
-        try {
-          const content = await fs.promises.readFile(filePath, 'utf8');
-          const lines = content.split('\n').filter(Boolean);
-          for (const line of lines) {
-            let entry;
-            try { entry = JSON.parse(line); } catch { continue; }
-
-            if (entry.type === 'assistant' && entry.message && entry.message.usage) {
-              const u = entry.message.usage;
-              inputTokens += (u.input_tokens || 0);
-              outputTokens += (u.output_tokens || 0);
-              cacheReadTokens += (u.cache_read_input_tokens || 0);
-              cacheCreationTokens += (u.cache_creation_input_tokens || 0);
-              if (!model && entry.message.model) model = entry.message.model;
-              messageCount++;
-            }
-
-            if (entry.timestamp) {
-              const ts = typeof entry.timestamp === 'number' ? entry.timestamp : new Date(entry.timestamp).getTime();
-              if (!firstTimestamp || ts < firstTimestamp) firstTimestamp = ts;
-              if (!lastTimestamp || ts > lastTimestamp) lastTimestamp = ts;
-            }
-          }
-        } catch { continue; }
-
-        if (messageCount > 0) {
-          results.push({
-            projectKey: dir,
-            sessionId,
-            model,
-            inputTokens,
-            outputTokens,
-            cacheReadTokens,
-            cacheCreationTokens,
-            messageCount,
-            firstTimestamp,
-            lastTimestamp,
-            fileSize: fileStat.size,
-            modified: fileStat.mtimeMs
-          });
-        }
-      }
+  const parsed = await mapLimit(jobs, USAGE_PARSE_CONCURRENCY, async (job) => {
+    const cached = cache[job.cacheKey];
+    if (cached && cached.mtimeMs === job.mtimeMs && cached.size === job.size) {
+      return { job, digest: cached };
     }
-  } catch { /* ignore top-level errors */ }
+    const digest = await parseSessionFile(job.filePath);
+    if (!digest) return { job, digest: null };
+    return {
+      job,
+      digest: Object.assign({ mtimeMs: job.mtimeMs, size: job.size }, digest)
+    };
+  });
 
+  for (const { job, digest } of parsed) {
+    if (!digest) continue;
+    nextCache[job.cacheKey] = digest;
+    results.push({
+      projectKey: job.projectKey,
+      sessionId: job.sessionId,
+      model: digest.model,
+      inputTokens: digest.inputTokens,
+      outputTokens: digest.outputTokens,
+      cacheReadTokens: digest.cacheReadTokens,
+      cacheCreationTokens: digest.cacheCreationTokens,
+      messageCount: digest.messageCount,
+      firstTimestamp: digest.firstTimestamp,
+      lastTimestamp: digest.lastTimestamp,
+      lastTurn: digest.lastTurn,
+      fileSize: digest.size,
+      modified: digest.mtimeMs
+    });
+  }
+
+  writeUsageCache(nextCache);
   return results;
 });
 

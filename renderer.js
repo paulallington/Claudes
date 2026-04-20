@@ -5771,9 +5771,11 @@ function buildUsageCard(label, value, sub) {
 }
 
 function renderUsageSummary(data) {
-  var totalInput = 0, totalOutput = 0, totalCacheRead = 0;
+  var totalApiProcessed = 0, totalInput = 0, totalOutput = 0, totalCacheRead = 0;
+  var totalConversation = 0;
   var last7dMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  var week7Input = 0, week7Output = 0, week7Cache = 0, week7Sessions = 0;
+  var week7Api = 0, week7Input = 0, week7Output = 0, week7Cache = 0, week7Sessions = 0;
+  var week7Conversation = 0;
   var projectSet7 = new Set(), projectSetAll = new Set();
   var earliestTs = Infinity, latestTs = 0;
 
@@ -5785,14 +5787,23 @@ function renderUsageSummary(data) {
 
   for (var i = 0; i < data.length; i++) {
     var s = data[i];
-    var sessionInput = s.inputTokens + s.cacheReadTokens + s.cacheCreationTokens;
-    totalInput += sessionInput;
+    // API input here bundles cache reads + cache creation, because that's what
+    // Anthropic processed and what drives the energy estimate. It over-counts
+    // "content" on long sessions (cache reads grow turn-over-turn) — that's
+    // why Conversation Tokens below is shown separately.
+    var sessionApiInput = s.inputTokens + s.cacheReadTokens + s.cacheCreationTokens;
+    totalApiProcessed += sessionApiInput + s.outputTokens;
+    totalInput += sessionApiInput;
     totalOutput += s.outputTokens;
     totalCacheRead += s.cacheReadTokens;
+    // Conversation tokens = final assistant turn's full context + its reply.
+    // Falls back to zero for sessions that never produced an assistant message.
+    var conv = s.lastTurn ? s.lastTurn.total : 0;
+    totalConversation += conv;
     projectSetAll.add(s.projectKey);
 
     var modelClass = classifyModel(s.model);
-    allModelTokens[modelClass].input += sessionInput;
+    allModelTokens[modelClass].input += sessionApiInput;
     allModelTokens[modelClass].output += s.outputTokens;
     allModelTokens[modelClass].cache += s.cacheReadTokens;
 
@@ -5800,12 +5811,14 @@ function renderUsageSummary(data) {
     if (s.lastTimestamp && s.lastTimestamp > latestTs) latestTs = s.lastTimestamp;
 
     if (s.lastTimestamp >= last7dMs) {
-      week7Input += sessionInput;
+      week7Api += sessionApiInput + s.outputTokens;
+      week7Input += sessionApiInput;
       week7Output += s.outputTokens;
       week7Cache += s.cacheReadTokens;
+      week7Conversation += conv;
       week7Sessions++;
       projectSet7.add(s.projectKey);
-      week7ModelTokens[modelClass].input += sessionInput;
+      week7ModelTokens[modelClass].input += sessionApiInput;
       week7ModelTokens[modelClass].output += s.outputTokens;
       week7ModelTokens[modelClass].cache += s.cacheReadTokens;
     }
@@ -5815,8 +5828,8 @@ function renderUsageSummary(data) {
   var dataSpanDays = earliestTs < Infinity ? Math.ceil((Date.now() - earliestTs) / (24 * 60 * 60 * 1000)) : 0;
 
   var periods = {
-    '7d':  { input: week7Input,  output: week7Output,  cache: week7Cache,    sessions: week7Sessions,   projects: projectSet7.size, modelTokens: week7ModelTokens },
-    'all': { input: totalInput,   output: totalOutput,   cache: totalCacheRead, sessions: data.length,   projects: projectSetAll.size, modelTokens: allModelTokens }
+    '7d':  { api: week7Api,           input: week7Input,  output: week7Output,  cache: week7Cache,    conversation: week7Conversation, sessions: week7Sessions,   projects: projectSet7.size,   modelTokens: week7ModelTokens },
+    'all': { api: totalApiProcessed,  input: totalInput,  output: totalOutput,  cache: totalCacheRead, conversation: totalConversation, sessions: data.length,    projects: projectSetAll.size, modelTokens: allModelTokens }
   };
 
   // Format earliest date for display
@@ -5833,18 +5846,39 @@ function renderUsageSummary(data) {
   };
   var chartDays = { '7d': 7, 'all': Math.max(dataSpanDays, 30) };
 
+  function buildCardWithTooltip(label, value, sub, tooltip) {
+    var card = buildUsageCard(label, value, sub);
+    if (tooltip) card.title = tooltip;
+    return card;
+  }
+
   function renderPeriod(period) {
     var p = periods[period];
 
     var container = document.getElementById('usage-summary-cards');
     container.textContent = '';
-    container.appendChild(buildUsageCard('Total Tokens', formatTokenCount(p.input + p.output), formatTokenCount(p.input) + ' in / ' + formatTokenCount(p.output) + ' out'));
-    container.appendChild(buildUsageCard('Cache Savings', formatTokenCount(p.cache), 'read from cache'));
-    container.appendChild(buildUsageCard('Sessions', String(p.sessions), p.projects + ' projects'));
+    container.appendChild(buildCardWithTooltip(
+      'API Tokens Processed',
+      formatTokenCount(p.api),
+      'incl. cached re-reads \u00b7 drives energy estimate',
+      'Every token Anthropic processed across all turns. Includes the conversation history re-sent (and cached) on each turn, so it grows faster than the actual content. This is what billing and energy costs scale with.'
+    ));
+    container.appendChild(buildCardWithTooltip(
+      'Conversation Tokens',
+      formatTokenCount(p.conversation),
+      'actual content across your chats',
+      'Sum of each session\u2019s final-turn context + reply. Counts each token of conversation once. Rough proxy for \u201chow much text actually flowed through the model\u201d.'
+    ));
+    container.appendChild(buildUsageCard(
+      'Input / Output',
+      formatTokenCount(p.input) + ' / ' + formatTokenCount(p.output),
+      String(p.sessions) + ' sessions \u00b7 ' + p.projects + ' projects'
+    ));
 
     var chartTitle = document.getElementById('usage-chart-title');
     if (chartTitle) chartTitle.textContent = periodLabels[period];
     renderBarChart('usage-chart-30d', data, chartDays[period]);
+    renderTokensPerspective(p.conversation, periodLabels[period]);
     renderEnvironmentalImpact(p.modelTokens, periodLabels[period]);
   }
 
@@ -5889,11 +5923,213 @@ function classifyModel(modelStr) {
   return 'unknown';
 }
 
+// ============================================================
+// Humour pools — used by renderTokensPerspective and renderEnvironmentalImpact.
+// Each entry has a `per` (how much metric equals 1 of this unit), a `unit`
+// display label, and a `tone` tag so the picker can balance the grid.
+// Numbers for the serious equivalents come from ballpark public estimates;
+// numbers for the silly ones are deliberately silly and tagged "estimated".
+// ============================================================
+var TOKEN_EQUIVALENTS = [
+  // nerdy
+  { unit: 'complete Lord of the Rings trilogies (text)', per: 576000, tone: 'nerdy' },
+  { unit: 'full Shakespeare plays',                     per: 30000,  tone: 'nerdy' },
+  { unit: 'Hitchhiker\u2019s Guide paperbacks',         per: 65000,  tone: 'nerdy' },
+  { unit: 'PhD theses (~80k words each)',               per: 107000, tone: 'nerdy' },
+  { unit: 'entire Wikipedia articles on cheese',        per: 12000,  tone: 'nerdy' },
+  { unit: 'Kernighan & Ritchie \u201CC\u201D books',    per: 80000,  tone: 'nerdy' },
+  // mundane
+  { unit: 'IKEA instruction manuals end-to-end',        per: 2000,   tone: 'mundane' },
+  { unit: 'old-school 280-char tweets',                 per: 50,     tone: 'mundane' },
+  { unit: 'cereal-box ingredient lists',                per: 180,    tone: 'mundane' },
+  { unit: 'average LinkedIn humblebrags',               per: 90,     tone: 'mundane' },
+  { unit: 'fridge-magnet haikus',                       per: 20,     tone: 'mundane' },
+  { unit: 'local-council planning notices',             per: 450,    tone: 'mundane' },
+  // absurd
+  { unit: 'regretful voicemails left by a sentient toaster',        per: 300,  tone: 'absurd' },
+  { unit: 'suicide notes written by a surprisingly articulate moth', per: 800,  tone: 'absurd' },
+  { unit: 'pages of minutes from an imaginary goose AGM',           per: 500,  tone: 'absurd' },
+  { unit: 'love letters between two rival kitchen sponges',         per: 400,  tone: 'absurd' },
+  { unit: 'motivational speeches delivered by a bored swan',        per: 650,  tone: 'absurd' },
+  { unit: 'villainous monologues from a mildly annoyed pigeon',     per: 900,  tone: 'absurd' },
+  // deadpan
+  { unit: 'slightly embarrassed British apologies',                 per: 12,   tone: 'deadpan' },
+  { unit: 'Ofsted reports for a school that definitely exists',     per: 8000, tone: 'deadpan' },
+  { unit: 'strongly worded letters to the council',                 per: 180,  tone: 'deadpan' },
+  { unit: 'passive-aggressive kitchen sticky notes',                per: 35,   tone: 'deadpan' },
+  { unit: '\u201Creply all\u201D apology emails',                   per: 120,  tone: 'deadpan' },
+  { unit: 'notes left on windscreens about parking',                per: 80,   tone: 'deadpan' }
+];
+
+var ENV_EQUIVALENTS = [
+  // mundane-specific (the flavour the user asked for)
+  { unit: 'electric shavers fully charged',                 gCO2Per: 0.8,  tone: 'mundane' },
+  { unit: 'hair dryers run for 1 minute',                   gCO2Per: 2,    tone: 'mundane' },
+  { unit: 'electric toothbrushes charged',                  gCO2Per: 0.4,  tone: 'mundane' },
+  { unit: 'Roombas woken up unnecessarily',                 gCO2Per: 1,    tone: 'mundane' },
+  { unit: 'air fryers preheating to no purpose',            gCO2Per: 4,    tone: 'mundane' },
+  { unit: 'kettles boiled for one cup and forgotten',       gCO2Per: 18,   tone: 'mundane' },
+  { unit: 'microwaves reheating leftover curry',            gCO2Per: 7,    tone: 'mundane' },
+  { unit: 'phone chargers left plugged in overnight',       gCO2Per: 5,    tone: 'mundane' },
+  { unit: 'smart fridges sending pointless notifications',  gCO2Per: 0.3,  tone: 'mundane' },
+  // absurd
+  { unit: 'tears boiled off a single disappointed octopus', gCO2Per: 0.5,  tone: 'absurd' },
+  { unit: 'gerbils levitated for 3 seconds',                gCO2Per: 0.9,  tone: 'absurd' },
+  { unit: 'Bluetooth speakers forced to play \u201CDespacito\u201D once', gCO2Per: 1.2, tone: 'absurd' },
+  { unit: 'lighthouses lit for one melancholy moment',      gCO2Per: 200,  tone: 'absurd' },
+  { unit: 'Tamagotchis kept alive for 24 hours',            gCO2Per: 0.02, tone: 'absurd' },
+  { unit: 'seagulls briefly contemplating a chip',          gCO2Per: 0.01, tone: 'absurd' },
+  { unit: 'ducks warmed to exactly room temperature',       gCO2Per: 35,   tone: 'absurd' },
+  // nerdy
+  { unit: 'seconds of a DeLorean at 88 mph',                gCO2Per: 85,   tone: 'nerdy' },
+  { unit: 'Big Ben chime-ticks',                            gCO2Per: 12,   tone: 'nerdy' },
+  { unit: 'frames of a 4K Blu-ray played',                  gCO2Per: 0.004, tone: 'nerdy' },
+  { unit: 'HDDs spun up just to find one JPEG',             gCO2Per: 0.9,  tone: 'nerdy' },
+  // deadpan
+  { unit: 'mildly awkward silences in a Zoom meeting',      gCO2Per: 0.3,  tone: 'deadpan' },
+  { unit: 'Google searches for \u201Cweather\u201D',        gCO2Per: 0.3,  tone: 'deadpan' },
+  { unit: '5-minute hot showers',                           gCO2Per: 500,  tone: 'deadpan' },
+  { unit: 'miles driven in a petrol car',                   gCO2Per: 404,  tone: 'deadpan' },
+  { unit: 'London\u2013New York flights',                   gCO2Per: 255000, tone: 'deadpan' }
+];
+
+// Pick `count` equivalents whose resulting number-of-units falls in a plausible
+// range. Prefers tone variety (no tone more than twice). `excludeSet` lets
+// reroll skip entries currently shown.
+function pickEquivalents(pool, metric, perKey, count, seed, excludeSet) {
+  if (!metric || metric <= 0) return [];
+  // First pass: filter to entries with a sensible count range.
+  var viable = [];
+  for (var i = 0; i < pool.length; i++) {
+    var entry = pool[i];
+    if (excludeSet && excludeSet[entry.unit]) continue;
+    var n = metric / entry[perKey];
+    if (n >= 0.3 && n <= 5000) {
+      viable.push({ entry: entry, n: n });
+    }
+  }
+  if (viable.length === 0) {
+    // Relax: just use all pool entries regardless of range.
+    for (var j = 0; j < pool.length; j++) {
+      if (excludeSet && excludeSet[pool[j].unit]) continue;
+      viable.push({ entry: pool[j], n: metric / pool[j][perKey] });
+    }
+  }
+  // Seeded shuffle (tiny LCG is fine here).
+  var rng = seed >>> 0;
+  function next() { rng = (rng * 1664525 + 1013904223) >>> 0; return rng / 0xffffffff; }
+  for (var k = viable.length - 1; k > 0; k--) {
+    var swap = Math.floor(next() * (k + 1));
+    var tmp = viable[k]; viable[k] = viable[swap]; viable[swap] = tmp;
+  }
+  // Greedy pick honouring tone variety.
+  var picked = [];
+  var toneCounts = {};
+  for (var m = 0; m < viable.length && picked.length < count; m++) {
+    var t = viable[m].entry.tone || 'other';
+    if ((toneCounts[t] || 0) >= 2) continue;
+    picked.push(viable[m]);
+    toneCounts[t] = (toneCounts[t] || 0) + 1;
+  }
+  // If we couldn't hit `count` under the tone cap, relax and top up.
+  for (var n2 = 0; n2 < viable.length && picked.length < count; n2++) {
+    if (picked.indexOf(viable[n2]) === -1) picked.push(viable[n2]);
+  }
+  return picked;
+}
+
+function formatEquivalentCount(n) {
+  if (n < 0.01) return '< 0.01';
+  if (n < 1) return n.toFixed(2);
+  if (n < 10) return n.toFixed(1);
+  return Math.round(n).toLocaleString();
+}
+
+function buildEquivalentTile(value, unit) {
+  var tile = document.createElement('div');
+  tile.className = 'usage-equiv-tile';
+  tile.dataset.unit = unit;
+  var v = document.createElement('div');
+  v.className = 'usage-equiv-tile-value';
+  v.textContent = value;
+  var u = document.createElement('div');
+  u.className = 'usage-equiv-tile-unit';
+  u.textContent = unit;
+  tile.appendChild(v);
+  tile.appendChild(u);
+  return tile;
+}
+
+function buildEquivBlockHeader(container, titleText) {
+  var header = document.createElement('div');
+  header.className = 'usage-equiv-header';
+  var h = document.createElement('span');
+  h.className = 'usage-equiv-title';
+  h.textContent = titleText;
+  var reroll = document.createElement('button');
+  reroll.className = 'usage-equiv-reroll';
+  reroll.type = 'button';
+  reroll.title = 'Re-roll equivalents';
+  reroll.setAttribute('aria-label', 'Re-roll equivalents');
+  reroll.textContent = '\u21BB'; // clockwise arrow
+  header.appendChild(h);
+  header.appendChild(reroll);
+  container.appendChild(header);
+  return reroll;
+}
+
+function renderEquivalentGrid(gridEl, entries, metric, perKey) {
+  gridEl.textContent = '';
+  if (entries.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'usage-equiv-empty';
+    empty.textContent = 'Not enough data yet to find a comparison.';
+    gridEl.appendChild(empty);
+    return;
+  }
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i];
+    var n = metric / e.entry[perKey];
+    gridEl.appendChild(buildEquivalentTile(formatEquivalentCount(n), e.entry.unit));
+  }
+}
+
+function renderTokensPerspective(totalConversation, periodLabel) {
+  var container = document.getElementById('usage-tokens-perspective');
+  if (!container) return;
+  container.textContent = '';
+
+  var reroll = buildEquivBlockHeader(container, 'Tokens in perspective \u2014 ' + (periodLabel || 'All Time'));
+
+  var grid = document.createElement('div');
+  grid.className = 'usage-equiv-grid';
+  container.appendChild(grid);
+
+  var shown = {};
+  var state = { seed: (totalConversation & 0xffff) ^ 0x9E37 };
+
+  function draw() {
+    var picks = pickEquivalents(TOKEN_EQUIVALENTS, totalConversation, 'per', 4, state.seed, shown);
+    shown = {};
+    picks.forEach(function (p) { shown[p.entry.unit] = true; });
+    renderEquivalentGrid(grid, picks, totalConversation, 'per');
+  }
+  draw();
+  reroll.addEventListener('click', function () {
+    state.seed = (state.seed * 1103515245 + 12345) >>> 0;
+    draw();
+  });
+
+  var foot = document.createElement('div');
+  foot.className = 'usage-equiv-footnote';
+  foot.textContent = '\u2248 0.75 English words per token. Silly units calibrated to taste.';
+  container.appendChild(foot);
+}
+
 function renderEnvironmentalImpact(modelTokens, periodLabel) {
   // Carbon intensity: Google Cloud / AWS average (kg CO2 per kWh)
   var KG_CO2_PER_KWH = 0.12;
 
-  // Calculate energy per model
   var energyWh = 0;
   var modelBreakdown = [];
   var modelNames = ['opus', 'sonnet', 'haiku', 'unknown'];
@@ -5913,7 +6149,6 @@ function renderEnvironmentalImpact(modelTokens, periodLabel) {
       totalTokens: tokens.input + tokens.output
     });
   }
-  // Calculate percentages
   for (var bi = 0; bi < modelBreakdown.length; bi++) {
     modelBreakdown[bi].pct = energyWh > 0 ? Math.round(modelBreakdown[bi].wh / energyWh * 100) : 0;
   }
@@ -5922,85 +6157,27 @@ function renderEnvironmentalImpact(modelTokens, periodLabel) {
   var co2Kg = energyKwh * KG_CO2_PER_KWH;
   var co2G = co2Kg * 1000;
 
-  // Format energy
   var energyStr, energyUnit;
-  if (energyWh < 1) {
-    energyStr = (energyWh * 1000).toFixed(1);
-    energyUnit = 'mWh';
-  } else if (energyWh < 1000) {
-    energyStr = energyWh.toFixed(1);
-    energyUnit = 'Wh';
-  } else {
-    energyStr = energyKwh.toFixed(2);
-    energyUnit = 'kWh';
-  }
+  if (energyWh < 1) { energyStr = (energyWh * 1000).toFixed(1); energyUnit = 'mWh'; }
+  else if (energyWh < 1000) { energyStr = energyWh.toFixed(1); energyUnit = 'Wh'; }
+  else { energyStr = energyKwh.toFixed(2); energyUnit = 'kWh'; }
 
-  // Format CO2
   var co2Str, co2Unit;
-  if (co2G < 1) {
-    co2Str = (co2G * 1000).toFixed(1);
-    co2Unit = 'mg';
-  } else if (co2G < 1000) {
-    co2Str = co2G.toFixed(1);
-    co2Unit = 'g';
-  } else {
-    co2Str = co2Kg.toFixed(2);
-    co2Unit = 'kg';
-  }
-
-  // Real-world equivalents (sorted small to large by CO2 in grams)
-  var equivalents = [
-    { icon: '\uD83D\uDD0D', g: 0.3,   unit: 'Google searches' },
-    { icon: '\uD83D\uDCA1', g: 1.2,   unit: 'hours of an LED bulb' },
-    { icon: '\uD83D\uDCF1', g: 0.96,  unit: 'phone charges' },
-    { icon: '\uD83C\uDF75', g: 15,    unit: 'cups of tea (boiling the kettle)' },
-    { icon: '\uD83C\uDFAC', g: 36,    unit: 'hours of Netflix streaming' },
-    { icon: '\uD83D\uDEC1', g: 500,   unit: '5-minute hot showers' },
-    { icon: '\uD83D\uDE97', g: 404,   unit: 'miles driven in a car' },
-    { icon: '\u2708\uFE0F', g: 255000, unit: 'London\u2013NYC flights' }
-  ];
-
-  // Pick the best equivalent (aim for a count between 1 and 200)
-  var best = null;
-  var bestCount = 0;
-  for (var i = 0; i < equivalents.length; i++) {
-    var count = co2G / equivalents[i].g;
-    if (count >= 0.3 && (best === null || (count >= 1 && count <= 200))) {
-      best = equivalents[i];
-      bestCount = count;
-    }
-  }
-  if (!best) {
-    best = equivalents[0];
-    bestCount = co2G / best.g;
-  }
-
-  var countStr;
-  if (bestCount < 0.01) countStr = '< 0.01';
-  else if (bestCount < 1) countStr = bestCount.toFixed(2);
-  else if (bestCount < 10) countStr = bestCount.toFixed(1);
-  else countStr = Math.round(bestCount).toLocaleString();
+  if (co2G < 1) { co2Str = (co2G * 1000).toFixed(1); co2Unit = 'mg'; }
+  else if (co2G < 1000) { co2Str = co2G.toFixed(1); co2Unit = 'g'; }
+  else { co2Str = co2Kg.toFixed(2); co2Unit = 'kg'; }
 
   var container = document.getElementById('usage-environmental');
   container.textContent = '';
 
-  // Header
-  var header = document.createElement('div');
-  header.className = 'usage-env-header';
-  var headerIcon = document.createElement('span');
-  headerIcon.className = 'usage-env-icon';
-  headerIcon.textContent = '\uD83C\uDF0D';
-  var headerTitle = document.createElement('span');
-  headerTitle.className = 'usage-env-title';
-  headerTitle.textContent = 'Environmental Impact \u2014 ' + (periodLabel || 'All Time') + ' (estimated)';
-  header.appendChild(headerIcon);
-  header.appendChild(headerTitle);
-  container.appendChild(header);
+  var reroll = buildEquivBlockHeader(
+    container,
+    'Environmental impact \u2014 ' + (periodLabel || 'All Time') + ' (estimated)'
+  );
 
-  // Stats grid
-  var grid = document.createElement('div');
-  grid.className = 'usage-env-grid';
-
+  // Stats row (energy + CO2)
+  var stats = document.createElement('div');
+  stats.className = 'usage-env-stats';
   function buildEnvStat(label, val, unit, sub) {
     var stat = document.createElement('div');
     stat.className = 'usage-env-stat';
@@ -6023,38 +6200,38 @@ function renderEnvironmentalImpact(modelTokens, periodLabel) {
     stat.appendChild(subEl);
     return stat;
   }
-
-  // Build sub-label showing model mix
   var modelMixParts = [];
   for (var mi2 = 0; mi2 < modelBreakdown.length; mi2++) {
     modelMixParts.push(modelBreakdown[mi2].name + ' ' + modelBreakdown[mi2].pct + '%');
   }
   var modelMixStr = modelMixParts.length > 0 ? modelMixParts.join(', ') : 'no model data';
+  stats.appendChild(buildEnvStat('Energy Used', energyStr, energyUnit, modelMixStr));
+  stats.appendChild(buildEnvStat('CO\u2082 Emissions', co2Str, co2Unit, KG_CO2_PER_KWH * 1000 + ' g/kWh cloud avg'));
+  container.appendChild(stats);
 
-  grid.appendChild(buildEnvStat('Energy Used', energyStr, energyUnit, modelMixStr));
-  grid.appendChild(buildEnvStat('CO\u2082 Emissions', co2Str, co2Unit, KG_CO2_PER_KWH * 1000 + ' g/kWh cloud avg'));
+  // Equivalents grid
+  var grid = document.createElement('div');
+  grid.className = 'usage-equiv-grid';
   container.appendChild(grid);
 
-  // Equivalent
-  var equiv = document.createElement('div');
-  equiv.className = 'usage-env-equivalent';
-  var eqIcon = document.createElement('span');
-  eqIcon.className = 'usage-env-equiv-icon';
-  eqIcon.textContent = best.icon;
-  var eqText = document.createElement('span');
-  eqText.className = 'usage-env-equiv-text';
-  eqText.textContent = "That's about the same as ";
-  var eqBold = document.createElement('strong');
-  eqBold.textContent = countStr + ' ' + best.unit;
-  eqText.appendChild(eqBold);
-  equiv.appendChild(eqIcon);
-  equiv.appendChild(eqText);
-  container.appendChild(equiv);
+  var shown = {};
+  var state = { seed: (Math.round(co2G * 1000) & 0xffff) ^ 0x4E22 };
+  function draw() {
+    var picks = pickEquivalents(ENV_EQUIVALENTS, co2G, 'gCO2Per', 4, state.seed, shown);
+    shown = {};
+    picks.forEach(function (p) { shown[p.entry.unit] = true; });
+    renderEquivalentGrid(grid, picks, co2G, 'gCO2Per');
+  }
+  draw();
+  reroll.addEventListener('click', function () {
+    state.seed = (state.seed * 1103515245 + 12345) >>> 0;
+    draw();
+  });
 
   // Disclaimer
   var disc = document.createElement('div');
   disc.className = 'usage-env-disclaimer';
-  disc.textContent = 'Energy estimated per model tier using published inference research (Luccioni et al. 2024, IEA 2024), scaled by API pricing ratios. Includes 1.1\u00D7 PUE. Actual values depend on hardware, batch size, and data centre location.';
+  disc.textContent = 'Energy estimated per model tier using published inference research (Luccioni et al. 2024, IEA 2024), scaled by API pricing ratios. Includes 1.1\u00D7 PUE. Equivalents are ballpark for serious units, intentionally playful for silly ones.';
   container.appendChild(disc);
 }
 
