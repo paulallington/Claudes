@@ -464,6 +464,31 @@ ipcMain.handle('config:saveProjects', (event, config) => {
   scheduleWriteConfig(config);
 });
 
+ipcMain.handle('project:popOut', (event, projectKey) => {
+  const cfg = readConfig();
+  const project = cfg.projects.find((p) => p.path === projectKey);
+  if (!project) return false;
+  project.poppedOut = true;
+  scheduleWriteConfig(cfg);
+  broadcastConfigUpdated(cfg);
+  createProjectWindow(projectKey);
+  return true;
+});
+
+ipcMain.handle('project:popIn', (event, projectKey) => {
+  const cfg = readConfig();
+  const project = cfg.projects.find((p) => p.path === projectKey);
+  if (!project) return false;
+  project.poppedOut = false;
+  scheduleWriteConfig(cfg);
+  broadcastConfigUpdated(cfg);
+  const win = popoutWindows.get(projectKey);
+  if (win && !win.isDestroyed()) {
+    win.close();
+  }
+  return true;
+});
+
 ipcMain.handle('app:getStartWithOS', () => {
   const settings = app.getLoginItemSettings();
   return settings.openAtLogin;
