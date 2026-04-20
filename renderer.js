@@ -634,6 +634,16 @@ function loadProjects() {
 if (window.electronAPI && window.electronAPI.onConfigUpdated) {
   window.electronAPI.onConfigUpdated(function (newCfg) {
     if (!newCfg) return;
+    // Detect projects transitioning poppedOut: true -> false (popout window just closed).
+    var justPoppedIn = [];
+    var oldMap = {};
+    (config.projects || []).forEach(function (p) { if (p) oldMap[p.path] = !!p.poppedOut; });
+    (newCfg.projects || []).forEach(function (p) {
+      if (p && oldMap[p.path] === true && p.poppedOut === false) {
+        justPoppedIn.push(p.path);
+      }
+    });
+
     config = newCfg;
     if (popoutMode) {
       var p = config.projects.find(function (x) { return x.path === popoutProjectKey; });
@@ -659,6 +669,58 @@ if (window.electronAPI && window.electronAPI.onConfigUpdated) {
           }
         }
       }
+      justPoppedIn.forEach(function (projectPath) {
+        handleProjectPoppedIn(projectPath);
+      });
+    }
+  });
+}
+
+function handleProjectPoppedIn(projectPath) {
+  // Popout window for this project just closed. Bring its content back to main:
+  // switch main to the project, and if main already had some columns for it,
+  // append any sessions that lived only in the popout (sessions.json is the
+  // source of truth — the popout persisted its state on every spawn/kill).
+  var idx = -1;
+  for (var i = 0; i < config.projects.length; i++) {
+    if (config.projects[i].path === projectPath) { idx = i; break; }
+  }
+  if (idx < 0) return;
+
+  var prevState = projectStates.get(projectPath);
+  var hadColumns = prevState && prevState.columns && prevState.columns.size > 0;
+
+  setActiveProject(idx, true);
+
+  if (hadColumns) {
+    mergePoppedInProjectSessions(projectPath);
+  }
+}
+
+function mergePoppedInProjectSessions(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.loadSessions) return;
+  window.electronAPI.loadSessions(projectPath).then(function (savedSessions) {
+    var state = projectStates.get(projectPath);
+    if (!state) return;
+    var existing = {};
+    state.columns.forEach(function (col) {
+      if (col && col.sessionId) existing[col.sessionId] = true;
+    });
+    var prevActive = activeProjectKey;
+    // addColumn uses activeProjectKey implicitly — temporarily swap so columns
+    // land in the right project's row container.
+    activeProjectKey = projectPath;
+    try {
+      var spawnArgs = buildSpawnArgs();
+      (savedSessions || []).forEach(function (entry) {
+        var sid = typeof entry === 'string' ? entry : (entry && entry.sessionId);
+        var title = entry && typeof entry === 'object' ? entry.title : null;
+        if (sid && !existing[sid]) {
+          addColumn(spawnArgs.concat(['--resume', sid]), null, title ? { title: title } : {});
+        }
+      });
+    } finally {
+      activeProjectKey = prevActive;
     }
   });
 }
