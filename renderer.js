@@ -575,6 +575,12 @@ function loadProjects() {
   if (!window.electronAPI) return;
   window.electronAPI.getProjects().then(function (cfg) {
     config = cfg || { projects: [], activeProjectIndex: -1 };
+    // Drop any corrupt null entries (can appear from a failed drag-reorder splice).
+    if (Array.isArray(config.projects)) {
+      config.projects = config.projects.filter(function (p) { return p && typeof p === 'object'; });
+    } else {
+      config.projects = [];
+    }
     for (var i = 0; i < config.projects.length; i++) {
       if (config.projects[i].columnCount === undefined) {
         config.projects[i].columnCount = 1;

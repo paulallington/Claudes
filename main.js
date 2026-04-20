@@ -35,7 +35,14 @@ function ensureConfigDir() {
 function readConfig() {
   ensureConfigDir();
   try {
-    return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    // Drop any corrupt null entries (can appear from a failed drag-reorder splice).
+    if (Array.isArray(cfg.projects)) {
+      cfg.projects = cfg.projects.filter((p) => p && typeof p === 'object');
+    } else {
+      cfg.projects = [];
+    }
+    return cfg;
   } catch {
     return { projects: [], activeProjectIndex: -1 };
   }
@@ -3289,7 +3296,7 @@ if (!gotLock) {
 
     const cfg = readConfig();
     for (const p of cfg.projects) {
-      if (p.poppedOut) {
+      if (p && p.poppedOut) {
         createProjectWindow(p.path);
       }
     }
