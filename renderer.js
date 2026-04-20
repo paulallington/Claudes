@@ -311,6 +311,7 @@ function updateActivityIndicator(id) {
 }
 
 function updateSidebarActivity() {
+  if (popoutMode) return; // sidebar not rendered in popout windows
   // Count activity states per project
   var attentionByProject = {};
   var workingByProject = {};
@@ -473,6 +474,7 @@ function saveColumnCounts() {
 }
 
 function updateProjectBadges() {
+  if (popoutMode) return; // sidebar not rendered in popout windows
   var items = document.querySelectorAll('.project-item');
   config.projects.forEach(function (project, index) {
     if (index >= items.length) return;
