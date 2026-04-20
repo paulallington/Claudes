@@ -634,18 +634,16 @@ function loadProjects() {
 if (window.electronAPI && window.electronAPI.onConfigUpdated) {
   window.electronAPI.onConfigUpdated(function (newCfg) {
     if (!newCfg) return;
-    // Detect transitions: true -> false is pop-in (window closed, content
-    // returns to main). false -> true is pop-out (window opened, main should
-    // hand its columns off so the popout owns them).
+    // Detect pop-in transitions (poppedOut true -> false) so main can rehydrate
+    // the project from sessions.json. Pop-outs are handled proactively in
+    // prepareAndPopOut (so sessions.json is already correct when the popout
+    // reads it); we don't need a reactive dispose here.
     var justPoppedIn = [];
-    var justPoppedOut = [];
     var oldMap = {};
     (config.projects || []).forEach(function (p) { if (p) oldMap[p.path] = !!p.poppedOut; });
     (newCfg.projects || []).forEach(function (p) {
       if (!p) return;
-      var was = oldMap[p.path];
-      if (was === true && p.poppedOut === false) justPoppedIn.push(p.path);
-      else if (was === false && p.poppedOut === true) justPoppedOut.push(p.path);
+      if (oldMap[p.path] === true && p.poppedOut === false) justPoppedIn.push(p.path);
     });
 
     config = newCfg;
@@ -656,12 +654,6 @@ if (window.electronAPI && window.electronAPI.onConfigUpdated) {
         document.title = 'Claudes \u2013 ' + p.name;
       }
     } else {
-      // Hand off columns BEFORE rendering / switching, so any new active
-      // project can safely take over without stale state still around.
-      justPoppedOut.forEach(function (projectPath) {
-        disposeMainColumnsForPopout(projectPath);
-      });
-
       renderProjectList();
       if (config.activeProjectIndex >= 0) {
         var cur = config.projects[config.activeProjectIndex];
@@ -686,34 +678,45 @@ if (window.electronAPI && window.electronAPI.onConfigUpdated) {
   });
 }
 
-function disposeMainColumnsForPopout(projectPath) {
-  // User just popped this project out. Move its columns to the new window:
-  // tear down main's local state (xterms, DOM, ptys) but keep sessions.json
-  // intact so the popout can hydrate from it. removeColumn() rewrites
-  // sessions.json as it goes, which would empty it before the popout loads —
-  // snapshot the session list up front and restore it afterwards.
+function prepareAndPopOut(projectPath) {
+  // Hand this project's columns off to a popout window. Doing it proactively
+  // (before the popout opens) avoids a race: the popout's renderer starts
+  // loading as soon as main.js creates the window, and it reads sessions.json
+  // on boot. If we relied on a reactive dispose in onConfigUpdated, the
+  // popout could read sessions.json before the snapshot-restore IPC was
+  // written to disk, and spawn a single blank column instead of resuming.
+  //
+  // Order:
+  //   1. Snapshot the current session list for the project.
+  //   2. Tear down main's DOM/xterms/ptys (removeColumn re-writes sessions
+  //      .json as it runs, ending at []).
+  //   3. Await saveSessions(snapshot) — IPCs are FIFO, so this lands after
+  //      every removeColumn's persistSessions has flushed.
+  //   4. Only then tell main.js to create the popout window.
+  if (!window.electronAPI || !window.electronAPI.saveSessions || !window.electronAPI.popOutProject) {
+    return;
+  }
   var state = projectStates.get(projectPath);
-  if (!state) return;
-
   var snapshot = [];
-  state.columns.forEach(function (col) {
-    if (col && col.sessionId) {
-      snapshot.push({ sessionId: col.sessionId, title: col.customTitle || null });
+  if (state) {
+    state.columns.forEach(function (col) {
+      if (col && col.sessionId) {
+        snapshot.push({ sessionId: col.sessionId, title: col.customTitle || null });
+      }
+    });
+
+    var ids = Array.from(state.columns.keys());
+    ids.forEach(function (id) { removeColumn(id); });
+
+    if (state.containerEl) state.containerEl.remove();
+    projectStates.delete(projectPath);
+    if (activeProjectKey === projectPath) {
+      activeProjectKey = null;
     }
+  }
+  window.electronAPI.saveSessions(projectPath, snapshot).then(function () {
+    window.electronAPI.popOutProject(projectPath);
   });
-
-  var ids = Array.from(state.columns.keys());
-  ids.forEach(function (id) { removeColumn(id); });
-
-  if (window.electronAPI && window.electronAPI.saveSessions) {
-    window.electronAPI.saveSessions(projectPath, snapshot);
-  }
-
-  if (state.containerEl) state.containerEl.remove();
-  projectStates.delete(projectPath);
-  if (activeProjectKey === projectPath) {
-    activeProjectKey = null;
-  }
 }
 
 function handleProjectPoppedIn(projectPath) {
@@ -986,9 +989,7 @@ function buildProjectItem(project, index) {
         window.electronAPI.saveProjects(config);
         renderProjectList();
       } else if (action === 'pop-out') {
-        if (window.electronAPI && window.electronAPI.popOutProject) {
-          window.electronAPI.popOutProject(config.projects[projIndex].path);
-        }
+        prepareAndPopOut(config.projects[projIndex].path);
       } else if (action === 'pop-in') {
         if (window.electronAPI && window.electronAPI.popInProject) {
           window.electronAPI.popInProject(config.projects[projIndex].path);
