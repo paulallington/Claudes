@@ -48,6 +48,19 @@ var activeProjectKey = null;
 var config = { projects: [], activeProjectIndex: -1 };
 var projectDragFromIndex = -1; // For sidebar drag-to-reorder
 
+var popoutMode = false;
+var popoutProjectKey = null;
+(function detectPopoutMode() {
+  try {
+    var params = new URLSearchParams(window.location.search);
+    if (params.get('mode') === 'popout') {
+      popoutMode = true;
+      popoutProjectKey = params.get('projectKey');
+      document.body.classList.add('mode-popout');
+    }
+  } catch {}
+})();
+
 // Automations state
 var automationsForProject = [];
 var allAutomationsData = null;
@@ -583,11 +596,45 @@ function loadProjects() {
     syncPanelToggleStates();
     loadNotifSettings();
     updateSortButton();
+
+    if (popoutMode) {
+      var idx = config.projects.findIndex(function (p) { return p.path === popoutProjectKey; });
+      if (idx < 0) {
+        document.title = 'Claudes \u2013 (project missing)';
+        showEmptyState();
+        return;
+      }
+      setActiveProject(idx, true);
+      return;
+    }
+
     renderProjectList();
-    if (config.activeProjectIndex >= 0 && config.projects[config.activeProjectIndex]) {
+    if (config.activeProjectIndex >= 0
+        && config.projects[config.activeProjectIndex]
+        && !config.projects[config.activeProjectIndex].poppedOut) {
       setActiveProject(config.activeProjectIndex, true);
     } else {
-      showEmptyState();
+      var firstAvailable = config.projects.findIndex(function (p) { return !p.poppedOut; });
+      if (firstAvailable >= 0) {
+        setActiveProject(firstAvailable, true);
+      } else {
+        showEmptyState();
+      }
+    }
+  });
+}
+if (window.electronAPI && window.electronAPI.onConfigUpdated) {
+  window.electronAPI.onConfigUpdated(function (newCfg) {
+    if (!newCfg) return;
+    config = newCfg;
+    if (popoutMode) {
+      var p = config.projects.find(function (x) { return x.path === popoutProjectKey; });
+      if (p) {
+        activeProjectNameEl.textContent = p.name;
+        document.title = 'Claudes \u2013 ' + p.name;
+      }
+    } else {
+      renderProjectList();
     }
   });
 }
