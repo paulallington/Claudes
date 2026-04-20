@@ -1478,6 +1478,7 @@ function removeProject(index) {
       config.activeProjectIndex = nextAvail;
       activeProjectKey = null;
       saveConfig();
+      renderProjectList();
       setActiveProject(nextAvail, false);
     } else {
       config.activeProjectIndex = -1;
