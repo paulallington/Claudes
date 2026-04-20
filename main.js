@@ -408,6 +408,7 @@ function createProjectWindow(projectKey) {
 
   win.on('close', () => {
     if (win.isDestroyed()) return;
+    if (win._skipCloseBookkeeping) return;
     try {
       const b = win.getBounds();
       const cfg = readConfig();
@@ -503,6 +504,16 @@ ipcMain.handle('project:popIn', (event, projectKey) => {
   broadcastConfigUpdated(cfg);
   const win = popoutWindows.get(projectKey);
   if (win && !win.isDestroyed()) {
+    win.close();
+  }
+  return true;
+});
+
+ipcMain.handle('project:closePopoutWindow', (event, projectKey) => {
+  const win = popoutWindows.get(projectKey);
+  if (win && !win.isDestroyed()) {
+    // Sentinel so the close handler skips its config bookkeeping.
+    win._skipCloseBookkeeping = true;
     win.close();
   }
   return true;

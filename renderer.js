@@ -1213,6 +1213,9 @@ function updateSortButton() {
 function removeProject(index) {
   var project = config.projects[index];
   if (!confirm('Remove project "' + project.name + '"? This will also delete its automations.')) return;
+  if (project.poppedOut && window.electronAPI && window.electronAPI.closePopoutWindow) {
+    window.electronAPI.closePopoutWindow(project.path);
+  }
   var key = project.path;
 
   var state = projectStates.get(key);
