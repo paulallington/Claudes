@@ -138,7 +138,186 @@ function loadHeadlessRunsForActiveProject() {
   });
 }
 
-function renderHeadlessDock() { /* populated in Task 13 */ }
+function renderHeadlessDock() {
+  var projectPath = getActiveProjectPath();
+  var runs = (projectPath && headlessRunsByProject[projectPath]) || [];
+
+  // List pane
+  headlessDockListEl.innerHTML = '';
+  if (runs.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'headless-dock-empty';
+    empty.textContent = 'No runs yet';
+    headlessDockListEl.appendChild(empty);
+  } else {
+    for (var i = 0; i < runs.length; i++) {
+      var r = runs[i];
+      var row = document.createElement('div');
+      row.className = 'headless-dock-row' + (r.runId === headlessSelectedRunId ? ' selected' : '');
+      row.dataset.runId = r.runId;
+
+      var status = document.createElement('div');
+      status.className = 'headless-dock-row-status ' + r.status;
+      row.appendChild(status);
+
+      var title = document.createElement('div');
+      title.className = 'headless-dock-row-title';
+      title.textContent = r.title || '(untitled)';
+      row.appendChild(title);
+
+      var time = document.createElement('div');
+      time.className = 'headless-dock-row-time';
+      time.textContent = formatRelativeTime(r.startedAt);
+      row.appendChild(time);
+
+      (function (runId) {
+        row.addEventListener('click', function () { selectHeadlessRun(runId); });
+      })(r.runId);
+      headlessDockListEl.appendChild(row);
+    }
+  }
+
+  // Detail pane
+  renderHeadlessDetail();
+}
+
+function formatRelativeTime(iso) {
+  if (!iso) return '';
+  var then = new Date(iso).getTime();
+  var diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (diffSec < 60) return diffSec + 's ago';
+  if (diffSec < 3600) return Math.floor(diffSec / 60) + 'm ago';
+  if (diffSec < 86400) return Math.floor(diffSec / 3600) + 'h ago';
+  return Math.floor(diffSec / 86400) + 'd ago';
+}
+
+function selectHeadlessRun(runId) {
+  headlessSelectedRunId = runId;
+  headlessOutputBuffer = '';
+  renderHeadlessDock();
+  var projectPath = getActiveProjectPath();
+  if (!projectPath || !runId) return;
+  window.electronAPI.headlessGet(projectPath, runId).then(function (res) {
+    if (res && res.output != null && headlessSelectedRunId === runId) {
+      headlessOutputBuffer = res.output;
+      renderHeadlessDetail();
+    }
+  });
+}
+
+function renderHeadlessDetail() {
+  var projectPath = getActiveProjectPath();
+  var runs = (projectPath && headlessRunsByProject[projectPath]) || [];
+  var entry = runs.find(function (r) { return r.runId === headlessSelectedRunId; });
+  headlessDockDetailEl.innerHTML = '';
+  if (!entry) {
+    var empty = document.createElement('div');
+    empty.className = 'headless-dock-empty';
+    empty.textContent = 'Select a run to view output';
+    headlessDockDetailEl.appendChild(empty);
+    return;
+  }
+
+  var header = document.createElement('div');
+  header.className = 'headless-dock-detail-header';
+
+  var preview = document.createElement('div');
+  preview.className = 'headless-dock-prompt-preview';
+  preview.textContent = entry.prompt;
+  preview.title = 'Click to expand';
+  preview.addEventListener('click', function () { preview.classList.toggle('expanded'); });
+  header.appendChild(preview);
+
+  var meta = document.createElement('div');
+  meta.textContent = entry.status + (entry.durationMs ? ' · ' + Math.round(entry.durationMs / 100) / 10 + 's' : '');
+  header.appendChild(meta);
+
+  if (entry.status === 'running') {
+    var cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', function () {
+      window.electronAPI.headlessCancel(entry.runId);
+    });
+    header.appendChild(cancelBtn);
+  }
+
+  var copyBtn = document.createElement('button');
+  copyBtn.textContent = 'Copy';
+  copyBtn.addEventListener('click', function () {
+    window.electronAPI.clipboardWriteText(headlessOutputBuffer);
+  });
+  header.appendChild(copyBtn);
+
+  var deleteBtn = document.createElement('button');
+  deleteBtn.textContent = 'Delete';
+  deleteBtn.addEventListener('click', function () {
+    window.electronAPI.headlessDelete(projectPath, entry.runId).then(function () {
+      headlessRunsByProject[projectPath] = (headlessRunsByProject[projectPath] || []).filter(function (r) { return r.runId !== entry.runId; });
+      if (headlessSelectedRunId === entry.runId) headlessSelectedRunId = null;
+      updateHeadlessChip();
+      renderHeadlessDock();
+    });
+  });
+  header.appendChild(deleteBtn);
+
+  headlessDockDetailEl.appendChild(header);
+
+  var output = document.createElement('div');
+  output.className = 'headless-dock-output';
+  output.id = 'headless-dock-output-body';
+  output.textContent = headlessOutputBuffer || (entry.status === 'running' ? '(streaming...)' : '(no output)');
+  headlessDockDetailEl.appendChild(output);
+}
+
+function openHeadlessDock() {
+  headlessDockEl.classList.remove('hidden');
+  // Mark all current runs as seen
+  var projectPath = getActiveProjectPath();
+  var runs = (projectPath && headlessRunsByProject[projectPath]) || [];
+  for (var i = 0; i < runs.length; i++) {
+    if (runs[i].status !== 'running') headlessSeen.add(runs[i].runId);
+  }
+  updateHeadlessChip();
+  renderHeadlessDock();
+  headlessDockPromptEl.focus();
+}
+
+function closeHeadlessDock() {
+  headlessDockEl.classList.add('hidden');
+}
+
+function toggleHeadlessDock() {
+  if (headlessDockEl.classList.contains('hidden')) openHeadlessDock();
+  else closeHeadlessDock();
+}
+
+headlessChipEl.addEventListener('click', toggleHeadlessDock);
+headlessDockCloseBtn.addEventListener('click', closeHeadlessDock);
+
+(function wireHeadlessDockResize() {
+  var dragging = false;
+  var startY = 0;
+  var startHeight = 0;
+  headlessDockResizeEl.addEventListener('mousedown', function (e) {
+    dragging = true;
+    startY = e.clientY;
+    startHeight = headlessDockEl.getBoundingClientRect().height;
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (!dragging) return;
+    var dy = startY - e.clientY;
+    var newHeight = Math.max(180, Math.min(window.innerHeight * 0.85, startHeight + dy));
+    headlessDockEl.style.height = newHeight + 'px';
+  });
+  document.addEventListener('mouseup', function () {
+    if (dragging) {
+      dragging = false;
+      document.body.style.userSelect = '';
+    }
+  });
+})();
 
 var darkTermTheme = {
   background: '#1a1a2e',
