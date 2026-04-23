@@ -535,5 +535,23 @@
       <span id="headless-chip-icon" class="headless-chip-icon"></span>
       <span id="headless-chip-label">0</span>
     </div>
+
+    <div id="headless-dock" class="headless-dock hidden">
+      <div class="headless-dock-resize" id="headless-dock-resize"></div>
+      <div class="headless-dock-header">
+        <div class="headless-dock-title">Headless Runs</div>
+        <button id="headless-dock-close" class="headless-dock-close" title="Close">&times;</button>
+      </div>
+      <div class="headless-dock-input">
+        <textarea id="headless-dock-prompt" placeholder="Type a prompt... (Enter to run, Shift+Enter for newline)" rows="2"></textarea>
+        <button id="headless-dock-run" class="headless-dock-run">Run</button>
+      </div>
+      <div class="headless-dock-body">
+        <div class="headless-dock-list" id="headless-dock-list"></div>
+        <div class="headless-dock-detail" id="headless-dock-detail">
+          <div class="headless-dock-empty">Select a run to view output</div>
+        </div>
+      </div>
+    </div>
 </body>
 </html>
