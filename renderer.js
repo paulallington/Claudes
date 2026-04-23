@@ -319,6 +319,85 @@ headlessDockCloseBtn.addEventListener('click', closeHeadlessDock);
   });
 })();
 
+function submitHeadlessRun() {
+  var prompt = headlessDockPromptEl.value;
+  if (!prompt || !prompt.trim()) return;
+  var projectPath = getActiveProjectPath();
+  if (!projectPath) return;
+  headlessDockRunBtn.disabled = true;
+  window.electronAPI.headlessRun(projectPath, prompt).then(function (res) {
+    headlessDockRunBtn.disabled = false;
+    if (res && res.error) {
+      alert('Headless run failed: ' + res.error);
+      return;
+    }
+    headlessDockPromptEl.value = '';
+    // The onHeadlessStarted handler below will insert the entry; also select it.
+    if (res && res.runId) {
+      headlessSelectedRunId = res.runId;
+      headlessOutputBuffer = '';
+    }
+  }).catch(function (err) {
+    headlessDockRunBtn.disabled = false;
+    alert('Headless run failed: ' + (err && err.message ? err.message : err));
+  });
+}
+
+headlessDockRunBtn.addEventListener('click', submitHeadlessRun);
+headlessDockPromptEl.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    submitHeadlessRun();
+  }
+});
+
+window.electronAPI.onHeadlessStarted(function (data) {
+  var list = headlessRunsByProject[data.projectPath] || [];
+  // Prepend
+  list = [data.entry].concat(list.filter(function (r) { return r.runId !== data.entry.runId; }));
+  headlessRunsByProject[data.projectPath] = list;
+  updateHeadlessChip();
+  if (!headlessDockEl.classList.contains('hidden') && getActiveProjectPath() === data.projectPath) {
+    renderHeadlessDock();
+  }
+});
+
+window.electronAPI.onHeadlessOutput(function (data) {
+  if (headlessSelectedRunId === data.runId) {
+    headlessOutputBuffer += data.chunk;
+    var outEl = document.getElementById('headless-dock-output-body');
+    if (outEl) {
+      outEl.textContent = headlessOutputBuffer;
+      outEl.scrollTop = outEl.scrollHeight;
+    }
+  }
+});
+
+window.electronAPI.onHeadlessCompleted(function (data) {
+  var runs = headlessRunsByProject[data.projectPath] || [];
+  var entry = runs.find(function (r) { return r.runId === data.runId; });
+  if (entry) {
+    entry.status = data.status;
+    entry.exitCode = data.exitCode;
+    entry.completedAt = data.completedAt;
+    entry.durationMs = data.durationMs;
+  }
+  updateHeadlessChip();
+  if (!headlessDockEl.classList.contains('hidden') && getActiveProjectPath() === data.projectPath) {
+    renderHeadlessDock();
+  }
+});
+
+window.electronAPI.onHeadlessFocusRun(function (data) {
+  // Switch to that project if needed, open dock, select run.
+  if (getActiveProjectPath() !== data.projectPath) {
+    var idx = (config.projects || []).findIndex(function (p) { return p && p.path === data.projectPath; });
+    if (idx >= 0) setActiveProject(idx, true);
+  }
+  openHeadlessDock();
+  selectHeadlessRun(data.runId);
+});
+
 var darkTermTheme = {
   background: '#1a1a2e',
   foreground: '#e0e0e0',
