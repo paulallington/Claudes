@@ -2417,6 +2417,54 @@ End your response with a JSON block wrapped in :::manager-result markers like th
 {"summary": "Brief description", "attentionItems": [{"summary": "...", "detail": "..."}], "actions": [{"type": "rerun_agent", "agentId": "agent_id_here"} or {"type": "rerun_all"} or {"type": "report"}], "needsHuman": false, "humanContext": "Only if needsHuman is true"}
 :::manager-result`;
 
+// --- Headless Persistence ---
+
+const HEADLESS_INDEX_CAP = 100;
+const { deriveHeadlessTitle, evictOldHeadlessRuns } = require('./lib/headless-helpers');
+
+function headlessDir(projectPath) {
+  return path.join(projectPath, '.claudes', 'headless-runs');
+}
+
+function headlessIndexPath(projectPath) {
+  return path.join(projectPath, '.claudes', 'headless-runs.json');
+}
+
+function ensureHeadlessDirs(projectPath) {
+  fs.mkdirSync(headlessDir(projectPath), { recursive: true });
+}
+
+function readHeadlessIndex(projectPath) {
+  try {
+    const raw = fs.readFileSync(headlessIndexPath(projectPath), 'utf8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed.runs)) return parsed;
+    return { runs: [] };
+  } catch {
+    return { runs: [] };
+  }
+}
+
+function writeHeadlessIndex(projectPath, index) {
+  ensureHeadlessDirs(projectPath);
+  fs.writeFileSync(headlessIndexPath(projectPath), JSON.stringify(index, null, 2), 'utf8');
+}
+
+function headlessOutputPath(projectPath, runId) {
+  return path.join(headlessDir(projectPath), runId + '.txt');
+}
+
+function deleteHeadlessOutputFile(projectPath, runId) {
+  try { fs.unlinkSync(headlessOutputPath(projectPath, runId)); } catch { /* ignore */ }
+}
+
+function applyHeadlessEviction(projectPath, index) {
+  const { kept, evicted } = evictOldHeadlessRuns(index.runs, HEADLESS_INDEX_CAP);
+  if (evicted.length === 0) return index;
+  for (const entry of evicted) deleteHeadlessOutputFile(projectPath, entry.runId);
+  return { ...index, runs: kept };
+}
+
 function findClaudePath() {
   try {
     const result = execFileSync('where', ['claude'], { encoding: 'utf8' });
