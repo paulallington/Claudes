@@ -8500,6 +8500,75 @@ function refreshAutomationsFlyout() {
   });
 }
 
+// ============================================================
+// Run Window Popover
+// ============================================================
+
+var currentRunWindowDraft = null;
+
+function openRunWindowPopover() {
+  var pop = document.getElementById('automations-runwindow-popover');
+  window.electronAPI.getAutomationSettings().then(function (settings) {
+    var w = settings.runWindow || { enabled: false, startHour: 9, startMinute: 0, endHour: 17, endMinute: 0, days: ['mon','tue','wed','thu','fri'] };
+    document.getElementById('runwindow-enabled').checked = !!w.enabled;
+    document.getElementById('runwindow-fields').style.display = w.enabled ? 'block' : 'none';
+    var pad = function (n) { return String(n).padStart(2, '0'); };
+    document.getElementById('runwindow-start').value = pad(w.startHour) + ':' + pad(w.startMinute || 0);
+    document.getElementById('runwindow-end').value = pad(w.endHour) + ':' + pad(w.endMinute || 0);
+    var days = w.days || [];
+    var dayEls = pop.querySelectorAll('.runwindow-days input[type="checkbox"]');
+    dayEls.forEach(function (el) {
+      el.checked = days.indexOf(el.getAttribute('data-day')) !== -1;
+    });
+    document.getElementById('runwindow-error').style.display = 'none';
+    pop.classList.remove('hidden');
+  });
+}
+
+function closeRunWindowPopover() {
+  document.getElementById('automations-runwindow-popover').classList.add('hidden');
+}
+
+function saveRunWindowPopover() {
+  var enabled = document.getElementById('runwindow-enabled').checked;
+  var errEl = document.getElementById('runwindow-error');
+  var payload;
+
+  if (!enabled) {
+    payload = null;
+  } else {
+    var startStr = document.getElementById('runwindow-start').value;
+    var endStr = document.getElementById('runwindow-end').value;
+    if (!startStr || !endStr) { errEl.textContent = 'Pick a start and end time'; errEl.style.display = 'block'; return; }
+    var sParts = startStr.split(':').map(Number);
+    var eParts = endStr.split(':').map(Number);
+    var days = Array.prototype.slice.call(document.querySelectorAll('#automations-runwindow-popover .runwindow-days input:checked'))
+      .map(function (el) { return el.getAttribute('data-day'); });
+    if (days.length === 0) { errEl.textContent = 'Pick at least one day'; errEl.style.display = 'block'; return; }
+    if (sParts[0] === eParts[0] && sParts[1] === eParts[1]) {
+      errEl.textContent = 'Start and end must differ';
+      errEl.style.display = 'block';
+      return;
+    }
+    payload = { enabled: true, startHour: sParts[0], startMinute: sParts[1], endHour: eParts[0], endMinute: eParts[1], days: days };
+  }
+
+  window.electronAPI.updateAutomationSettings({ runWindow: payload }).then(function () {
+    closeRunWindowPopover();
+    refreshAutomationsRunWindowIndicator();
+    if (typeof refreshAutomationsStatusStrip === 'function') refreshAutomationsStatusStrip();
+  });
+}
+
+function refreshAutomationsRunWindowIndicator() {
+  var ind = document.getElementById('automations-runwindow-indicator');
+  if (!ind) return;
+  window.electronAPI.getAutomationSettings().then(function (settings) {
+    if (settings.runWindow && settings.runWindow.enabled) ind.classList.remove('hidden');
+    else ind.classList.add('hidden');
+  });
+}
+
 document.getElementById('btn-automations-flyout').addEventListener('click', toggleAutomationsFlyout);
 document.getElementById('btn-automations-flyout-close').addEventListener('click', toggleAutomationsFlyout);
 document.getElementById('btn-automations-global-toggle').addEventListener('click', function () {
@@ -8507,6 +8576,35 @@ document.getElementById('btn-automations-global-toggle').addEventListener('click
     refreshAutomationsFlyout();
   });
 });
+
+(function setupRunWindowPopover() {
+  var enabledEl = document.getElementById('runwindow-enabled');
+  if (enabledEl) {
+    enabledEl.addEventListener('change', function () {
+      document.getElementById('runwindow-fields').style.display = this.checked ? 'block' : 'none';
+    });
+  }
+  var openBtn = document.getElementById('btn-automations-runwindow');
+  if (openBtn) openBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var pop = document.getElementById('automations-runwindow-popover');
+    if (pop.classList.contains('hidden')) openRunWindowPopover();
+    else closeRunWindowPopover();
+  });
+  var cancelBtn = document.getElementById('btn-runwindow-cancel');
+  if (cancelBtn) cancelBtn.addEventListener('click', closeRunWindowPopover);
+  var saveBtn = document.getElementById('btn-runwindow-save');
+  if (saveBtn) saveBtn.addEventListener('click', saveRunWindowPopover);
+
+  document.addEventListener('click', function (e) {
+    var pop = document.getElementById('automations-runwindow-popover');
+    var wrap = document.querySelector('.automations-runwindow-wrap');
+    if (!pop || pop.classList.contains('hidden')) return;
+    if (wrap && !wrap.contains(e.target)) closeRunWindowPopover();
+  });
+
+  refreshAutomationsRunWindowIndicator();
+})();
 
 // ============================================================
 // Automation Events & Sidebar Integration
