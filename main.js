@@ -22,10 +22,11 @@ const CONFIG_DIR = path.join(os.homedir(), '.claudes');
 // installed production instance doesn't let the two fight over the same
 // config (last-write-wins → surprising "deleted project came back" bugs).
 const CONFIG_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'projects.json' : 'projects-dev.json');
-const LOOPS_FILE = path.join(CONFIG_DIR, 'loops.json');
-const LOOPS_RUNS_DIR = path.join(CONFIG_DIR, 'loop-runs');
-const AUTOMATIONS_FILE = path.join(CONFIG_DIR, 'automations.json');
-const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, 'automation-runs');
+const LOOPS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'loops.json' : 'loops-dev.json');
+const LOOPS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'loop-runs' : 'loop-runs-dev');
+const AUTOMATIONS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'automations.json' : 'automations-dev.json');
+const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-runs' : 'automation-runs-dev');
+const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
 
 // --- Config ---
 
@@ -103,7 +104,7 @@ function readAutomations() {
   try {
     return JSON.parse(fs.readFileSync(AUTOMATIONS_FILE, 'utf8'));
   } catch {
-    return { globalEnabled: true, maxConcurrentRuns: 3, agentReposBaseDir: path.join(os.homedir(), '.claudes', 'agents'), automations: [] };
+    return { globalEnabled: true, maxConcurrentRuns: 3, agentReposBaseDir: AGENTS_DIR_DEFAULT, automations: [] };
   }
 }
 
@@ -179,7 +180,7 @@ function migrateLoopsToAutomations() {
   const automationsData = {
     globalEnabled: loopData.globalEnabled !== undefined ? loopData.globalEnabled : true,
     maxConcurrentRuns: loopData.maxConcurrentRuns || 3,
-    agentReposBaseDir: path.join(os.homedir(), '.claudes', 'agents'),
+    agentReposBaseDir: AGENTS_DIR_DEFAULT,
     automations: []
   };
 
@@ -1841,7 +1842,7 @@ ipcMain.handle('automations:setupAgentClone', async (event, automationId, agentI
   if (!agent.isolation || !agent.isolation.enabled) return { error: 'Agent does not have isolation enabled' };
 
   // Determine clone path
-  const baseDir = data.agentReposBaseDir || path.join(os.homedir(), '.claudes', 'agents');
+  const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
   const projectName = automation.projectPath.split(/[/\\]/).pop();
   const agentDirName = agent.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
   const clonePath = path.join(baseDir, projectName, agentDirName);
@@ -2230,7 +2231,7 @@ ipcMain.handle('automations:validateDependencies', (event, agents) => {
 ipcMain.handle('automations:getSettings', () => {
   const data = readAutomations();
   return {
-    agentReposBaseDir: data.agentReposBaseDir || path.join(os.homedir(), '.claudes', 'agents'),
+    agentReposBaseDir: data.agentReposBaseDir || AGENTS_DIR_DEFAULT,
     runWindow: data.runWindow || null
   };
 });
@@ -2317,7 +2318,7 @@ ipcMain.handle('automations:setupManagerClone', async (event, automationId) => {
   if (!automation || !automation.manager) return { error: 'Automation or manager not found' };
   if (!automation.manager.isolation || !automation.manager.isolation.enabled) return { error: 'Manager isolation not enabled' };
 
-  const baseDir = data.agentReposBaseDir || path.join(os.homedir(), '.claudes', 'agents');
+  const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
   const projectName = automation.projectPath.split(/[/\\]/).pop();
   const automationDirName = automation.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
   const clonePath = path.join(baseDir, projectName, '_manager-' + automationDirName);
@@ -2982,7 +2983,7 @@ async function runManager(automationId) {
   if (manager.isolation && manager.isolation.enabled) {
     if (!manager.isolation.clonePath || !fs.existsSync(manager.isolation.clonePath)) {
       // Auto-setup clone for manager
-      const baseDir = data.agentReposBaseDir || path.join(os.homedir(), '.claudes', 'agents');
+      const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
       const projectName = automation.projectPath.split(/[/\\]/).pop();
       const automationDirName = automation.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
       const clonePath = path.join(baseDir, projectName, '_manager-' + automationDirName);
