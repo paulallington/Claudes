@@ -9494,6 +9494,9 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   }
 
   connectBtn.addEventListener('click', async () => {
+    // Disable immediately — render('connecting') also disables but there's a
+    // gap between the click and the state event arriving back from main.
+    connectBtn.disabled = true;
     clearError();
     const connectionString = connStringInput.value;
     const dbName = dbNameInput.value;
