@@ -7357,6 +7357,41 @@ function openAutomationModal(existingAutomation) {
   document.getElementById('automation-manager-skip-permissions').checked = mgr.skipPermissions || false;
   document.getElementById('automation-manager-isolation').checked = mgr.isolation ? mgr.isolation.enabled : false;
 
+  // Populate per-automation runWindow section
+  var rwSection = document.getElementById('automation-runwindow-section');
+  var rwBody = document.getElementById('automation-runwindow-body');
+  var rwEnabled = document.getElementById('automation-runwindow-enabled');
+  var rwFields = document.getElementById('automation-runwindow-fields');
+  var rwStart = document.getElementById('automation-runwindow-start');
+  var rwEnd = document.getElementById('automation-runwindow-end');
+  var rwErr = document.getElementById('automation-runwindow-error');
+  var w = existingAutomation && existingAutomation.runWindow;
+  var pad2 = function (n) { return String(n).padStart(2, '0'); };
+  if (w && w.enabled) {
+    rwSection.classList.add('expanded');
+    rwBody.style.display = 'block';
+    rwEnabled.checked = true;
+    rwFields.style.display = 'block';
+    rwStart.value = pad2(w.startHour) + ':' + pad2(w.startMinute || 0);
+    rwEnd.value = pad2(w.endHour) + ':' + pad2(w.endMinute || 0);
+    var dayEls = document.querySelectorAll('#automation-runwindow-days input[type="checkbox"]');
+    var days = w.days || [];
+    dayEls.forEach(function (el) { el.checked = days.indexOf(el.getAttribute('data-day')) !== -1; });
+  } else {
+    rwSection.classList.remove('expanded');
+    rwBody.style.display = 'none';
+    rwEnabled.checked = false;
+    rwFields.style.display = 'none';
+    rwStart.value = '09:00';
+    rwEnd.value = '17:00';
+    var dayEls2 = document.querySelectorAll('#automation-runwindow-days input[type="checkbox"]');
+    dayEls2.forEach(function (el) {
+      var d = el.getAttribute('data-day');
+      el.checked = (d !== 'sat' && d !== 'sun');
+    });
+  }
+  rwErr.style.display = 'none';
+
   document.getElementById('automation-modal-overlay').classList.remove('hidden');
   var firstNameInput = document.querySelector('.agent-name');
   if (firstNameInput) firstNameInput.focus();
@@ -7879,6 +7914,24 @@ function saveAutomation() {
     }
   }
 
+  // Build per-automation runWindow
+  var rwErrEl = document.getElementById('automation-runwindow-error');
+  rwErrEl.style.display = 'none';
+  var rwEnabledV = document.getElementById('automation-runwindow-enabled').checked;
+  var automationRunWindow = null;
+  if (rwEnabledV) {
+    var rwStartStr = document.getElementById('automation-runwindow-start').value;
+    var rwEndStr = document.getElementById('automation-runwindow-end').value;
+    if (!rwStartStr || !rwEndStr) { rwErrEl.textContent = 'Pick a start and end time'; rwErrEl.style.display = 'block'; return; }
+    var sP = rwStartStr.split(':').map(Number);
+    var eP = rwEndStr.split(':').map(Number);
+    if (sP[0] === eP[0] && sP[1] === eP[1]) { rwErrEl.textContent = 'Start and end must differ'; rwErrEl.style.display = 'block'; return; }
+    var rwDays = Array.prototype.slice.call(document.querySelectorAll('#automation-runwindow-days input:checked'))
+      .map(function (el) { return el.getAttribute('data-day'); });
+    if (rwDays.length === 0) { rwErrEl.textContent = 'Pick at least one day'; rwErrEl.style.display = 'block'; return; }
+    automationRunWindow = { enabled: true, startHour: sP[0], startMinute: sP[1], endHour: eP[0], endMinute: eP[1], days: rwDays };
+  }
+
   // Only trigger clone setup for NEW isolation — agents/managers that need isolation but don't have a clonePath yet
   var needsNewClone = modalAgents.some(function (ag) {
     return ag.isolation && ag.isolation.enabled && !ag.isolation.clonePath;
@@ -7927,7 +7980,7 @@ function saveAutomation() {
 
       return Promise.all(removePromises);
     }).then(function () {
-      return window.electronAPI.updateAutomation(automationEditingId, { name: automationName, manager: managerConfig });
+      return window.electronAPI.updateAutomation(automationEditingId, { name: automationName, manager: managerConfig, runWindow: automationRunWindow });
     }).then(function () {
       var promises = agents.map(function (ag) {
         if (ag.id && ag.id.indexOf('temp_') !== 0) {
@@ -7951,7 +8004,8 @@ function saveAutomation() {
       name: automationName,
       projectPath: activeProjectKey,
       agents: agents,
-      manager: managerConfig
+      manager: managerConfig,
+      runWindow: automationRunWindow
     };
     window.electronAPI.createAutomation(config).then(function (automation) {
       if (hasIsolated) {
@@ -8699,6 +8753,19 @@ document.getElementById('btn-automations-global-toggle').addEventListener('click
   startAutomationsStatusStripTimer();
 
   refreshAutomationsRunWindowIndicator();
+
+  var autoRwToggle = document.getElementById('automation-runwindow-toggle');
+  if (autoRwToggle) autoRwToggle.addEventListener('click', function () {
+    var section = document.getElementById('automation-runwindow-section');
+    var body = document.getElementById('automation-runwindow-body');
+    var isOpen = section.classList.toggle('expanded');
+    body.style.display = isOpen ? 'block' : 'none';
+  });
+
+  var autoRwEnabled = document.getElementById('automation-runwindow-enabled');
+  if (autoRwEnabled) autoRwEnabled.addEventListener('change', function () {
+    document.getElementById('automation-runwindow-fields').style.display = this.checked ? 'block' : 'none';
+  });
 })();
 
 // ============================================================

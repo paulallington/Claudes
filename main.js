@@ -1569,7 +1569,8 @@ ipcMain.handle('automations:create', (event, config) => {
     projectPath: config.projectPath,
     agents: agents,
     enabled: true,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    runWindow: config.runWindow || null
   };
 
   data.automations.push(automation);
