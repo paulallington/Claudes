@@ -5264,19 +5264,19 @@ body.mode-popout #btn-add-project {
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  background: #2a2a45;
-  color: #e6e6f0;
-  border: 1px solid var(--border-primary, #3a3a5a);
+  background: var(--bg-toolbar);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
   border-radius: 999px;
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 2px 8px var(--shadow);
   user-select: none;
 }
 
 .headless-chip:hover {
-  background: #34345a;
+  background: var(--bg-panel);
 }
 
 .headless-chip.hidden {
@@ -5284,24 +5284,24 @@ body.mode-popout #btn-add-project {
 }
 
 .headless-chip.state-running .headless-chip-icon::before {
-  content: '\25D4'; /* rotating circle glyph, will animate */
+  content: '\25D4';
   display: inline-block;
   animation: headless-spin 1s linear infinite;
 }
 
 .headless-chip.state-done .headless-chip-icon::before {
   content: '\25CF';
-  color: #4ade80;
+  color: var(--color-green-env);
 }
 
 .headless-chip.state-new .headless-chip-icon::before {
   content: '\25CF';
-  color: #facc15;
+  color: var(--color-yellow);
 }
 
 .headless-chip.state-error .headless-chip-icon::before {
   content: '\25CF';
-  color: #f87171;
+  color: var(--accent);
 }
 
 @keyframes headless-spin {
@@ -5322,11 +5322,12 @@ body.mode-popout #btn-add-project {
   min-height: 180px;
   max-height: 85vh;
   z-index: 240;
-  background: #1a1a2e;
-  border-top: 1px solid var(--border-primary, #3a3a5a);
+  background: var(--bg-main);
+  color: var(--text-primary);
+  border-top: 1px solid var(--border-primary);
   display: flex;
   flex-direction: column;
-  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 -4px 20px var(--shadow-heavy);
 }
 
 .headless-dock.hidden { display: none; }
@@ -5335,46 +5336,46 @@ body.mode-popout #btn-add-project {
   height: 6px;
   cursor: ns-resize;
   background: transparent;
-  border-top: 1px solid var(--border-primary, #3a3a5a);
+  border-top: 1px solid var(--border-primary);
 }
-.headless-dock-resize:hover { background: rgba(255, 255, 255, 0.05); }
+.headless-dock-resize:hover { background: var(--hover-medium); }
 
 .headless-dock-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 8px 16px;
-  border-bottom: 1px solid var(--border-primary, #3a3a5a);
+  border-bottom: 1px solid var(--border-primary);
 }
 
 .headless-dock-title {
   font-size: 13px;
   font-weight: 600;
-  color: #e6e6f0;
+  color: var(--text-primary);
 }
 
 .headless-dock-close {
   background: transparent;
   border: none;
-  color: #9a9ab0;
+  color: var(--text-muted);
   font-size: 20px;
   cursor: pointer;
   padding: 0 8px;
 }
-.headless-dock-close:hover { color: #e6e6f0; }
+.headless-dock-close:hover { color: var(--text-primary); }
 
 .headless-dock-input {
   display: flex;
   gap: 8px;
   padding: 10px 16px;
-  border-bottom: 1px solid var(--border-primary, #3a3a5a);
+  border-bottom: 1px solid var(--border-primary);
 }
 
 .headless-dock-input textarea {
   flex: 1;
-  background: #12122a;
-  color: #e6e6f0;
-  border: 1px solid var(--border-primary, #3a3a5a);
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
   border-radius: 4px;
   padding: 6px 8px;
   font-family: inherit;
@@ -5385,15 +5386,15 @@ body.mode-popout #btn-add-project {
 }
 
 .headless-dock-run {
-  background: #4a4a7a;
-  color: #e6e6f0;
-  border: 1px solid var(--border-primary, #3a3a5a);
+  background: var(--bg-button);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
   border-radius: 4px;
   padding: 0 16px;
   cursor: pointer;
   font-size: 13px;
 }
-.headless-dock-run:hover { background: #5a5a9a; }
+.headless-dock-run:hover { background: var(--bg-panel); }
 .headless-dock-run:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .headless-dock-body {
@@ -5407,7 +5408,7 @@ body.mode-popout #btn-add-project {
   min-width: 200px;
   max-width: 400px;
   overflow-y: auto;
-  border-right: 1px solid var(--border-primary, #3a3a5a);
+  border-right: 1px solid var(--border-primary);
 }
 
 .headless-dock-row {
@@ -5416,25 +5417,25 @@ body.mode-popout #btn-add-project {
   gap: 8px;
   padding: 8px 12px;
   cursor: pointer;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid var(--border-subtle);
   font-size: 12px;
-  color: #c0c0d0;
+  color: var(--text-body);
 }
-.headless-dock-row:hover { background: rgba(255, 255, 255, 0.03); }
-.headless-dock-row.selected { background: rgba(120, 120, 180, 0.15); color: #e6e6f0; }
+.headless-dock-row:hover { background: var(--hover-subtle); }
+.headless-dock-row.selected { background: var(--hover-strong); color: var(--text-primary); }
 
 .headless-dock-row-status {
   width: 10px; height: 10px; border-radius: 50%;
   flex-shrink: 0;
 }
-.headless-dock-row-status.running { background: #60a5fa; animation: headless-spin 1s linear infinite; }
-.headless-dock-row-status.completed { background: #4ade80; }
-.headless-dock-row-status.error { background: #f87171; }
-.headless-dock-row-status.cancelled { background: #9a9ab0; }
-.headless-dock-row-status.interrupted { background: #fbbf24; }
+.headless-dock-row-status.running { background: var(--color-blue); animation: headless-spin 1s linear infinite; }
+.headless-dock-row-status.completed { background: var(--color-green-env); }
+.headless-dock-row-status.error { background: var(--accent); }
+.headless-dock-row-status.cancelled { background: var(--text-muted); }
+.headless-dock-row-status.interrupted { background: var(--color-yellow); }
 
 .headless-dock-row-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.headless-dock-row-time { color: #8a8aa0; font-size: 11px; flex-shrink: 0; }
+.headless-dock-row-time { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
 
 .headless-dock-detail {
   flex: 1;
@@ -5446,24 +5447,24 @@ body.mode-popout #btn-add-project {
 
 .headless-dock-detail-header {
   padding: 10px 16px;
-  border-bottom: 1px solid var(--border-primary, #3a3a5a);
+  border-bottom: 1px solid var(--border-primary);
   display: flex;
   gap: 10px;
   align-items: center;
   font-size: 12px;
-  color: #c0c0d0;
+  color: var(--text-body);
 }
 
 .headless-dock-detail-header button {
-  background: #2a2a45;
-  border: 1px solid var(--border-primary, #3a3a5a);
-  color: #e6e6f0;
+  background: var(--bg-toolbar);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
   padding: 4px 10px;
   font-size: 12px;
   border-radius: 4px;
   cursor: pointer;
 }
-.headless-dock-detail-header button:hover { background: #34345a; }
+.headless-dock-detail-header button:hover { background: var(--bg-panel); }
 
 .headless-dock-prompt-preview {
   flex: 1;
@@ -5471,9 +5472,9 @@ body.mode-popout #btn-add-project {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
-  color: #9a9ab0;
+  color: var(--text-secondary);
 }
-.headless-dock-prompt-preview.expanded { white-space: pre-wrap; color: #c0c0d0; }
+.headless-dock-prompt-preview.expanded { white-space: pre-wrap; color: var(--text-body); }
 
 .headless-dock-output {
   flex: 1;
@@ -5481,12 +5482,12 @@ body.mode-popout #btn-add-project {
   padding: 12px 16px;
   font-family: 'Cascadia Mono', 'Consolas', monospace;
   font-size: 12px;
-  color: #d0d0e0;
+  color: var(--text-primary);
   white-space: pre-wrap;
 }
 
 .headless-dock-empty {
   padding: 24px;
-  color: #8a8aa0;
+  color: var(--text-muted);
   text-align: center;
 }
