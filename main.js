@@ -2922,6 +2922,25 @@ function finalizeHeadlessRun(projectPath, runId, status, exitCode, errorMessage)
       if (errorMessage) entry.error = errorMessage;
       writeHeadlessIndex(projectPath, index);
     }
+    // OS notification
+    try {
+      if (Notification.isSupported()) {
+        const titleText = entry ? entry.title : runId;
+        let notifTitle = 'Headless run completed';
+        if (status === 'error') notifTitle = 'Headless run failed';
+        else if (status === 'cancelled') notifTitle = 'Headless run cancelled';
+        const notif = new Notification({ title: notifTitle, body: titleText });
+        notif.on('click', () => {
+          if (mainWindow) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.show();
+            mainWindow.focus();
+            mainWindow.webContents.send('headless:focus-run', { projectPath, runId });
+          }
+        });
+        notif.show();
+      }
+    } catch (err) { console.error('headless notification failed:', err); }
     if (mainWindow) {
       mainWindow.webContents.send('headless:completed', {
         projectPath, runId, status, exitCode, completedAt,
