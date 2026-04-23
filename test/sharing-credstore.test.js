@@ -30,7 +30,6 @@ function makeFakeFs() {
     unlinkSync: (p) => {
       files.delete(p);
     },
-    mkdirSync: () => {},
     _files: files,
   };
 }
@@ -116,4 +115,47 @@ test('createCredStore: isAvailable reflects safeStorage', () => {
   });
   assert.equal(ok.isAvailable(), true);
   assert.equal(no.isAvailable(), false);
+});
+
+test('createCredStore: write rejects when connectionString is not a string', () => {
+  const store = createCredStore({
+    safeStorage: makeFakeSafeStorage(),
+    fs: makeFakeFs(),
+    filePath: '/fake/shared-creds.enc',
+  });
+  assert.throws(
+    () => store.write({ connectionString: undefined, dbName: 'Claudes' }),
+    /must be strings/
+  );
+  assert.throws(
+    () => store.write({ connectionString: 123, dbName: 'Claudes' }),
+    /must be strings/
+  );
+});
+
+test('createCredStore: write rejects when dbName is not a string', () => {
+  const store = createCredStore({
+    safeStorage: makeFakeSafeStorage(),
+    fs: makeFakeFs(),
+    filePath: '/fake/shared-creds.enc',
+  });
+  assert.throws(
+    () => store.write({ connectionString: 'mongodb://host/', dbName: null }),
+    /must be strings/
+  );
+});
+
+test('createCredStore: read calls log on decrypt failure', () => {
+  const fakeFs = makeFakeFs();
+  fakeFs.writeFileSync('/fake/shared-creds.enc', Buffer.from('garbage-not-encrypted'));
+  const logCalls = [];
+  const store = createCredStore({
+    safeStorage: makeFakeSafeStorage(),
+    fs: fakeFs,
+    filePath: '/fake/shared-creds.enc',
+    log: (...args) => logCalls.push(args),
+  });
+  assert.equal(store.read(), null);
+  assert.equal(logCalls.length, 1);
+  assert.equal(logCalls[0][0].includes('decrypt failed'), true);
 });
