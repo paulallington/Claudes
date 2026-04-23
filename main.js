@@ -2708,6 +2708,90 @@ function preRunPull(clonePath) {
   });
 }
 
+/**
+ * Spawn `claude --print` and stream-parse stdout, emitting text chunks as they arrive.
+ *
+ * Returns: { child, cleanup }
+ *   - child: the ChildProcess (caller tracks lifecycle + handles 'close'/'error').
+ *   - cleanup(): removes any temp MCP config file created during spawn.
+ *
+ * Callbacks:
+ *   - onText(chunk): called with each extracted text fragment.
+ *   - onRaw(chunk): called with each raw stdout chunk (for saving to disk).
+ */
+function spawnHeadlessClaude(prompt, cwd, opts) {
+  opts = opts || {};
+  const args = ['--print', prompt, '--output-format', 'stream-json', '--verbose'];
+  if (opts.skipPermissions) args.push('--dangerously-skip-permissions');
+  if (opts.bare) args.push('--bare');
+  if (opts.model) args.push('--model', opts.model);
+  if (Array.isArray(opts.extraArgs)) {
+    for (const a of opts.extraArgs) args.push(a);
+  }
+
+  let mcpConfigPath = null;
+  if (opts.mcpConfig) {
+    mcpConfigPath = opts.mcpConfigPath;
+    fs.mkdirSync(path.dirname(mcpConfigPath), { recursive: true });
+    fs.writeFileSync(mcpConfigPath, JSON.stringify(opts.mcpConfig), 'utf8');
+    args.push('--mcp-config', mcpConfigPath);
+    if (Array.isArray(opts.allowedTools) && opts.allowedTools.length > 0) {
+      args.push('--allowedTools', opts.allowedTools.join(','));
+    }
+  }
+
+  const child = spawn(getClaudePath(), args, {
+    cwd: cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: Object.assign({}, process.env)
+  });
+
+  let streamBuffer = '';
+  child.stdout.on('data', (chunk) => {
+    const raw = chunk.toString();
+    if (typeof opts.onRaw === 'function') opts.onRaw(raw);
+    streamBuffer += raw;
+    const lines = streamBuffer.split('\n');
+    streamBuffer = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const evt = JSON.parse(line);
+        let text = '';
+        if (evt.type === 'assistant' && evt.message && evt.message.content) {
+          evt.message.content.forEach(block => {
+            if (block.type === 'text') text += block.text;
+          });
+        } else if (evt.type === 'content_block_delta' && evt.delta) {
+          if (evt.delta.type === 'text_delta') text = evt.delta.text;
+        } else if (evt.type === 'result' && evt.result) {
+          if (typeof evt.result === 'string') {
+            text = evt.result;
+          } else if (Array.isArray(evt.result)) {
+            evt.result.forEach(block => {
+              if (block.type === 'text') text += block.text;
+            });
+          }
+        }
+        if (text && typeof opts.onText === 'function') opts.onText(text);
+      } catch { /* skip non-JSON lines */ }
+    }
+  });
+
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString();
+    if (typeof opts.onText === 'function') opts.onText(text);
+  });
+
+  const cleanup = () => {
+    if (mcpConfigPath) {
+      try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
+    }
+  };
+
+  return { child, cleanup };
+}
+
 async function runAgent(automationId, agentId) {
   let data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
@@ -2810,11 +2894,8 @@ async function runAgent(automationId, agentId) {
     }
   }
 
-  const args = ['--print', fullPrompt, '--output-format', 'stream-json', '--verbose'];
-  if (agent.skipPermissions) args.push('--dangerously-skip-permissions');
-
-  // Database MCP config
-  let mcpConfigPath = null;
+  // Build MCP config (if any) — same shape as before
+  let mcpOpts = null;
   if (agent.dbConnectionString) {
     const mcpArgs = ['-y', 'mongodb-mcp-server@latest'];
     if (agent.dbReadOnly !== false) mcpArgs.push('--readOnly');
@@ -2827,13 +2908,10 @@ async function runAgent(automationId, agentId) {
         }
       }
     };
-    mcpConfigPath = path.join(AUTOMATIONS_RUNS_DIR, automationId + '_' + agentId + '_mcp.json');
-    fs.mkdirSync(path.dirname(mcpConfigPath), { recursive: true });
-    fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig), 'utf8');
-    args.push('--mcp-config', mcpConfigPath);
-
+    const mcpConfigPath = path.join(AUTOMATIONS_RUNS_DIR, automationId + '_' + agentId + '_mcp.json');
+    let allowedTools = null;
     if (agent.dbReadOnly !== false) {
-      const allowedTools = [
+      allowedTools = [
         'mcp__mongodb__find', 'mcp__mongodb__count', 'mcp__mongodb__collection-indexes',
         'mcp__mongodb__collection-schema', 'mcp__mongodb__collection-storage-size',
         'mcp__mongodb__db-stats', 'mcp__mongodb__explain', 'mcp__mongodb__export',
@@ -2842,64 +2920,30 @@ async function runAgent(automationId, agentId) {
         'mcp__mongodb__search-knowledge',
         'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'
       ];
-      args.push('--allowedTools', allowedTools.join(','));
     }
+    mcpOpts = { mcpConfig, mcpConfigPath, allowedTools };
   }
 
-  const child = spawn(getClaudePath(), args, {
-    cwd: cwd,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: Object.assign({}, process.env)
+  const spawned = spawnHeadlessClaude(fullPrompt, cwd, {
+    skipPermissions: !!agent.skipPermissions,
+    mcpConfig: mcpOpts ? mcpOpts.mcpConfig : null,
+    mcpConfigPath: mcpOpts ? mcpOpts.mcpConfigPath : null,
+    allowedTools: mcpOpts ? mcpOpts.allowedTools : null,
+    onRaw: (raw) => { outputChunks.push(raw); },
+    onText: (text) => {
+      textChunks.push(text);
+      if (mainWindow) mainWindow.webContents.send('automations:agent-output', { automationId, agentId, chunk: text });
+    }
   });
+  const child = spawned.child;
 
   runningAgents.set(key, child);
   agentLiveOutputBuffers.set(key, textChunks);
 
-  let streamBuffer = '';
-  child.stdout.on('data', (chunk) => {
-    const raw = chunk.toString();
-    outputChunks.push(raw);
-    streamBuffer += raw;
-    const lines = streamBuffer.split('\n');
-    streamBuffer = lines.pop();
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const evt = JSON.parse(line);
-        let text = '';
-        if (evt.type === 'assistant' && evt.message && evt.message.content) {
-          evt.message.content.forEach(block => {
-            if (block.type === 'text') text += block.text;
-          });
-        } else if (evt.type === 'content_block_delta' && evt.delta) {
-          if (evt.delta.type === 'text_delta') text = evt.delta.text;
-        } else if (evt.type === 'result' && evt.result) {
-          if (typeof evt.result === 'string') {
-            text = evt.result;
-          } else if (Array.isArray(evt.result)) {
-            evt.result.forEach(block => {
-              if (block.type === 'text') text += block.text;
-            });
-          }
-        }
-        if (text) {
-          textChunks.push(text);
-          if (mainWindow) mainWindow.webContents.send('automations:agent-output', { automationId, agentId, chunk: text });
-        }
-      } catch { /* skip non-JSON lines */ }
-    }
-  });
-
-  child.stderr.on('data', (chunk) => {
-    const text = chunk.toString();
-    textChunks.push(text);
-    if (mainWindow) mainWindow.webContents.send('automations:agent-output', { automationId, agentId, chunk: text });
-  });
-
   child.on('close', (exitCode) => {
     runningAgents.delete(key);
     agentLiveOutputBuffers.delete(key);
-    if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
+    spawned.cleanup();
 
     const completedAt = new Date().toISOString();
     let runStatus = exitCode === 0 ? 'completed' : 'error';
@@ -2973,7 +3017,7 @@ async function runAgent(automationId, agentId) {
   child.on('error', (err) => {
     runningAgents.delete(key);
     agentLiveOutputBuffers.delete(key);
-    if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
+    spawned.cleanup();
     try {
       const freshData = readAutomations();
       const freshAuto = freshData.automations.find(a => a.id === automationId);
