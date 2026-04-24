@@ -767,16 +767,20 @@ ipcMain.handle('sticky-notes:load', (event, projectPath) => {
   }
   const notes = Array.isArray(data && data.notes) ? data.notes : [];
   // Forward-compat defaults for v1 files that lack new keys.
-  return notes.map((n) => ({
-    id: n.id,
-    content: typeof n.content === 'string' ? n.content : '',
-    x: typeof n.x === 'number' ? n.x : 20,
-    y: typeof n.y === 'number' ? n.y : 20,
-    width: typeof n.width === 'number' ? n.width : 240,
-    height: typeof n.height === 'number' ? n.height : 180,
-    color: typeof n.color === 'string' ? n.color : 'yellow',
-    fontSize: typeof n.fontSize === 'number' ? n.fontSize : 15
-  }));
+  return notes.map((n) => {
+    const out = {
+      id: n.id,
+      content: typeof n.content === 'string' ? n.content : '',
+      x: typeof n.x === 'number' ? n.x : 20,
+      y: typeof n.y === 'number' ? n.y : 20,
+      width: typeof n.width === 'number' ? n.width : 240,
+      height: typeof n.height === 'number' ? n.height : 180,
+      color: typeof n.color === 'string' ? n.color : 'yellow',
+      fontSize: typeof n.fontSize === 'number' ? n.fontSize : 15
+    };
+    if (n.anchor && typeof n.anchor === 'object') out.anchor = n.anchor;
+    return out;
+  });
 });
 
 ipcMain.handle('sticky-notes:save', (event, projectPath, notes) => {

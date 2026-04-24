@@ -1662,6 +1662,9 @@ function restoreProjectSessions(projectPath, project) {
     } else {
       addColumn(spawnArgs.length > 0 ? spawnArgs : null);
     }
+    if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
+      window.__repositionStickyNotesForActiveProject();
+    }
   });
 }
 
@@ -3383,6 +3386,9 @@ function refitAll() {
       wsSend({ type: 'resize', id: id, cols: col.terminal.cols, rows: col.terminal.rows });
     } catch (e) {}
   });
+  if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
+    window.__repositionStickyNotesForActiveProject();
+  }
 }
 
 var resizeTimeout;
@@ -9431,6 +9437,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   var loadedProjects = new Set();   // projectKeys we've already fetched from disk
   var loadingProjects = new Map();  // projectKey -> Promise (in-flight load)
   var openPopoverNoteId = null;
+  var noteIsDragging = false;       // true while a drag or resize gesture is in progress
 
   function genId() {
     return 'note_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7);
@@ -9513,6 +9520,63 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     noteEl.style.height = note.height + 'px';
     noteEl.style.fontSize = note.fontSize + 'px';
     noteEl.setAttribute('data-color', note.color);
+  }
+
+  function findColumnAtPoint(clientX, clientY) {
+    var state = typeof getActiveState === 'function' ? getActiveState() : null;
+    if (!state || !state.rows) return null;
+    for (var rowIdx = 0; rowIdx < state.rows.length; rowIdx++) {
+      var row = state.rows[rowIdx];
+      if (!row || !row.columnIds) continue;
+      for (var colIdx = 0; colIdx < row.columnIds.length; colIdx++) {
+        var col = allColumns.get(row.columnIds[colIdx]);
+        if (!col || !col.element) continue;
+        var rect = col.element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        if (clientX >= rect.left && clientX <= rect.right &&
+            clientY >= rect.top && clientY <= rect.bottom) {
+          return { rowIdx: rowIdx, colIdx: colIdx, rect: rect };
+        }
+      }
+    }
+    return null;
+  }
+
+  function computeAbsolutePosition(note) {
+    var containerRect = columnsContainerEl.getBoundingClientRect();
+    var a = note.anchor;
+    if (a && a.type === 'column') {
+      var state = typeof getActiveState === 'function' ? getActiveState() : null;
+      var row = state && state.rows ? state.rows[a.rowIdx] : null;
+      var colId = row && row.columnIds ? row.columnIds[a.colIdx] : undefined;
+      var col = (typeof colId !== 'undefined') ? allColumns.get(colId) : null;
+      if (col && col.element) {
+        var rect = col.element.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          return {
+            x: (rect.left - containerRect.left) + a.ratioX * rect.width,
+            y: (rect.top - containerRect.top) + a.ratioY * rect.height
+          };
+        }
+        // Column exists but has zero rect (transient layout) — hold position.
+        return { x: note.x, y: note.y };
+      }
+      // Column not found (killed / row removed): degrade to container anchor in-memory.
+      var rx = containerRect.width > 0 ? (note.x / containerRect.width) : 0.05;
+      var ry = containerRect.height > 0 ? (note.y / containerRect.height) : 0.05;
+      note.anchor = { type: 'container', ratioX: rx, ratioY: ry };
+      return {
+        x: rx * containerRect.width,
+        y: ry * containerRect.height
+      };
+    }
+    if (a && a.type === 'container') {
+      return {
+        x: a.ratioX * containerRect.width,
+        y: a.ratioY * containerRect.height
+      };
+    }
+    return { x: note.x, y: note.y };
   }
 
   function createNoteElement(note) {
@@ -9653,6 +9717,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       var startY = e.clientY;
       var startLeft = note.x;
       var startTop = note.y;
+      noteIsDragging = true;
       document.body.style.userSelect = 'none';
       function move(ev) {
         note.x = startLeft + (ev.clientX - startX);
@@ -9661,10 +9726,30 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
         el.style.left = note.x + 'px';
         el.style.top = note.y + 'px';
       }
-      function up() {
+      function up(ev) {
         document.removeEventListener('mousemove', move);
         document.removeEventListener('mouseup', up);
         document.body.style.userSelect = '';
+        noteIsDragging = false;
+        var cR = columnsContainerEl.getBoundingClientRect();
+        var hit = findColumnAtPoint(ev.clientX, ev.clientY);
+        if (hit) {
+          note.anchor = {
+            type: 'column',
+            rowIdx: hit.rowIdx,
+            colIdx: hit.colIdx,
+            ratioX: (ev.clientX - hit.rect.left) / hit.rect.width,
+            ratioY: (ev.clientY - hit.rect.top) / hit.rect.height
+          };
+        } else {
+          note.anchor = {
+            type: 'container',
+            ratioX: cR.width > 0 ? (ev.clientX - cR.left) / cR.width : 0,
+            ratioY: cR.height > 0 ? (ev.clientY - cR.top) / cR.height : 0
+          };
+        }
+        note.x = parseFloat(el.style.left) || 0;
+        note.y = parseFloat(el.style.top) || 0;
         var projectKey = currentProjectKey();
         if (projectKey) save(projectKey);
       }
@@ -9687,6 +9772,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
           var startTop = note.y;
           var startWidth = note.width;
           var startHeight = note.height;
+          noteIsDragging = true;
           document.body.style.userSelect = 'none';
           function move(ev) {
             var dx = ev.clientX - startX;
@@ -9710,6 +9796,27 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
             document.removeEventListener('mousemove', move);
             document.removeEventListener('mouseup', up);
             document.body.style.userSelect = '';
+            noteIsDragging = false;
+            var elRect = el.getBoundingClientRect();
+            var cR = columnsContainerEl.getBoundingClientRect();
+            var hit = findColumnAtPoint(elRect.left, elRect.top);
+            if (hit) {
+              note.anchor = {
+                type: 'column',
+                rowIdx: hit.rowIdx,
+                colIdx: hit.colIdx,
+                ratioX: (elRect.left - hit.rect.left) / hit.rect.width,
+                ratioY: (elRect.top - hit.rect.top) / hit.rect.height
+              };
+            } else {
+              note.anchor = {
+                type: 'container',
+                ratioX: cR.width > 0 ? (elRect.left - cR.left) / cR.width : 0,
+                ratioY: cR.height > 0 ? (elRect.top - cR.top) / cR.height : 0
+              };
+            }
+            note.x = parseFloat(el.style.left) || 0;
+            note.y = parseFloat(el.style.top) || 0;
             var projectKey = currentProjectKey();
             if (projectKey) save(projectKey);
           }
@@ -9806,11 +9913,32 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       while (container.firstChild) container.removeChild(container.firstChild);
       var notes = getNotes(projectKey);
       for (var i = 0; i < notes.length; i++) {
-        clampPosition(notes[i]);
+        var pos = computeAbsolutePosition(notes[i]);
+        notes[i].x = pos.x;
+        notes[i].y = pos.y;
         var el = createNoteElement(notes[i]);
         container.appendChild(el);
       }
     });
+  }
+
+  function repositionStickyNotesForActiveProject() {
+    if (noteIsDragging) return;
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    var notes = getNotes(projectKey);
+    var els = container.querySelectorAll('.sticky-note[data-note-id]');
+    for (var i = 0; i < els.length; i++) {
+      var id = els[i].getAttribute('data-note-id');
+      var note = null;
+      for (var j = 0; j < notes.length; j++) {
+        if (notes[j].id === id) { note = notes[j]; break; }
+      }
+      if (!note) continue;
+      var pos = computeAbsolutePosition(note);
+      els[i].style.left = pos.x + 'px';
+      els[i].style.top = pos.y + 'px';
+    }
   }
 
   function createNewNote() {
@@ -9819,21 +9947,66 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     ensureLoaded(projectKey).then(function () {
       if (currentProjectKey() !== projectKey) return;
       var arr = getNotes(projectKey);
-      var stagger = arr.length % 10;
+      var state = typeof getActiveState === 'function' ? getActiveState() : null;
+
+      // Determine target column for anchor.
+      var rowIdx = -1, colIdx = -1;
+      if (state && state.focusedColumnId !== null && typeof state.focusedColumnId !== 'undefined') {
+        var focusedRow = findRowForColumn(state, state.focusedColumnId);
+        if (focusedRow) {
+          rowIdx = state.rows.indexOf(focusedRow);
+          colIdx = focusedRow.columnIds.indexOf(state.focusedColumnId);
+        }
+      }
+      if (rowIdx < 0 && state && state.rows) {
+        for (var r = 0; r < state.rows.length; r++) {
+          if (state.rows[r] && state.rows[r].columnIds && state.rows[r].columnIds.length > 0) {
+            rowIdx = r;
+            colIdx = 0;
+            break;
+          }
+        }
+      }
+
+      // Stagger against existing notes sharing the same anchor.
+      var staggerCount = 0;
+      for (var k = 0; k < arr.length; k++) {
+        var aa = arr[k].anchor;
+        if (rowIdx >= 0) {
+          if (aa && aa.type === 'column' && aa.rowIdx === rowIdx && aa.colIdx === colIdx) staggerCount++;
+        } else {
+          if (!aa || aa.type === 'container') staggerCount++;
+        }
+      }
+      var stagger = staggerCount % 10;
+      var ratio = 0.05 + stagger * 0.02;
+
+      var anchor;
+      if (rowIdx >= 0) {
+        anchor = { type: 'column', rowIdx: rowIdx, colIdx: colIdx, ratioX: ratio, ratioY: ratio };
+      } else {
+        anchor = { type: 'container', ratioX: ratio, ratioY: ratio };
+      }
+
       var note = {
         id: genId(),
         content: '',
-        x: 20 + stagger * 18,
-        y: 20 + stagger * 18,
+        x: 20,
+        y: 20,
         width: 240,
         height: 180,
         color: DEFAULT_COLOR,
-        fontSize: DEFAULT_FONT_SIZE
+        fontSize: DEFAULT_FONT_SIZE,
+        anchor: anchor
       };
-      clampPosition(note);
       arr.push(note);
       var el = createNoteElement(note);
       container.appendChild(el);
+      var pos = computeAbsolutePosition(note);
+      note.x = pos.x;
+      note.y = pos.y;
+      el.style.left = note.x + 'px';
+      el.style.top = note.y + 'px';
       save(projectKey);
     });
   }
@@ -9850,30 +10023,9 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     closeAllPopovers();
   });
 
-  // Window resize: re-clamp every visible note against new columns-container bounds.
-  window.addEventListener('resize', function () {
-    var projectKey = currentProjectKey();
-    if (!projectKey) return;
-    var notes = getNotes(projectKey);
-    var changed = false;
-    for (var i = 0; i < notes.length; i++) {
-      var before = notes[i].x + ',' + notes[i].y;
-      clampPosition(notes[i]);
-      var after = notes[i].x + ',' + notes[i].y;
-      if (before !== after) {
-        changed = true;
-        var el = container.querySelector('.sticky-note[data-note-id="' + notes[i].id + '"]');
-        if (el) {
-          el.style.left = notes[i].x + 'px';
-          el.style.top = notes[i].y + 'px';
-        }
-      }
-    }
-    if (changed) save(projectKey);
-  });
-
   // Expose the render hook so setActiveProject can call it.
   window.__renderStickyNotesForActiveProject = renderForActiveProject;
+  window.__repositionStickyNotesForActiveProject = repositionStickyNotesForActiveProject;
 
   // Initial render in case setActiveProject already fired before this IIFE executed.
   renderForActiveProject();
