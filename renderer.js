@@ -900,6 +900,72 @@ function removeRowIfEmpty(state, row) {
   state.rows.splice(idx, 1);
 }
 
+function applyLayoutRatios(state, entries, rowHeightByIdx, rowsByIdx) {
+  // Group entries by row index in spawn order so we can pair with row.columnIds[].
+  var byRow = {};
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i];
+    (byRow[e.rowIdx] = byRow[e.rowIdx] || []).push(e);
+  }
+
+  // Column widths.
+  for (var rIdx in byRow) {
+    if (!Object.prototype.hasOwnProperty.call(byRow, rIdx)) continue;
+    var row = (rowsByIdx && rowsByIdx[rIdx]) || state.rows[rIdx];
+    if (!row) continue;
+    var rowEntries = byRow[rIdx];
+    var allHaveRatio = rowEntries.every(function (e) { return e.widthRatio !== null; });
+    var persistableCount = 0;
+    for (var pc = 0; pc < row.columnIds.length; pc++) {
+      var pcCol = state.columns.get(row.columnIds[pc]);
+      if (pcCol && pcCol.sessionId) persistableCount++;
+    }
+    if (!allHaveRatio || rowEntries.length !== persistableCount) continue;
+    var sum = rowEntries.reduce(function (s, e) { return s + e.widthRatio; }, 0);
+    if (!(sum > 0)) continue;
+    var entryIdx = 0;
+    for (var c = 0; c < row.columnIds.length; c++) {
+      var col = state.columns.get(row.columnIds[c]);
+      if (!col) continue;
+      if (col.sessionId && entryIdx < rowEntries.length) {
+        var ratio = rowEntries[entryIdx].widthRatio / sum;
+        col.element.style.flex = ratio + ' 1 0';
+        col.element.style.width = '';
+        entryIdx++;
+      } else {
+        col.element.style.flex = '1 1 0';
+        col.element.style.width = '';
+      }
+    }
+  }
+
+  // Row heights — only apply if every actual row maps back to an original index with a heightRatio.
+  if (rowsByIdx) {
+    var ratiosForActualRows = [];
+    for (var ri = 0; ri < state.rows.length; ri++) {
+      var matched = null;
+      for (var origIdx in rowsByIdx) {
+        if (rowsByIdx[origIdx] === state.rows[ri] && typeof rowHeightByIdx[origIdx] === 'number') {
+          matched = rowHeightByIdx[origIdx];
+          break;
+        }
+      }
+      if (matched === null) { ratiosForActualRows = null; break; }
+      ratiosForActualRows.push(matched);
+    }
+    if (ratiosForActualRows && ratiosForActualRows.length > 0) {
+      var hSum = ratiosForActualRows.reduce(function (s, v) { return s + v; }, 0);
+      if (hSum > 0) {
+        for (var ri2 = 0; ri2 < state.rows.length; ri2++) {
+          state.rows[ri2].el.style.flex = (ratiosForActualRows[ri2] / hSum) + ' 1 0';
+          state.rows[ri2].el.style.height = '';
+        }
+      }
+    }
+  }
+  refitAll();
+}
+
 // ============================================================
 // Project Management
 // ============================================================
@@ -1649,19 +1715,81 @@ function setActiveProject(index, isStartup) {
 }
 
 function restoreProjectSessions(projectPath, project) {
-  window.electronAPI.loadSessions(projectPath).then(function (savedSessions) {
+  window.electronAPI.loadSessions(projectPath).then(function (saved) {
     var spawnArgs = buildSpawnArgs();
-    if (savedSessions && savedSessions.length > 0) {
-      for (var i = 0; i < savedSessions.length; i++) {
-        // Support both old format (plain string) and new format ({sessionId, title})
-        var entry = savedSessions[i];
-        var sessionId = typeof entry === 'string' ? entry : entry.sessionId;
-        var title = typeof entry === 'object' ? entry.title : null;
-        addColumn(spawnArgs.concat(['--resume', sessionId]), null, title ? { title: title } : {});
+    var state = projectStates.get(projectPath);
+
+    // Mark restore in progress so background timers (session-sync, title-edit) don't overwrite
+    // sessions.json with default-flex ratios before applyLayoutRatios runs.
+    if (state) state.restoringLayout = true;
+
+    var entries = [];
+    var rowHeightByIdx = {};
+
+    if (saved && saved.version === 2 && Array.isArray(saved.rows)) {
+      for (var r = 0; r < saved.rows.length; r++) {
+        var srow = saved.rows[r] || {};
+        var srowCols = Array.isArray(srow.columns) ? srow.columns : [];
+        if (typeof srow.heightRatio === 'number' && isFinite(srow.heightRatio) && srow.heightRatio > 0) {
+          rowHeightByIdx[r] = srow.heightRatio;
+        }
+        for (var c = 0; c < srowCols.length; c++) {
+          var col = srowCols[c] || {};
+          if (!col.sessionId) continue;
+          entries.push({
+            rowIdx: r,
+            sessionId: col.sessionId,
+            title: col.title || null,
+            widthRatio: (typeof col.widthRatio === 'number' && isFinite(col.widthRatio) && col.widthRatio > 0) ? col.widthRatio : null
+          });
+        }
       }
-    } else {
-      addColumn(spawnArgs.length > 0 ? spawnArgs : null);
+    } else if (Array.isArray(saved) && saved.length > 0) {
+      for (var i = 0; i < saved.length; i++) {
+        var entry = saved[i];
+        var sid = typeof entry === 'string' ? entry : entry && entry.sessionId;
+        if (!sid) continue;
+        entries.push({
+          rowIdx: 0,
+          sessionId: sid,
+          title: (typeof entry === 'object' && entry && entry.title) ? entry.title : null,
+          widthRatio: null
+        });
+      }
     }
+
+    if (entries.length === 0) {
+      if (state) state.restoringLayout = false;
+      addColumn(spawnArgs.length > 0 ? spawnArgs : null);
+      if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
+        window.__repositionStickyNotesForActiveProject();
+      }
+      return;
+    }
+
+    var rowsByIdx = {};
+    for (var k = 0; k < entries.length; k++) {
+      var e = entries[k];
+      var targetRow = rowsByIdx[e.rowIdx];
+      if (!targetRow) {
+        while (state.rows.length <= e.rowIdx) {
+          var newRow = addRowToProject(state);
+          rowsByIdx[state.rows.length - 1] = newRow;
+        }
+        targetRow = rowsByIdx[e.rowIdx];
+      }
+      addColumn(spawnArgs.concat(['--resume', e.sessionId]), targetRow, e.title ? { title: e.title } : {});
+    }
+
+    for (var rr = state.rows.length - 1; rr >= 0; rr--) {
+      removeRowIfEmpty(state, state.rows[rr]);
+    }
+
+    applyLayoutRatios(state, entries, rowHeightByIdx, rowsByIdx);
+
+    if (state) state.restoringLayout = false;
+    persistSessions(projectPath);
+
     if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
       window.__repositionStickyNotesForActiveProject();
     }
@@ -2866,13 +2994,60 @@ function persistSessions(projectKey) {
   if (!window.electronAPI) return;
   var state = projectStates.get(projectKey);
   if (!state) return;
-  var sessionData = [];
-  state.columns.forEach(function (col) {
-    if (col.sessionId) {
-      sessionData.push({ sessionId: col.sessionId, title: col.customTitle || null });
+
+  // Skip while restore is mid-flight — applyLayoutRatios will persist the correct shape on completion.
+  if (state.restoringLayout) return;
+
+  // Skip if the container is hidden (project not active). DOM measurements would all return 0,
+  // causing the defensive `rh = 1` fallback to silently overwrite saved ratios with uniform values.
+  // Background session-sync (lines ~2780/2830/2845) and title-edit (line ~1956) both fire
+  // persistSessions for non-active projects, so this guard is load-bearing, not theoretical.
+  if (state.containerEl && state.containerEl.offsetParent === null) return;
+
+  // Sum row heights once so we can normalise.
+  var rowHeights = [];
+  var totalRowHeight = 0;
+  for (var r = 0; r < state.rows.length; r++) {
+    var rh = state.rows[r].el.getBoundingClientRect().height;
+    if (!isFinite(rh) || rh <= 0) rh = 1; // defensive
+    rowHeights.push(rh);
+    totalRowHeight += rh;
+  }
+  if (totalRowHeight <= 0) totalRowHeight = state.rows.length || 1;
+
+  var rowsOut = [];
+  for (var r2 = 0; r2 < state.rows.length; r2++) {
+    var row = state.rows[r2];
+    var colWidths = [];
+    var totalColWidth = 0;
+    for (var c = 0; c < row.columnIds.length; c++) {
+      var col = state.columns.get(row.columnIds[c]);
+      var cw = col ? col.element.getBoundingClientRect().width : 0;
+      if (!isFinite(cw) || cw <= 0) cw = 1;
+      colWidths.push(cw);
+      totalColWidth += cw;
     }
-  });
-  window.electronAPI.saveSessions(projectKey, sessionData);
+    if (totalColWidth <= 0) totalColWidth = row.columnIds.length || 1;
+
+    var columnsOut = [];
+    for (var c2 = 0; c2 < row.columnIds.length; c2++) {
+      var col2 = state.columns.get(row.columnIds[c2]);
+      if (!col2 || !col2.sessionId) continue;
+      columnsOut.push({
+        sessionId: col2.sessionId,
+        title: col2.customTitle || null,
+        widthRatio: colWidths[c2] / totalColWidth
+      });
+    }
+    if (columnsOut.length === 0) continue;
+
+    rowsOut.push({
+      heightRatio: rowHeights[r2] / totalRowHeight,
+      columns: columnsOut
+    });
+  }
+
+  window.electronAPI.saveSessions(projectKey, { version: 2, rows: rowsOut });
 }
 
 function removeColumn(id) {
@@ -3112,6 +3287,7 @@ function toggleMaximizeColumn(id) {
 function setupResizeHandle(handle) {
   handle.addEventListener('mousedown', function (e) {
     e.preventDefault();
+    var persistKey = activeProjectKey;
     handle.classList.add('active');
 
     var leftId = parseInt(handle.dataset.leftColumnId);
@@ -3147,6 +3323,7 @@ function setupResizeHandle(handle) {
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
+      persistSessions(persistKey);
     }
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
@@ -3160,6 +3337,7 @@ function setupResizeHandle(handle) {
 function setupRowResizeHandle(handle) {
   handle.addEventListener('mousedown', function (e) {
     e.preventDefault();
+    var persistKey = activeProjectKey;
     handle.classList.add('active');
 
     var state = getActiveState();
@@ -3201,6 +3379,7 @@ function setupRowResizeHandle(handle) {
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
+      persistSessions(persistKey);
     }
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
@@ -3344,6 +3523,7 @@ function moveColumnToPosition(columnId, targetRow, insertIndex) {
   }
 
   refitAll();
+  persistSessions(activeProjectKey);
 }
 
 function rebuildRowDOM(row) {
