@@ -11,7 +11,7 @@
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",
     "dist:publish": "electron-builder --publish always",
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test test/"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -44,6 +44,7 @@
       "index.html",
       "styles.css",
       "pty-server.js",
+      "lib/**/*",
       "icon.ico",
       "icon.png",
       "icon-tray.ico",

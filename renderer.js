@@ -900,6 +900,75 @@ function removeRowIfEmpty(state, row) {
   state.rows.splice(idx, 1);
 }
 
+function applyLayoutRatios(state, entries, rowHeightByIdx, rowsByIdx) {
+  // Group entries by row index in spawn order so we can pair with row.columnIds[].
+  var byRow = {};
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i];
+    (byRow[e.rowIdx] = byRow[e.rowIdx] || []).push(e);
+  }
+
+  // Column widths.
+  for (var rIdx in byRow) {
+    if (!Object.prototype.hasOwnProperty.call(byRow, rIdx)) continue;
+    var row = (rowsByIdx && rowsByIdx[rIdx]) || state.rows[rIdx];
+    if (!row) continue;
+    var rowEntries = byRow[rIdx];
+    var allHaveRatio = rowEntries.every(function (e) { return e.widthRatio !== null; });
+    var persistableCount = 0;
+    for (var pc = 0; pc < row.columnIds.length; pc++) {
+      var pcCol = state.columns.get(row.columnIds[pc]);
+      if (pcCol && pcCol.sessionId) persistableCount++;
+    }
+    if (!allHaveRatio || rowEntries.length !== persistableCount) continue;
+    var sum = rowEntries.reduce(function (s, e) { return s + e.widthRatio; }, 0);
+    if (!(sum > 0)) continue;
+    var entryIdx = 0;
+    for (var c = 0; c < row.columnIds.length; c++) {
+      var col = state.columns.get(row.columnIds[c]);
+      if (!col) continue;
+      if (col.sessionId && entryIdx < rowEntries.length) {
+        var ratio = rowEntries[entryIdx].widthRatio / sum;
+        col.element.style.flex = ratio + ' 1 0';
+        col.element.style.width = '';
+        col.lastWidthRatio = ratio;
+        entryIdx++;
+      } else {
+        col.element.style.flex = '1 1 0';
+        col.element.style.width = '';
+      }
+    }
+  }
+
+  // Row heights — only apply if every actual row maps back to an original index with a heightRatio.
+  if (rowsByIdx) {
+    var ratiosForActualRows = [];
+    for (var ri = 0; ri < state.rows.length; ri++) {
+      var matched = null;
+      for (var origIdx in rowsByIdx) {
+        if (rowsByIdx[origIdx] === state.rows[ri] && typeof rowHeightByIdx[origIdx] === 'number') {
+          matched = rowHeightByIdx[origIdx];
+          break;
+        }
+      }
+      if (matched === null) { ratiosForActualRows = null; break; }
+      ratiosForActualRows.push(matched);
+    }
+    if (ratiosForActualRows && ratiosForActualRows.length > 0) {
+      var hSum = ratiosForActualRows.reduce(function (s, v) { return s + v; }, 0);
+      if (hSum > 0) {
+        for (var ri2 = 0; ri2 < state.rows.length; ri2++) {
+          var rRatio = ratiosForActualRows[ri2] / hSum;
+          state.rows[ri2].el.style.flex = rRatio + ' 1 0';
+          state.rows[ri2].el.style.height = '';
+          state.rows[ri2].lastHeightRatio = rRatio;
+        }
+      }
+    }
+  }
+  refitAll();
+}
+
 // ============================================================
 // Project Management
 // ============================================================
@@ -1643,21 +1712,93 @@ function setActiveProject(index, isStartup) {
     refitAll();
   }
   loadHeadlessRunsForActiveProject();
+  if (typeof window.__renderStickyNotesForActiveProject === 'function') {
+    window.__renderStickyNotesForActiveProject();
+  }
 }
 
 function restoreProjectSessions(projectPath, project) {
-  window.electronAPI.loadSessions(projectPath).then(function (savedSessions) {
+  window.electronAPI.loadSessions(projectPath).then(function (saved) {
     var spawnArgs = buildSpawnArgs();
-    if (savedSessions && savedSessions.length > 0) {
-      for (var i = 0; i < savedSessions.length; i++) {
-        // Support both old format (plain string) and new format ({sessionId, title})
-        var entry = savedSessions[i];
-        var sessionId = typeof entry === 'string' ? entry : entry.sessionId;
-        var title = typeof entry === 'object' ? entry.title : null;
-        addColumn(spawnArgs.concat(['--resume', sessionId]), null, title ? { title: title } : {});
+    var state = projectStates.get(projectPath);
+
+    // Mark restore in progress so background timers (session-sync, title-edit) don't overwrite
+    // sessions.json with default-flex ratios before applyLayoutRatios runs.
+    if (state) state.restoringLayout = true;
+
+    try {
+      var entries = [];
+      var rowHeightByIdx = {};
+
+      if (saved && saved.version === 2 && Array.isArray(saved.rows)) {
+        for (var r = 0; r < saved.rows.length; r++) {
+          var srow = saved.rows[r] || {};
+          var srowCols = Array.isArray(srow.columns) ? srow.columns : [];
+          if (typeof srow.heightRatio === 'number' && isFinite(srow.heightRatio) && srow.heightRatio > 0) {
+            rowHeightByIdx[r] = srow.heightRatio;
+          }
+          for (var c = 0; c < srowCols.length; c++) {
+            var col = srowCols[c] || {};
+            if (!col.sessionId) continue;
+            entries.push({
+              rowIdx: r,
+              sessionId: col.sessionId,
+              title: col.title || null,
+              widthRatio: (typeof col.widthRatio === 'number' && isFinite(col.widthRatio) && col.widthRatio > 0) ? col.widthRatio : null
+            });
+          }
+        }
+      } else if (Array.isArray(saved) && saved.length > 0) {
+        for (var i = 0; i < saved.length; i++) {
+          var entry = saved[i];
+          var sid = typeof entry === 'string' ? entry : entry && entry.sessionId;
+          if (!sid) continue;
+          entries.push({
+            rowIdx: 0,
+            sessionId: sid,
+            title: (typeof entry === 'object' && entry && entry.title) ? entry.title : null,
+            widthRatio: null
+          });
+        }
       }
-    } else {
-      addColumn(spawnArgs.length > 0 ? spawnArgs : null);
+
+      if (entries.length === 0) {
+        addColumn(spawnArgs.length > 0 ? spawnArgs : null);
+        if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
+          window.__repositionStickyNotesForActiveProject();
+        }
+        return;
+      }
+
+      var rowsByIdx = {};
+      for (var k = 0; k < entries.length; k++) {
+        var e = entries[k];
+        var targetRow = rowsByIdx[e.rowIdx];
+        if (!targetRow) {
+          while (state.rows.length <= e.rowIdx) {
+            var newRow = addRowToProject(state);
+            rowsByIdx[state.rows.length - 1] = newRow;
+          }
+          targetRow = rowsByIdx[e.rowIdx];
+        }
+        addColumn(spawnArgs.concat(['--resume', e.sessionId]), targetRow, e.title ? { title: e.title } : {});
+      }
+
+      for (var rr = state.rows.length - 1; rr >= 0; rr--) {
+        removeRowIfEmpty(state, state.rows[rr]);
+      }
+
+      applyLayoutRatios(state, entries, rowHeightByIdx, rowsByIdx);
+
+      if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
+        window.__repositionStickyNotesForActiveProject();
+      }
+    } finally {
+      // Always clear the flag — even if a synchronous call above threw — so background
+      // persists are not silently disabled for the rest of the session. persistSessions
+      // runs after the reset so the canonicalising write actually happens.
+      if (state) state.restoringLayout = false;
+      persistSessions(projectPath);
     }
   });
 }
@@ -2860,13 +3001,77 @@ function persistSessions(projectKey) {
   if (!window.electronAPI) return;
   var state = projectStates.get(projectKey);
   if (!state) return;
-  var sessionData = [];
-  state.columns.forEach(function (col) {
-    if (col.sessionId) {
-      sessionData.push({ sessionId: col.sessionId, title: col.customTitle || null });
+
+  // Skip while restore is mid-flight — applyLayoutRatios will persist the correct shape on completion.
+  if (state.restoringLayout) return;
+
+  // When the container is hidden (project not active), DOM measurements return 0. Use cached
+  // ratios from the row/column objects instead so background session-sync persists still flush.
+  var hidden = !!(state.containerEl && state.containerEl.offsetParent === null);
+
+  var rowHeights = [];
+  var totalRowHeight = 0;
+  for (var r = 0; r < state.rows.length; r++) {
+    var rh;
+    if (hidden) {
+      rh = (typeof state.rows[r].lastHeightRatio === 'number' && state.rows[r].lastHeightRatio > 0)
+        ? state.rows[r].lastHeightRatio
+        : (1 / state.rows.length);
+    } else {
+      rh = state.rows[r].el.getBoundingClientRect().height;
+      if (!isFinite(rh) || rh <= 0) rh = 1; // defensive
     }
-  });
-  window.electronAPI.saveSessions(projectKey, sessionData);
+    rowHeights.push(rh);
+    totalRowHeight += rh;
+  }
+  if (totalRowHeight <= 0) totalRowHeight = state.rows.length || 1;
+
+  var rowsOut = [];
+  for (var r2 = 0; r2 < state.rows.length; r2++) {
+    var row = state.rows[r2];
+    var colWidths = [];
+    var totalColWidth = 0;
+    for (var c = 0; c < row.columnIds.length; c++) {
+      var col = state.columns.get(row.columnIds[c]);
+      var cw;
+      if (!col) {
+        cw = 0;
+      } else if (hidden) {
+        cw = (typeof col.lastWidthRatio === 'number' && col.lastWidthRatio > 0)
+          ? col.lastWidthRatio
+          : (1 / row.columnIds.length);
+      } else {
+        cw = col.element.getBoundingClientRect().width;
+        if (!isFinite(cw) || cw <= 0) cw = 1;
+      }
+      colWidths.push(cw);
+      totalColWidth += cw;
+    }
+    if (totalColWidth <= 0) totalColWidth = row.columnIds.length || 1;
+
+    var columnsOut = [];
+    for (var c2 = 0; c2 < row.columnIds.length; c2++) {
+      var col2 = state.columns.get(row.columnIds[c2]);
+      if (!col2 || !col2.sessionId) continue;
+      var widthRatio = colWidths[c2] / totalColWidth;
+      if (!hidden) col2.lastWidthRatio = widthRatio;
+      columnsOut.push({
+        sessionId: col2.sessionId,
+        title: col2.customTitle || null,
+        widthRatio: widthRatio
+      });
+    }
+    if (columnsOut.length === 0) continue;
+
+    var heightRatio = rowHeights[r2] / totalRowHeight;
+    if (!hidden) row.lastHeightRatio = heightRatio;
+    rowsOut.push({
+      heightRatio: heightRatio,
+      columns: columnsOut
+    });
+  }
+
+  window.electronAPI.saveSessions(projectKey, { version: 2, rows: rowsOut });
 }
 
 function removeColumn(id) {
@@ -3106,6 +3311,7 @@ function toggleMaximizeColumn(id) {
 function setupResizeHandle(handle) {
   handle.addEventListener('mousedown', function (e) {
     e.preventDefault();
+    var persistKey = activeProjectKey;
     handle.classList.add('active');
 
     var leftId = parseInt(handle.dataset.leftColumnId);
@@ -3141,6 +3347,7 @@ function setupResizeHandle(handle) {
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
+      persistSessions(persistKey);
     }
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
@@ -3154,6 +3361,7 @@ function setupResizeHandle(handle) {
 function setupRowResizeHandle(handle) {
   handle.addEventListener('mousedown', function (e) {
     e.preventDefault();
+    var persistKey = activeProjectKey;
     handle.classList.add('active');
 
     var state = getActiveState();
@@ -3195,6 +3403,7 @@ function setupRowResizeHandle(handle) {
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
+      persistSessions(persistKey);
     }
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
@@ -3338,6 +3547,7 @@ function moveColumnToPosition(columnId, targetRow, insertIndex) {
   }
 
   refitAll();
+  persistSessions(activeProjectKey);
 }
 
 function rebuildRowDOM(row) {
@@ -3380,6 +3590,9 @@ function refitAll() {
       wsSend({ type: 'resize', id: id, cols: col.terminal.cols, rows: col.terminal.rows });
     } catch (e) {}
   });
+  if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
+    window.__repositionStickyNotesForActiveProject();
+  }
 }
 
 var resizeTimeout;
@@ -9404,4 +9617,620 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     updateAction.style.display = '';
     updateBar.classList.remove('hidden');
   };
+})();
+
+// ============================================================
+// Sticky Notes
+// ============================================================
+(function setupStickyNotes() {
+  var container = document.getElementById('sticky-notes-container');
+  var columnsContainerEl = document.getElementById('columns-container');
+  var btn = document.getElementById('btn-sticky-notes');
+  if (!container || !columnsContainerEl || !btn) return;
+
+  var STICKY_COLORS = ['yellow', 'pink', 'green', 'blue', 'purple', 'gray'];
+  var DEFAULT_COLOR = 'yellow';
+  var DEFAULT_FONT_SIZE = 15;
+  var FONT_MIN = 10;
+  var FONT_MAX = 24;
+  var MIN_W = 120;
+  var MIN_H = 80;
+  var HEADER_VISIBLE = 24; // px of header that must stay within columns-container
+
+  var notesByProject = new Map();   // projectKey -> notes[]
+  var loadedProjects = new Set();   // projectKeys we've already fetched from disk
+  var loadingProjects = new Map();  // projectKey -> Promise (in-flight load)
+  var openPopoverNoteId = null;
+  var noteIsDragging = false;       // true while a drag or resize gesture is in progress
+
+  function genId() {
+    return 'note_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7);
+  }
+
+  function currentProjectKey() {
+    // activeProjectKey is a module-level var in renderer.js — closure-captured at call time.
+    return typeof activeProjectKey !== 'undefined' ? activeProjectKey : null;
+  }
+
+  function getNotes(projectKey) {
+    if (!projectKey) return [];
+    var arr = notesByProject.get(projectKey);
+    if (!arr) {
+      arr = [];
+      notesByProject.set(projectKey, arr);
+    }
+    return arr;
+  }
+
+  function save(projectKey) {
+    if (!projectKey) return;
+    if (!window.electronAPI || !window.electronAPI.saveStickyNotes) return;
+    var notes = getNotes(projectKey);
+    window.electronAPI.saveStickyNotes(projectKey, notes);
+  }
+
+  function ensureLoaded(projectKey) {
+    if (!projectKey) return Promise.resolve([]);
+    if (loadedProjects.has(projectKey)) return Promise.resolve(getNotes(projectKey));
+    if (loadingProjects.has(projectKey)) return loadingProjects.get(projectKey);
+    if (!window.electronAPI || !window.electronAPI.loadStickyNotes) {
+      loadedProjects.add(projectKey);
+      return Promise.resolve([]);
+    }
+    var p = window.electronAPI.loadStickyNotes(projectKey).then(function (notes) {
+      var arr = Array.isArray(notes) ? notes.slice() : [];
+      // Normalize defaults defensively (main.js also defaults them, but belt-and-braces).
+      for (var i = 0; i < arr.length; i++) {
+        if (!arr[i].id) arr[i].id = genId();
+        if (typeof arr[i].content !== 'string') arr[i].content = '';
+        if (typeof arr[i].x !== 'number') arr[i].x = 20;
+        if (typeof arr[i].y !== 'number') arr[i].y = 20;
+        if (typeof arr[i].width !== 'number') arr[i].width = 240;
+        if (typeof arr[i].height !== 'number') arr[i].height = 180;
+        if (STICKY_COLORS.indexOf(arr[i].color) < 0) arr[i].color = DEFAULT_COLOR;
+        if (typeof arr[i].fontSize !== 'number') arr[i].fontSize = DEFAULT_FONT_SIZE;
+      }
+      notesByProject.set(projectKey, arr);
+      loadedProjects.add(projectKey);
+      loadingProjects.delete(projectKey);
+      return arr;
+    }).catch(function (err) {
+      console.error('loadStickyNotes failed:', err);
+      notesByProject.set(projectKey, []);
+      loadedProjects.add(projectKey);
+      loadingProjects.delete(projectKey);
+      return [];
+    });
+    loadingProjects.set(projectKey, p);
+    return p;
+  }
+
+  function clampPosition(note) {
+    var rect = columnsContainerEl.getBoundingClientRect();
+    var maxX = Math.max(0, rect.width - HEADER_VISIBLE);
+    var minX = -(note.width - HEADER_VISIBLE);
+    var maxY = Math.max(0, rect.height - HEADER_VISIBLE);
+    var minY = 0; // keep above top edge of columns-container (toolbar stays clear)
+    if (note.x > maxX) note.x = maxX;
+    if (note.x < minX) note.x = minX;
+    if (note.y > maxY) note.y = maxY;
+    if (note.y < minY) note.y = minY;
+  }
+
+  function applyNoteStyle(noteEl, note) {
+    noteEl.style.left = note.x + 'px';
+    noteEl.style.top = note.y + 'px';
+    noteEl.style.width = note.width + 'px';
+    noteEl.style.height = note.height + 'px';
+    noteEl.style.fontSize = note.fontSize + 'px';
+    noteEl.setAttribute('data-color', note.color);
+  }
+
+  function findColumnAtPoint(clientX, clientY) {
+    var state = typeof getActiveState === 'function' ? getActiveState() : null;
+    if (!state || !state.rows) return null;
+    for (var rowIdx = 0; rowIdx < state.rows.length; rowIdx++) {
+      var row = state.rows[rowIdx];
+      if (!row || !row.columnIds) continue;
+      for (var colIdx = 0; colIdx < row.columnIds.length; colIdx++) {
+        var col = allColumns.get(row.columnIds[colIdx]);
+        if (!col || !col.element) continue;
+        var rect = col.element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        if (clientX >= rect.left && clientX <= rect.right &&
+            clientY >= rect.top && clientY <= rect.bottom) {
+          return { rowIdx: rowIdx, colIdx: colIdx, rect: rect };
+        }
+      }
+    }
+    return null;
+  }
+
+  function computeAbsolutePosition(note) {
+    var containerRect = columnsContainerEl.getBoundingClientRect();
+    var a = note.anchor;
+    if (a && a.type === 'column') {
+      var state = typeof getActiveState === 'function' ? getActiveState() : null;
+      var row = state && state.rows ? state.rows[a.rowIdx] : null;
+      var colId = row && row.columnIds ? row.columnIds[a.colIdx] : undefined;
+      var col = (typeof colId !== 'undefined') ? allColumns.get(colId) : null;
+      if (col && col.element) {
+        var rect = col.element.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          return {
+            x: (rect.left - containerRect.left) + a.ratioX * rect.width,
+            y: (rect.top - containerRect.top) + a.ratioY * rect.height
+          };
+        }
+        // Column exists but has zero rect (transient layout) — hold position.
+        return { x: note.x, y: note.y };
+      }
+      // Column not found (killed / row removed): degrade to container anchor in-memory.
+      var rx = containerRect.width > 0 ? (note.x / containerRect.width) : 0.05;
+      var ry = containerRect.height > 0 ? (note.y / containerRect.height) : 0.05;
+      note.anchor = { type: 'container', ratioX: rx, ratioY: ry };
+      return {
+        x: rx * containerRect.width,
+        y: ry * containerRect.height
+      };
+    }
+    if (a && a.type === 'container') {
+      return {
+        x: a.ratioX * containerRect.width,
+        y: a.ratioY * containerRect.height
+      };
+    }
+    return { x: note.x, y: note.y };
+  }
+
+  function createNoteElement(note) {
+    var el = document.createElement('div');
+    el.className = 'sticky-note';
+    el.setAttribute('data-note-id', note.id);
+    applyNoteStyle(el, note);
+
+    var header = document.createElement('div');
+    header.className = 'sticky-note-header';
+
+    var settingsBtn = document.createElement('button');
+    settingsBtn.className = 'sticky-note-settings';
+    settingsBtn.title = 'Color and size';
+    settingsBtn.innerHTML = '&#9881;';
+
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'sticky-note-close';
+    closeBtn.title = 'Delete';
+    closeBtn.innerHTML = '&times;';
+
+    header.appendChild(settingsBtn);
+    header.appendChild(closeBtn);
+
+    var body = document.createElement('textarea');
+    body.className = 'sticky-note-body';
+    body.setAttribute('spellcheck', 'false');
+    body.value = note.content || '';
+
+    el.appendChild(header);
+    el.appendChild(body);
+
+    var dirs = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
+    for (var i = 0; i < dirs.length; i++) {
+      var h = document.createElement('div');
+      h.className = 'sticky-note-resize ' + dirs[i];
+      h.setAttribute('data-dir', dirs[i]);
+      el.appendChild(h);
+    }
+
+    var popover = buildPopover(note);
+    el.appendChild(popover);
+
+    wireNote(el, note, header, settingsBtn, closeBtn, body, popover);
+    return el;
+  }
+
+  function buildPopover(note) {
+    var pop = document.createElement('div');
+    pop.className = 'sticky-note-popover';
+
+    var swatches = document.createElement('div');
+    swatches.className = 'sticky-note-swatches';
+    for (var i = 0; i < STICKY_COLORS.length; i++) {
+      var c = STICKY_COLORS[i];
+      var sw = document.createElement('button');
+      sw.className = 'sticky-swatch' + (note.color === c ? ' selected' : '');
+      sw.setAttribute('data-color', c);
+      sw.setAttribute('aria-label', c.charAt(0).toUpperCase() + c.slice(1));
+      swatches.appendChild(sw);
+    }
+
+    var fs = document.createElement('div');
+    fs.className = 'sticky-note-fontsize';
+    var dec = document.createElement('button');
+    dec.className = 'sticky-font-dec';
+    dec.title = 'Smaller';
+    dec.innerHTML = '&minus;';
+    var val = document.createElement('span');
+    val.className = 'sticky-font-value';
+    val.textContent = note.fontSize + 'px';
+    var inc = document.createElement('button');
+    inc.className = 'sticky-font-inc';
+    inc.title = 'Larger';
+    inc.textContent = '+';
+    fs.appendChild(dec);
+    fs.appendChild(val);
+    fs.appendChild(inc);
+
+    pop.appendChild(swatches);
+    pop.appendChild(fs);
+    return pop;
+  }
+
+  function closeAllPopovers() {
+    var opens = container.querySelectorAll('.sticky-note-popover.open');
+    for (var i = 0; i < opens.length; i++) opens[i].classList.remove('open');
+    openPopoverNoteId = null;
+  }
+
+  function bringToFront(note) {
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    var arr = getNotes(projectKey);
+    var idx = arr.indexOf(note);
+    if (idx < 0) return;
+    if (idx === arr.length - 1) return; // already on top
+    arr.splice(idx, 1);
+    arr.push(note);
+    var el = container.querySelector('.sticky-note[data-note-id="' + note.id + '"]');
+    if (el) container.appendChild(el); // re-append moves to end of DOM (top of stack)
+    save(projectKey);
+  }
+
+  function deleteNote(note) {
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    var arr = getNotes(projectKey);
+    var idx = arr.indexOf(note);
+    if (idx < 0) return;
+    arr.splice(idx, 1);
+    var el = container.querySelector('.sticky-note[data-note-id="' + note.id + '"]');
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+    if (openPopoverNoteId === note.id) openPopoverNoteId = null;
+    save(projectKey);
+  }
+
+  function wireNote(el, note, header, settingsBtn, closeBtn, body, popover) {
+    // Bring-to-front on any mousedown inside the note (except the gear/close buttons —
+    // they still bring to front, but drag bail-early needs to happen first).
+    el.addEventListener('mousedown', function () {
+      bringToFront(note);
+    });
+
+    // Textarea input → update + save.
+    body.addEventListener('input', function () {
+      note.content = body.value;
+      var projectKey = currentProjectKey();
+      if (projectKey) save(projectKey);
+    });
+
+    // Drag on header.
+    header.addEventListener('mousedown', function (e) {
+      if (e.target.closest('.sticky-note-settings, .sticky-note-close')) return;
+      if (e.button !== 0) return;
+      e.preventDefault();
+      var startX = e.clientX;
+      var startY = e.clientY;
+      var startLeft = note.x;
+      var startTop = note.y;
+      noteIsDragging = true;
+      document.body.style.userSelect = 'none';
+      function move(ev) {
+        note.x = startLeft + (ev.clientX - startX);
+        note.y = startTop + (ev.clientY - startY);
+        clampPosition(note);
+        el.style.left = note.x + 'px';
+        el.style.top = note.y + 'px';
+      }
+      function up(ev) {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        document.body.style.userSelect = '';
+        noteIsDragging = false;
+        var cR = columnsContainerEl.getBoundingClientRect();
+        var hit = findColumnAtPoint(ev.clientX, ev.clientY);
+        if (hit) {
+          note.anchor = {
+            type: 'column',
+            rowIdx: hit.rowIdx,
+            colIdx: hit.colIdx,
+            ratioX: (ev.clientX - hit.rect.left) / hit.rect.width,
+            ratioY: (ev.clientY - hit.rect.top) / hit.rect.height
+          };
+        } else {
+          note.anchor = {
+            type: 'container',
+            ratioX: cR.width > 0 ? (ev.clientX - cR.left) / cR.width : 0,
+            ratioY: cR.height > 0 ? (ev.clientY - cR.top) / cR.height : 0
+          };
+        }
+        note.x = parseFloat(el.style.left) || 0;
+        note.y = parseFloat(el.style.top) || 0;
+        var projectKey = currentProjectKey();
+        if (projectKey) save(projectKey);
+      }
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+
+    // Resize on each handle.
+    var handles = el.querySelectorAll('.sticky-note-resize');
+    for (var i = 0; i < handles.length; i++) {
+      (function (handle) {
+        handle.addEventListener('mousedown', function (e) {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          e.stopPropagation();
+          var dir = handle.getAttribute('data-dir');
+          var startX = e.clientX;
+          var startY = e.clientY;
+          var startLeft = note.x;
+          var startTop = note.y;
+          var startWidth = note.width;
+          var startHeight = note.height;
+          noteIsDragging = true;
+          document.body.style.userSelect = 'none';
+          function move(ev) {
+            var dx = ev.clientX - startX;
+            var dy = ev.clientY - startY;
+            var newX = startLeft, newY = startTop, newW = startWidth, newH = startHeight;
+            if (dir.indexOf('e') >= 0) newW = Math.max(MIN_W, startWidth + dx);
+            if (dir.indexOf('w') >= 0) {
+              newW = Math.max(MIN_W, startWidth - dx);
+              newX = startLeft + (startWidth - newW);
+            }
+            if (dir.indexOf('s') >= 0) newH = Math.max(MIN_H, startHeight + dy);
+            if (dir.indexOf('n') >= 0) {
+              newH = Math.max(MIN_H, startHeight - dy);
+              newY = startTop + (startHeight - newH);
+            }
+            note.x = newX; note.y = newY; note.width = newW; note.height = newH;
+            clampPosition(note);
+            applyNoteStyle(el, note);
+          }
+          function up() {
+            document.removeEventListener('mousemove', move);
+            document.removeEventListener('mouseup', up);
+            document.body.style.userSelect = '';
+            noteIsDragging = false;
+            var elRect = el.getBoundingClientRect();
+            var cR = columnsContainerEl.getBoundingClientRect();
+            var hit = findColumnAtPoint(elRect.left, elRect.top);
+            if (hit) {
+              note.anchor = {
+                type: 'column',
+                rowIdx: hit.rowIdx,
+                colIdx: hit.colIdx,
+                ratioX: (elRect.left - hit.rect.left) / hit.rect.width,
+                ratioY: (elRect.top - hit.rect.top) / hit.rect.height
+              };
+            } else {
+              note.anchor = {
+                type: 'container',
+                ratioX: cR.width > 0 ? (elRect.left - cR.left) / cR.width : 0,
+                ratioY: cR.height > 0 ? (elRect.top - cR.top) / cR.height : 0
+              };
+            }
+            note.x = parseFloat(el.style.left) || 0;
+            note.y = parseFloat(el.style.top) || 0;
+            var projectKey = currentProjectKey();
+            if (projectKey) save(projectKey);
+          }
+          document.addEventListener('mousemove', move);
+          document.addEventListener('mouseup', up);
+        });
+      })(handles[i]);
+    }
+
+    // Close button.
+    closeBtn.addEventListener('mousedown', function (e) {
+      e.stopPropagation();
+    });
+    closeBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      deleteNote(note);
+    });
+
+    // Settings button opens popover.
+    settingsBtn.addEventListener('mousedown', function (e) {
+      e.stopPropagation();
+    });
+    settingsBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var wasOpen = popover.classList.contains('open');
+      closeAllPopovers();
+      if (!wasOpen) {
+        popover.classList.add('open');
+        openPopoverNoteId = note.id;
+        // Refresh the selected swatch marker in case color changed elsewhere.
+        var swatches = popover.querySelectorAll('.sticky-swatch');
+        for (var i = 0; i < swatches.length; i++) {
+          swatches[i].classList.toggle('selected', swatches[i].getAttribute('data-color') === note.color);
+        }
+        var val = popover.querySelector('.sticky-font-value');
+        if (val) val.textContent = note.fontSize + 'px';
+      }
+    });
+
+    // Popover swatches.
+    var swatches = popover.querySelectorAll('.sticky-swatch');
+    for (var j = 0; j < swatches.length; j++) {
+      (function (sw) {
+        sw.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+        sw.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var c = sw.getAttribute('data-color');
+          if (!c || STICKY_COLORS.indexOf(c) < 0) return;
+          note.color = c;
+          el.setAttribute('data-color', c);
+          var others = popover.querySelectorAll('.sticky-swatch');
+          for (var k = 0; k < others.length; k++) {
+            others[k].classList.toggle('selected', others[k].getAttribute('data-color') === c);
+          }
+          var projectKey = currentProjectKey();
+          if (projectKey) save(projectKey);
+        });
+      })(swatches[j]);
+    }
+
+    // Font size +/-.
+    var decBtn = popover.querySelector('.sticky-font-dec');
+    var incBtn = popover.querySelector('.sticky-font-inc');
+    var valEl = popover.querySelector('.sticky-font-value');
+    function bumpFont(delta) {
+      var next = note.fontSize + delta;
+      if (next < FONT_MIN) next = FONT_MIN;
+      if (next > FONT_MAX) next = FONT_MAX;
+      if (next === note.fontSize) return;
+      note.fontSize = next;
+      el.style.fontSize = next + 'px';
+      if (valEl) valEl.textContent = next + 'px';
+      var projectKey = currentProjectKey();
+      if (projectKey) save(projectKey);
+    }
+    if (decBtn) {
+      decBtn.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+      decBtn.addEventListener('click', function (e) { e.stopPropagation(); bumpFont(-1); });
+    }
+    if (incBtn) {
+      incBtn.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+      incBtn.addEventListener('click', function (e) { e.stopPropagation(); bumpFont(1); });
+    }
+  }
+
+  function renderForActiveProject() {
+    while (container.firstChild) container.removeChild(container.firstChild);
+    openPopoverNoteId = null;
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    ensureLoaded(projectKey).then(function () {
+      // Re-check in case project switched during the load.
+      if (currentProjectKey() !== projectKey) return;
+      while (container.firstChild) container.removeChild(container.firstChild);
+      var notes = getNotes(projectKey);
+      for (var i = 0; i < notes.length; i++) {
+        var pos = computeAbsolutePosition(notes[i]);
+        notes[i].x = pos.x;
+        notes[i].y = pos.y;
+        var el = createNoteElement(notes[i]);
+        container.appendChild(el);
+      }
+    });
+  }
+
+  function repositionStickyNotesForActiveProject() {
+    if (noteIsDragging) return;
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    var notes = getNotes(projectKey);
+    var els = container.querySelectorAll('.sticky-note[data-note-id]');
+    for (var i = 0; i < els.length; i++) {
+      var id = els[i].getAttribute('data-note-id');
+      var note = null;
+      for (var j = 0; j < notes.length; j++) {
+        if (notes[j].id === id) { note = notes[j]; break; }
+      }
+      if (!note) continue;
+      var pos = computeAbsolutePosition(note);
+      els[i].style.left = pos.x + 'px';
+      els[i].style.top = pos.y + 'px';
+    }
+  }
+
+  function createNewNote() {
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    ensureLoaded(projectKey).then(function () {
+      if (currentProjectKey() !== projectKey) return;
+      var arr = getNotes(projectKey);
+      var state = typeof getActiveState === 'function' ? getActiveState() : null;
+
+      // Determine target column for anchor.
+      var rowIdx = -1, colIdx = -1;
+      if (state && state.focusedColumnId !== null && typeof state.focusedColumnId !== 'undefined') {
+        var focusedRow = findRowForColumn(state, state.focusedColumnId);
+        if (focusedRow) {
+          rowIdx = state.rows.indexOf(focusedRow);
+          colIdx = focusedRow.columnIds.indexOf(state.focusedColumnId);
+        }
+      }
+      if (rowIdx < 0 && state && state.rows) {
+        for (var r = 0; r < state.rows.length; r++) {
+          if (state.rows[r] && state.rows[r].columnIds && state.rows[r].columnIds.length > 0) {
+            rowIdx = r;
+            colIdx = 0;
+            break;
+          }
+        }
+      }
+
+      // Stagger against existing notes sharing the same anchor.
+      var staggerCount = 0;
+      for (var k = 0; k < arr.length; k++) {
+        var aa = arr[k].anchor;
+        if (rowIdx >= 0) {
+          if (aa && aa.type === 'column' && aa.rowIdx === rowIdx && aa.colIdx === colIdx) staggerCount++;
+        } else {
+          if (!aa || aa.type === 'container') staggerCount++;
+        }
+      }
+      var stagger = staggerCount % 10;
+      var ratio = 0.05 + stagger * 0.02;
+
+      var anchor;
+      if (rowIdx >= 0) {
+        anchor = { type: 'column', rowIdx: rowIdx, colIdx: colIdx, ratioX: ratio, ratioY: ratio };
+      } else {
+        anchor = { type: 'container', ratioX: ratio, ratioY: ratio };
+      }
+
+      var note = {
+        id: genId(),
+        content: '',
+        x: 20,
+        y: 20,
+        width: 240,
+        height: 180,
+        color: DEFAULT_COLOR,
+        fontSize: DEFAULT_FONT_SIZE,
+        anchor: anchor
+      };
+      arr.push(note);
+      var el = createNoteElement(note);
+      container.appendChild(el);
+      var pos = computeAbsolutePosition(note);
+      note.x = pos.x;
+      note.y = pos.y;
+      el.style.left = note.x + 'px';
+      el.style.top = note.y + 'px';
+      save(projectKey);
+    });
+  }
+
+  btn.addEventListener('click', createNewNote);
+
+  // Document-level dismiss for the open popover. Registered once at init.
+  // Exempts both .sticky-note-popover (clicks inside the popover) and
+  // .sticky-note-settings (the gear's own click handler opens/closes it; we
+  // don't want the document listener to also fire and immediately re-close).
+  document.addEventListener('mousedown', function (e) {
+    if (!openPopoverNoteId) return;
+    if (e.target.closest('.sticky-note-popover, .sticky-note-settings')) return;
+    closeAllPopovers();
+  });
+
+  // Expose the render hook so setActiveProject can call it.
+  window.__renderStickyNotesForActiveProject = renderForActiveProject;
+  window.__repositionStickyNotesForActiveProject = repositionStickyNotesForActiveProject;
+
+  // Initial render in case setActiveProject already fired before this IIFE executed.
+  renderForActiveProject();
 })();
