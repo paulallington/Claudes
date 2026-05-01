@@ -4460,12 +4460,14 @@ function navigateColumn(direction) {
 // ============================================================
 
 var maximizedColumnId = null;
+var savedMaximizedRowSnapshot = null;
 
 function toggleMaximizeColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (!state) return;
+  var MaximizeLayoutAPI = (typeof window !== 'undefined' && window.MaximizeLayout) ? window.MaximizeLayout : null;
 
   if (maximizedColumnId === id) {
     // Restore
@@ -4476,6 +4478,20 @@ function toggleMaximizeColumn(id) {
       c.element.style.flex = '';
       c.element.style.width = '';
     });
+    // Restore previously-saved row inline flex/height before un-hiding rows
+    if (MaximizeLayoutAPI && savedMaximizedRowSnapshot) {
+      var restoreOp = MaximizeLayoutAPI.computeRestoreRowOp(savedMaximizedRowSnapshot);
+      if (restoreOp) {
+        for (var rr = 0; rr < state.rows.length; rr++) {
+          if (state.rows[rr].id === restoreOp.rowId) {
+            state.rows[rr].el.style.flex = restoreOp.flex;
+            state.rows[rr].el.style.height = restoreOp.height;
+            break;
+          }
+        }
+      }
+    }
+    savedMaximizedRowSnapshot = null;
     // Show all rows and resize handles
     for (var r = 0; r < state.rows.length; r++) {
       state.rows[r].el.classList.remove('row-hidden');
@@ -4490,6 +4506,17 @@ function toggleMaximizeColumn(id) {
     maximizedColumnId = id;
     state.containerEl.classList.add('has-maximized');
     var targetRow = findRowForColumn(state, id);
+    if (MaximizeLayoutAPI && targetRow) {
+      var rowsSnap = state.rows.map(function (r) {
+        return { id: r.id, inlineFlex: r.el.style.flex, inlineHeight: r.el.style.height };
+      });
+      var maxOp = MaximizeLayoutAPI.computeMaximizeRowOp(rowsSnap, targetRow.id);
+      savedMaximizedRowSnapshot = maxOp.snapshot;
+      if (maxOp.expand) {
+        targetRow.el.style.flex = maxOp.expand.flex;
+        targetRow.el.style.height = maxOp.expand.height;
+      }
+    }
     for (var r2 = 0; r2 < state.rows.length; r2++) {
       if (state.rows[r2] !== targetRow) {
         state.rows[r2].el.classList.add('row-hidden');
