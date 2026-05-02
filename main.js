@@ -1192,7 +1192,29 @@ function migrateReviewCommentsForColumnImpl(projectPath, wsId, oldSid, newSid, c
   return { migrated: 0 };
 }
 
+// Flush any in-flight pending save for this column under the OLD identity
+// (any scope, any colId), so we don't race the rename in migrateForColumn.
+function flushPendingForColumn(projectPath, wsId, sessionId, colId) {
+  for (const [key, entry] of Array.from(pendingReviewComments.entries())) {
+    // Match if same project + workspace, AND same column under either
+    // session id OR pending colId (covers both pending->real and real->real).
+    if (entry.projectPath !== projectPath) continue;
+    if ((entry.workspaceId || null) !== (wsId || null)) continue;
+    var matchesSession = (sessionId != null && entry.sessionId === sessionId);
+    var matchesColId = (colId != null && entry.colId === colId);
+    if (!matchesSession && !matchesColId) continue;
+    if (entry.timer) clearTimeout(entry.timer);
+    pendingReviewComments.delete(key);
+    try {
+      writeReviewCommentsAtomic(entry.projectPath, entry.workspaceId, entry.sessionId, entry.scope, entry.comments, entry.colId);
+    } catch (err) {
+      console.error('flushPendingForColumn failed:', err);
+    }
+  }
+}
+
 ipcMain.handle('review-comments:migrateForColumn', (event, projectPath, wsId, oldSid, newSid, colId) => {
+  flushPendingForColumn(projectPath, wsId, oldSid, colId);
   return migrateReviewCommentsForColumnImpl(projectPath, wsId, oldSid, newSid, colId);
 });
 

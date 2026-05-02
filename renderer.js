@@ -3978,12 +3978,9 @@ function addDiffColumn(diffData, opts) {
     renderDiffContent(diffBody, colData);
   });
 
-  // Close button handler \u2014 also drop the diff-slot index entry so a future
-  // open of the same (session, file, scope) creates a fresh column.
+  // Close button handler \u2014 diffSlotIndex cleanup is centralized in removeColumn
+  // so all column-removal paths drop the slot entry.
   header.querySelector('.col-close').addEventListener('click', function () {
-    if (fullKey != null && diffSlotIndex.get(fullKey) === id) {
-      diffSlotIndex.delete(fullKey);
-    }
     removeColumn(id);
   });
 
@@ -4630,6 +4627,21 @@ function persistSessions(projectKey, workspaceId) {
 function removeColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
+
+  // Clean up diffSlotIndex entries pointing at this id (Critical fix: addDiffColumn
+  // registered it, but only the inline close-button handler was deleting it —
+  // other removeColumn callers leaked the entry).
+  if (col && col.isDiff && col.reviewSlotKey) {
+    for (const [k, v] of diffSlotIndex.entries()) {
+      if (v === id) diffSlotIndex.delete(k);
+    }
+  }
+
+  // Drop document-level mouseup listener registered for gutter selection.
+  if (col && col._gutterMouseUpHandler) {
+    document.removeEventListener('mouseup', col._gutterMouseUpHandler);
+    col._gutterMouseUpHandler = null;
+  }
 
   // If this column is maximized, restore first
   if (maximizedColumnId === id) {

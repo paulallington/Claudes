@@ -94,6 +94,29 @@ test('scrubArtifactsImpl: returns {removed:0} when .claudes dir does not exist',
   }
 });
 
+test('scrubArtifactsImpl: sticky-notes prefix does not match neighbour wsIds with shared root', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claudes-scrub-collision-'));
+  const claudesDir = path.join(tmpDir, '.claudes');
+  fs.mkdirSync(claudesDir, { recursive: true });
+  const files = {
+    // Should be removed (exact wsId match)
+    'sticky-notes-WS_TARGET.json':           'target',
+    // Should be UNTOUCHED (different wsId that begins with WS_TARGET — separator '_' is not allowed)
+    'sticky-notes-WS_TARGET_NEIGHBOR.json':  'neighbor'
+  };
+  for (const name of Object.keys(files)) {
+    fs.writeFileSync(path.join(claudesDir, name), files[name], 'utf8');
+  }
+  try {
+    const result = scrubArtifactsImpl(tmpDir, 'WS_TARGET');
+    assert.strictEqual(result.removed, 1, 'expected only the exact-match file removed');
+    assert.ok(!fs.existsSync(path.join(claudesDir, 'sticky-notes-WS_TARGET.json')), 'exact target should be removed');
+    assert.ok(fs.existsSync(path.join(claudesDir, 'sticky-notes-WS_TARGET_NEIGHBOR.json')), 'neighbour wsId should be untouched');
+  } finally {
+    cleanup(tmpDir);
+  }
+});
+
 test('scrubArtifactsImpl: returns {removed:0} when no matching files exist', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claudes-scrub-nomatch-'));
   const claudesDir = path.join(tmpDir, '.claudes');
