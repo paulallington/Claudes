@@ -6030,7 +6030,7 @@ body.mode-popout #btn-add-project {
   user-select: none;
 }
 .review-comment-indicator:hover { opacity: 1; }
-.review-comment-indicator:focus { outline: 1px solid #6ea8fe; outline-offset: 1px; }
+.review-comment-indicator:focus-visible { outline: 1px solid #6ea8fe; outline-offset: 1px; }
 
 .review-comment-connector {
   position: absolute;
@@ -6079,6 +6079,7 @@ body.mode-popout #btn-add-project {
 }
 .review-comment-save:hover { background: #4a6a9c; border-color: #6ea8fe; }
 .review-comment-delete:hover { background: #6a3a3a; border-color: #d04a4a; }
+.review-comment-save:focus-visible, .review-comment-delete:focus-visible { outline: 1px solid #6ea8fe; outline-offset: 1px; }
 
 #git-review-comments-actions {
   display: flex;
@@ -6097,6 +6098,7 @@ body.mode-popout #btn-add-project {
   flex: 1;
 }
 #git-review-comments-actions button:hover { background: #4a6a9c; border-color: #6ea8fe; }
+#git-review-comments-actions button:focus-visible { outline: 1px solid #6ea8fe; outline-offset: 1px; }
 
 .review-stale-comments {
   margin-top: 16px;

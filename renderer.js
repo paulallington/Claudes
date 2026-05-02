@@ -3537,6 +3537,13 @@ function paintReviewIndicators(colData) {
       e.stopPropagation();
       openCommentBox(colData, c.startLine, c.endLine, c.side, c.id);
     });
+    indicator.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        openCommentBox(colData, c.startLine, c.endLine, c.side, c.id);
+      }
+    });
     var firstNum = startRow.querySelector('.diff-line-num');
     if (firstNum) firstNum.appendChild(indicator);
 
