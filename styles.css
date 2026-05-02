@@ -6016,3 +6016,118 @@ body.mode-popout #btn-add-project {
   color: #d33;
 }
 
+/* Review comments — inline diff annotations */
+
+.diff-line-num.gutter-selected { background: rgba(110, 168, 254, 0.25); }
+.diff-line-num { position: relative; }
+
+.review-comment-indicator {
+  display: inline-block;
+  cursor: pointer;
+  font-size: 12px;
+  margin-left: 2px;
+  opacity: 0.85;
+  user-select: none;
+}
+.review-comment-indicator:hover { opacity: 1; }
+.review-comment-indicator:focus-visible { outline: 1px solid #6ea8fe; outline-offset: 1px; }
+
+.review-comment-connector {
+  position: absolute;
+  left: 4px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #6ea8fe;
+  pointer-events: none;
+}
+
+.review-comment-box {
+  background: #232336;
+  border: 1px solid #3a3a52;
+  border-radius: 4px;
+  padding: 8px;
+  margin: 4px 0;
+}
+.review-comment-textarea {
+  width: 100%;
+  min-height: 70px;
+  background: #1a1a2e;
+  color: #ccc;
+  border: 1px solid #3a3a52;
+  border-radius: 3px;
+  padding: 4px;
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.review-comment-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  justify-content: flex-end;
+}
+.review-comment-save, .review-comment-delete {
+  background: #3a3a52;
+  color: #ccc;
+  border: 1px solid #4a4a62;
+  padding: 4px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.review-comment-save:hover { background: #4a6a9c; border-color: #6ea8fe; }
+.review-comment-delete:hover { background: #6a3a3a; border-color: #d04a4a; }
+.review-comment-save:focus-visible, .review-comment-delete:focus-visible { outline: 1px solid #6ea8fe; outline-offset: 1px; }
+
+#git-review-comments-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #2a2a3e;
+}
+#git-review-comments-actions button {
+  background: #3a3a52;
+  color: #ccc;
+  border: 1px solid #4a4a62;
+  padding: 4px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  flex: 1;
+}
+#git-review-comments-actions button:hover { background: #4a6a9c; border-color: #6ea8fe; }
+#git-review-comments-actions button:focus-visible { outline: 1px solid #6ea8fe; outline-offset: 1px; }
+
+.review-stale-comments {
+  margin-top: 16px;
+  padding: 8px;
+  background: #1f1f30;
+  border-top: 1px solid #2a2a3e;
+}
+.review-stale-comments summary {
+  cursor: pointer;
+  color: #c79a4a;
+  font-size: 12px;
+  user-select: none;
+}
+.review-stale-truncation-notice {
+  margin: 6px 0;
+  padding: 4px 8px;
+  background: #2a2a1f;
+  color: #c79a4a;
+  font-size: 11px;
+  border-radius: 3px;
+}
+.review-stale-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.review-stale-entry {
+  cursor: pointer;
+  padding: 4px 6px;
+  background: #232336;
+  border: 1px solid #3a3a52;
+  border-radius: 3px;
+}
+.review-stale-entry:hover { background: #2a2a3e; }
+.review-stale-ref { color: #6ea8fe; font-family: monospace; font-size: 12px; }
+.review-stale-text { color: #aaa; font-size: 12px; margin-top: 2px; white-space: pre-wrap; }
