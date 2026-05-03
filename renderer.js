@@ -26,8 +26,19 @@ var optRemoteControl = document.getElementById('opt-remote-control');
 var optBare = document.getElementById('opt-bare');
 var optHeadless = document.getElementById('opt-headless');
 var optModel = document.getElementById('opt-model');
+var optModelRow = document.getElementById('opt-model-row');
+var optEndpoint = document.getElementById('opt-endpoint');
+var optEndpointModelRow = document.getElementById('opt-endpoint-model-row');
+var optEndpointModelDisplay = document.getElementById('opt-endpoint-model-display');
 var optWorktree = document.getElementById('opt-worktree');
 var optCustomArgs = document.getElementById('opt-custom-args');
+var btnManageEndpoints = document.getElementById('btn-manage-endpoints');
+
+// Endpoint preset state. Cached in renderer so spawn paths can attach the env
+// block synchronously without waiting on an IPC round-trip per spawn.
+var endpointPresets = [];        // [{ id, name, baseUrl, model, hasToken }]
+var currentEndpointId = null;    // active project's selected preset id (null = Anthropic)
+var currentEndpointEnv = null;   // env block returned by endpoint:getEnv, or null
 
 
 // Each window has its own counter for new column/pty ids. Give popouts a high
@@ -1634,7 +1645,7 @@ function setActiveProject(index, isStartup) {
       restoreProjectSessions(newKey, project);
     } else {
       var spawnArgs = buildSpawnArgs();
-      addColumn(spawnArgs.length > 0 ? spawnArgs : null);
+      addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, spawnOpts());
     }
   } else {
     if (state.focusedColumnId !== null) {
@@ -1654,10 +1665,10 @@ function restoreProjectSessions(projectPath, project) {
         var entry = savedSessions[i];
         var sessionId = typeof entry === 'string' ? entry : entry.sessionId;
         var title = typeof entry === 'object' ? entry.title : null;
-        addColumn(spawnArgs.concat(['--resume', sessionId]), null, title ? { title: title } : {});
+        addColumn(spawnArgs.concat(['--resume', sessionId]), null, spawnOpts(title ? { title: title } : null));
       }
     } else {
-      addColumn(spawnArgs.length > 0 ? spawnArgs : null);
+      addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, spawnOpts());
     }
   });
 }
@@ -2258,7 +2269,7 @@ function addRow() {
   if (!state) return;
 
   var row = addRowToProject(state);
-  addColumn(null, row);
+  addColumn(null, row, spawnOpts());
 }
 
 // ============================================================
@@ -3402,7 +3413,7 @@ window.addEventListener('resize', function () {
 document.addEventListener('keydown', function (e) {
   if (e.ctrlKey && e.shiftKey && e.key === 'T') {
     e.preventDefault();
-    addColumn();
+    addColumn(null, null, spawnOpts());
     return;
   }
   if (e.ctrlKey && e.shiftKey && e.key === 'R') {
@@ -5612,7 +5623,7 @@ btnAdd.addEventListener('click', function () {
     return;
   }
   var args = buildSpawnArgs();
-  addColumn(args.length > 0 ? args : null);
+  addColumn(args.length > 0 ? args : null, null, spawnOpts());
 });
 btnAddRow.addEventListener('click', addRow);
 btnToggleSidebar.addEventListener('click', toggleSidebar);
@@ -5661,6 +5672,13 @@ function closeSpawnDropdown() {
   spawnDropdown.classList.add('hidden');
 }
 
+// Bare mode is forced on whenever a local endpoint preset is active — local
+// models can't fit Claude Code's full system prompt + MCP/plugin/hook context,
+// so we always strip the heavy bits when routing away from Anthropic Cloud.
+function isBareEffective() {
+  return optBare.checked || !!currentEndpointId;
+}
+
 function buildSpawnArgs() {
   var args = [];
   if (optSkipPermissions.checked) {
@@ -5669,10 +5687,13 @@ function buildSpawnArgs() {
   if (optRemoteControl.checked) {
     args.push('--remote-control');
   }
-  if (optBare.checked) {
+  if (isBareEffective()) {
     args.push('--bare');
   }
-  if (optModel.value) {
+  // The CLI's --model flag overrides ANTHROPIC_MODEL env, so when an endpoint
+  // preset is active we skip it — the env block already pins every model tier
+  // to the preset's model and CLI flags would override that.
+  if (optModel.value && !currentEndpointId) {
     args.push('--model', optModel.value);
   }
   var worktree = optWorktree.value.trim();
@@ -5689,12 +5710,24 @@ function buildSpawnArgs() {
   return args;
 }
 
+function truncateLabel(s, max) {
+  if (!s) return '';
+  return s.length > max ? s.slice(0, max - 1) + '\u2026' : s;
+}
+
 function updateSpawnButtonLabel() {
   var tags = [];
-  if (optModel.value) tags.push(optModel.value);
+  var preset = currentEndpointId
+    ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
+    : null;
+  if (preset) {
+    tags.push(truncateLabel(preset.name || 'endpoint', 16));
+  } else if (optModel && optModel.value) {
+    tags.push(optModel.value);
+  }
   if (optSkipPermissions.checked) tags.push('yolo');
   if (optRemoteControl.checked) tags.push('remote');
-  if (optBare.checked) tags.push('bare');
+  if (isBareEffective()) tags.push('bare');
   if (optWorktree.value.trim()) tags.push('worktree');
   if (optCustomArgs.value.trim()) tags.push('custom');
 
@@ -5717,7 +5750,8 @@ function saveSpawnOptions() {
     bare: optBare.checked,
     model: optModel.value,
     worktree: optWorktree.value,
-    customArgs: optCustomArgs.value
+    customArgs: optCustomArgs.value,
+    endpointId: currentEndpointId || null
   };
   saveConfig();
 }
@@ -5733,7 +5767,28 @@ function loadSpawnOptions() {
   optModel.value = opts.model || '';
   optWorktree.value = opts.worktree || '';
   optCustomArgs.value = opts.customArgs || '';
+
+  // If the persisted endpointId no longer refers to a known preset (deleted in
+  // the meantime), silently fall back to the default Anthropic endpoint.
+  var endpointId = opts.endpointId || null;
+  if (endpointId && !endpointPresets.find(function (p) { return p.id === endpointId; })) {
+    endpointId = null;
+  }
+  applyEndpointSelection(endpointId, /* persist */ false);
   updateSpawnButtonLabel();
+}
+
+// Returns an opts object for addColumn, including the endpoint env if a preset
+// is active. Spread any caller-supplied opts on top.
+function spawnOpts(extra) {
+  var o = {};
+  if (extra) {
+    for (var k in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, k)) o[k] = extra[k];
+    }
+  }
+  if (currentEndpointEnv) o.env = currentEndpointEnv;
+  return o;
 }
 
 btnAddOptions.addEventListener('click', function (e) {
@@ -5749,6 +5804,111 @@ optBare.addEventListener('change', onSpawnOptionChanged);
 optModel.addEventListener('change', onSpawnOptionChanged);
 optWorktree.addEventListener('input', onSpawnOptionChanged);
 optCustomArgs.addEventListener('input', onSpawnOptionChanged);
+
+// --- Endpoint preset wiring ---
+
+function renderEndpointDropdown() {
+  // Preserve current value across rebuild.
+  var prev = optEndpoint.value;
+  while (optEndpoint.firstChild) optEndpoint.removeChild(optEndpoint.firstChild);
+  var defaultOpt = document.createElement('option');
+  defaultOpt.value = '';
+  defaultOpt.textContent = 'Anthropic (cloud)';
+  optEndpoint.appendChild(defaultOpt);
+  endpointPresets.forEach(function (p) {
+    var o = document.createElement('option');
+    o.value = p.id;
+    o.textContent = p.name || '(unnamed)';
+    optEndpoint.appendChild(o);
+  });
+  // Restore selection if still valid; otherwise fall back to current state.
+  if (prev && endpointPresets.find(function (p) { return p.id === prev; })) {
+    optEndpoint.value = prev;
+  } else {
+    optEndpoint.value = currentEndpointId || '';
+  }
+}
+
+function applyEndpointSelection(endpointId, persist) {
+  currentEndpointId = endpointId || null;
+  optEndpoint.value = currentEndpointId || '';
+
+  var preset = currentEndpointId
+    ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
+    : null;
+
+  // Toggle the model row: when a preset is active, hide the Sonnet/Opus/Haiku
+  // dropdown (it's a no-op since the env fans the single preset model into
+  // every tier) and show a read-only line instead.
+  if (preset) {
+    optModelRow.classList.add('hidden');
+    optEndpointModelRow.classList.remove('hidden');
+    optEndpointModelDisplay.textContent = preset.model || '(no model set)';
+  } else {
+    optModelRow.classList.remove('hidden');
+    optEndpointModelRow.classList.add('hidden');
+    optEndpointModelDisplay.textContent = '';
+  }
+
+  // Refresh the cached env block (async — main process decrypts the token).
+  if (currentEndpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
+    window.electronAPI.endpointGetEnv(currentEndpointId).then(function (env) {
+      // Guard against a later selection arriving before this resolves.
+      if (currentEndpointId === endpointId) currentEndpointEnv = env || null;
+    }).catch(function () { currentEndpointEnv = null; });
+  } else {
+    currentEndpointEnv = null;
+  }
+
+  if (persist) {
+    saveSpawnOptions();
+  }
+  updateSpawnButtonLabel();
+}
+
+optEndpoint.addEventListener('change', function () {
+  applyEndpointSelection(optEndpoint.value || null, /* persist */ true);
+});
+// Don't let the select's mouse interactions close the spawn dropdown.
+optEndpoint.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+optEndpoint.addEventListener('click', function (e) { e.stopPropagation(); });
+var endpointSelectOpen = false;
+optEndpoint.addEventListener('focus', function () { endpointSelectOpen = true; });
+optEndpoint.addEventListener('blur', function () { endpointSelectOpen = false; });
+
+function loadEndpointPresets() {
+  if (!window.electronAPI || !window.electronAPI.endpointList) return Promise.resolve();
+  return window.electronAPI.endpointList().then(function (list) {
+    endpointPresets = Array.isArray(list) ? list : [];
+    renderEndpointDropdown();
+    // Re-load spawn options so the active project's persisted endpointId can
+    // be validated and applied. Without this, app startup races —
+    // setActiveProject runs before this IPC resolves, so loadSpawnOptions
+    // validates against an empty cache, decides the id is unknown, and zeros
+    // out the in-memory selection. Re-running here picks it back up.
+    if (typeof config !== 'undefined' && config && config.activeProjectIndex != null
+        && config.projects && config.projects[config.activeProjectIndex]) {
+      loadSpawnOptions();
+    } else if (currentEndpointId && !endpointPresets.find(function (p) { return p.id === currentEndpointId; })) {
+      applyEndpointSelection(null, /* persist */ true);
+    } else {
+      applyEndpointSelection(currentEndpointId, /* persist */ false);
+    }
+  });
+}
+
+if (window.electronAPI && window.electronAPI.onEndpointsUpdated) {
+  window.electronAPI.onEndpointsUpdated(function () {
+    loadEndpointPresets();
+  });
+}
+
+// Kick off initial load. If electronAPI isn't ready yet (popout windows
+// sometimes initialize the bridge late), this is a no-op and a later
+// loadSpawnOptions call will trigger applyEndpointSelection without env.
+if (window.electronAPI && window.electronAPI.endpointList) {
+  loadEndpointPresets();
+}
 
 // Prevent model select interactions from closing the spawn dropdown
 optModel.addEventListener('mousedown', function (e) { e.stopPropagation(); });
@@ -5766,7 +5926,8 @@ document.addEventListener('click', function (e) {
   if (!spawnDropdown.classList.contains('hidden') &&
       !spawnDropdown.contains(e.target) &&
       e.target !== btnAddOptions &&
-      !modelSelectOpen) {
+      !modelSelectOpen &&
+      !endpointSelectOpen) {
     closeSpawnDropdown();
   }
 });
@@ -5774,6 +5935,282 @@ document.addEventListener('click', function (e) {
 // Prevent dropdown clicks from closing it
 spawnDropdown.addEventListener('click', function (e) {
   e.stopPropagation();
+});
+
+// ============================================================
+// Endpoint Presets Modal
+// ============================================================
+
+var endpointsModal = document.getElementById('endpoints-modal');
+var endpointsCloseBtn = document.getElementById('endpoints-close');
+var endpointsListEl = document.getElementById('endpoints-list');
+var endpointsNewBtn = document.getElementById('endpoints-new');
+var endpointsForm = document.getElementById('endpoints-form');
+var endpointsEmpty = document.getElementById('endpoints-empty');
+var epName = document.getElementById('ep-name');
+var epBaseUrl = document.getElementById('ep-base-url');
+var epAuthToken = document.getElementById('ep-auth-token');
+var epTokenToggle = document.getElementById('ep-token-toggle');
+var epModelInput = document.getElementById('ep-model');
+var epModelSelect = document.getElementById('ep-model-select');
+var epModelFetchBtn = document.getElementById('ep-model-fetch');
+var epStatus = document.getElementById('ep-status');
+var epTestBtn = document.getElementById('ep-test');
+var epDeleteBtn = document.getElementById('ep-delete');
+var epSaveBtn = document.getElementById('ep-save');
+
+// Editing state. null = no preset selected (form hidden); a string id =
+// editing an existing preset; the sentinel '__new__' = unsaved new preset.
+var editingPresetId = null;
+
+function setEpStatus(text, kind) {
+  epStatus.textContent = text || '';
+  epStatus.classList.remove('ok', 'error');
+  if (kind === 'ok') epStatus.classList.add('ok');
+  else if (kind === 'error') epStatus.classList.add('error');
+}
+
+function showEndpointForm(show) {
+  if (show) {
+    endpointsForm.classList.remove('hidden');
+    endpointsEmpty.classList.add('hidden');
+  } else {
+    endpointsForm.classList.add('hidden');
+    endpointsEmpty.classList.remove('hidden');
+  }
+}
+
+function clearEndpointForm() {
+  epName.value = '';
+  epBaseUrl.value = '';
+  epAuthToken.value = '';
+  epAuthToken.type = 'password';
+  epModelInput.value = '';
+  epModelInput.classList.remove('hidden');
+  epModelSelect.classList.add('hidden');
+  while (epModelSelect.firstChild) epModelSelect.removeChild(epModelSelect.firstChild);
+  setEpStatus('');
+}
+
+function renderEndpointsListUI() {
+  while (endpointsListEl.firstChild) endpointsListEl.removeChild(endpointsListEl.firstChild);
+  if (endpointPresets.length === 0) {
+    var empty = document.createElement('li');
+    empty.className = 'empty';
+    empty.textContent = 'No presets yet — click + to add one.';
+    endpointsListEl.appendChild(empty);
+    return;
+  }
+  endpointPresets.forEach(function (p) {
+    var li = document.createElement('li');
+    li.textContent = p.name || '(unnamed)';
+    li.dataset.id = p.id;
+    if (p.id === editingPresetId) li.classList.add('active');
+    li.addEventListener('click', function () { selectEndpointForEdit(p.id); });
+    endpointsListEl.appendChild(li);
+  });
+}
+
+function selectEndpointForEdit(id) {
+  editingPresetId = id;
+  if (!window.electronAPI || !window.electronAPI.endpointGet) return;
+  window.electronAPI.endpointGet(id).then(function (preset) {
+    if (!preset) {
+      // Stale list; refresh and clear.
+      editingPresetId = null;
+      showEndpointForm(false);
+      loadEndpointPresets();
+      return;
+    }
+    epName.value = preset.name || '';
+    epBaseUrl.value = preset.baseUrl || '';
+    epAuthToken.value = preset.authToken || '';
+    epAuthToken.type = 'password';
+    epModelInput.value = preset.model || '';
+    epModelInput.classList.remove('hidden');
+    epModelSelect.classList.add('hidden');
+    setEpStatus('');
+    showEndpointForm(true);
+    renderEndpointsListUI();
+    epName.focus();
+  });
+}
+
+function startNewEndpoint() {
+  editingPresetId = '__new__';
+  clearEndpointForm();
+  showEndpointForm(true);
+  renderEndpointsListUI();
+  epName.focus();
+}
+
+function openEndpointsModal() {
+  closeSpawnDropdown();
+  loadEndpointPresets().then(function () {
+    endpointsModal.classList.remove('hidden');
+    // Auto-select something so the user isn't staring at an empty form:
+    // prefer the active project's selected preset, otherwise the first one,
+    // otherwise show the empty-state with the "+" hint.
+    var preferred = currentEndpointId
+      || (endpointPresets[0] && endpointPresets[0].id)
+      || null;
+    if (preferred) {
+      selectEndpointForEdit(preferred);
+    } else {
+      editingPresetId = null;
+      clearEndpointForm();
+      showEndpointForm(false);
+      renderEndpointsListUI();
+    }
+  });
+}
+
+function closeEndpointsModal() {
+  endpointsModal.classList.add('hidden');
+  editingPresetId = null;
+}
+
+function collectFormPayload() {
+  return {
+    id: editingPresetId === '__new__' ? null : editingPresetId,
+    name: epName.value.trim(),
+    baseUrl: epBaseUrl.value.trim(),
+    authToken: epAuthToken.value, // pass as-is; main encrypts
+    model: epModelInput.classList.contains('hidden')
+      ? epModelSelect.value
+      : epModelInput.value.trim()
+  };
+}
+
+function saveCurrentPreset() {
+  var payload = collectFormPayload();
+  if (!payload.name) { setEpStatus('Name is required', 'error'); return; }
+  if (!payload.baseUrl) { setEpStatus('Base URL is required', 'error'); return; }
+  if (!payload.model) { setEpStatus('Model is required', 'error'); return; }
+  setEpStatus('Saving…');
+  window.electronAPI.endpointSave(payload).then(function (result) {
+    setEpStatus('Saved', 'ok');
+    var newId = (result && result.id) || payload.id;
+    return loadEndpointPresets().then(function () {
+      if (newId) {
+        editingPresetId = newId;
+        renderEndpointsListUI();
+        // Auto-apply the saved preset to the active project when nothing
+        // valid is currently selected. This catches: (a) the very first
+        // preset being created, (b) the active project's stored id pointing
+        // at a deleted/renamed preset, (c) user editing a preset and
+        // expecting it to "just work" without a separate dropdown click.
+        var hasValidCurrent = currentEndpointId
+          && endpointPresets.some(function (p) { return p.id === currentEndpointId; });
+        if (!hasValidCurrent) {
+          applyEndpointSelection(newId, /* persist */ true);
+        } else if (newId === currentEndpointId) {
+          // Refresh the cached env block when the active preset is edited.
+          applyEndpointSelection(newId, /* persist */ false);
+        }
+      }
+    });
+  }).catch(function (err) {
+    setEpStatus('Save failed: ' + (err && err.message ? err.message : err), 'error');
+  });
+}
+
+function deleteCurrentPreset() {
+  if (!editingPresetId || editingPresetId === '__new__') {
+    // Nothing persisted to delete — just clear the form.
+    editingPresetId = null;
+    clearEndpointForm();
+    showEndpointForm(false);
+    renderEndpointsListUI();
+    return;
+  }
+  if (!confirm('Delete this preset? Projects using it will fall back to Anthropic (cloud).')) return;
+  window.electronAPI.endpointDelete(editingPresetId).then(function () {
+    editingPresetId = null;
+    clearEndpointForm();
+    showEndpointForm(false);
+    return loadEndpointPresets();
+  }).catch(function (err) {
+    setEpStatus('Delete failed: ' + (err && err.message ? err.message : err), 'error');
+  });
+}
+
+function fetchModelsFromForm() {
+  var baseUrl = epBaseUrl.value.trim();
+  var authToken = epAuthToken.value;
+  if (!baseUrl) { setEpStatus('Base URL is required to fetch models', 'error'); return; }
+  setEpStatus('Fetching models…');
+  window.electronAPI.endpointFetchModels({ baseUrl: baseUrl, authToken: authToken }).then(function (result) {
+    if (!result || !result.ok) {
+      setEpStatus('Fetch failed: ' + ((result && result.error) || 'unknown'), 'error');
+      return;
+    }
+    if (!result.models || result.models.length === 0) {
+      setEpStatus('No models reported by endpoint', 'error');
+      return;
+    }
+    // Switch to the select dropdown, populate, preselect current value if present.
+    while (epModelSelect.firstChild) epModelSelect.removeChild(epModelSelect.firstChild);
+    var current = epModelInput.value.trim();
+    var foundCurrent = false;
+    result.models.forEach(function (m) {
+      var o = document.createElement('option');
+      o.value = m;
+      o.textContent = m;
+      if (m === current) { o.selected = true; foundCurrent = true; }
+      epModelSelect.appendChild(o);
+    });
+    if (!foundCurrent && current) {
+      // Keep the user's current value as a manual option at the top.
+      var manual = document.createElement('option');
+      manual.value = current;
+      manual.textContent = current + ' (manual)';
+      manual.selected = true;
+      epModelSelect.insertBefore(manual, epModelSelect.firstChild);
+    }
+    epModelInput.classList.add('hidden');
+    epModelSelect.classList.remove('hidden');
+    setEpStatus('Loaded ' + result.models.length + ' model' + (result.models.length === 1 ? '' : 's'), 'ok');
+  }).catch(function (err) {
+    setEpStatus('Fetch failed: ' + (err && err.message ? err.message : err), 'error');
+  });
+}
+
+function testConnection() {
+  var baseUrl = epBaseUrl.value.trim();
+  var authToken = epAuthToken.value;
+  if (!baseUrl) { setEpStatus('Base URL is required to test', 'error'); return; }
+  setEpStatus('Testing…');
+  window.electronAPI.endpointFetchModels({ baseUrl: baseUrl, authToken: authToken }).then(function (result) {
+    if (result && result.ok) {
+      setEpStatus('Connection OK (' + (result.models ? result.models.length : 0) + ' models)', 'ok');
+    } else {
+      setEpStatus('Failed: ' + ((result && result.error) || 'unknown'), 'error');
+    }
+  }).catch(function (err) {
+    setEpStatus('Failed: ' + (err && err.message ? err.message : err), 'error');
+  });
+}
+
+if (btnManageEndpoints) {
+  btnManageEndpoints.addEventListener('click', function (e) {
+    e.stopPropagation();
+    openEndpointsModal();
+  });
+}
+endpointsCloseBtn.addEventListener('click', closeEndpointsModal);
+endpointsNewBtn.addEventListener('click', startNewEndpoint);
+epSaveBtn.addEventListener('click', saveCurrentPreset);
+epDeleteBtn.addEventListener('click', deleteCurrentPreset);
+epModelFetchBtn.addEventListener('click', fetchModelsFromForm);
+epTestBtn.addEventListener('click', testConnection);
+epTokenToggle.addEventListener('click', function () {
+  epAuthToken.type = epAuthToken.type === 'password' ? 'text' : 'password';
+});
+
+// Click on backdrop (outside dialog) closes the modal.
+endpointsModal.addEventListener('click', function (e) {
+  if (e.target === endpointsModal) closeEndpointsModal();
 });
 
 // ============================================================
@@ -7263,7 +7700,7 @@ function launchManagerTerminal(automation) {
   }
   spawnArgs.push('--append-system-prompt', context);
 
-  addColumn(spawnArgs, null, { title: automation.name + ' Manager' });
+  addColumn(spawnArgs, null, spawnOpts({ title: automation.name + ' Manager' }));
 
   window.electronAPI.dismissManager(automation.id);
   refreshAutomations();
@@ -7494,7 +7931,7 @@ function renderMultiAgentDetail(automation) {
         '--- AGENT OUTPUT ---\n' + output + '\n--- END AGENT OUTPUT ---';
       var spawnArgs = buildSpawnArgs();
       spawnArgs.push('--append-system-prompt', context);
-      addColumn(spawnArgs, null, { title: agentName });
+      addColumn(spawnArgs, null, spawnOpts({ title: agentName }));
     });
     row.querySelector('.pipeline-btn-history').addEventListener('click', function () {
       viewingAgentInPipeline = true;
@@ -9312,7 +9749,7 @@ document.getElementById('btn-automation-open-claude').addEventListener('click', 
 
   var spawnArgs = buildSpawnArgs();
   spawnArgs.push('--append-system-prompt', context);
-  addColumn(spawnArgs, null, { title: automationName });
+  addColumn(spawnArgs, null, spawnOpts({ title: automationName }));
 });
 
 document.getElementById('btn-automation-copy-output').addEventListener('click', function () {

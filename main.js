@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray, Menu, nativeImage, Notification, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray, Menu, nativeImage, Notification, powerMonitor, safeStorage } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -27,6 +27,7 @@ const LOOPS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'loop-runs' : 'loo
 const AUTOMATIONS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'automations.json' : 'automations-dev.json');
 const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-runs' : 'automation-runs-dev');
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
+const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
 
 // --- Config ---
 
@@ -84,6 +85,111 @@ function flushPendingConfig() {
     pendingConfig = null;
     try { writeConfig(cfg); } catch (err) { console.error('writeConfig failed:', err); }
   }
+}
+
+// --- Endpoint Presets ---
+//
+// Each preset is one of:
+//   { id, name, baseUrl, authToken: { encrypted: <b64> }, model }     // normal case
+//   { id, name, baseUrl, authToken: { plain: <string> }, model }      // safeStorage unavailable
+// The "Anthropic (cloud)" default is synthetic — never persisted.
+//
+// Endpoints live in their own file (ENDPOINTS_FILE), not projects.json. The
+// renderer round-trips projects.json wholesale on every project edit; if we
+// stored endpoints there too, those writes would clobber any preset added
+// outside the renderer's view.
+
+function encryptToken(plain) {
+  if (!plain) return { plain: '' };
+  if (safeStorage.isEncryptionAvailable()) {
+    return { encrypted: safeStorage.encryptString(plain).toString('base64') };
+  }
+  return { plain };
+}
+
+function decryptToken(stored) {
+  if (!stored) return '';
+  if (typeof stored === 'string') return stored;
+  if (stored.plain != null) return stored.plain;
+  if (stored.encrypted) {
+    try {
+      return safeStorage.decryptString(Buffer.from(stored.encrypted, 'base64'));
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+function readEndpoints() {
+  ensureConfigDir();
+  try {
+    const raw = fs.readFileSync(ENDPOINTS_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.endpoints)) return data.endpoints;
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+function writeEndpoints(list) {
+  ensureConfigDir();
+  fs.writeFileSync(ENDPOINTS_FILE, JSON.stringify({ endpoints: list }, null, 2), 'utf8');
+}
+
+function getEndpointById(id) {
+  if (!id) return null;
+  const list = readEndpoints();
+  return list.find((e) => e && e.id === id) || null;
+}
+
+function buildEndpointEnv(endpointId) {
+  const preset = getEndpointById(endpointId);
+  if (!preset) return null;
+  const token = decryptToken(preset.authToken);
+  const model = preset.model || '';
+  // ANTHROPIC_AUTH_TOKEN must be set to *something* — if it's empty or missing
+  // the Claude CLI falls back to the user's real Anthropic credentials and
+  // sends them to whatever local server we've pointed it at. A dummy value
+  // keeps it honest. LM Studio (and other local servers without auth) will
+  // accept any string.
+  const authToken = token || 'no-auth';
+  return {
+    ANTHROPIC_BASE_URL: preset.baseUrl || '',
+    ANTHROPIC_AUTH_TOKEN: authToken,
+    ANTHROPIC_MODEL: model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+    CLAUDE_CODE_SUBAGENT_MODEL: model,
+    DISABLE_PROMPT_CACHING: '1',
+    DISABLE_AUTOUPDATER: '1',
+    DISABLE_TELEMETRY: '1',
+    DISABLE_NON_ESSENTIAL_MODEL_CALLS: '1',
+    // Local-model context discipline — without these, a single large bash or
+    // MCP tool result can blow past the model's context window in one turn.
+    // Conservative caps that won't hurt typical workflows but stop runaway
+    // file dumps from triggering autocompact thrash.
+    BASH_MAX_OUTPUT_LENGTH: '8000',
+    MAX_MCP_OUTPUT_TOKENS: '10000',
+    MAX_THINKING_TOKENS: '2000'
+  };
+}
+
+// Look up a project by its filesystem path and return the env block for its
+// configured endpoint preset, or null if the project has no preset selected.
+// Used by background spawn paths (headless runs, automation agents, automation
+// managers) which only know the project path, not the renderer's cached state.
+function getProjectEndpointEnvByPath(projectPath) {
+  if (!projectPath) return null;
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  if (!project) return null;
+  const id = project.spawnOptions && project.spawnOptions.endpointId;
+  if (!id) return null;
+  return buildEndpointEnv(id);
 }
 
 // --- Loops Persistence ---
@@ -524,6 +630,114 @@ ipcMain.handle('config:getProjects', () => {
 
 ipcMain.handle('config:saveProjects', (event, config) => {
   scheduleWriteConfig(config);
+});
+
+// --- Endpoint preset IPC handlers ---
+//
+// Renderer sees plaintext tokens through these handlers. Encrypted blobs
+// never leave main; the spawn flow asks for the env block via endpoint:getEnv
+// rather than handing the token to the renderer when it can be avoided.
+
+ipcMain.handle('endpoint:list', () => {
+  const list = readEndpoints();
+  return list.map((e) => ({
+    id: e.id,
+    name: e.name || '',
+    baseUrl: e.baseUrl || '',
+    model: e.model || '',
+    hasToken: !!decryptToken(e.authToken)
+  }));
+});
+
+ipcMain.handle('endpoint:get', (event, id) => {
+  const e = getEndpointById(id);
+  if (!e) return null;
+  return {
+    id: e.id,
+    name: e.name || '',
+    baseUrl: e.baseUrl || '',
+    model: e.model || '',
+    authToken: decryptToken(e.authToken)
+  };
+});
+
+// Claude Code internally appends `/v1/messages` etc. to ANTHROPIC_BASE_URL,
+// so the stored base URL must be the host root WITHOUT a trailing `/v1`.
+// LM Studio's OpenAI-compat router is rooted at `/v1/*`, so users tend to
+// paste `http://host:port/v1` thinking that's the API root — strip it.
+function normalizeBaseUrl(input) {
+  let url = String(input || '').trim();
+  url = url.replace(/\/+$/, '');         // trailing slashes
+  url = url.replace(/\/v1\/?$/i, '');    // trailing /v1 (case insensitive)
+  return url;
+}
+
+ipcMain.handle('endpoint:save', (event, preset) => {
+  if (!preset || typeof preset !== 'object') {
+    throw new Error('endpoint:save requires a preset object');
+  }
+  const list = readEndpoints();
+  const id = preset.id || ('ep_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+  const stored = {
+    id,
+    name: String(preset.name || '').trim(),
+    baseUrl: normalizeBaseUrl(preset.baseUrl),
+    model: String(preset.model || '').trim(),
+    authToken: encryptToken(String(preset.authToken || ''))
+  };
+  const idx = list.findIndex((e) => e && e.id === id);
+  if (idx >= 0) list[idx] = stored;
+  else list.push(stored);
+  writeEndpoints(list);
+  // Push to all windows so other open instances reload their dropdown.
+  BrowserWindow.getAllWindows().forEach((w) => {
+    try { w.webContents.send('endpoints:updated'); } catch { /* ignore */ }
+  });
+  return { id };
+});
+
+ipcMain.handle('endpoint:delete', (event, id) => {
+  const list = readEndpoints().filter((e) => e && e.id !== id);
+  writeEndpoints(list);
+  BrowserWindow.getAllWindows().forEach((w) => {
+    try { w.webContents.send('endpoints:updated'); } catch { /* ignore */ }
+  });
+  return { ok: true };
+});
+
+ipcMain.handle('endpoint:getEnv', (event, id) => {
+  return buildEndpointEnv(id);
+});
+
+ipcMain.handle('endpoint:fetchModels', async (event, args) => {
+  // Accept either `http://host:port` or `http://host:port/v1`; we store the
+  // bare host but tolerate either form on the way in.
+  const baseUrl = normalizeBaseUrl((args && args.baseUrl) || '');
+  const authToken = String((args && args.authToken) || '');
+  if (!baseUrl) return { ok: false, error: 'Base URL is required' };
+  const url = baseUrl + '/v1/models';
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'GET',
+        headers: authToken ? { Authorization: 'Bearer ' + authToken } : {},
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) return { ok: false, error: 'HTTP ' + res.status + ' ' + res.statusText };
+    const data = await res.json();
+    const arr = Array.isArray(data && data.data) ? data.data : (Array.isArray(data) ? data : []);
+    const models = arr.map((m) => (m && (m.id || m.model || m.name)) || '').filter(Boolean);
+    return { ok: true, models };
+  } catch (err) {
+    const msg = err && err.name === 'AbortError' ? 'Request timed out' : (err && err.message) || 'Fetch failed';
+    return { ok: false, error: msg };
+  }
 });
 
 ipcMain.handle('popout:setTransfer', (event, projectKey, transferList) => {
@@ -2774,7 +2988,7 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
   const child = spawn(getClaudePath(), args, {
     cwd: cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: Object.assign({}, process.env)
+    env: opts.env ? Object.assign({}, process.env, opts.env) : Object.assign({}, process.env)
   });
 
   let streamBuffer = '';
@@ -2875,10 +3089,12 @@ function runHeadless(projectPath, prompt) {
     throw err;
   }
 
+  const endpointEnv = getProjectEndpointEnvByPath(projectPath);
   const spawned = spawnHeadlessClaude(prompt, projectPath, {
     skipPermissions: !!spawnOptions.skipPermissions,
     bare: !!spawnOptions.bare,
-    model: spawnOptions.model || null,
+    model: endpointEnv ? null : (spawnOptions.model || null),
+    env: endpointEnv,
     onText: (text) => {
       try { outputStream.write(text); } catch { /* ignore */ }
       if (mainWindow) mainWindow.webContents.send('headless:output', { projectPath, runId, chunk: text });
@@ -3108,6 +3324,7 @@ async function runAgent(automationId, agentId) {
     mcpConfig: mcpOpts ? mcpOpts.mcpConfig : null,
     mcpConfigPath: mcpOpts ? mcpOpts.mcpConfigPath : null,
     allowedTools: mcpOpts ? mcpOpts.allowedTools : null,
+    env: getProjectEndpointEnvByPath(automation.projectPath),
     onRaw: (raw) => { outputChunks.push(raw); },
     onText: (text) => {
       textChunks.push(text);
@@ -3395,10 +3612,13 @@ async function runManager(automationId) {
     }
   }
 
+  const managerEndpointEnv = getProjectEndpointEnvByPath(automation.projectPath);
   const child = spawn(getClaudePath(), args, {
     cwd: cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: Object.assign({}, process.env)
+    env: managerEndpointEnv
+      ? Object.assign({}, process.env, managerEndpointEnv)
+      : Object.assign({}, process.env)
   });
 
   runningManagers.set(automationId, child);

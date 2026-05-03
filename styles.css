@@ -813,7 +813,8 @@ html, body {
   accent-color: var(--accent);
 }
 
-.spawn-model-row select {
+.spawn-model-row select,
+.spawn-endpoint-row select {
   background: var(--bg-button);
   color: var(--text-primary);
   border: 1px solid var(--border-dim);
@@ -822,6 +823,41 @@ html, body {
   font-size: 12px;
   cursor: pointer;
   flex: 1;
+}
+
+.spawn-endpoint-model-row.hidden,
+.spawn-model-row.hidden {
+  display: none;
+}
+
+.spawn-readonly-value {
+  flex: 1;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spawn-manage-btn {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 4px 8px;
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.spawn-manage-btn:hover {
+  background: var(--hover-medium);
+  color: var(--text-primary);
+  border-color: var(--accent);
 }
 
 .spawn-custom-row input[type="text"] {
@@ -1486,6 +1522,225 @@ html, body {
 .modal-btn-save:hover {
   background: var(--accent);
   color: var(--text-bright);
+}
+
+/* --- Endpoint Presets Modal --- */
+
+.endpoints-dialog {
+  width: 720px;
+  max-width: 90vw;
+  max-height: 80vh;
+}
+
+.endpoints-body {
+  display: flex;
+  flex-direction: row;
+  padding: 0;
+  gap: 0;
+  min-height: 360px;
+}
+
+.endpoints-sidebar {
+  width: 220px;
+  border-right: 1px solid var(--border-primary);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-main);
+}
+
+.endpoints-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-primary);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.endpoints-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.endpoints-list li {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-body);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.endpoints-list li:hover {
+  background: var(--hover-medium);
+}
+
+.endpoints-list li.active {
+  background: var(--hover-medium);
+  border-left-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.endpoints-list li.empty {
+  color: var(--text-dim);
+  font-style: italic;
+  cursor: default;
+}
+
+.endpoints-list li.empty:hover {
+  background: transparent;
+}
+
+.endpoints-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.endpoints-empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+  margin: auto;
+}
+
+.endpoints-empty.hidden {
+  display: none;
+}
+
+.endpoints-form.hidden {
+  display: none;
+}
+
+.endpoints-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.endpoints-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.endpoints-field > span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.endpoints-field-hint {
+  font-style: normal;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-dimmer, var(--text-dim));
+  margin-left: 4px;
+  font-size: 10px;
+}
+
+.endpoints-field input[type="text"],
+.endpoints-field input[type="password"],
+.endpoints-field select {
+  background: var(--bg-button);
+  color: var(--text-primary);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+}
+
+.endpoints-field input::placeholder {
+  color: var(--text-dim);
+}
+
+.endpoints-token-row,
+.endpoints-model-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.endpoints-token-row input,
+.endpoints-model-row input,
+.endpoints-model-row select {
+  flex: 1;
+}
+
+.endpoints-icon-btn {
+  background: var(--bg-button);
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.endpoints-icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.endpoints-form-status {
+  font-size: 11px;
+  color: var(--text-dim);
+  min-height: 16px;
+}
+
+.endpoints-form-status.ok {
+  color: var(--accent-success, #4ade80);
+}
+
+.endpoints-form-status.error {
+  color: var(--accent-danger, #f87171);
+}
+
+.endpoints-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border-primary);
+  padding-top: 12px;
+}
+
+.endpoints-form-spacer {
+  flex: 1;
+}
+
+.endpoints-secondary-btn,
+.endpoints-danger-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.endpoints-secondary-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.endpoints-danger-btn:hover {
+  border-color: #f87171;
+  color: #f87171;
 }
 
 /* --- File Editor Modal --- */

@@ -193,14 +193,20 @@
               </label>
               <label class="spawn-option">
                 <input type="checkbox" id="opt-bare"> Bare Mode
-                <span class="spawn-help" title="Lightweight mode that skips hooks, LSP, and plugins. Best for scripted/automated tasks (--bare).">?</span>
+                <span class="spawn-help" title="Lightweight mode that skips hooks, LSP, and plugins (--bare). Best for scripted/automated tasks. Forced on automatically when a local endpoint preset is active, since local models can't fit the full system prompt.">?</span>
               </label>
               <label class="spawn-option">
                 <input type="checkbox" id="opt-headless"> Headless
                 <span class="spawn-help" title="Run the prompt without a terminal column. Output streams into the headless dock at the bottom.">?</span>
               </label>
               <div class="spawn-divider"></div>
-              <div class="spawn-option spawn-model-row">
+              <div class="spawn-option spawn-endpoint-row">
+                <label for="opt-endpoint">Endpoint:</label>
+                <select id="opt-endpoint">
+                  <option value="">Anthropic (cloud)</option>
+                </select>
+              </div>
+              <div class="spawn-option spawn-model-row" id="opt-model-row">
                 <label for="opt-model">Model:</label>
                 <select id="opt-model">
                   <option value="">Default</option>
@@ -208,6 +214,10 @@
                   <option value="opus">Opus</option>
                   <option value="haiku">Haiku</option>
                 </select>
+              </div>
+              <div class="spawn-option spawn-endpoint-model-row hidden" id="opt-endpoint-model-row">
+                <label>Model:</label>
+                <span id="opt-endpoint-model-display" class="spawn-readonly-value"></span>
               </div>
               <div class="spawn-divider"></div>
               <div class="spawn-option spawn-custom-row">
@@ -217,6 +227,7 @@
                 <input type="text" id="opt-custom-args" placeholder="Custom args..." title="Additional CLI arguments">
               </div>
               <div class="spawn-divider"></div>
+              <button type="button" id="btn-manage-endpoints" class="spawn-manage-btn">&#9881; Manage endpoints&hellip;</button>
               <div class="spawn-hint">Options apply to the Spawn button</div>
             </div>
           </div>
@@ -405,6 +416,64 @@
       <div class="modal-footer">
         <span id="fileeditor-status" class="modal-status"></span>
         <button id="fileeditor-save" class="modal-btn-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Endpoint Presets Modal -->
+  <div id="endpoints-modal" class="modal-overlay hidden">
+    <div class="modal-dialog endpoints-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Endpoint Presets</span>
+        <span class="modal-subtitle">Point Claude Code at any Anthropic-compatible API (LM Studio, Ollama, remote box).</span>
+        <span id="endpoints-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body endpoints-body">
+        <div class="endpoints-sidebar">
+          <div class="endpoints-list-header">
+            <span>Presets</span>
+            <button type="button" id="endpoints-new" class="endpoints-icon-btn" title="New preset">+</button>
+          </div>
+          <ul id="endpoints-list" class="endpoints-list"></ul>
+        </div>
+        <div class="endpoints-editor" id="endpoints-editor">
+          <div class="endpoints-empty hidden" id="endpoints-empty">
+            <p>No preset selected.</p>
+            <p>Click <strong>+</strong> to create one, or pick one from the list.</p>
+          </div>
+          <div class="endpoints-form" id="endpoints-form">
+            <label class="endpoints-field">
+              <span>Name</span>
+              <input type="text" id="ep-name" placeholder="e.g. LM Studio &ndash; Qwen3 Coder" autocomplete="off">
+            </label>
+            <label class="endpoints-field">
+              <span>Base URL <em class="endpoints-field-hint">(host only — /v1 is added automatically)</em></span>
+              <input type="text" id="ep-base-url" placeholder="http://localhost:1234" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="endpoints-field">
+              <span>Auth Token <em class="endpoints-field-hint">(optional)</em></span>
+              <div class="endpoints-token-row">
+                <input type="password" id="ep-auth-token" placeholder="Leave blank if endpoint has no auth" autocomplete="off" spellcheck="false">
+                <button type="button" id="ep-token-toggle" class="endpoints-icon-btn" title="Show/hide token">&#128065;</button>
+              </div>
+            </label>
+            <label class="endpoints-field">
+              <span>Model</span>
+              <div class="endpoints-model-row">
+                <input type="text" id="ep-model" placeholder="qwen/qwen3-coder-next" autocomplete="off" spellcheck="false">
+                <select id="ep-model-select" class="hidden"></select>
+                <button type="button" id="ep-model-fetch" class="endpoints-icon-btn" title="Fetch loaded models from endpoint">&#8634;</button>
+              </div>
+            </label>
+            <div class="endpoints-form-status" id="ep-status"></div>
+            <div class="endpoints-form-actions">
+              <button type="button" id="ep-test" class="endpoints-secondary-btn">Test connection</button>
+              <button type="button" id="ep-delete" class="endpoints-danger-btn">Delete</button>
+              <span class="endpoints-form-spacer"></span>
+              <button type="button" id="ep-save" class="modal-btn-save">Save</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>

@@ -126,5 +126,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onHeadlessOutput: (callback) => ipcRenderer.on('headless:output', (_, data) => callback(data)),
   onHeadlessCompleted: (callback) => ipcRenderer.on('headless:completed', (_, data) => callback(data)),
   onHeadlessFocusRun: (callback) => ipcRenderer.on('headless:focus-run', (_, data) => callback(data)),
-  onPowerResume: (callback) => ipcRenderer.on('power:resume', () => callback())
+  onPowerResume: (callback) => ipcRenderer.on('power:resume', () => callback()),
+
+  // Endpoint presets
+  endpointList: () => ipcRenderer.invoke('endpoint:list'),
+  endpointGet: (id) => ipcRenderer.invoke('endpoint:get', id),
+  endpointSave: (preset) => ipcRenderer.invoke('endpoint:save', preset),
+  endpointDelete: (id) => ipcRenderer.invoke('endpoint:delete', id),
+  endpointGetEnv: (id) => ipcRenderer.invoke('endpoint:getEnv', id),
+  endpointFetchModels: (args) => ipcRenderer.invoke('endpoint:fetchModels', args),
+  onEndpointsUpdated: (callback) => ipcRenderer.on('endpoints:updated', () => callback())
 });
