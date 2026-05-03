@@ -3249,6 +3249,19 @@ function deleteHeadless(projectPath, runId) {
   return true;
 }
 
+// Resolve the env block for an agent. Agents created or edited with the
+// per-agent connection picker have an explicit `endpointId` field (null = cloud,
+// string = preset id). Legacy agents that pre-date the picker have no field
+// at all — they fall back to the project's configured endpoint so we don't
+// silently switch a user's existing automations to cloud.
+function getAgentEndpointEnv(agent, projectPath) {
+  if (agent && Object.prototype.hasOwnProperty.call(agent, 'endpointId')) {
+    if (!agent.endpointId) return null;
+    return buildEndpointEnv(agent.endpointId, agent.endpointModel || null);
+  }
+  return getProjectEndpointEnvByPath(projectPath);
+}
+
 async function runAgent(automationId, agentId) {
   let data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
@@ -3386,7 +3399,7 @@ async function runAgent(automationId, agentId) {
     mcpConfig: mcpOpts ? mcpOpts.mcpConfig : null,
     mcpConfigPath: mcpOpts ? mcpOpts.mcpConfigPath : null,
     allowedTools: mcpOpts ? mcpOpts.allowedTools : null,
-    env: getProjectEndpointEnvByPath(automation.projectPath),
+    env: getAgentEndpointEnv(agent, automation.projectPath),
     onRaw: (raw) => { outputChunks.push(raw); },
     onText: (text) => {
       textChunks.push(text);
