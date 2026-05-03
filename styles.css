@@ -5850,3 +5850,46 @@ body.mode-popout #btn-add-project {
   color: var(--text-muted);
   text-align: center;
 }
+
+/* Per-agent connection tag on automation cards and headless dock */
+.automation-card-conn-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.automation-card-conn-tag--cloud {
+  background: rgba(100, 210, 255, 0.15);
+  color: var(--color-cyan, #64d2ff);
+  border: 1px solid rgba(100, 210, 255, 0.4);
+}
+.automation-card-conn-tag--local {
+  background: rgba(255, 165, 0, 0.15);
+  color: #ffa500;
+  border: 1px solid rgba(255, 165, 0, 0.4);
+}
+
+.headless-dock-row-conn {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.headless-dock-row-conn--cloud {
+  background: rgba(100, 210, 255, 0.15);
+  color: var(--color-cyan, #64d2ff);
+  border: 1px solid rgba(100, 210, 255, 0.4);
+}
+.headless-dock-row-conn--local {
+  background: rgba(255, 165, 0, 0.15);
+  color: #ffa500;
+  border: 1px solid rgba(255, 165, 0, 0.4);
+}

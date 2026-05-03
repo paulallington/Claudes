@@ -3988,8 +3988,28 @@ function refreshGitStatus(force) {
   }).then(done, done);
 }
 
+function updateActiveProjectBranchLabels(branch) {
+  if (!activeProjectKey) return;
+  var project = config.projects.find(function (p) { return p.path === activeProjectKey; });
+  if (!project) return;
+  var trimmed = (branch || '').trim();
+
+  if (activeProjectNameEl) {
+    activeProjectNameEl.textContent = trimmed
+      ? project.name + '  ⎇ ' + trimmed
+      : project.name;
+  }
+
+  var item = document.querySelector('.project-item[data-project-path="' + CSS.escape(activeProjectKey) + '"]');
+  if (item) {
+    var tag = item.querySelector('.project-branch');
+    if (tag) tag.textContent = trimmed ? '⎇ ' + trimmed : '';
+  }
+}
+
 function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstagedStats, stagedStats) {
   graphLaneState = null;
+  updateActiveProjectBranchLabels(branch);
   while (gitHeaderEl.firstChild) gitHeaderEl.removeChild(gitHeaderEl.firstChild);
   while (gitChangesEl.firstChild) gitChangesEl.removeChild(gitChangesEl.firstChild);
 
@@ -7787,8 +7807,19 @@ function renderAutomationCards(automations, container) {
         '<button class="automation-btn-edit" title="Edit">&#9998;</button>' +
         '<button class="automation-btn-delete" title="Delete">&times;</button></span>';
 
+      var connTag = '';
+      if (endpointPresets.length > 0) {
+        if (!agent.endpointId) {
+          connTag = '<span class="automation-card-conn-tag automation-card-conn-tag--cloud">Cloud</span>';
+        } else {
+          var preset = endpointPresets.find(function (p) { return p.id === agent.endpointId; });
+          connTag = '<span class="automation-card-conn-tag automation-card-conn-tag--local">' + escapeHtml(preset ? preset.name : 'local') + '</span>';
+        }
+      }
+
       card.innerHTML = '<div class="automation-card-header">' +
         '<span class="automation-card-name">' + escapeHtml(agent.name) + '</span>' +
+        connTag +
         '<span class="automation-card-schedule">' + schedText + '</span>' +
         '</div>' +
         '<div class="automation-card-status">' + lastRunText + '</div>' +
@@ -7821,8 +7852,24 @@ function renderAutomationCards(automations, container) {
         '<button class="automation-btn-edit" title="Edit">&#9998;</button>' +
         '<button class="automation-btn-delete" title="Delete">&times;</button></span>';
 
+      var connTagsHtml = '';
+      if (endpointPresets.length > 0) {
+        var connNames = {};
+        automation.agents.forEach(function (ag) {
+          if (!ag.endpointId) connNames['Cloud'] = 'cloud';
+          else {
+            var p = endpointPresets.find(function (pp) { return pp.id === ag.endpointId; });
+            if (p) connNames[p.name] = 'local';
+          }
+        });
+        Object.keys(connNames).forEach(function (n) {
+          connTagsHtml += '<span class="automation-card-conn-tag automation-card-conn-tag--' + connNames[n] + '">' + escapeHtml(n) + '</span>';
+        });
+      }
+
       card.innerHTML = '<div class="automation-card-header">' +
         '<span class="automation-card-name">' + escapeHtml(automation.name) + '</span>' +
+        connTagsHtml +
         '<span class="automation-card-schedule">' + agentSummary + '</span>' +
         '</div>' + dotsHtml +
         '<div class="automation-card-footer">' +
