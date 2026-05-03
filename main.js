@@ -1771,6 +1771,12 @@ ipcMain.handle('window:flashFrame', () => {
   }
 });
 
+ipcMain.handle('window:stopFlashFrame', () => {
+  if (mainWindow && mainWindow.isFocused()) {
+    mainWindow.flashFrame(false);
+  }
+});
+
 ipcMain.handle('shell:openExternal', (event, url) => {
   return shell.openExternal(url);
 });

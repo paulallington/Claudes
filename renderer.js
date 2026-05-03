@@ -2259,6 +2259,33 @@ function addColumn(args, targetRow, opts) {
     var c = allColumns.get(id);
     if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
       c.lastInputAt = Date.now();
+      // Stop attention flash when the user types — clearly they're responding
+      if (c.activityState === 'attention') {
+        c.hasUserInput = false;
+        c.notified = true;
+        if (c.headerEl) c.headerEl.classList.remove('attention-flash');
+        var projKey = c.projectKey;
+        if (projKey) {
+          var sidebarItem = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(projKey) + '"]');
+          if (sidebarItem && sidebarItem.classList.contains('attention-flash')) {
+            var otherFlashing = false;
+            allColumns.forEach(function (other) {
+              if (other !== c && other.projectKey === projKey && other.headerEl &&
+                  other.headerEl.classList.contains('attention-flash')) {
+                otherFlashing = true;
+              }
+            });
+            if (!otherFlashing) {
+              projectsNeedingAttention.delete(projKey);
+              sidebarItem.classList.remove('attention-flash');
+            }
+          }
+        }
+        // Stop taskbar flash too (only if window is focused — clicking already stops it)
+        if (window.electronAPI && window.electronAPI.stopFlashFrame && document.hasFocus()) {
+          window.electronAPI.stopFlashFrame();
+        }
+      }
       // Only set hasUserInput when user actually submits (Enter key = \r or \n)
       // Not on typing/pasting, which happens before submission
       if (data.indexOf('\r') !== -1 || data.indexOf('\n') !== -1) {
