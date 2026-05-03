@@ -193,7 +193,11 @@
               </label>
               <label class="spawn-option">
                 <input type="checkbox" id="opt-bare"> Bare Mode
-                <span class="spawn-help" title="Lightweight mode that skips hooks, LSP, and plugins (--bare). Best for scripted/automated tasks. Forced on automatically when a local endpoint preset is active, since local models can't fit the full system prompt.">?</span>
+                <span class="spawn-help" title="Skip hooks, LSP, plugin sync, attribution, auto-memory, background prefetches, keychain reads, and CLAUDE.md auto-discovery (--bare). Auto-ticked when you select a local endpoint preset.">?</span>
+              </label>
+              <label class="spawn-option">
+                <input type="checkbox" id="opt-strip-mcps"> Strip MCPs
+                <span class="spawn-help" title="Disable all MCP servers for this column (--strict-mcp-config + empty config). Useful on local models where MCP tool schemas can chew through the context budget. Off by default — flip on if autocompact starts thrashing.">?</span>
               </label>
               <label class="spawn-option">
                 <input type="checkbox" id="opt-headless"> Headless
@@ -216,8 +220,11 @@
                 </select>
               </div>
               <div class="spawn-option spawn-endpoint-model-row hidden" id="opt-endpoint-model-row">
-                <label>Model:</label>
-                <span id="opt-endpoint-model-display" class="spawn-readonly-value"></span>
+                <label for="opt-endpoint-model">Model:</label>
+                <select id="opt-endpoint-model" title="Model loaded by the endpoint. Defaults to the preset's chosen model.">
+                  <option value="">(loading…)</option>
+                </select>
+                <button type="button" id="opt-endpoint-model-refresh" class="spawn-icon-btn" title="Re-fetch loaded models from endpoint">&#8634;</button>
               </div>
               <div class="spawn-divider"></div>
               <div class="spawn-option spawn-custom-row">

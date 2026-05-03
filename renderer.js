@@ -24,12 +24,14 @@ var spawnDropdown = document.getElementById('spawn-dropdown');
 var optSkipPermissions = document.getElementById('opt-skip-permissions');
 var optRemoteControl = document.getElementById('opt-remote-control');
 var optBare = document.getElementById('opt-bare');
+var optStripMcps = document.getElementById('opt-strip-mcps');
 var optHeadless = document.getElementById('opt-headless');
 var optModel = document.getElementById('opt-model');
 var optModelRow = document.getElementById('opt-model-row');
 var optEndpoint = document.getElementById('opt-endpoint');
 var optEndpointModelRow = document.getElementById('opt-endpoint-model-row');
-var optEndpointModelDisplay = document.getElementById('opt-endpoint-model-display');
+var optEndpointModel = document.getElementById('opt-endpoint-model');
+var optEndpointModelRefresh = document.getElementById('opt-endpoint-model-refresh');
 var optWorktree = document.getElementById('opt-worktree');
 var optCustomArgs = document.getElementById('opt-custom-args');
 var btnManageEndpoints = document.getElementById('btn-manage-endpoints');
@@ -38,7 +40,11 @@ var btnManageEndpoints = document.getElementById('btn-manage-endpoints');
 // block synchronously without waiting on an IPC round-trip per spawn.
 var endpointPresets = [];        // [{ id, name, baseUrl, model, hasToken }]
 var currentEndpointId = null;    // active project's selected preset id (null = Anthropic)
+var currentEndpointModel = null; // user-selected model override for active project (null = use preset default)
 var currentEndpointEnv = null;   // env block returned by endpoint:getEnv, or null
+// Cache of fetched models per endpoint id to avoid refetching on every selection.
+// { [endpointId]: { models: string[], fetchedAt: number, ok: boolean } }
+var endpointModelsCache = {};
 
 
 // Each window has its own counter for new column/pty ids. Give popouts a high
@@ -2048,6 +2054,46 @@ function addColumn(args, targetRow, opts) {
   col.dataset.id = String(id);
 
   var header = createColumnHeader(id, opts.title);
+
+  // Drop a banner above the terminal so the user can see at a glance which
+  // backend each column is talking to. Two flavours:
+  //   - Orange "Local" banner when an endpoint preset is active, with a
+  //     capability caveat (the prompt-caching warning claude prints on
+  //     startup gets drowned out by claude's own UI redraws; this banner
+  //     stays visible).
+  //   - Green "Cloud" banner when no preset is active, only shown if the
+  //     user has at least one preset configured (so cloud-only users don't
+  //     get a banner cluttering every column).
+  var endpointBanner = null;
+  var hasLocalEnv = opts.env && opts.env.ANTHROPIC_BASE_URL;
+  if (hasLocalEnv) {
+    var preset = currentEndpointId
+      ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
+      : null;
+    var presetName = preset ? preset.name : 'Local endpoint';
+    // Banner shows the model the column was *actually* spawned with — read
+    // it from the env block rather than the preset's default, so per-spawn
+    // model overrides surface correctly.
+    var presetModel = opts.env.ANTHROPIC_MODEL || (preset && preset.model) || 'unknown';
+    endpointBanner = document.createElement('div');
+    endpointBanner.className = 'endpoint-banner endpoint-banner--local';
+    endpointBanner.innerHTML =
+      '<span class="endpoint-banner-tag endpoint-banner-tag--local">Local</span>' +
+      '<span class="endpoint-banner-name">' + escapeHtml(presetName) + '</span>' +
+      '<span class="endpoint-banner-sep">·</span>' +
+      '<span class="endpoint-banner-model">' + escapeHtml(presetModel) + '</span>' +
+      '<span class="endpoint-banner-caveat">Suitable for simple bug fixes and investigation only</span>';
+  } else if (endpointPresets.length > 0 && !opts.cmd) {
+    // Only show cloud banner if user has presets configured (otherwise it's
+    // noise) and only for actual claude columns (not custom-cmd columns).
+    endpointBanner = document.createElement('div');
+    endpointBanner.className = 'endpoint-banner endpoint-banner--cloud';
+    endpointBanner.innerHTML =
+      '<span class="endpoint-banner-tag endpoint-banner-tag--cloud">Cloud</span>' +
+      '<span class="endpoint-banner-name">Anthropic</span>' +
+      '<span class="endpoint-banner-caveat">Suitable for any tasks</span>';
+  }
+
   var termWrapper = document.createElement('div');
   termWrapper.className = 'terminal-wrapper';
 
@@ -2065,8 +2111,18 @@ function addColumn(args, targetRow, opts) {
   });
 
   col.appendChild(header);
+  if (endpointBanner) col.appendChild(endpointBanner);
   col.appendChild(termWrapper);
   col.appendChild(scrollBtn);
+
+  // For local-endpoint columns, default the effort dropdown to "medium"
+  // immediately so the visible state matches the auto-injected slash command
+  // that fires later in detectSession. Without this, the dropdown shows the
+  // empty placeholder for ~3s after spawn — looks like it ignored the change.
+  if (hasLocalEnv) {
+    var effortDropdown = col.querySelector('.col-effort');
+    if (effortDropdown) effortDropdown.value = 'medium';
+  }
   setupColumnDropTarget(col);
   row.el.appendChild(col);
 
@@ -2791,6 +2847,23 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
             col.sessionMtime = sessions[i].modified || 0;
             persistSessions(col.projectKey);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
+            // For local-endpoint columns, default effort to medium. High
+            // effort lets the model spend thousands of tokens on
+            // chain-of-thought, which is fine on the cloud but adds minutes
+            // of latency on a 5090 running a 35B at ~50-80 tok/s. Medium is
+            // the right floor for "simple bug fix and investigation"
+            // workloads. Fires once per column at first session detection.
+            if (col.env && col.env.ANTHROPIC_BASE_URL && !col.localEffortApplied) {
+              col.localEffortApplied = true;
+              setTimeout(function () {
+                wsSend({ type: 'write', id: columnId, data: '/config set effort medium\n' });
+                // Also reflect the change in the column header's effort
+                // dropdown so the visible state matches what claude actually
+                // received. Without this the dropdown lies.
+                var effortEl = col.element && col.element.querySelector('.col-effort');
+                if (effortEl) effortEl.value = 'medium';
+              }, 800);
+            }
           }
           return;
         }
@@ -5672,13 +5745,6 @@ function closeSpawnDropdown() {
   spawnDropdown.classList.add('hidden');
 }
 
-// Bare mode is forced on whenever a local endpoint preset is active — local
-// models can't fit Claude Code's full system prompt + MCP/plugin/hook context,
-// so we always strip the heavy bits when routing away from Anthropic Cloud.
-function isBareEffective() {
-  return optBare.checked || !!currentEndpointId;
-}
-
 function buildSpawnArgs() {
   var args = [];
   if (optSkipPermissions.checked) {
@@ -5687,8 +5753,16 @@ function buildSpawnArgs() {
   if (optRemoteControl.checked) {
     args.push('--remote-control');
   }
-  if (isBareEffective()) {
+  if (optBare.checked) {
     args.push('--bare');
+  }
+  // --bare and --strict-mcp-config are independent: bare covers hooks/LSP/
+  // plugins/CLAUDE.md, strip-mcps covers MCP servers. Locally you usually
+  // want bare on (smaller startup) but MCPs available (otherwise the model
+  // has no tools beyond bash/file ops). Toggle each independently.
+  if (optStripMcps.checked) {
+    args.push('--strict-mcp-config');
+    args.push('--mcp-config', '{"mcpServers":{}}');
   }
   // The CLI's --model flag overrides ANTHROPIC_MODEL env, so when an endpoint
   // preset is active we skip it — the env block already pins every model tier
@@ -5727,7 +5801,8 @@ function updateSpawnButtonLabel() {
   }
   if (optSkipPermissions.checked) tags.push('yolo');
   if (optRemoteControl.checked) tags.push('remote');
-  if (isBareEffective()) tags.push('bare');
+  if (optBare.checked) tags.push('bare');
+  if (optStripMcps.checked) tags.push('no-mcp');
   if (optWorktree.value.trim()) tags.push('worktree');
   if (optCustomArgs.value.trim()) tags.push('custom');
 
@@ -5748,10 +5823,12 @@ function saveSpawnOptions() {
     skipPermissions: optSkipPermissions.checked,
     remoteControl: optRemoteControl.checked,
     bare: optBare.checked,
+    stripMcps: optStripMcps.checked,
     model: optModel.value,
     worktree: optWorktree.value,
     customArgs: optCustomArgs.value,
-    endpointId: currentEndpointId || null
+    endpointId: currentEndpointId || null,
+    endpointModel: currentEndpointModel || null
   };
   saveConfig();
 }
@@ -5764,6 +5841,7 @@ function loadSpawnOptions() {
   optSkipPermissions.checked = !!opts.skipPermissions;
   optRemoteControl.checked = !!opts.remoteControl;
   optBare.checked = !!opts.bare;
+  optStripMcps.checked = !!opts.stripMcps;
   optModel.value = opts.model || '';
   optWorktree.value = opts.worktree || '';
   optCustomArgs.value = opts.customArgs || '';
@@ -5774,6 +5852,9 @@ function loadSpawnOptions() {
   if (endpointId && !endpointPresets.find(function (p) { return p.id === endpointId; })) {
     endpointId = null;
   }
+  // Restore the per-project model selection BEFORE applyEndpointSelection so
+  // populateEndpointModelDropdown can preselect it.
+  currentEndpointModel = endpointId ? (opts.endpointModel || null) : null;
   applyEndpointSelection(endpointId, /* persist */ false);
   updateSpawnButtonLabel();
 }
@@ -5801,6 +5882,7 @@ function onSpawnOptionChanged() { updateSpawnButtonLabel(); saveSpawnOptions(); 
 optSkipPermissions.addEventListener('change', onSpawnOptionChanged);
 optRemoteControl.addEventListener('change', onSpawnOptionChanged);
 optBare.addEventListener('change', onSpawnOptionChanged);
+optStripMcps.addEventListener('change', onSpawnOptionChanged);
 optModel.addEventListener('change', onSpawnOptionChanged);
 optWorktree.addEventListener('input', onSpawnOptionChanged);
 optCustomArgs.addEventListener('input', onSpawnOptionChanged);
@@ -5830,35 +5912,46 @@ function renderEndpointDropdown() {
 }
 
 function applyEndpointSelection(endpointId, persist) {
+  var wasNoPreset = !currentEndpointId;
+  var idChanged = currentEndpointId !== (endpointId || null);
   currentEndpointId = endpointId || null;
   optEndpoint.value = currentEndpointId || '';
+
+  // Auto-toggle Bare Mode on user-initiated cloud↔local transitions:
+  //   cloud → preset: tick bare (local models can't fit the full system prompt)
+  //   preset → cloud: untick bare (cloud has no reason to strip MCPs/hooks)
+  // persist=true marks user-initiated changes; loadSpawnOptions on app load
+  // passes persist=false so saved bare preferences are honoured across restarts.
+  if (persist) {
+    if (wasNoPreset && currentEndpointId && !optBare.checked) {
+      optBare.checked = true;
+    } else if (!wasNoPreset && !currentEndpointId && optBare.checked) {
+      optBare.checked = false;
+    }
+  }
 
   var preset = currentEndpointId
     ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
     : null;
 
-  // Toggle the model row: when a preset is active, hide the Sonnet/Opus/Haiku
-  // dropdown (it's a no-op since the env fans the single preset model into
-  // every tier) and show a read-only line instead.
+  // Toggle which "Model" row is shown: cloud uses the Sonnet/Opus/Haiku
+  // dropdown; local uses an endpoint-specific dropdown populated from
+  // /v1/models on the active server (with the preset's chosen model as the
+  // default fallback).
   if (preset) {
     optModelRow.classList.add('hidden');
     optEndpointModelRow.classList.remove('hidden');
-    optEndpointModelDisplay.textContent = preset.model || '(no model set)';
+    if (idChanged) {
+      // Only reset the dropdown when the endpoint identity changed; switching
+      // back to the same preset shouldn't wipe an in-progress selection.
+      populateEndpointModelDropdown(preset);
+    }
   } else {
     optModelRow.classList.remove('hidden');
     optEndpointModelRow.classList.add('hidden');
-    optEndpointModelDisplay.textContent = '';
   }
 
-  // Refresh the cached env block (async — main process decrypts the token).
-  if (currentEndpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
-    window.electronAPI.endpointGetEnv(currentEndpointId).then(function (env) {
-      // Guard against a later selection arriving before this resolves.
-      if (currentEndpointId === endpointId) currentEndpointEnv = env || null;
-    }).catch(function () { currentEndpointEnv = null; });
-  } else {
-    currentEndpointEnv = null;
-  }
+  refreshEndpointEnv();
 
   if (persist) {
     saveSpawnOptions();
@@ -5866,7 +5959,103 @@ function applyEndpointSelection(endpointId, persist) {
   updateSpawnButtonLabel();
 }
 
+// Refresh the cached env block (async — main process decrypts the token and
+// resolves the model override). Shared between selection changes and per-spawn
+// model picks, so all callsites stay in sync.
+function refreshEndpointEnv() {
+  if (currentEndpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
+    var capturedId = currentEndpointId;
+    var capturedModel = currentEndpointModel;
+    window.electronAPI.endpointGetEnv(capturedId, capturedModel).then(function (env) {
+      // Guard against a later selection arriving before this resolves.
+      if (currentEndpointId === capturedId) currentEndpointEnv = env || null;
+    }).catch(function () { currentEndpointEnv = null; });
+  } else {
+    currentEndpointEnv = null;
+  }
+}
+
+// Populate the local-model dropdown: render whatever's in cache immediately
+// (so the UI doesn't sit on "(loading…)" if we just looked at this endpoint
+// a moment ago), then fire a background refresh from /v1/models.
+function populateEndpointModelDropdown(preset) {
+  var defaultModel = preset && preset.model ? preset.model : '';
+  var cached = endpointModelsCache[preset.id];
+  if (cached && cached.ok && cached.models && cached.models.length > 0) {
+    renderEndpointModelOptions(cached.models, defaultModel);
+  } else {
+    // Show the default while we wait, so the user can spawn immediately
+    // without staring at "(loading…)".
+    renderEndpointModelOptions(defaultModel ? [defaultModel] : [], defaultModel);
+    fetchEndpointModels(preset, /* force */ false);
+  }
+}
+
+function renderEndpointModelOptions(models, defaultModel) {
+  while (optEndpointModel.firstChild) optEndpointModel.removeChild(optEndpointModel.firstChild);
+  // Preference: project's saved override → preset default → first available.
+  var preferred = currentEndpointModel || defaultModel || (models && models[0]) || '';
+  var preferredFound = false;
+  models.forEach(function (m) {
+    var opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = m;
+    if (m === preferred) { opt.selected = true; preferredFound = true; }
+    optEndpointModel.appendChild(opt);
+  });
+  // If the preferred (saved) model isn't in the fetched list, prepend it as
+  // a stale entry so the user can see why their setting isn't applying.
+  if (preferred && !preferredFound) {
+    var stale = document.createElement('option');
+    stale.value = preferred;
+    stale.textContent = preferred + ' (not loaded)';
+    stale.selected = true;
+    optEndpointModel.insertBefore(stale, optEndpointModel.firstChild);
+  }
+  // Keep currentEndpointModel in sync with the visible selection so spawnOpts
+  // builds the right env even if the user never opens the dropdown.
+  currentEndpointModel = optEndpointModel.value || null;
+  refreshEndpointEnv();
+  updateSpawnButtonLabel();
+}
+
+function fetchEndpointModels(preset, force) {
+  if (!preset || !window.electronAPI || !window.electronAPI.endpointFetchModels) return;
+  // Skip refetch within 5 minutes unless forced.
+  var cached = endpointModelsCache[preset.id];
+  if (!force && cached && cached.ok && (Date.now() - cached.fetchedAt) < 5 * 60 * 1000) return;
+
+  // Need the auth token for the fetch — main has it, ask via endpointGet.
+  window.electronAPI.endpointGet(preset.id).then(function (full) {
+    if (!full) return;
+    return window.electronAPI.endpointFetchModels({
+      baseUrl: full.baseUrl,
+      authToken: full.authToken
+    });
+  }).then(function (result) {
+    if (!result) return;
+    if (result.ok && Array.isArray(result.models)) {
+      endpointModelsCache[preset.id] = {
+        ok: true,
+        models: result.models,
+        fetchedAt: Date.now()
+      };
+      // Only re-render if this preset is still the active one.
+      if (currentEndpointId === preset.id) {
+        renderEndpointModelOptions(result.models, preset.model || '');
+      }
+    } else {
+      endpointModelsCache[preset.id] = { ok: false, models: [], fetchedAt: Date.now() };
+    }
+  }).catch(function () {
+    endpointModelsCache[preset.id] = { ok: false, models: [], fetchedAt: Date.now() };
+  });
+}
+
 optEndpoint.addEventListener('change', function () {
+  // Reset model selection on endpoint change — the new endpoint will likely
+  // have different model identifiers than the old one.
+  currentEndpointModel = null;
   applyEndpointSelection(optEndpoint.value || null, /* persist */ true);
 });
 // Don't let the select's mouse interactions close the spawn dropdown.
@@ -5875,6 +6064,39 @@ optEndpoint.addEventListener('click', function (e) { e.stopPropagation(); });
 var endpointSelectOpen = false;
 optEndpoint.addEventListener('focus', function () { endpointSelectOpen = true; });
 optEndpoint.addEventListener('blur', function () { endpointSelectOpen = false; });
+
+// Per-project model override dropdown. Selecting a different model rebuilds
+// the env block and persists the choice in spawnOptions.endpointModel.
+optEndpointModel.addEventListener('change', function () {
+  currentEndpointModel = optEndpointModel.value || null;
+  refreshEndpointEnv();
+  saveSpawnOptions();
+  updateSpawnButtonLabel();
+});
+// Refresh the model list when the user opens the dropdown — local models can
+// be loaded/swapped in LM Studio without restarting Claudes, so the cached
+// list goes stale fast. mousedown fires before the native picker opens.
+optEndpointModel.addEventListener('mousedown', function (e) {
+  e.stopPropagation();
+  var preset = currentEndpointId
+    ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
+    : null;
+  if (preset) fetchEndpointModels(preset, /* force */ true);
+});
+optEndpointModel.addEventListener('click', function (e) { e.stopPropagation(); });
+var endpointModelSelectOpen = false;
+optEndpointModel.addEventListener('focus', function () { endpointModelSelectOpen = true; });
+optEndpointModel.addEventListener('blur', function () { endpointModelSelectOpen = false; });
+
+if (optEndpointModelRefresh) {
+  optEndpointModelRefresh.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var preset = currentEndpointId
+      ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
+      : null;
+    if (preset) fetchEndpointModels(preset, /* force */ true);
+  });
+}
 
 function loadEndpointPresets() {
   if (!window.electronAPI || !window.electronAPI.endpointList) return Promise.resolve();
@@ -5927,7 +6149,8 @@ document.addEventListener('click', function (e) {
       !spawnDropdown.contains(e.target) &&
       e.target !== btnAddOptions &&
       !modelSelectOpen &&
-      !endpointSelectOpen) {
+      !endpointSelectOpen &&
+      !endpointModelSelectOpen) {
     closeSpawnDropdown();
   }
 });

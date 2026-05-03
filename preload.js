@@ -133,7 +133,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   endpointGet: (id) => ipcRenderer.invoke('endpoint:get', id),
   endpointSave: (preset) => ipcRenderer.invoke('endpoint:save', preset),
   endpointDelete: (id) => ipcRenderer.invoke('endpoint:delete', id),
-  endpointGetEnv: (id) => ipcRenderer.invoke('endpoint:getEnv', id),
+  endpointGetEnv: (id, modelOverride) => ipcRenderer.invoke('endpoint:getEnv', id, modelOverride),
   endpointFetchModels: (args) => ipcRenderer.invoke('endpoint:fetchModels', args),
   onEndpointsUpdated: (callback) => ipcRenderer.on('endpoints:updated', () => callback())
 });

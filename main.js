@@ -145,11 +145,13 @@ function getEndpointById(id) {
   return list.find((e) => e && e.id === id) || null;
 }
 
-function buildEndpointEnv(endpointId) {
+function buildEndpointEnv(endpointId, modelOverride) {
   const preset = getEndpointById(endpointId);
   if (!preset) return null;
   const token = decryptToken(preset.authToken);
-  const model = preset.model || '';
+  // Per-project model override (set by the endpoint model dropdown in the
+  // spawn options) takes precedence over the preset's default model.
+  const model = (modelOverride && String(modelOverride).trim()) || preset.model || '';
   // ANTHROPIC_AUTH_TOKEN must be set to *something* — if it's empty or missing
   // the Claude CLI falls back to the user's real Anthropic credentials and
   // sends them to whatever local server we've pointed it at. A dummy value
@@ -189,7 +191,8 @@ function getProjectEndpointEnvByPath(projectPath) {
   if (!project) return null;
   const id = project.spawnOptions && project.spawnOptions.endpointId;
   if (!id) return null;
-  return buildEndpointEnv(id);
+  const modelOverride = project.spawnOptions && project.spawnOptions.endpointModel;
+  return buildEndpointEnv(id, modelOverride);
 }
 
 // --- Loops Persistence ---
@@ -705,8 +708,8 @@ ipcMain.handle('endpoint:delete', (event, id) => {
   return { ok: true };
 });
 
-ipcMain.handle('endpoint:getEnv', (event, id) => {
-  return buildEndpointEnv(id);
+ipcMain.handle('endpoint:getEnv', (event, id, modelOverride) => {
+  return buildEndpointEnv(id, modelOverride);
 });
 
 ipcMain.handle('endpoint:fetchModels', async (event, args) => {
