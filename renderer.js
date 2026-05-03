@@ -8779,6 +8779,16 @@ function updateCardHeaderBadges(card, agentIndex) {
   title.after(frag);
 }
 
+function refreshAgentModelDropdown(card, endpointId) {
+  var modelGroup = card.querySelector('.agent-model-group');
+  if (!modelGroup) return;
+  var stub = { endpointId: endpointId || null, endpointModel: null };
+  var temp = document.createElement('div');
+  temp.innerHTML = renderAgentConnectionSection(stub);
+  var newModelGroup = temp.querySelector('.agent-model-group');
+  if (newModelGroup) modelGroup.replaceWith(newModelGroup);
+}
+
 function bindAgentCardEvents(card, agentIndex) {
   var header = card.querySelector('.agent-card-header');
   if (header) {
@@ -8871,6 +8881,31 @@ function bindAgentCardEvents(card, agentIndex) {
       if (startupFields) startupFields.style.display = type === 'app_startup' ? '' : 'none';
     });
   }
+
+  // Connection picker — change swaps the model dropdown to that connection's
+  // model list. Refresh button is delegated because it's re-created on swap.
+  var epSelect = card.querySelector('.agent-endpoint');
+  if (epSelect) {
+    epSelect.addEventListener('change', function () {
+      refreshAgentModelDropdown(card, epSelect.value);
+    });
+  }
+  card.addEventListener('click', function (e) {
+    if (!e.target.classList || !e.target.classList.contains('agent-endpoint-model-refresh')) return;
+    var ep = card.querySelector('.agent-endpoint');
+    if (!ep || !ep.value) return;
+    var preset = endpointPresets.find(function (p) { return p.id === ep.value; });
+    if (!preset || !window.electronAPI || !window.electronAPI.endpointFetchModels) return;
+    var btn = e.target;
+    var origHtml = btn.innerHTML;
+    btn.textContent = '…';
+    window.electronAPI.endpointFetchModels({ baseUrl: preset.baseUrl, authToken: '' }).then(function (result) {
+      btn.innerHTML = origHtml;
+      if (!result || !result.ok || !result.models || result.models.length === 0) return;
+      endpointModelsCache[preset.id] = { models: result.models, fetchedAt: Date.now(), ok: true };
+      refreshAgentModelDropdown(card, ep.value);
+    }).catch(function () { btn.innerHTML = origHtml; });
+  });
 
   // Update chip labels and header when agent name changes
   var nameInput = card.querySelector('.agent-name');
