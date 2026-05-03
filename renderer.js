@@ -8435,7 +8435,7 @@ function openAutomationModal(existingAutomation) {
   if (existingAutomation) {
     modalAgents = existingAutomation.agents.map(function (ag) { return Object.assign({}, ag); });
   } else {
-    modalAgents = [{ name: '', prompt: '', schedule: { type: 'interval', minutes: 60 }, runMode: 'independent', runAfter: [], runOnUpstreamFailure: false, isolation: { enabled: false, clonePath: null }, skipPermissions: false, dbConnectionString: null, dbReadOnly: true, firstStartOnly: false }];
+    modalAgents = [{ name: '', prompt: '', schedule: { type: 'interval', minutes: 60 }, runMode: 'independent', runAfter: [], runOnUpstreamFailure: false, isolation: { enabled: false, clonePath: null }, skipPermissions: false, dbConnectionString: null, dbReadOnly: true, firstStartOnly: false, endpointId: null, endpointModel: null }];
   }
 
   var isMulti = modalAgents.length > 1;
@@ -9043,6 +9043,11 @@ function syncAgentFromCard(card, agentIndex) {
   agent.skipPermissions = (card.querySelector('.agent-skip-permissions') || {}).checked || false;
   agent.dbConnectionString = (card.querySelector('.agent-db-connection') || {}).value.trim() || null;
   agent.dbReadOnly = (card.querySelector('.agent-db-readonly') || {}).checked !== false;
+
+  var epEl = card.querySelector('.agent-endpoint');
+  agent.endpointId = (epEl && epEl.value) ? epEl.value : null;
+  var epModelEl = card.querySelector('.agent-endpoint-model');
+  agent.endpointModel = (epModelEl && epModelEl.value) ? epModelEl.value : null;
 }
 
 function syncAllAgentsFromCards() {
@@ -9328,7 +9333,8 @@ document.getElementById('btn-add-agent').addEventListener('click', function () {
   modalAgents.push({
     name: '', prompt: '', schedule: { type: 'interval', minutes: 60 },
     runMode: 'independent', runAfter: [], runOnUpstreamFailure: false, isolation: { enabled: false, clonePath: null },
-    skipPermissions: false, dbConnectionString: null, dbReadOnly: true, firstStartOnly: false
+    skipPermissions: false, dbConnectionString: null, dbReadOnly: true, firstStartOnly: false,
+    endpointId: null, endpointModel: null
   });
   renderModalAgentCards();
   document.getElementById('automation-manager-section').style.display = '';
