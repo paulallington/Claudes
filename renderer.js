@@ -8535,6 +8535,55 @@ function renderModalAgentCards() {
   updateRunAfterChipStates();
 }
 
+function renderAgentConnectionSection(agent) {
+  var selectedId = (agent && agent.endpointId) || '';
+  var selectedModel = (agent && agent.endpointModel) || '';
+
+  var connOpts = '<option value=""' + (selectedId === '' ? ' selected' : '') + '>Cloud (Anthropic)</option>';
+  endpointPresets.forEach(function (p) {
+    connOpts += '<option value="' + escapeHtml(p.id) + '"' + (selectedId === p.id ? ' selected' : '') + '>' + escapeHtml(p.name || '(unnamed)') + '</option>';
+  });
+
+  var modelOpts;
+  var refreshBtn = '';
+  if (!selectedId) {
+    var cloudModels = [
+      { v: '', t: 'Default' },
+      { v: 'sonnet', t: 'Sonnet (latest)' },
+      { v: 'opus', t: 'Opus (latest)' },
+      { v: 'haiku', t: 'Haiku (latest)' }
+    ];
+    modelOpts = cloudModels.map(function (m) {
+      return '<option value="' + m.v + '"' + (selectedModel === m.v ? ' selected' : '') + '>' + m.t + '</option>';
+    }).join('');
+  } else {
+    var cached = endpointModelsCache[selectedId];
+    var preset = endpointPresets.find(function (p) { return p.id === selectedId; });
+    var defaultModel = preset ? (preset.model || '') : '';
+    var models = (cached && cached.models) ? cached.models.slice() : [];
+    if (defaultModel && models.indexOf(defaultModel) === -1) models.unshift(defaultModel);
+    if (selectedModel && models.indexOf(selectedModel) === -1) models.unshift(selectedModel);
+    if (models.length === 0) models = [defaultModel || ''];
+    modelOpts = models.map(function (m) {
+      var isSel = selectedModel ? (m === selectedModel) : (m === defaultModel);
+      return '<option value="' + escapeHtml(m) + '"' + (isSel ? ' selected' : '') + '>' + escapeHtml(m || '(default)') + '</option>';
+    }).join('');
+    refreshBtn = '<button type="button" class="agent-endpoint-model-refresh spawn-icon-btn" title="Re-fetch loaded models from endpoint">&#8634;</button>';
+  }
+
+  return '<div class="automation-form-group agent-connection-group">' +
+    '<label>Connection</label>' +
+    '<select class="agent-endpoint">' + connOpts + '</select>' +
+    '</div>' +
+    '<div class="automation-form-group agent-model-group">' +
+    '<label>Model</label>' +
+    '<div class="automation-schedule-row">' +
+      '<select class="agent-endpoint-model">' + modelOpts + '</select>' +
+      refreshBtn +
+    '</div>' +
+    '</div>';
+}
+
 function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
   var isMulti = allAgents.length > 1;
   var cardId = 'agent-card-' + agentIndex;
@@ -8682,6 +8731,7 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
           '</div>' +
         '</div>' +
       '</div>' +
+      renderAgentConnectionSection(agent) +
       '<div class="automation-form-group">' +
         '<label>Database <span class="automation-permission-hint">(optional)</span></label>' +
         '<div class="automation-db-row">' +
