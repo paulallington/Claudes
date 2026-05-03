@@ -50,6 +50,7 @@
       "icon-tray.png",
       "claude-icon.png",
       "claude-small.png",
+      "lib/**/*",
       "node_modules/**/*"
     ],
     "win": {
