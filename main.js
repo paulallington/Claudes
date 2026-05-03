@@ -1874,7 +1874,8 @@ ipcMain.handle('automations:updateAgent', (event, automationId, agentId, updates
   const agent = automation.agents.find(ag => ag.id === agentId);
   if (!agent) return null;
   const safeFields = ['name', 'prompt', 'schedule', 'runMode', 'runAfter', 'runOnUpstreamFailure',
-    'passUpstreamContext', 'isolation', 'enabled', 'skipPermissions', 'firstStartOnly', 'dbConnectionString', 'dbReadOnly'];
+    'passUpstreamContext', 'isolation', 'enabled', 'skipPermissions', 'firstStartOnly', 'dbConnectionString', 'dbReadOnly',
+    'endpointId', 'endpointModel'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) agent[field] = updates[field];
   });

@@ -8627,7 +8627,9 @@ function renderAgentConnectionSection(agent) {
 
   return '<div class="automation-form-group agent-connection-group">' +
     '<label>Connection</label>' +
-    '<select class="agent-endpoint">' + connOpts + '</select>' +
+    '<div class="automation-schedule-row">' +
+      '<select class="agent-endpoint">' + connOpts + '</select>' +
+    '</div>' +
     '</div>' +
     '<div class="automation-form-group agent-model-group">' +
     '<label>Model</label>' +
