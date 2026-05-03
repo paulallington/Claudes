@@ -3123,6 +3123,13 @@ function runHeadless(projectPath, prompt) {
   const outputFile = headlessOutputPath(projectPath, runId);
   fs.writeFileSync(outputFile, '', 'utf8');
 
+  // Resolve the connection name for the dock chip.
+  let connectionName = 'Cloud';
+  if (spawnOptions.endpointId) {
+    const preset = getEndpointById(spawnOptions.endpointId);
+    if (preset) connectionName = preset.name || 'local';
+  }
+
   // Prepend the new run, then evict oldest beyond cap.
   let index = readHeadlessIndex(projectPath);
   const entry = {
@@ -3133,7 +3140,8 @@ function runHeadless(projectPath, prompt) {
     startedAt,
     completedAt: null,
     durationMs: 0,
-    exitCode: null
+    exitCode: null,
+    connectionName
   };
   index = { ...index, runs: [entry, ...(index.runs || [])] };
   index = applyHeadlessEviction(projectPath, index);

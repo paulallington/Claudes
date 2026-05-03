@@ -193,6 +193,13 @@ function renderHeadlessDock() {
       title.textContent = r.title || '(untitled)';
       row.appendChild(title);
 
+      if (r.connectionName && endpointPresets.length > 0) {
+        var conn = document.createElement('span');
+        conn.className = 'headless-dock-row-conn ' + (r.connectionName === 'Cloud' ? 'headless-dock-row-conn--cloud' : 'headless-dock-row-conn--local');
+        conn.textContent = r.connectionName;
+        row.appendChild(conn);
+      }
+
       var time = document.createElement('div');
       time.className = 'headless-dock-row-time';
       time.textContent = formatRelativeTime(r.startedAt);
