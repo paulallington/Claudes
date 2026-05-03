@@ -226,6 +226,26 @@
                 </select>
                 <button type="button" id="opt-endpoint-model-refresh" class="spawn-icon-btn" title="Re-fetch loaded models from endpoint">&#8634;</button>
               </div>
+              <div class="spawn-option spawn-effort-row">
+                <label for="opt-default-effort-cloud">Cloud effort:</label>
+                <select id="opt-default-effort-cloud" title="Default reasoning effort applied to cloud Claude columns at spawn">
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high" selected>High</option>
+                  <option value="xhigh">XHigh</option>
+                  <option value="max">Max</option>
+                </select>
+              </div>
+              <div class="spawn-option spawn-effort-row">
+                <label for="opt-default-effort-local">Local effort:</label>
+                <select id="opt-default-effort-local" title="Default reasoning effort applied to local-endpoint columns at spawn">
+                  <option value="low">Low</option>
+                  <option value="medium" selected>Medium</option>
+                  <option value="high">High</option>
+                  <option value="xhigh">XHigh</option>
+                  <option value="max">Max</option>
+                </select>
+              </div>
               <div class="spawn-divider"></div>
               <div class="spawn-option spawn-custom-row">
                 <input type="text" id="opt-worktree" placeholder="Worktree name..." title="Spawn in isolated git worktree (--worktree)">

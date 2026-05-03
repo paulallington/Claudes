@@ -813,6 +813,7 @@ html, body {
   accent-color: var(--accent);
 }
 
+.spawn-effort-row select,
 .spawn-model-row select,
 .spawn-endpoint-row select {
   background: var(--bg-button);

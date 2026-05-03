@@ -34,7 +34,17 @@ var optEndpointModel = document.getElementById('opt-endpoint-model');
 var optEndpointModelRefresh = document.getElementById('opt-endpoint-model-refresh');
 var optWorktree = document.getElementById('opt-worktree');
 var optCustomArgs = document.getElementById('opt-custom-args');
+var optDefaultEffortCloud = document.getElementById('opt-default-effort-cloud');
+var optDefaultEffortLocal = document.getElementById('opt-default-effort-local');
 var btnManageEndpoints = document.getElementById('btn-manage-endpoints');
+
+// Per-endpoint-class default effort applied at spawn. User-configurable in the
+// spawn options panel; persisted in config.defaultEffortCloud/Local.
+var defaultEffortCloud = 'high';
+var defaultEffortLocal = 'medium';
+function isValidEffort(v) {
+  return v === 'low' || v === 'medium' || v === 'high' || v === 'xhigh' || v === 'max';
+}
 
 // Endpoint preset state. Cached in renderer so spawn paths can attach the env
 // block synchronously without waiting on an IPC round-trip per spawn.
@@ -945,6 +955,10 @@ function loadProjects() {
     if (config.fontSize) {
       fontSize = Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, config.fontSize));
     }
+    if (isValidEffort(config.defaultEffortCloud)) defaultEffortCloud = config.defaultEffortCloud;
+    if (isValidEffort(config.defaultEffortLocal)) defaultEffortLocal = config.defaultEffortLocal;
+    if (optDefaultEffortCloud) optDefaultEffortCloud.value = defaultEffortCloud;
+    if (optDefaultEffortLocal) optDefaultEffortLocal.value = defaultEffortLocal;
     if (config.theme) {
       setThemePreference(config.theme);
     }
@@ -1893,14 +1907,18 @@ function createColumnHeader(id, customTitle, opts) {
 
     var effortSelect = document.createElement('select');
     effortSelect.className = 'col-effort';
-    effortSelect.title = 'Effort level';
-    effortSelect.innerHTML = '<option value="">Effort</option><option value="low">Low</option><option value="medium">Med</option><option value="high">High</option>';
-    effortSelect.addEventListener('change', function () {
-      if (effortSelect.value) {
-        wsSend({ type: 'write', id: id, data: '/config set effort ' + effortSelect.value + '\n' });
-      }
+    effortSelect.title = 'Effort level — launched with --effort. To change mid-session, click to open the interactive /effort picker (Claude Code has no non-interactive way to change effort after spawn).';
+    effortSelect.innerHTML = '<option value="">Effort</option><option value="low">Low</option><option value="medium">Med</option><option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option>';
+    // Mid-session effort changes can only be made via the interactive /effort
+    // picker — there's no non-interactive setter. Open the picker and let the
+    // user finish there. Reset the dropdown to its prior value since we can't
+    // know what the user actually picked.
+    effortSelect.addEventListener('mousedown', function (e) {
+      e.stopPropagation();
+      e.preventDefault();
+      wsSend({ type: 'write', id: id, data: '/effort\n' });
+      effortSelect.blur();
     });
-    effortSelect.addEventListener('mousedown', function (e) { e.stopPropagation(); });
 
     actions.appendChild(compactBtn);
     actions.appendChild(teleportBtn);
@@ -2115,13 +2133,17 @@ function addColumn(args, targetRow, opts) {
   col.appendChild(termWrapper);
   col.appendChild(scrollBtn);
 
-  // For local-endpoint columns, default the effort dropdown to "medium"
-  // immediately so the visible state matches the auto-injected slash command
-  // that fires later in detectSession. Without this, the dropdown shows the
-  // empty placeholder for ~3s after spawn — looks like it ignored the change.
+  // Default the effort dropdown immediately so the visible state matches the
+  // auto-injected slash command that fires later in detectSession. Without
+  // this, the dropdown shows the empty placeholder for ~3s after spawn —
+  // looks like it ignored the change. Per-class defaults are user-configurable
+  // in the spawn options panel (defaultEffortCloud/Local).
   if (hasLocalEnv) {
     var effortDropdown = col.querySelector('.col-effort');
-    if (effortDropdown) effortDropdown.value = 'medium';
+    if (effortDropdown) effortDropdown.value = defaultEffortLocal;
+  } else if (!opts.cmd) {
+    var effortDropdownCloud = col.querySelector('.col-effort');
+    if (effortDropdownCloud) effortDropdownCloud.value = defaultEffortCloud;
   }
   setupColumnDropTarget(col);
   row.el.appendChild(col);
@@ -2847,22 +2869,16 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
             col.sessionMtime = sessions[i].modified || 0;
             persistSessions(col.projectKey);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
-            // For local-endpoint columns, default effort to medium. High
-            // effort lets the model spend thousands of tokens on
-            // chain-of-thought, which is fine on the cloud but adds minutes
-            // of latency on a 5090 running a 35B at ~50-80 tok/s. Medium is
-            // the right floor for "simple bug fix and investigation"
-            // workloads. Fires once per column at first session detection.
-            if (col.env && col.env.ANTHROPIC_BASE_URL && !col.localEffortApplied) {
-              col.localEffortApplied = true;
-              setTimeout(function () {
-                wsSend({ type: 'write', id: columnId, data: '/config set effort medium\n' });
-                // Also reflect the change in the column header's effort
-                // dropdown so the visible state matches what claude actually
-                // received. Without this the dropdown lies.
-                var effortEl = col.element && col.element.querySelector('.col-effort');
-                if (effortEl) effortEl.value = 'medium';
-              }, 800);
+            // Effort is now set at spawn via --effort (the only non-interactive
+            // mechanism — /config set effort doesn't exist and /effort opens
+            // an interactive picker). Just sync the column header dropdown
+            // visual to whatever default this column was launched with so the
+            // tab honestly reflects what claude is running on.
+            if (!col.effortApplied) {
+              var isLocal = col.env && col.env.ANTHROPIC_BASE_URL;
+              col.effortApplied = true;
+              var effortEl = col.element && col.element.querySelector('.col-effort');
+              if (effortEl) effortEl.value = isLocal ? defaultEffortLocal : defaultEffortCloud;
             }
           }
           return;
@@ -5753,7 +5769,17 @@ function buildSpawnArgs() {
   if (optRemoteControl.checked) {
     args.push('--remote-control');
   }
-  if (optBare.checked) {
+  // Force --bare whenever the endpoint env carries an Authorization custom
+  // header (set by main.js when the base URL has user:pass@). Reasoning:
+  //   - ANTHROPIC_AUTH_TOKEN sends `Authorization: Bearer ...` which collides
+  //     with our `Authorization: Basic ...` at the proxy and 401s ngrok.
+  //   - The collision-free alternative is ANTHROPIC_API_KEY (sent as x-api-key,
+  //     not Authorization), but Claude prompts to confirm any non-bare API key.
+  //   - --bare trusts ANTHROPIC_API_KEY without prompting, so it's the only
+  //     combo that actually communicates.
+  var endpointEnv = currentEndpointEnv || {};
+  var needsBareForProxyAuth = !!endpointEnv.ANTHROPIC_CUSTOM_HEADERS;
+  if (optBare.checked || needsBareForProxyAuth) {
     args.push('--bare');
   }
   // --bare and --strict-mcp-config are independent: bare covers hooks/LSP/
@@ -5773,6 +5799,14 @@ function buildSpawnArgs() {
   var worktree = optWorktree.value.trim();
   if (worktree) {
     args.push('--worktree', worktree);
+  }
+  // --effort is the only non-interactive way to set reasoning effort. The
+  // /effort slash command opens an interactive arrow-key picker and `/config
+  // set effort` doesn't exist, so this flag is the lever. Cloud and local get
+  // separate user-configurable defaults.
+  var effort = currentEndpointId ? defaultEffortLocal : defaultEffortCloud;
+  if (isValidEffort(effort)) {
+    args.push('--effort', effort);
   }
   var custom = optCustomArgs.value.trim();
   if (custom) {
@@ -5801,7 +5835,7 @@ function updateSpawnButtonLabel() {
   }
   if (optSkipPermissions.checked) tags.push('yolo');
   if (optRemoteControl.checked) tags.push('remote');
-  if (optBare.checked) tags.push('bare');
+  if (optBare.checked || (currentEndpointEnv && currentEndpointEnv.ANTHROPIC_CUSTOM_HEADERS)) tags.push('bare');
   if (optStripMcps.checked) tags.push('no-mcp');
   if (optWorktree.value.trim()) tags.push('worktree');
   if (optCustomArgs.value.trim()) tags.push('custom');
@@ -5887,6 +5921,29 @@ optModel.addEventListener('change', onSpawnOptionChanged);
 optWorktree.addEventListener('input', onSpawnOptionChanged);
 optCustomArgs.addEventListener('input', onSpawnOptionChanged);
 
+// Default-effort selectors are app-global (not per-project), so they bypass
+// saveSpawnOptions and persist straight to config root.
+if (optDefaultEffortCloud) {
+  optDefaultEffortCloud.addEventListener('change', function () {
+    if (!isValidEffort(optDefaultEffortCloud.value)) return;
+    defaultEffortCloud = optDefaultEffortCloud.value;
+    config.defaultEffortCloud = defaultEffortCloud;
+    saveConfig();
+  });
+  optDefaultEffortCloud.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+  optDefaultEffortCloud.addEventListener('click', function (e) { e.stopPropagation(); });
+}
+if (optDefaultEffortLocal) {
+  optDefaultEffortLocal.addEventListener('change', function () {
+    if (!isValidEffort(optDefaultEffortLocal.value)) return;
+    defaultEffortLocal = optDefaultEffortLocal.value;
+    config.defaultEffortLocal = defaultEffortLocal;
+    saveConfig();
+  });
+  optDefaultEffortLocal.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+  optDefaultEffortLocal.addEventListener('click', function (e) { e.stopPropagation(); });
+}
+
 // --- Endpoint preset wiring ---
 
 function renderEndpointDropdown() {
@@ -5968,10 +6025,16 @@ function refreshEndpointEnv() {
     var capturedModel = currentEndpointModel;
     window.electronAPI.endpointGetEnv(capturedId, capturedModel).then(function (env) {
       // Guard against a later selection arriving before this resolves.
-      if (currentEndpointId === capturedId) currentEndpointEnv = env || null;
-    }).catch(function () { currentEndpointEnv = null; });
+      if (currentEndpointId === capturedId) {
+        currentEndpointEnv = env || null;
+        // Refresh the spawn button label so the auto-forced 'bare' tag
+        // appears as soon as a URL-cred endpoint is picked.
+        updateSpawnButtonLabel();
+      }
+    }).catch(function () { currentEndpointEnv = null; updateSpawnButtonLabel(); });
   } else {
     currentEndpointEnv = null;
+    updateSpawnButtonLabel();
   }
 }
 

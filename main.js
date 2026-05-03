@@ -158,9 +158,19 @@ function buildEndpointEnv(endpointId, modelOverride) {
   // keeps it honest. LM Studio (and other local servers without auth) will
   // accept any string.
   const authToken = token || 'no-auth';
-  return {
-    ANTHROPIC_BASE_URL: preset.baseUrl || '',
-    ANTHROPIC_AUTH_TOKEN: authToken,
+  // URL-embedded creds (e.g. https://user:pass@ngrok-tunnel/) must be lifted
+  // out: undici (used by Claude CLI's internal fetch) refuses URLs with
+  // userinfo. Forward them as a Basic auth header via ANTHROPIC_CUSTOM_HEADERS.
+  //
+  // Auth header conflict: ANTHROPIC_AUTH_TOKEN makes Claude emit
+  // `Authorization: Bearer ...`. If we also set Basic via custom headers, the
+  // proxy sees two Authorization values and 401s. Switch the upstream auth to
+  // ANTHROPIC_API_KEY (sent as `x-api-key`, not `Authorization`) when URL
+  // creds are present so the Basic header is the only Authorization header
+  // reaching the proxy. LM Studio and similar local servers ignore x-api-key.
+  const { url: cleanBaseUrl, basicAuth } = extractUrlCredentials(preset.baseUrl || '');
+  const env = {
+    ANTHROPIC_BASE_URL: cleanBaseUrl,
     ANTHROPIC_MODEL: model,
     ANTHROPIC_DEFAULT_OPUS_MODEL: model,
     ANTHROPIC_DEFAULT_SONNET_MODEL: model,
@@ -178,6 +188,13 @@ function buildEndpointEnv(endpointId, modelOverride) {
     MAX_MCP_OUTPUT_TOKENS: '10000',
     MAX_THINKING_TOKENS: '2000'
   };
+  if (basicAuth) {
+    env.ANTHROPIC_CUSTOM_HEADERS = 'Authorization: Basic ' + basicAuth;
+    env.ANTHROPIC_API_KEY = authToken;
+  } else {
+    env.ANTHROPIC_AUTH_TOKEN = authToken;
+  }
+  return env;
 }
 
 // Look up a project by its filesystem path and return the env block for its
@@ -675,6 +692,34 @@ function normalizeBaseUrl(input) {
   return url;
 }
 
+// Extract user:pass@ credentials from a URL so callers can send Basic auth
+// explicitly. Required because:
+//   1. Node's undici fetch (Node 18+) refuses URLs with embedded userinfo —
+//      "Request cannot be constructed from a URL that includes credentials".
+//   2. The Claude CLI's internal fetch hits the same restriction when
+//      ANTHROPIC_BASE_URL contains creds.
+// Common shape: ngrok tunnel basic-auth, e.g. https://user:pass@host/...
+// Returns { url: <stripped>, basicAuth: <base64('user:pass')> | null }.
+function extractUrlCredentials(rawUrl) {
+  const input = String(rawUrl || '');
+  if (!input) return { url: '', basicAuth: null };
+  try {
+    const u = new URL(input);
+    if (!u.username && !u.password) return { url: input, basicAuth: null };
+    const user = decodeURIComponent(u.username || '');
+    const pass = decodeURIComponent(u.password || '');
+    u.username = '';
+    u.password = '';
+    // URL.toString() normalizes trailing slash on origin-only URLs — strip it
+    // so the result round-trips cleanly through normalizeBaseUrl.
+    let clean = u.toString();
+    if (!u.pathname || u.pathname === '/') clean = clean.replace(/\/$/, '');
+    return { url: clean, basicAuth: Buffer.from(user + ':' + pass).toString('base64') };
+  } catch {
+    return { url: input, basicAuth: null };
+  }
+}
+
 ipcMain.handle('endpoint:save', (event, preset) => {
   if (!preset || typeof preset !== 'object') {
     throw new Error('endpoint:save requires a preset object');
@@ -718,7 +763,15 @@ ipcMain.handle('endpoint:fetchModels', async (event, args) => {
   const baseUrl = normalizeBaseUrl((args && args.baseUrl) || '');
   const authToken = String((args && args.authToken) || '');
   if (!baseUrl) return { ok: false, error: 'Base URL is required' };
-  const url = baseUrl + '/v1/models';
+  // URL-embedded creds (ngrok-style basic auth) must be stripped before fetch
+  // — undici refuses URLs with userinfo. Promote them to a Basic auth header.
+  // If both URL creds and an explicit token exist, URL creds win because the
+  // proxy layer is what's gating the request.
+  const { url: cleanBase, basicAuth } = extractUrlCredentials(baseUrl);
+  const url = cleanBase + '/v1/models';
+  const headers = {};
+  if (basicAuth) headers['Authorization'] = 'Basic ' + basicAuth;
+  else if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
@@ -726,7 +779,7 @@ ipcMain.handle('endpoint:fetchModels', async (event, args) => {
     try {
       res = await fetch(url, {
         method: 'GET',
-        headers: authToken ? { Authorization: 'Bearer ' + authToken } : {},
+        headers,
         signal: controller.signal
       });
     } finally {
