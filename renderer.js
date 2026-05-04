@@ -7304,6 +7304,9 @@ function openUsageModal() {
     renderUsageSummary(data);
     renderUsageDaily(data);
     renderUsageSessions(data);
+    if (window.electronAPI && window.electronAPI.getUsageCosts) {
+      window.electronAPI.getUsageCosts().then(renderCostTab).catch(function () {});
+    }
   });
 }
 
@@ -8022,6 +8025,83 @@ function renderUsageSessions(data, filterProject) {
   }
   table.appendChild(tbody);
   tableContainer.appendChild(table);
+}
+
+function fmtUsd(n) {
+  if (!n) return '$0.00';
+  if (n < 0.01) return '<$0.01';
+  return '$' + n.toFixed(2);
+}
+
+function renderCostTab(c) {
+  if (!c) return;
+  var totalEl = document.getElementById('cost-total');
+  if (totalEl) totalEl.textContent = fmtUsd(c.total);
+  var opusEl = document.getElementById('cost-opus');
+  if (opusEl) opusEl.textContent = fmtUsd(c.byModel && c.byModel.opus);
+  var sonnetEl = document.getElementById('cost-sonnet');
+  if (sonnetEl) sonnetEl.textContent = fmtUsd(c.byModel && c.byModel.sonnet);
+  var haikuEl = document.getElementById('cost-haiku');
+  if (haikuEl) haikuEl.textContent = fmtUsd(c.byModel && c.byModel.haiku);
+
+  var byProj = document.getElementById('cost-by-project');
+  if (byProj) {
+    byProj.innerHTML = '';
+    var keys = c.byProject ? Object.keys(c.byProject) : [];
+    var rows = keys.map(function (k) { return [k, c.byProject[k]]; });
+    rows.sort(function (a, b) { return b[1] - a[1]; });
+    if (!rows.length) {
+      byProj.innerHTML = '<div class="cost-row" style="opacity:.6">No usage recorded.</div>';
+    } else {
+      rows.forEach(function (r) {
+        var d = document.createElement('div');
+        d.className = 'cost-row';
+        var name = document.createElement('span');
+        name.className = 'cost-row-name';
+        name.textContent = r[0];
+        var val = document.createElement('span');
+        val.className = 'cost-row-val';
+        val.textContent = fmtUsd(r[1]);
+        d.appendChild(name);
+        d.appendChild(val);
+        byProj.appendChild(d);
+      });
+    }
+  }
+
+  var byDayEl = document.getElementById('cost-by-day');
+  if (byDayEl) {
+    byDayEl.innerHTML = '';
+    var dayKeys = c.byDay ? Object.keys(c.byDay) : [];
+    var days = dayKeys.sort().slice(-30);
+    if (!days.length) {
+      byDayEl.innerHTML = '<div class="cost-row" style="opacity:.6">No daily data.</div>';
+    } else {
+      var max = 0;
+      for (var di = 0; di < days.length; di++) if (c.byDay[days[di]] > max) max = c.byDay[days[di]];
+      if (!max) max = 1;
+      days.forEach(function (d) {
+        var row = document.createElement('div');
+        row.className = 'cost-day-row';
+        var label = document.createElement('span');
+        label.className = 'cost-day-label';
+        label.textContent = d;
+        var bar = document.createElement('div');
+        bar.className = 'cost-day-bar';
+        var fill = document.createElement('div');
+        fill.className = 'cost-day-fill';
+        fill.style.width = ((c.byDay[d] / max) * 100) + '%';
+        bar.appendChild(fill);
+        var val = document.createElement('span');
+        val.className = 'cost-day-val';
+        val.textContent = fmtUsd(c.byDay[d]);
+        row.appendChild(label);
+        row.appendChild(bar);
+        row.appendChild(val);
+        byDayEl.appendChild(row);
+      });
+    }
+  }
 }
 
 btnUsage.addEventListener('click', openUsageModal);

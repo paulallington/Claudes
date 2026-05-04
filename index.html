@@ -393,6 +393,7 @@
             <button class="usage-tab active" data-usage-tab="summary">Summary</button>
             <button class="usage-tab" data-usage-tab="daily">Daily</button>
             <button class="usage-tab" data-usage-tab="sessions">Sessions</button>
+            <button class="usage-tab" data-usage-tab="cost">Cost</button>
           </div>
           <div id="usage-tab-summary" class="usage-tab-content active">
             <div id="plan-limits-section" class="plan-limits-section"></div>
@@ -422,6 +423,22 @@
               </select>
             </div>
             <div class="usage-table-container" id="usage-sessions-table"></div>
+          </div>
+          <div id="usage-tab-cost" class="usage-tab-content">
+            <div class="cost-summary">
+              <div class="cost-card"><div class="cost-label">Total</div><div class="cost-value" id="cost-total">—</div></div>
+              <div class="cost-card"><div class="cost-label">Opus</div><div class="cost-value" id="cost-opus">—</div></div>
+              <div class="cost-card"><div class="cost-label">Sonnet</div><div class="cost-value" id="cost-sonnet">—</div></div>
+              <div class="cost-card"><div class="cost-label">Haiku</div><div class="cost-value" id="cost-haiku">—</div></div>
+            </div>
+            <h3 class="usage-section-title">By project</h3>
+            <div id="cost-by-project" class="cost-table"></div>
+            <h3 class="usage-section-title">Last 30 days</h3>
+            <div id="cost-by-day" class="cost-chart"></div>
+            <div class="cost-disclaimer">
+              Approximate, based on Anthropic public list prices. Plan-included usage is billed differently;
+              these figures show what the same tokens would cost at API rates.
+            </div>
           </div>
         </div>
       </div>

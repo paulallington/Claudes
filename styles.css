@@ -3941,6 +3941,34 @@ html, body {
   margin-top: 4px;
 }
 
+/* Cost tab */
+
+.cost-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.cost-card {
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+.cost-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+.cost-value { font-size: 22px; font-weight: 600; color: var(--text-primary); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.cost-table { display: flex; flex-direction: column; gap: 4px; margin-bottom: 20px; }
+.cost-row { display: flex; justify-content: space-between; padding: 6px 10px; background: rgba(255,255,255,0.02); border-radius: 4px; font-size: 12px; }
+.cost-row-name { color: var(--text-primary); }
+.cost-row-val { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.cost-chart { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
+.cost-day-row { display: grid; grid-template-columns: 84px 1fr 70px; gap: 8px; align-items: center; font-size: 11px; }
+.cost-day-label { color: var(--text-dim); }
+.cost-day-bar { height: 8px; background: rgba(255,255,255,0.04); border-radius: 4px; overflow: hidden; }
+.cost-day-fill { height: 100%; background: #4f8cff; border-radius: 4px; }
+.cost-day-val { color: var(--text-primary); text-align: right; font-variant-numeric: tabular-nums; }
+.cost-disclaimer { font-size: 10px; color: var(--text-dimmer); margin-top: 12px; line-height: 1.4; }
+
 /* Environmental impact */
 
 .usage-environmental {
