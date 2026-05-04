@@ -7069,9 +7069,25 @@ function handleThresholdCrossings(crossings) {
     if (c.threshold === 70 && !enabled70) continue;
     if (c.threshold === 90 && !enabled90) continue;
     showThresholdNotification(c);
-    // TODO Task 1.4: when c.threshold === 90 && c.window === 'seven_day' &&
-    // notifSettings.limitsPause !== false, also call promptPauseAutomations(c).
+    if (c.threshold === 90 && c.window === 'seven_day' && (!notifSettings || notifSettings.limitsPause !== false)) {
+      promptPauseAutomations(c);
+    }
   }
+}
+
+function promptPauseAutomations(c) {
+  if (!window.electronAPI || !window.electronAPI.getAutomationSettings || !window.electronAPI.toggleAutomationsGlobal) return;
+  var ok = window.confirm(
+    'You\'ve crossed 90% of your weekly limit (' + Math.round(c.value) + '%).\n\n' +
+    'Pause all your automations until next reset?'
+  );
+  if (!ok) return;
+  // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
+  window.electronAPI.getAutomationSettings().then(function (settings) {
+    if (settings && settings.globalEnabled) {
+      window.electronAPI.toggleAutomationsGlobal();
+    }
+  });
 }
 
 function showThresholdNotification(c) {
