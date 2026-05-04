@@ -718,24 +718,33 @@ function updateSidebarActivity() {
 }
 
 // Notification settings (defaults: all on)
-var notifSettings = { taskbar: true, sidebar: true, header: true };
+var notifSettings = { taskbar: true, sidebar: true, header: true, limits70: true, limits90: true, limitsPause: true };
 
 function loadNotifSettings() {
   if (config.notifications) {
-    notifSettings = Object.assign({ taskbar: true, sidebar: true, header: true }, config.notifications);
+    notifSettings = Object.assign({ taskbar: true, sidebar: true, header: true, limits70: true, limits90: true, limitsPause: true }, config.notifications);
   }
   var el1 = document.getElementById('setting-notif-taskbar');
   var el2 = document.getElementById('setting-notif-sidebar');
   var el3 = document.getElementById('setting-notif-header');
+  var el4 = document.getElementById('setting-notif-limits-70');
+  var el5 = document.getElementById('setting-notif-limits-90');
+  var el6 = document.getElementById('setting-notif-limits-pause');
   if (el1) el1.checked = notifSettings.taskbar;
   if (el2) el2.checked = notifSettings.sidebar;
   if (el3) el3.checked = notifSettings.header;
+  if (el4) el4.checked = notifSettings.limits70 !== false;
+  if (el5) el5.checked = notifSettings.limits90 !== false;
+  if (el6) el6.checked = notifSettings.limitsPause !== false;
 }
 
 function saveNotifSettings() {
   notifSettings.taskbar = document.getElementById('setting-notif-taskbar').checked;
   notifSettings.sidebar = document.getElementById('setting-notif-sidebar').checked;
   notifSettings.header = document.getElementById('setting-notif-header').checked;
+  notifSettings.limits70 = document.getElementById('setting-notif-limits-70').checked;
+  notifSettings.limits90 = document.getElementById('setting-notif-limits-90').checked;
+  notifSettings.limitsPause = document.getElementById('setting-notif-limits-pause').checked;
   config.notifications = notifSettings;
   saveConfig();
 }
