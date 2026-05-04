@@ -1755,6 +1755,64 @@ ipcMain.handle('usage:getAll', async () => {
   return results;
 });
 
+// Full-text search across all session JSONLs. Streaming-style: returns first
+// `limit` hits with surrounding context. Case-insensitive substring match
+// (no regex for V1).
+ipcMain.handle('sessions:search', async (_event, query, limit) => {
+  if (!query || typeof query !== 'string' || query.length < 2) return [];
+  const max = Math.max(1, Math.min(200, limit || 50));
+  const needle = query.toLowerCase();
+  const root = path.join(os.homedir(), '.claude', 'projects');
+  let projectDirs;
+  try { projectDirs = await fs.promises.readdir(root); } catch { return []; }
+
+  const hits = [];
+  outer:
+  for (const dir of projectDirs) {
+    const projDir = path.join(root, dir);
+    let entries;
+    try { entries = await fs.promises.readdir(projDir); } catch { continue; }
+    for (const file of entries) {
+      if (!file.endsWith('.jsonl')) continue;
+      const filePath = path.join(projDir, file);
+      let content;
+      try { content = await fs.promises.readFile(filePath, 'utf8'); } catch { continue; }
+      const idx = content.toLowerCase().indexOf(needle);
+      if (idx === -1) continue;
+      // Find the JSONL line containing the match
+      const lineStart = content.lastIndexOf('\n', idx) + 1;
+      const lineEnd = content.indexOf('\n', idx);
+      const line = content.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
+      let snippet = line;
+      try {
+        const obj = JSON.parse(line);
+        if (obj && obj.message && obj.message.content) {
+          const c = obj.message.content;
+          snippet = typeof c === 'string'
+            ? c
+            : Array.isArray(c)
+              ? c.map(p => (p && p.text) || '').join(' ')
+              : JSON.stringify(c);
+        }
+      } catch { /* keep raw line */ }
+      // Trim to ~200 chars around the needle for display
+      const matchInSnippet = snippet.toLowerCase().indexOf(needle);
+      const start = Math.max(0, matchInSnippet - 80);
+      const end = Math.min(snippet.length, matchInSnippet + 120);
+      const trimmed = (start > 0 ? '…' : '') + snippet.slice(start, end) + (end < snippet.length ? '…' : '');
+
+      hits.push({
+        projectKey: dir,
+        sessionId: file.replace('.jsonl', ''),
+        snippet: trimmed,
+        matchedAt: idx
+      });
+      if (hits.length >= max) break outer;
+    }
+  }
+  return hits;
+});
+
 // --- Auto Updater ---
 
 autoUpdater.autoDownload = true;

@@ -51,6 +51,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readEnvFile: (filePath) => ipcRenderer.invoke('launch:readEnvFile', filePath),
   saveRecentLaunches: (projectPath, recent) => ipcRenderer.invoke('launch:saveRecentLaunches', projectPath, recent),
   getUsage: () => ipcRenderer.invoke('usage:getAll'),
+  searchSessions: (query, limit) => ipcRenderer.invoke('sessions:search', query, limit),
   getPlanLimits: (force) => ipcRenderer.invoke('usage:getPlanLimits', force),
   detectThresholdCrossings: (prev, next) => ipcRenderer.invoke('usage:detectThresholdCrossings', prev, next),
   getSessionContextTokens: (projectKey, sessionId) => ipcRenderer.invoke('session:contextTokens', projectKey, sessionId),
