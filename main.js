@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
+const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-thresholds');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
@@ -1646,6 +1647,18 @@ ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
   } catch (e) {
     return { ok: false, error: 'fetch-failed', message: e.message };
   }
+});
+
+ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
+  try { return detectPlanLimitCrossings(prev, next); } catch { return []; }
+});
+
+ipcMain.handle('notify:show', (_event, opts) => {
+  try {
+    const notif = new Notification({ title: opts.title || 'Claudes', body: opts.body || '' });
+    notif.show();
+    return true;
+  } catch { return false; }
 });
 
 ipcMain.handle('usage:getAll', async () => {

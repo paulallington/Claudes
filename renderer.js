@@ -6976,6 +6976,7 @@ function renderPlanLimits(result) {
 // Most recent plan-limits result (used by both the Usage modal panel and the
 // persistent sidebar mini-bar). Refreshed by loadPlanLimits().
 var lastPlanLimitsResult = null;
+var prevPlanLimitsData = null;  // last successful data, used for crossing detection
 
 function renderPlanLimitsMini(result) {
   var el = document.getElementById('plan-limits-mini');
@@ -7042,6 +7043,14 @@ function loadPlanLimits(force) {
     lastPlanLimitsResult = r;
     if (!usageModal.classList.contains('hidden')) renderPlanLimits(r);
     renderPlanLimitsMini(r);
+    if (r && r.ok && r.data) {
+      if (prevPlanLimitsData) {
+        window.electronAPI.detectThresholdCrossings(prevPlanLimitsData, r.data).then(function (crossings) {
+          if (crossings && crossings.length) handleThresholdCrossings(crossings);
+        });
+      }
+      prevPlanLimitsData = r.data;
+    }
     return r;
   }).catch(function (e) {
     var err = { ok: false, message: e && e.message ? e.message : String(e) };
@@ -7050,6 +7059,32 @@ function loadPlanLimits(force) {
     renderPlanLimitsMini(err);
     return err;
   });
+}
+
+function handleThresholdCrossings(crossings) {
+  for (var i = 0; i < crossings.length; i++) {
+    var c = crossings[i];
+    var enabled70 = !notifSettings || notifSettings.limits70 !== false;
+    var enabled90 = !notifSettings || notifSettings.limits90 !== false;
+    if (c.threshold === 70 && !enabled70) continue;
+    if (c.threshold === 90 && !enabled90) continue;
+    showThresholdNotification(c);
+  }
+}
+
+function showThresholdNotification(c) {
+  var label = ({
+    five_hour: 'Current session',
+    seven_day: 'Weekly (all models)',
+    seven_day_sonnet: 'Weekly (Sonnet)',
+    seven_day_opus: 'Weekly (Opus)',
+    seven_day_omelette: 'Weekly (Claude Design)'
+  })[c.window] || c.window;
+  var msg = label + ' just crossed ' + c.threshold + '% (' + Math.round(c.value) + '% used).';
+  if (window.electronAPI && window.electronAPI.flashFrame) window.electronAPI.flashFrame();
+  if (window.electronAPI && window.electronAPI.showSystemNotification) {
+    window.electronAPI.showSystemNotification({ title: 'Claude usage limit', body: msg });
+  }
 }
 
 // Background polling for the sidebar mini-bar.
