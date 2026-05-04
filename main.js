@@ -1655,6 +1655,8 @@ ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
 
 ipcMain.handle('notify:show', (_event, opts) => {
   try {
+    if (!opts || typeof opts !== 'object') return false;
+    if (!Notification.isSupported()) return false;
     const notif = new Notification({ title: opts.title || 'Claudes', body: opts.body || '' });
     notif.show();
     return true;

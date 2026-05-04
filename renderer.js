@@ -7069,6 +7069,8 @@ function handleThresholdCrossings(crossings) {
     if (c.threshold === 70 && !enabled70) continue;
     if (c.threshold === 90 && !enabled90) continue;
     showThresholdNotification(c);
+    // TODO Task 1.4: when c.threshold === 90 && c.window === 'seven_day' &&
+    // notifSettings.limitsPause !== false, also call promptPauseAutomations(c).
   }
 }
 
@@ -7081,7 +7083,9 @@ function showThresholdNotification(c) {
     seven_day_omelette: 'Weekly (Claude Design)'
   })[c.window] || c.window;
   var msg = label + ' just crossed ' + c.threshold + '% (' + Math.round(c.value) + '% used).';
-  if (window.electronAPI && window.electronAPI.flashFrame) window.electronAPI.flashFrame();
+  if (!document.hasFocus() && window.electronAPI && window.electronAPI.flashFrame) {
+    window.electronAPI.flashFrame();
+  }
   if (window.electronAPI && window.electronAPI.showSystemNotification) {
     window.electronAPI.showSystemNotification({ title: 'Claude usage limit', body: msg });
   }
