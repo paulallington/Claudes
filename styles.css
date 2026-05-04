@@ -6169,3 +6169,35 @@ body.mode-popout #btn-add-project {
   font-size: 12px;
 }
 .broadcast-send-btn:hover { background: #3a78ee; }
+
+.session-search-dialog { width: 720px; max-height: 80vh; }
+#session-search-input {
+  width: 100%;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 14px;
+  margin-bottom: 8px;
+  box-sizing: border-box;
+}
+.session-search-results {
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.session-search-hit {
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+}
+.session-search-hit:hover { border-color: #4f8cff; }
+.session-search-hit-meta { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.session-search-hit-snippet { font-size: 12px; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; }
+.session-search-hit-snippet mark { background: rgba(79,140,255,0.4); color: inherit; padding: 0 1px; }

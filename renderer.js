@@ -10817,3 +10817,94 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     textEl.value = '';
   });
 })();
+
+(function setupSessionSearch() {
+  var btn = document.getElementById('btn-session-search');
+  var modal = document.getElementById('session-search-modal');
+  var closeBtn = document.getElementById('session-search-close');
+  var input = document.getElementById('session-search-input');
+  var resultsEl = document.getElementById('session-search-results');
+  if (!btn || !modal) return;
+
+  function open() {
+    modal.classList.remove('hidden');
+    input.focus();
+    input.select();
+  }
+  function close() { modal.classList.add('hidden'); }
+
+  btn.addEventListener('click', open);
+  closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.ctrlKey && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); open(); }
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (m) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m];
+    });
+  }
+
+  function highlight(text, q) {
+    var safe = escapeHtml(text);
+    var idx = safe.toLowerCase().indexOf(q.toLowerCase());
+    if (idx === -1) return safe;
+    return safe.slice(0, idx) + '<mark>' + safe.slice(idx, idx + q.length) + '</mark>' + safe.slice(idx + q.length);
+  }
+
+  var debounceTimer = null;
+  input.addEventListener('input', function () {
+    clearTimeout(debounceTimer);
+    var q = input.value.trim();
+    if (q.length < 2) { resultsEl.innerHTML = ''; return; }
+    debounceTimer = setTimeout(function () { runSearch(q); }, 200);
+  });
+
+  function runSearch(q) {
+    resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Searching…</div>';
+    if (!window.electronAPI || !window.electronAPI.searchSessions) {
+      resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
+      return;
+    }
+    window.electronAPI.searchSessions(q, 50).then(function (hits) {
+      resultsEl.innerHTML = '';
+      if (!hits || !hits.length) {
+        resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">No matches.</div>';
+        return;
+      }
+      hits.forEach(function (h) {
+        var div = document.createElement('div');
+        div.className = 'session-search-hit';
+        var meta = document.createElement('div');
+        meta.className = 'session-search-hit-meta';
+        meta.textContent = h.projectKey + '  •  ' + (h.sessionId ? h.sessionId.slice(0, 8) : '');
+        var snip = document.createElement('div');
+        snip.className = 'session-search-hit-snippet';
+        snip.innerHTML = highlight(h.snippet || '', q);
+        div.appendChild(meta);
+        div.appendChild(snip);
+        div.addEventListener('click', function () { openHit(h); });
+        resultsEl.appendChild(div);
+      });
+    }).catch(function () {
+      resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search failed.</div>';
+    });
+  }
+
+  function openHit(h) {
+    if (!config || !config.projects) return;
+    var idx = -1;
+    for (var i = 0; i < config.projects.length; i++) {
+      if (config.projects[i].path === h.projectKey) { idx = i; break; }
+    }
+    if (idx < 0) {
+      alert('That session\'s project is not in your project list. Add it first.');
+      return;
+    }
+    setActiveProject(idx, true);
+    addColumn(null, null, { sessionId: h.sessionId });
+    close();
+  }
+})();

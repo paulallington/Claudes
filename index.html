@@ -161,6 +161,7 @@
           <span id="active-project-name" class="active-project-name"></span>
         </div>
         <div class="toolbar-actions">
+          <button id="btn-session-search" class="toolbar-btn" title="Search session transcripts (Ctrl+Shift+F)">🔎</button>
           <button id="btn-broadcast" class="toolbar-btn" title="Broadcast a prompt to multiple columns">⤳</button>
           <button id="btn-automations-flyout" class="toolbar-btn" title="Automations">&#8634;</button>
           <div class="toolbar-menu-wrap">
@@ -676,6 +677,20 @@
         <input type="checkbox" id="broadcast-press-enter" checked> Press Enter after send
       </label>
       <button id="broadcast-send" class="broadcast-send-btn">Send to selected</button>
+    </div>
+  </div>
+
+  <!-- Session Search Modal -->
+  <div id="session-search-modal" class="modal-overlay hidden">
+    <div class="modal-dialog session-search-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Search sessions</span>
+        <span id="session-search-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <input type="search" id="session-search-input" placeholder="Search across all session transcripts…" autocomplete="off">
+        <div id="session-search-results" class="session-search-results"></div>
+      </div>
     </div>
   </div>
 
