@@ -1191,6 +1191,18 @@ html, body {
   color: var(--text-bright);
 }
 
+.col-delta-pill {
+  font-size: 10px;
+  color: var(--text-dimmer);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+  cursor: help;
+}
+
 /* Maximize/Restore states */
 .col-hidden {
   display: none !important;

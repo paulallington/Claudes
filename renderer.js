@@ -1950,6 +1950,13 @@ function createColumnHeader(id, customTitle, opts) {
   });
   actions.appendChild(maximizeBtn);
 
+  var deltaPill = document.createElement('span');
+  deltaPill.className = 'col-delta-pill';
+  deltaPill.dataset.colDelta = '';
+  deltaPill.setAttribute('hidden', '');
+  deltaPill.textContent = 'Δ —';
+  actions.appendChild(deltaPill);
+
   if (!opts.isDiff) {
     var restartBtn = document.createElement('span');
     restartBtn.className = 'col-restart';
@@ -2362,16 +2369,30 @@ function addColumn(args, targetRow, opts) {
     createdAt: Date.now(),
     lastInputAt: 0,
     hasUserInput: false,
-    notified: false
+    notified: false,
+    spawnSessionPct: null,    // five_hour.utilization at spawn time
+    spawnWeeklyPct: null,     // seven_day.utilization at spawn time
+    deltaSessionEl: null      // header element, captured below
   };
 
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
+  colData.deltaSessionEl = header.querySelector('[data-col-delta]');
   setFocusedColumn(id);
+  if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
+    var d0 = lastPlanLimitsResult.data;
+    colData.spawnSessionPct = d0.five_hour ? d0.five_hour.utilization : null;
+    colData.spawnWeeklyPct = d0.seven_day ? d0.seven_day.utilization : null;
+  }
   refitAll();
   saveColumnCounts();
   updateProjectBadges();
+
+  // Render delta pill immediately (shows Δ 0.0% right away if we have data)
+  if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
+    updateColumnDeltaPills(lastPlanLimitsResult.data);
+  }
 
   // Auto-fetch title from session if resuming without a saved title
   if (resumeSessionId && !opts.title && !cmd) {
@@ -7050,6 +7071,7 @@ function loadPlanLimits(force) {
         });
       }
       prevPlanLimitsData = r.data;
+      updateColumnDeltaPills(r.data);
     }
     return r;
   }).catch(function (e) {
@@ -7073,6 +7095,24 @@ function handleThresholdCrossings(crossings) {
       promptPauseAutomations(c);
     }
   }
+}
+
+function updateColumnDeltaPills(data) {
+  if (!data || !data.five_hour) return;
+  var nowSession = data.five_hour.utilization;
+  if (typeof nowSession !== 'number') return;
+  allColumns.forEach(function (c) {
+    if (!c.deltaSessionEl) return;
+    if (c.spawnSessionPct == null) return;
+    var delta = nowSession - c.spawnSessionPct;
+    if (delta < 0) delta = 0;  // session reset mid-life — don't show negative
+    c.deltaSessionEl.removeAttribute('hidden');
+    c.deltaSessionEl.textContent = 'Δ ' + delta.toFixed(1) + '%';
+    c.deltaSessionEl.title =
+      'Session usage spent by this column since spawn\n' +
+      'Spawn snapshot: ' + c.spawnSessionPct.toFixed(1) + '%\n' +
+      'Now: ' + nowSession.toFixed(1) + '%';
+  });
 }
 
 function promptPauseAutomations(c) {
