@@ -3149,6 +3149,9 @@ function restartColumn(id) {
     updateColumnDeltaPills(lastPlanLimitsResult.data);
   }
 
+  // Hide the context meter — the new session's first poll will repopulate it.
+  if (col && col.ctxMeterEl) col.ctxMeterEl.setAttribute('hidden', '');
+
   // Remove any existing exit overlay
   var overlay = col.element.querySelector('.exit-overlay');
   if (overlay) overlay.remove();
@@ -7140,6 +7143,9 @@ function startContextMeterPoll(colId) {
     if (!window.electronAPI || !window.electronAPI.getSessionContextTokens) return;
     window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId).then(function (tokens) {
       if (tokens == null) return;
+      // TODO: col.model is not yet populated — colData has no model field. All
+      // current 4.x models are 200k; if 1M-context sessions need accurate limits,
+      // parse --model from claudeArgs in addColumn or read opts.env.ANTHROPIC_MODEL.
       var modelKey = col.model || 'sonnet';
       var limit = CTX_LIMIT_CACHE.get(modelKey);
       function draw() {
@@ -7157,8 +7163,8 @@ function startContextMeterPoll(colId) {
         CTX_LIMIT_CACHE.set(modelKey, lim);
         limit = lim;
         draw();
-      });
-    });
+      }).catch(function () { /* fall back silently — pill stays hidden */ });
+    }).catch(function () {});
   }
   tick();  // immediate first poll
   c.ctxPollTimer = setInterval(tick, CTX_POLL_MS);
