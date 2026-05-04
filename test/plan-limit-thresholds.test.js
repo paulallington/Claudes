@@ -1,5 +1,5 @@
 const test = require('node:test');
-const assert = require('node:assert');
+const assert = require('node:assert/strict');
 const { detectCrossings } = require('../lib/plan-limit-thresholds');
 
 test('returns no crossings on first observation', () => {
