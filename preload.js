@@ -53,6 +53,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getUsage: () => ipcRenderer.invoke('usage:getAll'),
   getPlanLimits: (force) => ipcRenderer.invoke('usage:getPlanLimits', force),
   detectThresholdCrossings: (prev, next) => ipcRenderer.invoke('usage:detectThresholdCrossings', prev, next),
+  getSessionContextTokens: (projectKey, sessionId) => ipcRenderer.invoke('session:contextTokens', projectKey, sessionId),
+  getModelContextLimit: (model) => ipcRenderer.invoke('session:modelContextLimit', model),
   showSystemNotification: (opts) => ipcRenderer.invoke('notify:show', opts),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   onUpdateAvailable: (callback) => ipcRenderer.on('update:available', (_, info) => callback(info)),

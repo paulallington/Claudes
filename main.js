@@ -1653,6 +1653,20 @@ ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
   try { return detectPlanLimitCrossings(prev, next); } catch { return []; }
 });
 
+const { lastAssistantContextTokens, modelContextLimit } = require('./lib/session-context-tokens');
+
+// One-shot read of the live context-token count for a session.
+// Renderer calls this every ~10s while a Claude column is live.
+ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId) => {
+  if (!projectPath || !sessionId) return null;
+  // projectPath is the renderer's projectKey (e.g. "D--Git-Repos-Claudes").
+  // Sessions live under ~/.claude/projects/<projectKey>/<sessionId>.jsonl.
+  const filePath = path.join(os.homedir(), '.claude', 'projects', projectPath, sessionId + '.jsonl');
+  return lastAssistantContextTokens(filePath);
+});
+
+ipcMain.handle('session:modelContextLimit', (_event, model) => modelContextLimit(model));
+
 ipcMain.handle('notify:show', (_event, opts) => {
   try {
     if (!opts || typeof opts !== 'object') return false;
