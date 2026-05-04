@@ -127,7 +127,7 @@ git commit -m "feat(usage): pure threshold-crossing detector for plan limits"
 **Files:**
 - Modify: `index.html` (Settings modal section, search for `setting-notif-sidebar`)
 - Modify: `renderer.js` (settings load/save block, search for `notifSettings`)
-- Modify: `main.js` (CONFIG defaults, search for `function defaultConfig`)
+  (No main.js change — config defaults live in the renderer's `notifSettings` object, not a `defaultConfig` function in main.)
 
 - [ ] **Step 1: Add settings checkboxes**
 
