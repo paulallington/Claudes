@@ -2569,6 +2569,7 @@ ipcMain.handle('automations:validateDependencies', (event, agents) => {
 ipcMain.handle('automations:getSettings', () => {
   const data = readAutomations();
   return {
+    globalEnabled: data.globalEnabled !== undefined ? data.globalEnabled : true,
     agentReposBaseDir: data.agentReposBaseDir || AGENTS_DIR_DEFAULT,
     runWindow: data.runWindow || null
   };

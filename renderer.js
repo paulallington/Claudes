@@ -7077,9 +7077,11 @@ function handleThresholdCrossings(crossings) {
 
 function promptPauseAutomations(c) {
   if (!window.electronAPI || !window.electronAPI.getAutomationSettings || !window.electronAPI.toggleAutomationsGlobal) return;
+  // window.confirm blocks the renderer thread. TODO: replace with a
+  // dialog.showMessageBox-backed IPC if blocking becomes a problem.
   var ok = window.confirm(
     'You\'ve crossed 90% of your weekly limit (' + Math.round(c.value) + '%).\n\n' +
-    'Pause all your automations until next reset?'
+    'Pause all your automations? You can re-enable them any time from the Automations panel.'
   );
   if (!ok) return;
   // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
@@ -7087,7 +7089,7 @@ function promptPauseAutomations(c) {
     if (settings && settings.globalEnabled) {
       window.electronAPI.toggleAutomationsGlobal();
     }
-  });
+  }).catch(function () { /* ignore — silent failure is acceptable here */ });
 }
 
 function showThresholdNotification(c) {
