@@ -1110,7 +1110,7 @@ html, body {
 
 /* Hide less-critical column actions on narrow columns */
 @container (max-width: 250px) {
-  .col-action, .col-effort, .col-delta-pill { display: none; }
+  .col-action, .col-effort, .col-delta-pill, .col-ctx-meter { display: none; }
 }
 
 .col-action {
@@ -1201,6 +1201,39 @@ html, body {
   font-variant-numeric: tabular-nums;
   margin-left: 6px;
   cursor: help;
+}
+
+.col-ctx-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+  height: 16px;
+  width: 90px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+  cursor: help;
+}
+.col-ctx-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #4f8cff;
+  width: 0;
+  transition: width 200ms ease;
+}
+.col-ctx-fill.warning { background: #e0a020; }
+.col-ctx-fill.critical { background: #e05050; }
+.col-ctx-text {
+  position: relative;
+  font-size: 10px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  width: 100%;
+  text-align: center;
+  text-shadow: 0 0 2px rgba(0,0,0,0.6);
 }
 
 /* Maximize/Restore states */

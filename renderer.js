@@ -1958,6 +1958,19 @@ function createColumnHeader(id, customTitle, opts) {
     deltaPill.textContent = 'Δ —';
     actions.appendChild(deltaPill);
 
+    var ctxMeter = document.createElement('div');
+    ctxMeter.className = 'col-ctx-meter';
+    ctxMeter.dataset.colCtx = '';
+    ctxMeter.setAttribute('hidden', '');
+    ctxMeter.title = 'Context window usage';
+    var ctxFill = document.createElement('div');
+    ctxFill.className = 'col-ctx-fill';
+    var ctxText = document.createElement('span');
+    ctxText.className = 'col-ctx-text';
+    ctxMeter.appendChild(ctxFill);
+    ctxMeter.appendChild(ctxText);
+    actions.appendChild(ctxMeter);
+
     var restartBtn = document.createElement('span');
     restartBtn.className = 'col-restart';
     restartBtn.dataset.id = String(id);
@@ -2372,13 +2385,21 @@ function addColumn(args, targetRow, opts) {
     notified: false,
     spawnSessionPct: null,    // five_hour.utilization at spawn time
     spawnWeeklyPct: null,  // reserved: weekly-delta pill in a follow-up task
-    deltaSessionEl: null      // header element, captured below
+    deltaSessionEl: null,     // header element, captured below
+    ctxMeterEl: null,
+    ctxFillEl: null,
+    ctxTextEl: null,
+    ctxPollTimer: null
   };
 
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
   colData.deltaSessionEl = header.querySelector('[data-col-delta]');
+  colData.ctxMeterEl = header.querySelector('[data-col-ctx]');
+  colData.ctxFillEl = colData.ctxMeterEl ? colData.ctxMeterEl.querySelector('.col-ctx-fill') : null;
+  colData.ctxTextEl = colData.ctxMeterEl ? colData.ctxMeterEl.querySelector('.col-ctx-text') : null;
+  startContextMeterPoll(id);
   setFocusedColumn(id);
   if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
     var d0 = lastPlanLimitsResult.data;
@@ -3054,6 +3075,7 @@ function removeColumn(id) {
   if (timer) clearTimeout(timer);
   activityTimers.delete(id);
   stopSessionSync(id);
+  stopContextMeterPoll(id);
 
   if (!col.isDiff) wsSend({ type: 'kill', id: id });
 
@@ -7102,6 +7124,51 @@ function handleThresholdCrossings(crossings) {
     if (c.threshold === 90 && c.window === 'seven_day' && (!notifSettings || notifSettings.limitsPause !== false)) {
       promptPauseAutomations(c);
     }
+  }
+}
+
+var CTX_POLL_MS = 10000;  // 10s — JSONL grows on every assistant turn
+var CTX_LIMIT_CACHE = new Map();  // model -> max tokens, populated lazily
+
+function startContextMeterPoll(colId) {
+  var c = allColumns.get(colId);
+  if (!c || c.cmd) return;  // skip non-Claude columns (custom commands)
+  function tick() {
+    var col = allColumns.get(colId);
+    if (!col || !col.ctxMeterEl) return;
+    if (!col.sessionId) return;  // session not yet detected — try again next tick
+    if (!window.electronAPI || !window.electronAPI.getSessionContextTokens) return;
+    window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId).then(function (tokens) {
+      if (tokens == null) return;
+      var modelKey = col.model || 'sonnet';
+      var limit = CTX_LIMIT_CACHE.get(modelKey);
+      function draw() {
+        col.ctxMeterEl.removeAttribute('hidden');
+        var pct = Math.min(100, (tokens / limit) * 100);
+        col.ctxFillEl.style.width = pct + '%';
+        col.ctxFillEl.classList.toggle('warning', pct >= 70 && pct < 90);
+        col.ctxFillEl.classList.toggle('critical', pct >= 90);
+        function k(n) { return n >= 1000 ? Math.round(n / 1000) + 'k' : String(n); }
+        col.ctxTextEl.textContent = k(tokens) + '/' + k(limit);
+        col.ctxMeterEl.title = tokens.toLocaleString() + ' / ' + limit.toLocaleString() + ' tokens (' + Math.round(pct) + '%)';
+      }
+      if (limit) { draw(); return; }
+      window.electronAPI.getModelContextLimit(modelKey).then(function (lim) {
+        CTX_LIMIT_CACHE.set(modelKey, lim);
+        limit = lim;
+        draw();
+      });
+    });
+  }
+  tick();  // immediate first poll
+  c.ctxPollTimer = setInterval(tick, CTX_POLL_MS);
+}
+
+function stopContextMeterPoll(colId) {
+  var c = allColumns.get(colId);
+  if (c && c.ctxPollTimer) {
+    clearInterval(c.ctxPollTimer);
+    c.ctxPollTimer = null;
   }
 }
 
