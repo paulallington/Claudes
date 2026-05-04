@@ -1950,19 +1950,19 @@ function createColumnHeader(id, customTitle, opts) {
   });
   actions.appendChild(maximizeBtn);
 
-  var deltaPill = document.createElement('span');
-  deltaPill.className = 'col-delta-pill';
-  deltaPill.dataset.colDelta = '';
-  deltaPill.setAttribute('hidden', '');
-  deltaPill.textContent = 'Δ —';
-  actions.appendChild(deltaPill);
-
   if (!opts.isDiff) {
+    var deltaPill = document.createElement('span');
+    deltaPill.className = 'col-delta-pill';
+    deltaPill.dataset.colDelta = '';
+    deltaPill.setAttribute('hidden', '');
+    deltaPill.textContent = 'Δ —';
+    actions.appendChild(deltaPill);
+
     var restartBtn = document.createElement('span');
     restartBtn.className = 'col-restart';
     restartBtn.dataset.id = String(id);
     restartBtn.title = 'Restart';
-    restartBtn.textContent = '\u21bb';
+    restartBtn.textContent = '↻';
     actions.appendChild(restartBtn);
   }
 
@@ -2371,7 +2371,7 @@ function addColumn(args, targetRow, opts) {
     hasUserInput: false,
     notified: false,
     spawnSessionPct: null,    // five_hour.utilization at spawn time
-    spawnWeeklyPct: null,     // seven_day.utilization at spawn time
+    spawnWeeklyPct: null,  // reserved: weekly-delta pill in a follow-up task
     deltaSessionEl: null      // header element, captured below
   };
 
@@ -3118,6 +3118,14 @@ function restartColumn(id) {
 
   // Kill the current process
   wsSend({ type: 'kill', id: id });
+
+  // Re-snapshot plan-limits so the Δ pill measures from this respawn, not the first spawn
+  if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
+    var d0 = lastPlanLimitsResult.data;
+    col.spawnSessionPct = d0.five_hour ? d0.five_hour.utilization : null;
+    col.spawnWeeklyPct = d0.seven_day ? d0.seven_day.utilization : null;
+    updateColumnDeltaPills(lastPlanLimitsResult.data);
+  }
 
   // Remove any existing exit overlay
   var overlay = col.element.querySelector('.exit-overlay');
@@ -7103,9 +7111,16 @@ function updateColumnDeltaPills(data) {
   if (typeof nowSession !== 'number') return;
   allColumns.forEach(function (c) {
     if (!c.deltaSessionEl) return;
-    if (c.spawnSessionPct == null) return;
+    if (c.spawnSessionPct == null) {
+      // Late snapshot: column was spawned before plan-limits data was available.
+      // Treat this poll as the baseline so the pill becomes meaningful from now on.
+      c.spawnSessionPct = nowSession;
+      if (data.seven_day && typeof data.seven_day.utilization === 'number') {
+        c.spawnWeeklyPct = data.seven_day.utilization;
+      }
+    }
     var delta = nowSession - c.spawnSessionPct;
-    if (delta < 0) delta = 0;  // session reset mid-life — don't show negative
+    if (delta < 0) delta = 0;
     c.deltaSessionEl.removeAttribute('hidden');
     c.deltaSessionEl.textContent = 'Δ ' + delta.toFixed(1) + '%';
     c.deltaSessionEl.title =

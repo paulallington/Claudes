@@ -1110,7 +1110,7 @@ html, body {
 
 /* Hide less-critical column actions on narrow columns */
 @container (max-width: 250px) {
-  .col-action, .col-effort { display: none; }
+  .col-action, .col-effort, .col-delta-pill { display: none; }
 }
 
 .col-action {
