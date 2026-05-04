@@ -161,6 +161,7 @@
           <span id="active-project-name" class="active-project-name"></span>
         </div>
         <div class="toolbar-actions">
+          <button id="btn-broadcast" class="toolbar-btn" title="Broadcast a prompt to multiple columns">⤳</button>
           <button id="btn-automations-flyout" class="toolbar-btn" title="Automations">&#8634;</button>
           <div class="toolbar-menu-wrap">
             <button id="btn-toolbar-menu" class="toolbar-menu-btn" title="Tools &amp; settings">&#8943;</button>
@@ -662,6 +663,21 @@
         </div>
       </div>
     </div>
+
+  <div id="broadcast-popover" class="broadcast-popover hidden">
+    <div class="broadcast-header">
+      <span class="broadcast-title">Broadcast prompt</span>
+      <button id="broadcast-close" class="broadcast-close">&times;</button>
+    </div>
+    <textarea id="broadcast-text" rows="4" placeholder="Type a prompt to send to selected columns…"></textarea>
+    <div id="broadcast-targets" class="broadcast-targets"></div>
+    <div class="broadcast-actions">
+      <label class="broadcast-press-enter">
+        <input type="checkbox" id="broadcast-press-enter" checked> Press Enter after send
+      </label>
+      <button id="broadcast-send" class="broadcast-send-btn">Send to selected</button>
+    </div>
+  </div>
 
   <script src="./node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="./node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>

@@ -10750,3 +10750,70 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     updateBar.classList.remove('hidden');
   };
 })();
+
+(function setupBroadcast() {
+  var btn = document.getElementById('btn-broadcast');
+  var popover = document.getElementById('broadcast-popover');
+  var closeBtn = document.getElementById('broadcast-close');
+  var sendBtn = document.getElementById('broadcast-send');
+  var textEl = document.getElementById('broadcast-text');
+  var targetsEl = document.getElementById('broadcast-targets');
+  var pressEnterEl = document.getElementById('broadcast-press-enter');
+  if (!btn || !popover) return;
+
+  function refreshTargets() {
+    targetsEl.innerHTML = '';
+    var any = false;
+    allColumns.forEach(function (c, id) {
+      if (c.cmd) return;  // only Claude columns
+      if (c.isDiff) return;
+      any = true;
+      var label = document.createElement('label');
+      label.className = 'broadcast-target';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.dataset.colId = id;
+      cb.checked = true;
+      var span = document.createElement('span');
+      var title = c.customTitle || c.cwd || ('column ' + id);
+      span.textContent = title;
+      label.appendChild(cb);
+      label.appendChild(span);
+      targetsEl.appendChild(label);
+    });
+    if (!any) {
+      var empty = document.createElement('div');
+      empty.className = 'broadcast-target';
+      empty.style.opacity = '0.6';
+      empty.textContent = 'No Claude columns open.';
+      targetsEl.appendChild(empty);
+    }
+  }
+
+  btn.addEventListener('click', function () {
+    refreshTargets();
+    popover.classList.remove('hidden');
+    textEl.focus();
+  });
+  closeBtn.addEventListener('click', function () { popover.classList.add('hidden'); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !popover.classList.contains('hidden')) {
+      popover.classList.add('hidden');
+    }
+  });
+
+  sendBtn.addEventListener('click', function () {
+    var text = textEl.value;
+    if (!text) return;
+    var checks = targetsEl.querySelectorAll('input[type=checkbox]:checked');
+    var pressEnter = pressEnterEl.checked;
+    checks.forEach(function (cb) {
+      var id = parseInt(cb.dataset.colId, 10);
+      var col = allColumns.get(id);
+      if (!col) return;
+      wsSend({ type: 'write', id: id, data: text + (pressEnter ? '\r' : '') });
+    });
+    popover.classList.add('hidden');
+    textEl.value = '';
+  });
+})();
