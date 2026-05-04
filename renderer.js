@@ -1318,6 +1318,30 @@ function removeRowIfEmpty(state, row) {
   }
 
   state.rows.splice(idx, 1);
+
+  // Surviving rows may carry stuck inline `flex: none; height: <px>` left over from a prior
+  // row-resize drag — without redistribution they stay locked at pre-collapse pixel heights.
+  if (state.rows.length > 0) {
+    var hidden = !!(state.containerEl && state.containerEl.offsetParent === null);
+    var heights = [];
+    for (var i = 0; i < state.rows.length; i++) {
+      var h;
+      if (hidden) {
+        h = (typeof state.rows[i].lastHeightRatio === 'number' && state.rows[i].lastHeightRatio > 0)
+          ? state.rows[i].lastHeightRatio
+          : 1;
+      } else {
+        h = state.rows[i].el.getBoundingClientRect().height;
+      }
+      heights.push(h);
+    }
+    var ratios = window.RowLayout.computeProportionalRowRatios(heights);
+    for (var j = 0; j < state.rows.length; j++) {
+      state.rows[j].el.style.flex = ratios[j] + ' 1 0';
+      state.rows[j].el.style.height = '';
+      state.rows[j].lastHeightRatio = ratios[j];
+    }
+  }
 }
 
 function applyLayoutRatios(state, entries, rowHeightByIdx, rowsByIdx) {
