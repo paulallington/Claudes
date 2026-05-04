@@ -3529,6 +3529,22 @@ window.addEventListener('resize', function () {
   resizeTimeout = setTimeout(refitAll, 100);
 });
 
+// On Windows, when the OS window loses focus mid-keypress (Alt-Tab, Win+arrow
+// snap, foreground steal), the keyup for held modifiers never reaches xterm's
+// hidden textarea — leaving Space/Shift "stuck" until the user manually
+// refocuses. Bounce the active terminal's focus on every window focus change
+// so xterm's input state resets cleanly.
+window.addEventListener('blur', function () {
+  var state = getActiveState();
+  if (state && state.focusedColumnId !== null) {
+    var col = allColumns.get(state.focusedColumnId);
+    if (col && col.terminal) col.terminal.blur();
+  }
+});
+window.addEventListener('focus', function () {
+  refocusActiveTerminal();
+});
+
 // ============================================================
 // Keyboard Shortcuts
 // ============================================================
@@ -6835,11 +6851,242 @@ function projectKeyToName(key) {
   return parts[parts.length - 1] || key;
 }
 
+function fmtResetsIn(iso) {
+  if (!iso) return '—';
+  var diff = new Date(iso).getTime() - Date.now();
+  if (diff <= 0) return 'now';
+  var hr = Math.floor(diff / 3600000);
+  var min = Math.floor((diff % 3600000) / 60000);
+  if (hr === 0) return min + ' min';
+  return hr + ' hr ' + min + ' min';
+}
+
+function buildPlanLimitRow(label, sub, pct) {
+  var row = document.createElement('div');
+  row.className = 'plan-limit-row';
+
+  var meta = document.createElement('div');
+  meta.className = 'plan-limit-meta';
+  var lbl = document.createElement('div');
+  lbl.className = 'plan-limit-label';
+  lbl.textContent = label;
+  var subEl = document.createElement('div');
+  subEl.className = 'plan-limit-sub';
+  subEl.textContent = sub;
+  meta.appendChild(lbl);
+  meta.appendChild(subEl);
+
+  var bar = document.createElement('div');
+  bar.className = 'plan-limit-bar';
+  var fill = document.createElement('div');
+  fill.className = 'plan-limit-bar-fill';
+  fill.style.width = Math.min(100, Math.max(0, pct)) + '%';
+  if (pct >= 90) fill.classList.add('critical');
+  else if (pct >= 70) fill.classList.add('warning');
+  bar.appendChild(fill);
+
+  var pctEl = document.createElement('div');
+  pctEl.className = 'plan-limit-pct';
+  pctEl.textContent = Math.round(pct) + '% used';
+
+  row.appendChild(meta);
+  row.appendChild(bar);
+  row.appendChild(pctEl);
+  return row;
+}
+
+function renderPlanLimits(result) {
+  var container = document.getElementById('plan-limits-section');
+  if (!container) return;
+  container.innerHTML = '';
+
+  var header = document.createElement('div');
+  header.className = 'plan-limits-header';
+  var title = document.createElement('div');
+  title.className = 'plan-limits-title';
+  title.textContent = 'Plan limits';
+  var refreshBtn = document.createElement('button');
+  refreshBtn.className = 'plan-limits-refresh';
+  refreshBtn.title = 'Refresh';
+  refreshBtn.textContent = '↻';
+  refreshBtn.addEventListener('click', function () { loadPlanLimits(true); });
+  header.appendChild(title);
+  header.appendChild(refreshBtn);
+  container.appendChild(header);
+
+  if (!result || !result.ok) {
+    var msg = document.createElement('div');
+    msg.className = 'plan-limits-error';
+    msg.textContent = (result && result.message) || 'Plan limits unavailable.';
+    container.appendChild(msg);
+    return;
+  }
+
+  var d = result.data || {};
+  var rows = [];
+  if (d.five_hour) {
+    rows.push(['Current session', 'Resets in ' + fmtResetsIn(d.five_hour.resets_at), d.five_hour.utilization || 0]);
+  }
+  if (d.seven_day) {
+    rows.push(['All models (weekly)', 'Resets in ' + fmtResetsIn(d.seven_day.resets_at), d.seven_day.utilization || 0]);
+  }
+  if (d.seven_day_opus) {
+    rows.push(['Opus only (weekly)', 'Resets in ' + fmtResetsIn(d.seven_day_opus.resets_at), d.seven_day_opus.utilization || 0]);
+  }
+  if (d.seven_day_sonnet) {
+    rows.push(['Sonnet only (weekly)', 'Resets in ' + fmtResetsIn(d.seven_day_sonnet.resets_at), d.seven_day_sonnet.utilization || 0]);
+  }
+  if (d.seven_day_omelette) {
+    rows.push(['Claude Design (weekly)', d.seven_day_omelette.resets_at ? 'Resets in ' + fmtResetsIn(d.seven_day_omelette.resets_at) : 'Not used yet', d.seven_day_omelette.utilization || 0]);
+  }
+
+  if (rows.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'plan-limits-error';
+    empty.textContent = 'No plan limits returned.';
+    container.appendChild(empty);
+    return;
+  }
+
+  var list = document.createElement('div');
+  list.className = 'plan-limits-list';
+  for (var i = 0; i < rows.length; i++) {
+    list.appendChild(buildPlanLimitRow(rows[i][0], rows[i][1], rows[i][2]));
+  }
+  container.appendChild(list);
+
+  if (result.fetchedAt) {
+    var foot = document.createElement('div');
+    foot.className = 'plan-limits-footer';
+    var ago = Math.max(0, Math.round((Date.now() - result.fetchedAt) / 1000));
+    foot.textContent = 'Last updated: ' + (ago < 5 ? 'just now' : ago + 's ago') + (result.cached ? ' (cached)' : '');
+    container.appendChild(foot);
+  }
+}
+
+// Most recent plan-limits result (used by both the Usage modal panel and the
+// persistent sidebar mini-bar). Refreshed by loadPlanLimits().
+var lastPlanLimitsResult = null;
+
+function renderPlanLimitsMini(result) {
+  var el = document.getElementById('plan-limits-mini');
+  if (!el) return;
+  if (!result || !result.ok || !result.data) {
+    el.classList.add('hidden');
+    return;
+  }
+  var d = result.data;
+  // Hide if the API returned nothing useful (e.g. API-key user).
+  if (!d.five_hour && !d.seven_day) {
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.remove('hidden');
+  el.innerHTML = '';
+
+  function row(label, slot) {
+    if (!slot) return null;
+    var pct = slot.utilization || 0;
+    var r = document.createElement('div');
+    r.className = 'plan-limits-mini-row';
+    var lbl = document.createElement('span');
+    lbl.className = 'plan-limits-mini-label';
+    lbl.textContent = label;
+    var bar = document.createElement('div');
+    bar.className = 'plan-limits-mini-bar';
+    var fill = document.createElement('div');
+    fill.className = 'plan-limits-mini-fill';
+    fill.style.width = Math.min(100, Math.max(0, pct)) + '%';
+    if (pct >= 90) fill.classList.add('critical');
+    else if (pct >= 70) fill.classList.add('warning');
+    bar.appendChild(fill);
+    var pctEl = document.createElement('span');
+    pctEl.className = 'plan-limits-mini-pct';
+    pctEl.textContent = Math.round(pct) + '%';
+    r.appendChild(lbl);
+    r.appendChild(bar);
+    r.appendChild(pctEl);
+    return r;
+  }
+
+  var sessionRow = row('Session', d.five_hour);
+  var weekRow = row('Week', d.seven_day);
+  if (sessionRow) el.appendChild(sessionRow);
+  if (weekRow) el.appendChild(weekRow);
+}
+
+function loadPlanLimits(force) {
+  var container = document.getElementById('plan-limits-section');
+  // Only show the modal's loading state when the modal is actually open and
+  // we don't already have data to display from a prior background poll.
+  if (container && !force && !usageModal.classList.contains('hidden') && !lastPlanLimitsResult) {
+    container.innerHTML = '<div class="plan-limits-loading">Loading plan limits…</div>';
+  }
+  if (!window.electronAPI || !window.electronAPI.getPlanLimits) {
+    var miss = { ok: false, message: 'Plan limits API not available.' };
+    lastPlanLimitsResult = miss;
+    renderPlanLimits(miss);
+    renderPlanLimitsMini(miss);
+    return Promise.resolve(miss);
+  }
+  return window.electronAPI.getPlanLimits(!!force).then(function (r) {
+    lastPlanLimitsResult = r;
+    if (!usageModal.classList.contains('hidden')) renderPlanLimits(r);
+    renderPlanLimitsMini(r);
+    return r;
+  }).catch(function (e) {
+    var err = { ok: false, message: e && e.message ? e.message : String(e) };
+    lastPlanLimitsResult = err;
+    if (!usageModal.classList.contains('hidden')) renderPlanLimits(err);
+    renderPlanLimitsMini(err);
+    return err;
+  });
+}
+
+// Background polling for the sidebar mini-bar.
+//   - Refresh on window focus if data is older than 2 minutes
+//   - Poll every 5 minutes while window is focused
+//   - Pause polling while window is blurred (no token noise when away)
+var PLAN_LIMITS_POLL_MS = 60 * 1000;
+var PLAN_LIMITS_FOCUS_STALE_MS = 60 * 1000;
+var planLimitsPollTimer = null;
+
+function startPlanLimitsPolling() {
+  if (planLimitsPollTimer) return;
+  planLimitsPollTimer = setInterval(function () { loadPlanLimits(false); }, PLAN_LIMITS_POLL_MS);
+}
+function stopPlanLimitsPolling() {
+  if (planLimitsPollTimer) { clearInterval(planLimitsPollTimer); planLimitsPollTimer = null; }
+}
+
+window.addEventListener('focus', function () {
+  var age = lastPlanLimitsResult && lastPlanLimitsResult.fetchedAt
+    ? Date.now() - lastPlanLimitsResult.fetchedAt
+    : Infinity;
+  if (age > PLAN_LIMITS_FOCUS_STALE_MS) loadPlanLimits(false);
+  startPlanLimitsPolling();
+});
+window.addEventListener('blur', stopPlanLimitsPolling);
+
+// Initial fetch on app start, only if the page already has focus.
+if (document.hasFocus()) {
+  loadPlanLimits(false);
+  startPlanLimitsPolling();
+}
+
+// Click the mini-bar to open the full Usage modal.
+(function () {
+  var mini = document.getElementById('plan-limits-mini');
+  if (mini) mini.addEventListener('click', openUsageModal);
+})();
+
 function openUsageModal() {
   usageModal.classList.remove('hidden');
   usageLoading.style.display = '';
   usageContent.classList.add('hidden');
   usageSubtitle.textContent = '';
+
+  loadPlanLimits(false);
 
   window.electronAPI.getUsage().then(function (data) {
     usageData = data;

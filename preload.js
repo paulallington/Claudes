@@ -51,6 +51,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readEnvFile: (filePath) => ipcRenderer.invoke('launch:readEnvFile', filePath),
   saveRecentLaunches: (projectPath, recent) => ipcRenderer.invoke('launch:saveRecentLaunches', projectPath, recent),
   getUsage: () => ipcRenderer.invoke('usage:getAll'),
+  getPlanLimits: (force) => ipcRenderer.invoke('usage:getPlanLimits', force),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   onUpdateAvailable: (callback) => ipcRenderer.on('update:available', (_, info) => callback(info)),
   onUpdateDownloaded: (callback) => ipcRenderer.on('update:downloaded', (_, info) => callback(info)),

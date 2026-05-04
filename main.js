@@ -1602,6 +1602,52 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
+// Plan-usage limits (Max/Pro plan: 5h session, 7d weekly, etc.). Calls the
+// undocumented OAuth-authed endpoint that Claude Code's /usage uses, reading
+// the bearer token from the CLI's credentials file. Cached briefly because the
+// server-side data updates on its own cadence and we don't want to hammer it.
+const PLAN_USAGE_CACHE_MS = 30_000;
+let planUsageCache = { data: null, fetchedAt: 0 };
+
+ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
+  const now = Date.now();
+  if (!force && planUsageCache.data && (now - planUsageCache.fetchedAt) < PLAN_USAGE_CACHE_MS) {
+    return { ok: true, data: planUsageCache.data, fetchedAt: planUsageCache.fetchedAt, cached: true };
+  }
+
+  const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
+  let token;
+  try {
+    const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
+    token = creds?.claudeAiOauth?.accessToken;
+  } catch {
+    return { ok: false, error: 'no-creds', message: 'Could not read ~/.claude/.credentials.json — Claude Code not logged in?' };
+  }
+  if (!token) {
+    return { ok: false, error: 'no-oauth', message: 'No OAuth token found (API-key users do not have plan limits).' };
+  }
+
+  try {
+    const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'anthropic-beta': 'oauth-2025-04-20'
+      }
+    });
+    if (res.status === 401) {
+      return { ok: false, error: 'unauthorized', message: 'OAuth token expired. Run any Claude Code command to refresh.' };
+    }
+    if (!res.ok) {
+      return { ok: false, error: 'http-' + res.status, message: 'Usage endpoint returned HTTP ' + res.status };
+    }
+    const data = await res.json();
+    planUsageCache = { data, fetchedAt: now };
+    return { ok: true, data, fetchedAt: now, cached: false };
+  } catch (e) {
+    return { ok: false, error: 'fetch-failed', message: e.message };
+  }
+});
+
 ipcMain.handle('usage:getAll', async () => {
   const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
   const results = [];
