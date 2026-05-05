@@ -105,32 +105,43 @@ wss.on('connection', (ws) => {
       case 'create': {
         const { id, cols, rows, cwd, args, cmd, env } = msg;
 
-        // On Windows, wrap non-Claude commands in cmd.exe /c so conpty
-        // properly flushes output before the process exits
-        let spawnCmd, spawnArgs;
-        if (cmd && process.platform === 'win32') {
-          spawnCmd = 'cmd.exe';
-          spawnArgs = ['/c', cmd, ...(args || [])];
-        } else {
-          spawnCmd = cmd || CLAUDE_PATH;
-          spawnArgs = args || [];
-        }
+        // Spawn directly so the child process owns the conpty: this matters
+        // for interactive long-running run-tab launches (dotnet run, blazor,
+        // npm start, python REPL) — under a cmd.exe /c wrapper the inner
+        // process saw a piped stdout and switched to buffered/non-interactive
+        // mode, hiding streaming output and breaking stdin/Ctrl+C delivery.
+        // The 200ms exit-delay below covers the "flush before exit" case for
+        // short-lived commands, so the wrapper is no longer needed.
+        const ptyOpts = {
+          name: 'xterm-256color',
+          cols: cols || 120,
+          rows: rows || 30,
+          cwd: cwd || process.cwd(),
+          env: env ? { ...process.env, ...env } : { ...process.env }
+        };
 
         let p;
         try {
-          p = pty.spawn(spawnCmd, spawnArgs, {
-            name: 'xterm-256color',
-            cols: cols || 120,
-            rows: rows || 30,
-            cwd: cwd || process.cwd(),
-            env: env ? { ...process.env, ...env } : { ...process.env }
-          });
+          p = pty.spawn(cmd || CLAUDE_PATH, args || [], ptyOpts);
         } catch (err) {
-          console.error('Failed to spawn pty:', err.message);
-          try {
-            ws.send(JSON.stringify({ type: 'exit', id, exitCode: 1 }));
-          } catch { /* ws closed */ }
-          break;
+          // Direct spawn failed — usually because the bare name didn't
+          // resolve via PATHEXT (e.g. .cmd shims like npm.cmd, yarn.cmd).
+          // Fall back to cmd.exe /c on Windows so the shell does the
+          // resolution. Output streaming for the inner process won't be
+          // as good under the wrapper, but at least it'll launch.
+          if (cmd && process.platform === 'win32') {
+            try {
+              p = pty.spawn('cmd.exe', ['/c', cmd, ...(args || [])], ptyOpts);
+            } catch (err2) {
+              console.error('Failed to spawn pty (direct + cmd.exe fallback):', err.message, '/', err2.message);
+              try { ws.send(JSON.stringify({ type: 'exit', id, exitCode: 1 })); } catch { /* ws closed */ }
+              break;
+            }
+          } else {
+            console.error('Failed to spawn pty:', err.message);
+            try { ws.send(JSON.stringify({ type: 'exit', id, exitCode: 1 })); } catch { /* ws closed */ }
+            break;
+          }
         }
 
         ptys.set(id, p);

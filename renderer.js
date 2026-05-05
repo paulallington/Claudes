@@ -533,10 +533,27 @@ function connectWS() {
             setColumnActivity(msg.id, 'working');
           }
         }
-        // Auto-open browser when server starts listening
-        if (col.launchUrl && !col.launchUrlOpened && msg.data.indexOf('Now listening on') !== -1) {
-          col.launchUrlOpened = true;
-          window.electronAPI.openExternal(col.launchUrl);
+        // Auto-open browser when server starts listening. Parse the actual
+        // URL out of the dotnet/asp.net log line ("Now listening on:
+        // https://localhost:7142") rather than using the configured
+        // applicationUrl — .NET's launchSettings.json stores the latter as a
+        // semicolon-separated list (e.g. "https://...;http://..."), which
+        // shell.openExternal can't interpret as a URL on Windows and falls
+        // through to opening File Explorer.
+        if (col.launchUrl && !col.launchUrlOpened) {
+          var nlMatch = msg.data.match(/Now listening on:\s*(https?:\/\/[^\s\r\n]+)/i);
+          if (nlMatch) {
+            col.launchUrlOpened = true;
+            // Kestrel often binds to "any address" (e.g. http://[::]:8080,
+            // http://0.0.0.0:8080, http://+:8080, http://*:8080) and logs that
+            // verbatim. Browsers can't navigate to those — rewrite to
+            // localhost so the auto-open lands on a connectable URL.
+            var openUrl = nlMatch[1].replace(
+              /^(https?:\/\/)(\[::\]|\[::0\]|0\.0\.0\.0|\+|\*)(:|\/|$)/i,
+              '$1localhost$3'
+            );
+            window.electronAPI.openExternal(openUrl);
+          }
         }
       }
     } else if (msg.type === 'exit') {
@@ -1791,6 +1808,7 @@ function setActiveProject(index, isStartup, skipDefaultSpawn) {
   config.activeProjectIndex = index;
   activeProjectKey = newKey;
   activeProjectNameEl.textContent = project.name;
+  if (typeof window.__rerenderHookList === 'function') window.__rerenderHookList();
 
   // Show branch in toolbar
   if (window.electronAPI && window.electronAPI.gitBranch) {
@@ -7734,6 +7752,8 @@ function renderPlanLimitsMini(result) {
   var weekRow = row('Week', d.seven_day);
   if (sessionRow) el.appendChild(sessionRow);
   if (weekRow) el.appendChild(weekRow);
+  // Re-attach the hover popover after innerHTML wipe.
+  if (typeof updatePlanLimitsPopover === 'function') updatePlanLimitsPopover();
 }
 
 function loadPlanLimits(force) {
@@ -8016,17 +8036,59 @@ document.addEventListener('focusin', function (e) {
   });
 });
 
-// Initial fetch on app start, only if the page already has focus.
-if (document.hasFocus()) {
-  loadPlanLimits(false);
-  startPlanLimitsPolling();
-}
+// Initial fetch on app start. Previously gated behind document.hasFocus(),
+// which meant a backgrounded launch (auto-start, taskbar click) left the
+// mini-bar empty until focus returned. Just fire the fetch — it's cheap.
+loadPlanLimits(false);
+startPlanLimitsPolling();
 
 // Click the mini-bar to open the full Usage modal.
 (function () {
   var mini = document.getElementById('plan-limits-mini');
   if (mini) mini.addEventListener('click', openUsageModal);
 })();
+
+// Live-update the hover popover's content whenever new plan-limits data
+// arrives. Popover is a child of #plan-limits-mini and is shown via CSS
+// :hover — no JS event listener required, which sidesteps any pointer-event
+// or stacking-context issue blocking mouseenter on the parent.
+function updatePlanLimitsPopover() {
+  var mini = document.getElementById('plan-limits-mini');
+  if (!mini) return;
+  var pop = mini.querySelector('.plan-limits-mini-popover');
+  if (!pop) {
+    pop = document.createElement('div');
+    pop.className = 'plan-limits-mini-popover';
+    mini.appendChild(pop);
+  }
+  function fmtSlot(label, slot) {
+    if (!slot) return '';
+    var pct = Math.round(slot.utilization || 0);
+    var html = '<div class="plan-limits-popover-slot">' +
+      '<div class="plan-limits-popover-row">' +
+        '<span class="plan-limits-popover-label">' + label + '</span>' +
+        '<span class="plan-limits-popover-pct">' + pct + '%</span>' +
+      '</div>';
+    if (slot.resets_at) {
+      var when = new Date(slot.resets_at);
+      var hhmm = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      var datePart = when.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+      html += '<div class="plan-limits-popover-sub">Resets ' + datePart +
+        ' at ' + hhmm + ' (in ' + fmtResetsIn(slot.resets_at) + ')</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+  var d = lastGoodPlanLimitsData;
+  var inner = '';
+  if (d) {
+    inner += fmtSlot('Session', d.five_hour);
+    inner += fmtSlot('Week', d.seven_day);
+  }
+  if (!inner) inner = '<div class="plan-limits-popover-sub">Loading usage…</div>';
+  inner += '<div class="plan-limits-popover-hint">Click for full usage</div>';
+  pop.innerHTML = inner;
+}
 
 function openUsageModal() {
   usageModal.classList.remove('hidden');
@@ -12068,7 +12130,19 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     return '';
   }
 
+  function normPath(p) {
+    return typeof p === 'string' ? p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : '';
+  }
+
+  function eventMatchesActiveProject(ev) {
+    if (!activeProjectKey) return true;  // no project active — show everything
+    var evCwd = normPath(ev.cwd);
+    if (!evCwd) return false;  // no cwd on event — can't scope, hide
+    return evCwd === normPath(activeProjectKey);
+  }
+
   function eventMatchesFilter(ev) {
+    if (!eventMatchesActiveProject(ev)) return false;
     if (!filterQuery) return true;
     var q = filterQuery.toLowerCase();
     var hay = (ev.event || '') + ' ' + (ev.tool_name || '') + ' ' + (ev.session_id || '') + ' ' + JSON.stringify(ev.tool_input || {});
@@ -12236,6 +12310,10 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     });
     listEl.scrollTop = listEl.scrollHeight;
   }
+
+  // Re-scope the visible list when the user switches projects — same as
+  // the Files / Git / Run / Automations tabs do.
+  window.__rerenderHookList = rerender;
 
   filterEl.addEventListener('input', function () {
     filterQuery = filterEl.value.trim();

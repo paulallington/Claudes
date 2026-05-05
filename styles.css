@@ -313,7 +313,8 @@ html, body {
   -webkit-app-region: drag;
 }
 
-#sidebar button, #sidebar .project-item, #sidebar .project-remove {
+#sidebar button, #sidebar .project-item, #sidebar .project-remove,
+#sidebar .plan-limits-mini {
   -webkit-app-region: no-drag;
 }
 
@@ -4102,6 +4103,7 @@ html, body {
 /* Sidebar mini bar — compact session + weekly indicator. */
 
 .plan-limits-mini {
+  position: relative;
   margin: 4px 8px 8px;
   padding: 8px 10px;
   background: var(--bg-deep);
@@ -4112,6 +4114,7 @@ html, body {
   gap: 4px;
   cursor: pointer;
   transition: border-color 120ms ease;
+  overflow: visible;
 }
 
 .plan-limits-mini:hover {
@@ -4154,6 +4157,81 @@ html, body {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+/* Hover popover for the sidebar mini bar — instant, CSS-only :hover trigger.
+   Anchored to the bar's left edge and grows rightward into the explorer
+   area; right-anchoring would push the popover out past the sidebar's
+   left edge where it gets clipped by the viewport. */
+.plan-limits-mini-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 999999;
+  min-width: 280px;
+  width: max-content;
+  max-width: 380px;
+  padding: 14px 16px;
+  background: #1c1c2c;
+  border: 1px solid var(--border-strong, #2a2a3a);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  font-size: 12px;
+  color: var(--text-primary, #e6e6e6);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 80ms ease, transform 80ms ease;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.plan-limits-mini:hover .plan-limits-mini-popover {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.plan-limits-popover-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plan-limits-popover-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+}
+
+.plan-limits-popover-label {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text-primary, #e6e6e6);
+  letter-spacing: 0.2px;
+}
+
+.plan-limits-popover-pct {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--text-primary, #e6e6e6);
+}
+
+.plan-limits-popover-sub {
+  font-size: 11px;
+  color: var(--text-dim, #9098b0);
+  line-height: 1.45;
+}
+
+.plan-limits-popover-hint {
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  font-size: 10.5px;
+  color: var(--text-dimmer, #6c7388);
+  text-align: center;
+  letter-spacing: 0.3px;
 }
 
 .usage-card-label {
