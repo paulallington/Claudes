@@ -52,6 +52,7 @@ var endpointPresets = [];        // [{ id, name, baseUrl, model, hasToken }]
 var currentEndpointId = null;    // active project's selected preset id (null = Anthropic)
 var currentEndpointModel = null; // user-selected model override for active project (null = use preset default)
 var currentEndpointEnv = null;   // env block returned by endpoint:getEnv, or null
+var firstSpawnLoadComplete = false;  // gate for cloud-default-on-boot
 // Cache of fetched models per endpoint id to avoid refetching on every selection.
 // { [endpointId]: { models: string[], fetchedAt: number, ok: boolean } }
 var endpointModelsCache = {};
@@ -541,6 +542,17 @@ function connectWS() {
     } else if (msg.type === 'exit') {
       var col2 = allColumns.get(msg.id);
       if (col2) {
+        // Endpoint failover: if this is a Claude column that died early with a
+        // non-zero exit code, and the column was spawned with an endpoint that
+        // has a fallback configured, transparently respawn with the fallback
+        // before showing the user an exit overlay.
+        var lifetime = (typeof msg.lifetime_ms === 'number') ? msg.lifetime_ms : Infinity;
+        var earlyExit = lifetime < 5000;
+        var nonZero = msg.exitCode !== 0 && msg.exitCode != null;
+        if (!col2.cmd && earlyExit && nonZero && col2.endpointId && !col2.failedOver) {
+          tryEndpointFailover(msg.id);
+          return;  // skip the default exit overlay; respawn replaces the column in place
+        }
         col2.element.appendChild(createExitOverlay(msg.id, msg.exitCode, col2));
         setColumnActivity(msg.id, 'exited');
         // Refresh run configs to update stop/restart controls
@@ -838,6 +850,136 @@ function refocusActiveTerminal() {
     var col = allColumns.get(state.focusedColumnId);
     if (col && col.terminal) col.terminal.focus();
   }
+}
+
+// Snippet expansion: when the user types "\\trigger" + Enter/Tab in a Claude
+// column, look up the snippet, prompt for any {{variables}}, then erase the
+// typed trigger and send the expanded body via the pty.
+//
+// Returns true if the keystroke was consumed (caller must NOT forward to pty),
+// or false if the keystroke should pass through normally.
+function handleSnippetExpansion(colId, data) {
+  var col = allColumns.get(colId);
+  if (!col) return false;
+  if (typeof col.snippetBuffer !== 'string') col.snippetBuffer = '';
+
+  // Backspace handling: pop one char off our buffer; let the pty handle echo
+  if (data === '\x7f' || data === '\b') {
+    col.snippetBuffer = col.snippetBuffer.slice(0, -1);
+    return false;
+  }
+
+  // Enter / Tab — try to expand. xterm may send '\r', '\n', '\r\n', or '\t';
+  // accept any input that contains an Enter/Tab char.
+  var isEnterTab = data === '\r' || data === '\n' || data === '\t' ||
+                   data === '\r\n' || data === '\n\r';
+  if (isEnterTab) {
+    var m = /\\\\([a-zA-Z0-9_-]+)\s*$/.exec(col.snippetBuffer);
+    if (m) {
+      var trig = m[1];
+      var cache = window.__snippetsCache || [];
+      var snip = cache.find(function (s) { return s.trigger === trig; });
+      if (snip) {
+        // Eat the keystroke now; run the async expansion separately. We can't
+        // use window.prompt() — Electron disables it. promptForValue() is an
+        // inline DOM modal that returns Promise<string|null>.
+        var triggerLen = m[0].length;
+        var trailing = (data === '\r' || data === '\n' || data === '\r\n' || data === '\n\r') ? '\r' : '';
+        col.snippetBuffer = '';
+        runSnippetExpansion(colId, snip, triggerLen, trailing);
+        return true;
+      }
+    }
+    // No match — clear buffer and let the keystroke pass through
+    col.snippetBuffer = '';
+    return false;
+  }
+
+  // Accumulate single printable chars (length 1, >= space) into the buffer.
+  // Bigger chunks (paste) reset rather than accumulate, since multi-char
+  // pastes don't represent typed triggers.
+  if (data.length === 1 && data >= ' ') {
+    col.snippetBuffer += data;
+    if (col.snippetBuffer.length > 200) col.snippetBuffer = col.snippetBuffer.slice(-200);
+  } else if (data.length > 1) {
+    col.snippetBuffer = '';
+  }
+  return false;
+}
+
+// Async snippet expansion: collects {{var}} values one-by-one via an inline
+// modal, then erases the typed trigger and sends the expanded body to the
+// column's pty. Cancel aborts cleanly.
+function runSnippetExpansion(colId, snip, triggerLen, trailing) {
+  var body = snip.body || '';
+  var varNames = [];
+  body.replace(/\{\{(\w+)\}\}/g, function (_, n) {
+    if (varNames.indexOf(n) === -1) varNames.push(n);
+    return _;
+  });
+  var values = {};
+  function next(i) {
+    if (i >= varNames.length) {
+      var expanded = body.replace(/\{\{(\w+)\}\}/g, function (_, n) { return values[n] || ''; });
+      var eraseStr = '';
+      for (var ei = 0; ei < triggerLen; ei++) eraseStr += '\b \b';
+      wsSend({ type: 'write', id: colId, data: eraseStr + expanded + trailing });
+      return;
+    }
+    promptForValue('Value for {{' + varNames[i] + '}}:').then(function (v) {
+      if (v === null) return;  // cancelled — abort the whole expansion
+      values[varNames[i]] = v;
+      next(i + 1);
+    });
+  }
+  next(0);
+}
+
+// Inline async prompt: returns Promise<string|null>. null = cancelled.
+// Replacement for window.prompt() which Electron disables.
+function promptForValue(message) {
+  return new Promise(function (resolve) {
+    var overlay = document.createElement('div');
+    overlay.className = 'snippet-prompt-overlay';
+    var dialog = document.createElement('div');
+    dialog.className = 'snippet-prompt-dialog';
+    var label = document.createElement('div');
+    label.className = 'snippet-prompt-label';
+    label.textContent = message;
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'snippet-prompt-input';
+    var actions = document.createElement('div');
+    actions.className = 'snippet-prompt-actions';
+    var cancel = document.createElement('button');
+    cancel.className = 'snippet-prompt-cancel';
+    cancel.textContent = 'Cancel';
+    var ok = document.createElement('button');
+    ok.className = 'snippet-prompt-ok';
+    ok.textContent = 'OK';
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    dialog.appendChild(label);
+    dialog.appendChild(input);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    setTimeout(function () { input.focus(); }, 0);
+
+    function done(value) {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      resolve(value);
+    }
+    ok.addEventListener('click', function () { done(input.value); });
+    cancel.addEventListener('click', function () { done(null); });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); done(input.value); }
+      else if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    });
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) done(null);
+    });
+  });
 }
 
 function saveColumnCounts() {
@@ -2291,6 +2433,7 @@ function addColumn(args, targetRow, opts) {
   });
 
   terminal.onData(function (data) {
+    if (handleSnippetExpansion(id, data)) return;  // consumed by snippet expansion
     wsSend({ type: 'write', id: id, data: data });
     var c = allColumns.get(id);
     if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
@@ -2389,7 +2532,10 @@ function addColumn(args, targetRow, opts) {
     ctxMeterEl: null,
     ctxFillEl: null,
     ctxTextEl: null,
-    ctxPollTimer: null
+    ctxPollTimer: null,
+    snippetBuffer: '',  // accumulates printable chars to detect "\\trigger" patterns
+    endpointId: opts.endpointId || (typeof currentEndpointId !== 'undefined' ? currentEndpointId : null) || null,
+    failedOver: false  // set true after one failover so we don't ping-pong
   };
 
   row.columnIds.push(id);
@@ -3169,6 +3315,58 @@ function restartColumn(id) {
   if (col.env) sendMsg.env = col.env;
   wsSend(sendMsg);
   setColumnActivity(id, 'working');
+}
+
+function tryEndpointFailover(colId) {
+  var col = allColumns.get(colId);
+  if (!col || col.failedOver) return;
+  if (!window.electronAPI || !window.electronAPI.endpointGet || !window.electronAPI.endpointGetEnv) return;
+  window.electronAPI.endpointGet(col.endpointId).then(function (preset) {
+    if (!preset || !preset.fallbackId) {
+      // No fallback configured — fall through to the normal exit overlay path.
+      col.element.appendChild(createExitOverlay(colId, null, col));
+      setColumnActivity(colId, 'exited');
+      return;
+    }
+    return window.electronAPI.endpointGetEnv(preset.fallbackId).then(function (envBlock) {
+      if (!envBlock) {
+        col.element.appendChild(createExitOverlay(colId, null, col));
+        setColumnActivity(colId, 'exited');
+        return;
+      }
+      col.failedOver = true;
+      col.endpointId = preset.fallbackId;
+      col.env = envBlock;
+
+      // Header badge
+      if (col.headerEl && !col.headerEl.querySelector('.col-failover-badge')) {
+        var badge = document.createElement('span');
+        badge.className = 'col-failover-badge';
+        badge.textContent = '↺ failover';
+        badge.title = 'Auto-failed-over to ' + preset.fallbackId;
+        col.headerEl.appendChild(badge);
+      }
+
+      // Re-create the pty with the same column id and the fallback env.
+      // Reuse existing args (--resume sessionId if present) so the user keeps their place.
+      try { col.terminal.clear(); } catch (e) {}
+      col.fitAddon.fit();
+      var respawnMsg = {
+        type: 'create',
+        id: colId,
+        cols: col.terminal.cols,
+        rows: col.terminal.rows,
+        cwd: col.cwd,
+        args: col.sessionId ? ['--resume', col.sessionId] : (col.cmdArgs || [])
+      };
+      respawnMsg.env = envBlock;
+      wsSend(respawnMsg);
+      setColumnActivity(colId, 'working');
+    });
+  }).catch(function () {
+    col.element.appendChild(createExitOverlay(colId, null, col));
+    setColumnActivity(colId, 'exited');
+  });
 }
 
 function setFocusedColumn(id) {
@@ -6013,11 +6211,20 @@ function loadSpawnOptions() {
   optWorktree.value = opts.worktree || '';
   optCustomArgs.value = opts.customArgs || '';
 
-  // If the persisted endpointId no longer refers to a known preset (deleted in
-  // the meantime), silently fall back to the default Anthropic endpoint.
-  var endpointId = opts.endpointId || null;
-  if (endpointId && !endpointPresets.find(function (p) { return p.id === endpointId; })) {
+  // First call on app boot always defaults to cloud (Anthropic), regardless of
+  // what was saved. Subsequent calls (project switches within the session)
+  // respect the saved endpointId.
+  var endpointId;
+  if (!firstSpawnLoadComplete) {
     endpointId = null;
+    firstSpawnLoadComplete = true;
+  } else {
+    // If the persisted endpointId no longer refers to a known preset (deleted in
+    // the meantime), silently fall back to the default Anthropic endpoint.
+    endpointId = opts.endpointId || null;
+    if (endpointId && !endpointPresets.find(function (p) { return p.id === endpointId; })) {
+      endpointId = null;
+    }
   }
   // Restore the per-project model selection BEFORE applyEndpointSelection so
   // populateEndpointModelDropdown can preselect it.
@@ -6373,6 +6580,7 @@ var epTokenToggle = document.getElementById('ep-token-toggle');
 var epModelInput = document.getElementById('ep-model');
 var epModelSelect = document.getElementById('ep-model-select');
 var epModelFetchBtn = document.getElementById('ep-model-fetch');
+var epFallback = document.getElementById('ep-fallback');
 var epStatus = document.getElementById('ep-status');
 var epTestBtn = document.getElementById('ep-test');
 var epDeleteBtn = document.getElementById('ep-delete');
@@ -6408,7 +6616,32 @@ function clearEndpointForm() {
   epModelInput.classList.remove('hidden');
   epModelSelect.classList.add('hidden');
   while (epModelSelect.firstChild) epModelSelect.removeChild(epModelSelect.firstChild);
+  if (epFallback) {
+    while (epFallback.firstChild) epFallback.removeChild(epFallback.firstChild);
+    var noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = '(none)';
+    epFallback.appendChild(noneOpt);
+  }
   setEpStatus('');
+}
+
+function populateFallbackOptions(currentEditingId, currentFallbackId) {
+  if (!epFallback) return;
+  while (epFallback.firstChild) epFallback.removeChild(epFallback.firstChild);
+  var none = document.createElement('option');
+  none.value = '';
+  none.textContent = '(none)';
+  epFallback.appendChild(none);
+  for (var i = 0; i < endpointPresets.length; i++) {
+    var p = endpointPresets[i];
+    if (p.id === currentEditingId) continue;  // can't fallback to self
+    var opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name || '(unnamed)';
+    if (p.id === currentFallbackId) opt.selected = true;
+    epFallback.appendChild(opt);
+  }
 }
 
 function renderEndpointsListUI() {
@@ -6448,6 +6681,7 @@ function selectEndpointForEdit(id) {
     epModelInput.value = preset.model || '';
     epModelInput.classList.remove('hidden');
     epModelSelect.classList.add('hidden');
+    populateFallbackOptions(preset.id, preset.fallbackId || '');
     setEpStatus('');
     showEndpointForm(true);
     renderEndpointsListUI();
@@ -6458,6 +6692,7 @@ function selectEndpointForEdit(id) {
 function startNewEndpoint() {
   editingPresetId = '__new__';
   clearEndpointForm();
+  populateFallbackOptions(null, '');
   showEndpointForm(true);
   renderEndpointsListUI();
   epName.focus();
@@ -6497,7 +6732,8 @@ function collectFormPayload() {
     authToken: epAuthToken.value, // pass as-is; main encrypts
     model: epModelInput.classList.contains('hidden')
       ? epModelSelect.value
-      : epModelInput.value.trim()
+      : epModelInput.value.trim(),
+    fallbackId: (epFallback && epFallback.value) || null
   };
 }
 
@@ -6508,6 +6744,10 @@ function saveCurrentPreset() {
   if (!payload.model) { setEpStatus('Model is required', 'error'); return; }
   setEpStatus('Saving…');
   window.electronAPI.endpointSave(payload).then(function (result) {
+    if (result && result.ok === false) {
+      setEpStatus(result.error || 'Save failed', 'error');
+      return;
+    }
     setEpStatus('Saved', 'ok');
     var newId = (result && result.id) || payload.id;
     return loadEndpointPresets().then(function () {
@@ -11019,13 +11259,51 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     debounceTimer = setTimeout(function () { runSearch(q); }, 200);
   });
 
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (!t || t.name !== 'search-mode') return;
+    var input2 = document.getElementById('session-search-input');
+    if (!input2) return;
+    if (t.value === 'prompts') {
+      input2.placeholder = 'Search your past prompts…';
+    } else {
+      input2.placeholder = 'Search across all session transcripts…';
+    }
+    var q = input2.value.trim();
+    if (q.length >= 2) runSearch(q);
+  });
+
   function runSearch(q) {
     resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Searching…</div>';
-    if (!window.electronAPI || !window.electronAPI.searchSessions) {
-      resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
-      return;
+    var modeRadio = document.querySelector('input[name=search-mode]:checked');
+    var mode = (modeRadio && modeRadio.value) || 'transcripts';
+    var apiCall;
+    if (mode === 'prompts') {
+      if (!window.electronAPI || !window.electronAPI.searchHistory) {
+        resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
+        return;
+      }
+      apiCall = window.electronAPI.searchHistory(q, 100).then(function (hits) {
+        // Normalize prompt hits to the same shape transcript hits use:
+        // { projectKey, sessionId, snippet }. sessionId is empty for prompts —
+        // openHit treats empty sessionId as "no resume; copy text instead".
+        return (hits || []).map(function (h) {
+          return {
+            projectKey: h.project || '',
+            sessionId: '',
+            snippet: h.snippet || h.text || '',
+            text: h.text || ''
+          };
+        });
+      });
+    } else {
+      if (!window.electronAPI || !window.electronAPI.searchSessions) {
+        resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
+        return;
+      }
+      apiCall = window.electronAPI.searchSessions(q, 50);
     }
-    window.electronAPI.searchSessions(q, 50).then(function (hits) {
+    apiCall.then(function (hits) {
       resultsEl.innerHTML = '';
       if (!hits || !hits.length) {
         resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">No matches.</div>';
@@ -11036,7 +11314,9 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
         div.className = 'session-search-hit';
         var meta = document.createElement('div');
         meta.className = 'session-search-hit-meta';
-        meta.textContent = h.projectKey + '  •  ' + (h.sessionId ? h.sessionId.slice(0, 8) : '');
+        var metaParts = [h.projectKey || ''];
+        if (h.sessionId) metaParts.push(h.sessionId.slice(0, 8));
+        meta.textContent = metaParts.filter(Boolean).join('  •  ');
         var snip = document.createElement('div');
         snip.className = 'session-search-hit-snippet';
         snip.innerHTML = highlight(h.snippet || '', q);
@@ -11051,6 +11331,14 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   }
 
   function openHit(h) {
+    if (!h.sessionId) {
+      // Prompt-mode hit — copy the full prompt text to the clipboard.
+      if (window.electronAPI && window.electronAPI.clipboardWriteText) {
+        window.electronAPI.clipboardWriteText(h.text || h.snippet || '');
+      }
+      close();
+      return;
+    }
     if (!config || !config.projects) return;
     var idx = -1;
     for (var i = 0; i < config.projects.length; i++) {
@@ -11060,11 +11348,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       alert('That session\'s project is not in your project list. Add it first.');
       return;
     }
-    // skipDefaultSpawn = true so the project switch doesn't open a fresh column
-    // before our resume column lands.
     setActiveProject(idx, false, true);
-    // --resume in the args is what actually tells the Claude CLI to pick up the
-    // existing session; sessionId in opts is just tracking metadata for the column.
     addColumn(['--resume', h.sessionId], null, spawnOpts({ sessionId: h.sessionId }));
     close();
   }
@@ -11081,5 +11365,500 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
         window.electronAPI.getUsageCosts(b.dataset.costFilter).then(renderCostTab).catch(function () {});
       }
     });
+  });
+})();
+
+(function setupPalette() {
+  var overlay = document.getElementById('palette-overlay');
+  var input = document.getElementById('palette-input');
+  var results = document.getElementById('palette-results');
+  if (!overlay) return;
+
+  var SLASH_COMMANDS = [
+    '/help', '/clear', '/compact', '/cost', '/usage', '/model', '/agents',
+    '/mcp', '/release', '/review', '/security-review', '/init'
+  ];
+
+  function buildCommands() {
+    var cmds = [];
+    if (config && config.projects) {
+      config.projects.forEach(function (p) {
+        cmds.push({
+          label: 'Switch to ' + (p.name || projectKeyToName(p.path)),
+          kind: 'project',
+          run: function () { setActiveProject(config.projects.indexOf(p), false); }
+        });
+        cmds.push({
+          label: 'Spawn in ' + (p.name || projectKeyToName(p.path)),
+          kind: 'spawn',
+          run: function () {
+            setActiveProject(config.projects.indexOf(p), false, true);
+            addColumn(null, null, spawnOpts());
+          }
+        });
+      });
+    }
+    SLASH_COMMANDS.forEach(function (s) {
+      cmds.push({
+        label: s,
+        kind: 'slash',
+        run: function () {
+          var st = getActiveState();
+          if (st && st.focusedColumnId != null) {
+            wsSend({ type: 'write', id: st.focusedColumnId, data: s + '\r' });
+          }
+        }
+      });
+    });
+    cmds.push({ label: 'Open Usage', kind: 'action', run: openUsageModal });
+    cmds.push({ label: 'Open snippet library', kind: 'action', run: function () {
+      if (typeof window.openSnippetsManager === 'function') window.openSnippetsManager();
+    }});
+    cmds.push({ label: 'Add project…', kind: 'action', run: function () {
+      var btn = document.getElementById('btn-add-project');
+      if (btn) btn.click();
+    }});
+    cmds.push({ label: 'Toggle sidebar', kind: 'action', run: function () {
+      var btn = document.getElementById('btn-toggle-sidebar');
+      if (btn) btn.click();
+    }});
+    cmds.push({ label: 'Kill focused column', kind: 'action', run: function () {
+      var st = getActiveState();
+      if (st && st.focusedColumnId != null) removeColumn(st.focusedColumnId);
+    }});
+    cmds.push({ label: 'Respawn focused column', kind: 'action', run: function () {
+      var st = getActiveState();
+      if (st && st.focusedColumnId != null) restartColumn(st.focusedColumnId);
+    }});
+    return cmds;
+  }
+
+  var commands = [];
+  var lastFiltered = [];
+  var selectedIdx = 0;
+
+  function open() {
+    commands = buildCommands();
+    lastFiltered = commands;
+    selectedIdx = 0;
+    overlay.classList.remove('hidden');
+    input.value = '';
+    // Blur active xterm so the input receives keystrokes immediately
+    if (typeof allColumns !== 'undefined') {
+      allColumns.forEach(function (c) {
+        if (c.terminal && typeof c.terminal.blur === 'function') c.terminal.blur();
+      });
+    }
+    setTimeout(function () { input.focus(); }, 0);
+    render(lastFiltered);
+  }
+  function close() {
+    overlay.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+
+  function render(list) {
+    results.innerHTML = '';
+    list.slice(0, 50).forEach(function (cmd, i) {
+      var row = document.createElement('div');
+      row.className = 'palette-row' + (i === selectedIdx ? ' active' : '');
+      row.dataset.idx = String(i);
+      var label = document.createElement('span');
+      label.textContent = cmd.label;
+      var kind = document.createElement('span');
+      kind.className = 'palette-row-kind';
+      kind.textContent = cmd.kind;
+      row.appendChild(label);
+      row.appendChild(kind);
+      row.addEventListener('click', function () { runAt(i, list); });
+      results.appendChild(row);
+    });
+  }
+
+  function runAt(i, list) {
+    var cmd = list[i];
+    if (!cmd) return;
+    close();
+    try { cmd.run(); } catch (e) { console.error('palette command failed', e); }
+  }
+
+  // Register Ctrl+K in capture phase so xterm can't swallow it.
+  document.addEventListener('keydown', function (e) {
+    if (e.ctrlKey && (e.key === 'k' || e.key === 'K') && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      open();
+    }
+  }, true);
+
+  // Navigation / dismissal handler — only acts when palette is open, so it can
+  // stay in normal bubble phase and not interfere with anything else.
+  document.addEventListener('keydown', function (e) {
+    if (overlay.classList.contains('hidden')) return;
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    var rendered = results.querySelectorAll('.palette-row');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedIdx = Math.min(rendered.length - 1, selectedIdx + 1);
+      updateActive(rendered);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedIdx = Math.max(0, selectedIdx - 1);
+      updateActive(rendered);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      runAt(selectedIdx, lastFiltered);
+    }
+  });
+
+  function updateActive(rows) {
+    rows.forEach(function (r, i) { r.classList.toggle('active', i === selectedIdx); });
+    var active = rows[selectedIdx];
+    if (active && typeof active.scrollIntoView === 'function') {
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  input.addEventListener('input', function () {
+    var q = input.value;
+    if (!window.electronAPI || !window.electronAPI.paletteRank) {
+      lastFiltered = commands;
+      selectedIdx = 0;
+      render(lastFiltered);
+      return;
+    }
+    window.electronAPI.paletteRank(commands.map(function (c) {
+      return { label: c.label, kind: c.kind };
+    }), q).then(function (rankedShallow) {
+      // Map back to full commands by label::kind composite key
+      var byLabel = new Map();
+      commands.forEach(function (c) { byLabel.set(c.label + '::' + c.kind, c); });
+      lastFiltered = rankedShallow.map(function (s) {
+        return byLabel.get(s.label + '::' + s.kind);
+      }).filter(Boolean);
+      selectedIdx = 0;
+      render(lastFiltered);
+    }).catch(function () {
+      lastFiltered = commands;
+      selectedIdx = 0;
+      render(lastFiltered);
+    });
+  });
+
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) close();
+  });
+})();
+
+(function setupHooks() {
+  var listEl = document.getElementById('hooks-list');
+  var filterEl = document.getElementById('hooks-filter');
+  var clearBtn = document.getElementById('hooks-clear');
+  var pauseEl = document.getElementById('hooks-pause');
+  if (!listEl) return;
+
+  var MAX_EVENTS = 1000;  // ring buffer
+  var hintEl = document.getElementById('hooks-empty-hint');
+  var events = [];
+  var filterQuery = '';
+  var paused = false;
+
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    return d.toTimeString().slice(0, 8);
+  }
+
+  function summarize(input) {
+    if (!input) return '';
+    if (typeof input === 'string') return input.slice(0, 80);
+    if (input.command) return String(input.command).slice(0, 80);
+    if (input.file_path) return input.file_path;
+    if (input.path) return input.path;
+    if (input.pattern) return input.pattern;
+    return '';
+  }
+
+  function eventMatchesFilter(ev) {
+    if (!filterQuery) return true;
+    var q = filterQuery.toLowerCase();
+    var hay = (ev.event || '') + ' ' + (ev.tool_name || '') + ' ' + (ev.session_id || '') + ' ' + JSON.stringify(ev.tool_input || {});
+    return hay.toLowerCase().indexOf(q) !== -1;
+  }
+
+  function renderEvent(ev) {
+    var row = document.createElement('div');
+    row.className = 'hook-row';
+    var time = document.createElement('span');
+    time.className = 'hook-time';
+    time.textContent = fmtTime(ev.received_at || Date.now());
+    var name = document.createElement('span');
+    name.className = 'hook-event';
+    name.textContent = ev.event || '?';
+    var tool = document.createElement('span');
+    tool.className = 'hook-tool';
+    tool.textContent = ev.tool_name || '';
+    var summary = document.createElement('span');
+    summary.textContent = ev.tool_input ? summarize(ev.tool_input) : (ev.session_id ? ev.session_id.slice(0, 8) : '');
+    row.appendChild(time);
+    row.appendChild(name);
+    row.appendChild(tool);
+    row.appendChild(summary);
+
+    var detail = document.createElement('div');
+    detail.className = 'hook-detail';
+    detail.style.display = 'none';
+    detail.textContent = JSON.stringify(ev, null, 2);
+    row.appendChild(detail);
+
+    row.addEventListener('click', function () {
+      row.classList.toggle('expanded');
+      detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
+    });
+    return row;
+  }
+
+  function rerender() {
+    listEl.innerHTML = '';
+    events.filter(eventMatchesFilter).slice(-200).forEach(function (ev) {
+      listEl.appendChild(renderEvent(ev));
+    });
+    listEl.scrollTop = listEl.scrollHeight;
+  }
+
+  filterEl.addEventListener('input', function () {
+    filterQuery = filterEl.value.trim();
+    rerender();
+  });
+  clearBtn.addEventListener('click', function () {
+    events = [];
+    rerender();
+    if (hintEl) hintEl.classList.remove('hidden');
+  });
+  pauseEl.addEventListener('change', function () { paused = pauseEl.checked; });
+
+  if (window.electronAPI && window.electronAPI.onHookEvent) {
+    window.electronAPI.onHookEvent(function (ev) {
+      if (paused) return;
+      ev.received_at = Date.now();
+      events.push(ev);
+      if (events.length > MAX_EVENTS) events.shift();
+      if (hintEl && !hintEl.classList.contains('hidden')) hintEl.classList.add('hidden');
+      // Append-only when the new event passes the current filter
+      if (eventMatchesFilter(ev)) {
+        var row = renderEvent(ev);
+        listEl.appendChild(row);
+        // Trim DOM to last 200 to keep things responsive
+        while (listEl.children.length > 200) listEl.removeChild(listEl.firstChild);
+        listEl.scrollTop = listEl.scrollHeight;
+      }
+    });
+  }
+
+  // Hooks auto-config wiring
+  var connectBtn = document.getElementById('btn-hooks-connect');
+  var disconnectBtn = document.getElementById('btn-hooks-disconnect');
+  var statusEl = document.getElementById('hooks-config-status');
+
+  function refreshConfigState() {
+    if (!window.electronAPI || !window.electronAPI.isHooksConfigured) return;
+    window.electronAPI.isHooksConfigured().then(function (configured) {
+      if (configured) {
+        if (connectBtn) connectBtn.classList.add('hidden');
+        if (disconnectBtn) disconnectBtn.classList.remove('hidden');
+        if (statusEl) {
+          statusEl.textContent = 'Connected. Restart any open Claude sessions to start receiving events.';
+          statusEl.classList.remove('error');
+          statusEl.classList.add('ok');
+        }
+      } else {
+        if (connectBtn) connectBtn.classList.remove('hidden');
+        if (disconnectBtn) disconnectBtn.classList.add('hidden');
+        if (statusEl) {
+          statusEl.textContent = '';
+          statusEl.classList.remove('ok', 'error');
+        }
+      }
+    }).catch(function () {});
+  }
+
+  if (connectBtn) connectBtn.addEventListener('click', function () {
+    if (!window.electronAPI || !window.electronAPI.configureHooks) return;
+    if (statusEl) {
+      statusEl.textContent = 'Configuring…';
+      statusEl.classList.remove('ok', 'error');
+    }
+    window.electronAPI.configureHooks().then(function (result) {
+      if (result && result.ok) {
+        refreshConfigState();
+      } else {
+        if (statusEl) {
+          statusEl.textContent = (result && result.error) ? ('Failed: ' + result.error) : 'Failed to configure hooks.';
+          statusEl.classList.add('error');
+        }
+      }
+    });
+  });
+
+  if (disconnectBtn) disconnectBtn.addEventListener('click', function () {
+    if (!window.electronAPI || !window.electronAPI.disconnectHooks) return;
+    if (!confirm('Remove Claudes hook entries from your ~/.claude/settings.json?')) return;
+    window.electronAPI.disconnectHooks().then(function (result) {
+      if (result && result.ok) {
+        refreshConfigState();
+      } else {
+        if (statusEl) {
+          statusEl.textContent = (result && result.error) ? ('Failed: ' + result.error) : 'Failed to disconnect.';
+          statusEl.classList.add('error');
+        }
+      }
+    });
+  });
+
+  // Initial check
+  refreshConfigState();
+})();
+
+(function setupSnippets() {
+  var btn = document.getElementById('btn-snippets');
+  var modal = document.getElementById('snippets-modal');
+  var closeBtn = document.getElementById('snippets-close');
+  var newBtn = document.getElementById('snippets-new');
+  var listEl = document.getElementById('snippets-list');
+  var trigEl = document.getElementById('snippet-trigger');
+  var labelEl = document.getElementById('snippet-label');
+  var bodyEl = document.getElementById('snippet-body');
+  var saveBtn = document.getElementById('snippet-save');
+  var delBtn = document.getElementById('snippet-delete');
+  if (!modal) return;
+
+  var snippets = [];
+  var editing = null;
+
+  function open() { modal.classList.remove('hidden'); refresh(); }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
+
+  function refresh() {
+    if (!window.electronAPI || !window.electronAPI.listSnippets) return Promise.resolve();
+    return window.electronAPI.listSnippets().then(function (list) {
+      snippets = list || [];
+      renderList();
+      // Update the in-memory cache used by trigger expansion (Task 3.3)
+      window.__snippetsCache = snippets;
+      if (editing) {
+        var match = snippets.find(function (s) { return s.id === editing.id; });
+        if (match) editing = match;
+        else editing = snippets.length ? snippets[0] : { trigger: '', label: '', body: '' };
+      } else if (snippets.length) {
+        editing = snippets[0];
+      } else {
+        editing = { trigger: '', label: '', body: '' };
+      }
+      paintEdit(editing);
+    });
+  }
+
+  function renderList() {
+    listEl.innerHTML = '';
+    snippets.forEach(function (s) {
+      var d = document.createElement('div');
+      d.className = 'snippet-item' + (editing && editing.id === s.id ? ' active' : '');
+      var name = document.createElement('div');
+      name.textContent = s.label || '(unnamed)';
+      var trig = document.createElement('div');
+      trig.className = 'snippet-item-trigger';
+      trig.textContent = '\\' + (s.trigger || '');
+      d.appendChild(name);
+      d.appendChild(trig);
+      d.addEventListener('click', function () { editing = s; paintEdit(s); renderList(); });
+      listEl.appendChild(d);
+    });
+  }
+
+  function paintEdit(s) {
+    trigEl.value = s.trigger || '';
+    labelEl.value = s.label || '';
+    bodyEl.value = s.body || '';
+  }
+
+  if (newBtn) newBtn.addEventListener('click', function () {
+    editing = { trigger: '', label: '', body: '' };
+    paintEdit(editing);
+    renderList();
+    trigEl.focus();
+  });
+
+  if (saveBtn) saveBtn.addEventListener('click', function () {
+    var snip = Object.assign({}, editing, {
+      trigger: trigEl.value.trim(),
+      label: labelEl.value.trim(),
+      body: bodyEl.value
+    });
+    if (!snip.trigger) { alert('Trigger required'); return; }
+    if (!window.electronAPI || !window.electronAPI.saveSnippet) return;
+    window.electronAPI.saveSnippet(snip).then(function (saved) {
+      editing = saved;
+      refresh();
+    });
+  });
+
+  if (delBtn) delBtn.addEventListener('click', function () {
+    if (!editing || !editing.id) return;
+    if (!confirm('Delete snippet "' + (editing.label || editing.trigger) + '"?')) return;
+    if (!window.electronAPI || !window.electronAPI.deleteSnippet) return;
+    window.electronAPI.deleteSnippet(editing.id).then(function () {
+      editing = null;
+      refresh();
+    });
+  });
+
+  if (btn) btn.addEventListener('click', open);
+
+  // Expose for the palette command (Task 1.2's setupPalette IIFE) and for
+  // the trigger expansion layer (Task 3.3) to refresh the in-memory cache.
+  window.openSnippetsManager = open;
+  window.refreshSnippetsCache = refresh;
+
+  // Pre-warm the cache so trigger expansion works immediately on app start
+  refresh();
+})();
+
+(function setupShortcutsModal() {
+  var btn = document.getElementById('btn-shortcuts');
+  var modal = document.getElementById('shortcuts-modal');
+  var closeBtn = document.getElementById('shortcuts-close');
+  if (!modal) return;
+
+  function open() { modal.classList.remove('hidden'); }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+
+  if (btn) btn.addEventListener('click', open);
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+
+  // ? hotkey — only fires when no input/textarea/select has focus, so it
+  // doesn't interfere with typing a literal "?" into a form.
+  document.addEventListener('keydown', function (e) {
+    if (e.key === '?' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      var t = e.target;
+      var tag = t && t.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (t && t.classList && t.classList.contains('xterm-helper-textarea')) return;
+      e.preventDefault();
+      open();
+      return;
+    }
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
   });
 })();

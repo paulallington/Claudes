@@ -53,6 +53,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getUsage: () => ipcRenderer.invoke('usage:getAll'),
   getUsageCosts: (filter) => ipcRenderer.invoke('usage:getCosts', filter),
   searchSessions: (query, limit) => ipcRenderer.invoke('sessions:search', query, limit),
+  searchHistory: (query, limit) => ipcRenderer.invoke('history:search', query, limit),
+  listSnippets: () => ipcRenderer.invoke('snippets:list'),
+  saveSnippet: (snippet) => ipcRenderer.invoke('snippets:save', snippet),
+  deleteSnippet: (id) => ipcRenderer.invoke('snippets:delete', id),
   getPlanLimits: (force) => ipcRenderer.invoke('usage:getPlanLimits', force),
   detectThresholdCrossings: (prev, next) => ipcRenderer.invoke('usage:detectThresholdCrossings', prev, next),
   getSessionContextTokens: (projectKey, sessionId) => ipcRenderer.invoke('session:contextTokens', projectKey, sessionId),
@@ -77,6 +81,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopFlashFrame: () => ipcRenderer.invoke('window:stopFlashFrame'),
   getHookServerPort: () => ipcRenderer.invoke('hooks:getPort'),
   onHookEvent: (callback) => ipcRenderer.on('hook:event', (_, event) => callback(event)),
+  configureHooks: () => ipcRenderer.invoke('hooks:configure'),
+  disconnectHooks: () => ipcRenderer.invoke('hooks:disconnect'),
+  isHooksConfigured: () => ipcRenderer.invoke('hooks:isConfigured'),
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   showItemInFolder: (fullPath) => ipcRenderer.invoke('shell:showItemInFolder', fullPath),
   openPath: (fullPath) => ipcRenderer.invoke('shell:openPath', fullPath),
@@ -143,5 +150,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   endpointDelete: (id) => ipcRenderer.invoke('endpoint:delete', id),
   endpointGetEnv: (id, modelOverride) => ipcRenderer.invoke('endpoint:getEnv', id, modelOverride),
   endpointFetchModels: (args) => ipcRenderer.invoke('endpoint:fetchModels', args),
-  onEndpointsUpdated: (callback) => ipcRenderer.on('endpoints:updated', () => callback())
+  onEndpointsUpdated: (callback) => ipcRenderer.on('endpoints:updated', () => callback()),
+
+  paletteRank: (items, query) => ipcRenderer.invoke('palette:rank', items, query)
 });

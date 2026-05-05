@@ -28,6 +28,7 @@
         <button class="explorer-tab" data-tab="git">Git</button>
         <button class="explorer-tab" data-tab="run">Run</button>
         <button class="explorer-tab" data-tab="automations">Automations</button>
+            <button class="explorer-tab" data-tab="hooks">Hooks</button>
       </div>
       <div class="explorer-content">
         <div id="tab-files" class="tab-content active">
@@ -139,6 +140,26 @@
             <pre id="automation-detail-output" class="automation-detail-output"></pre>
           </div>
         </div>
+        <div id="tab-hooks" class="tab-content">
+          <div class="hooks-toolbar">
+            <input type="search" id="hooks-filter" placeholder="Filter events…" autocomplete="off">
+            <button id="hooks-clear" class="hooks-btn" title="Clear">Clear</button>
+            <label class="hooks-pause-toggle">
+              <input type="checkbox" id="hooks-pause"> Pause
+            </label>
+          </div>
+            <div id="hooks-empty-hint" class="hooks-empty-hint">
+              <div id="hooks-empty-text">
+                No hook events yet. Claude CLI needs hooks configured in <code>~/.claude/settings.json</code> to forward tool events here.
+              </div>
+              <div id="hooks-config-actions" class="hooks-config-actions">
+                <button id="btn-hooks-connect" class="hooks-btn hooks-connect-btn">Connect hooks</button>
+                <button id="btn-hooks-disconnect" class="hooks-btn hooks-disconnect-btn hidden">Disconnect</button>
+                <span id="hooks-config-status" class="hooks-config-status"></span>
+              </div>
+            </div>
+          <div id="hooks-list" class="hooks-list"></div>
+        </div>
       </div>
     </div>
     <div id="explorer-resize-handle"></div>
@@ -163,6 +184,8 @@
         <div class="toolbar-actions">
           <button id="btn-session-search" class="toolbar-btn" title="Search session transcripts (Ctrl+Shift+F)">🔎</button>
           <button id="btn-broadcast" class="toolbar-btn" title="Broadcast a prompt to multiple columns">⤳</button>
+          <button id="btn-snippets" class="toolbar-btn" title="Prompt snippets">📝</button>
+          <button id="btn-shortcuts" class="toolbar-btn" title="Power-user shortcuts &amp; features (?)">❔</button>
           <button id="btn-automations-flyout" class="toolbar-btn" title="Automations">&#8634;</button>
           <div class="toolbar-menu-wrap">
             <button id="btn-toolbar-menu" class="toolbar-menu-btn" title="Tools &amp; settings">&#8943;</button>
@@ -531,6 +554,12 @@
                 <button type="button" id="ep-model-fetch" class="endpoints-icon-btn" title="Fetch loaded models from endpoint">&#8634;</button>
               </div>
             </label>
+            <label class="endpoints-field">
+              <span>Fallback endpoint (optional)</span>
+              <select id="ep-fallback">
+                <option value="">(none)</option>
+              </select>
+            </label>
             <div class="endpoints-form-status" id="ep-status"></div>
             <div class="endpoints-form-actions">
               <button type="button" id="ep-test" class="endpoints-secondary-btn">Test connection</button>
@@ -711,9 +740,119 @@
         <span id="session-search-close" class="modal-close">&times;</span>
       </div>
       <div class="modal-body">
-        <input type="search" id="session-search-input" placeholder="Search across all session transcripts…" autocomplete="off">
+            <div class="session-search-mode">
+              <label><input type="radio" name="search-mode" value="transcripts" checked> Transcripts</label>
+              <label><input type="radio" name="search-mode" value="prompts"> My prompts</label>
+            </div>
+            <input type="search" id="session-search-input" placeholder="Search across all session transcripts…" autocomplete="off">
         <div id="session-search-results" class="session-search-results"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- Snippets Modal -->
+  <div id="snippets-modal" class="modal-overlay hidden">
+    <div class="modal-dialog snippets-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Prompt snippets</span>
+        <span id="snippets-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body snippets-body">
+        <div class="snippets-list-pane">
+          <button id="snippets-new" class="snippets-btn">+ New</button>
+          <div id="snippets-list" class="snippets-list"></div>
+        </div>
+        <div class="snippets-edit-pane">
+          <label>Trigger (typed as <code>\trigger</code>):
+            <input type="text" id="snippet-trigger" placeholder="e.g. review">
+          </label>
+          <label>Label:
+            <input type="text" id="snippet-label" placeholder="e.g. Code review prompt">
+          </label>
+          <label>Body (use <code>{{name}}</code> for variables):
+            <textarea id="snippet-body" rows="10" placeholder="Please review {{file}} for {{focus_area}}…"></textarea>
+          </label>
+          <div class="snippets-edit-actions">
+            <button id="snippet-save" class="snippets-btn primary">Save</button>
+            <button id="snippet-delete" class="snippets-btn danger">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shortcuts Reference Modal -->
+  <div id="shortcuts-modal" class="modal-overlay hidden">
+    <div class="modal-dialog shortcuts-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Power-user shortcuts &amp; features</span>
+        <span id="shortcuts-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body shortcuts-body">
+        <section class="shortcuts-section">
+          <h3>Keyboard shortcuts</h3>
+          <table class="shortcuts-table">
+            <tbody>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Command palette — fuzzy-search projects, slash commands, app actions</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td><td>Search sessions — toggle between transcripts and your prompt history</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd></td><td>Spawn a new column in the active project</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></td><td>Add a new row to the layout</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></td><td>Kill the focused column</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd></td><td>Navigate between columns</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>B</kbd></td><td>Toggle the Projects sidebar</td></tr>
+              <tr><td><kbd>?</kbd></td><td>Open this shortcuts reference</td></tr>
+              <tr><td><kbd>Esc</kbd></td><td>Close the active modal / popover</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Plan limits &amp; usage</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Sidebar mini bar</strong> — live Session and Week percentages from the OAuth-authed plan-limits endpoint. Click to open the full Usage modal.</li>
+            <li><strong>Threshold notifications</strong> — system notification + window flash when 70% / 90% are crossed on session or weekly windows. Toggle individually in Settings.</li>
+            <li><strong>Auto-pause prompt</strong> — at 90% weekly, optional confirm dialog to disable global automations until you re-enable them.</li>
+            <li><strong>Session attribution &Delta; pill</strong> — each Claude column header shows how much of the 5-hour session quota that column has consumed since spawn. Hover for snapshot vs current numbers.</li>
+            <li><strong>Context-window meter</strong> — per-column live tokens / model-max indicator (e.g. <code>12k/200k</code>). Amber at 70%, red at 90% — compact proactively before auto-compact.</li>
+            <li><strong>Cost dashboard</strong> — Usage modal &rarr; Cost tab. Total + per-model + per-project + 30-day chart, with Today / 7-day / 30-day / All-time filter.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Workflow speed</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Cross-column broadcast</strong> (&#10547;) — send the same prompt to multiple Claude columns at once. Picks up custom column titles and project names automatically.</li>
+            <li><strong>Session full-text search</strong> (&#128270; / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>) — grep across every session JSONL on disk. Click a hit to switch project and resume that session.</li>
+            <li><strong>My prompts search</strong> — same modal, "My prompts" radio mode. Searches <code>~/.claude/history.jsonl</code>. Click a hit to copy the prompt to your clipboard.</li>
+            <li><strong>Cmd-K command palette</strong> — fuzzy search across projects (switch / spawn), slash commands (sent to focused column), and app actions (open Usage, kill column, respawn, etc.).</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Snippets &amp; observability</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Prompt snippets</strong> (&#128221;) — save reusable prompt templates with <code>{{variable}}</code> placeholders. Type <code>\trigger</code> + Enter in any Claude column to expand; the app prompts you for each variable, then erases the typed trigger and sends the expanded body.</li>
+            <li><strong>Hook event inspector</strong> — Hooks tab in the explorer panel streams every <code>PreToolUse</code>, <code>PostToolUse</code>, etc. event from Claude CLI. Filter, pause, click to expand JSON. Click <em>Connect hooks</em> to auto-configure <code>~/.claude/settings.json</code>.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Reliability &amp; automation</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Endpoint failover</strong> — optional <em>Fallback endpoint</em> on each preset. If a Claude column exits within 5 seconds with a non-zero code, the app respawns it on the fallback endpoint with a <code>&#8634; failover</code> badge in the header.</li>
+            <li><strong>Automation usage gates</strong> — per-agent <em>Skip if session usage above N%</em> and <em>Skip if weekly usage above N%</em> fields. Scheduled runs auto-skip when over the threshold so they don't burn the rest of your quota.</li>
+          </ul>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Command Palette -->
+  <div id="palette-overlay" class="palette-overlay hidden">
+    <div class="palette">
+      <input type="text" id="palette-input" class="palette-input" placeholder="Type a command, project, or slash command…" autocomplete="off">
+      <div id="palette-results" class="palette-results"></div>
+      <div class="palette-hint">↑↓ navigate · ↵ run · Esc close</div>
     </div>
   </div>
 

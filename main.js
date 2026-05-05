@@ -16,6 +16,7 @@ let isQuitting = false;
 let hookServer;
 let hookServerPort;
 const ptyPort = app.isPackaged ? 3456 : 3457;
+const hookServerListenPort = app.isPackaged ? 53456 : 53457;
 let ptyServerProcess;
 
 const CONFIG_DIR = path.join(os.homedir(), '.claudes');
@@ -29,6 +30,7 @@ const AUTOMATIONS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'automations.jso
 const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-runs' : 'automation-runs-dev');
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
+const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
 
 // --- Config ---
 
@@ -238,6 +240,18 @@ function readAutomations() {
 function writeAutomations(data) {
   ensureConfigDir();
   fs.writeFileSync(AUTOMATIONS_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// Prompt snippet library — persists to ~/.claudes/snippets.json. Each snippet
+// has { id, trigger, label, body }. Triggered in the renderer by typing
+// "\trigger" in a column terminal.
+function readSnippets() {
+  try { return JSON.parse(fs.readFileSync(SNIPPETS_FILE, 'utf8')); }
+  catch { return { snippets: [] }; }
+}
+function writeSnippets(data) {
+  ensureConfigDir();
+  fs.writeFileSync(SNIPPETS_FILE, JSON.stringify(data, null, 2), 'utf8');
 }
 
 function ensureAgentRunsDir(automationId, agentId) {
@@ -727,12 +741,27 @@ ipcMain.handle('endpoint:save', (event, preset) => {
   }
   const list = readEndpoints();
   const id = preset.id || ('ep_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+
+  // Optional fallbackId: must reference another existing preset, never self.
+  // Empty string / undefined / null all mean "no fallback".
+  let fallbackId = null;
+  if (preset.fallbackId) {
+    if (preset.fallbackId === id) {
+      return { ok: false, error: 'Fallback cannot be the same preset.' };
+    }
+    if (!list.find((e) => e && e.id === preset.fallbackId)) {
+      return { ok: false, error: 'Fallback endpoint does not exist.' };
+    }
+    fallbackId = String(preset.fallbackId);
+  }
+
   const stored = {
     id,
     name: String(preset.name || '').trim(),
     baseUrl: normalizeBaseUrl(preset.baseUrl),
     model: String(preset.model || '').trim(),
-    authToken: encryptToken(String(preset.authToken || ''))
+    authToken: encryptToken(String(preset.authToken || '')),
+    fallbackId
   };
   const idx = list.findIndex((e) => e && e.id === id);
   if (idx >= 0) list[idx] = stored;
@@ -742,7 +771,7 @@ ipcMain.handle('endpoint:save', (event, preset) => {
   BrowserWindow.getAllWindows().forEach((w) => {
     try { w.webContents.send('endpoints:updated'); } catch { /* ignore */ }
   });
-  return { id };
+  return { id, ok: true };
 });
 
 ipcMain.handle('endpoint:delete', (event, id) => {
@@ -1653,6 +1682,9 @@ ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
   try { return detectPlanLimitCrossings(prev, next); } catch { return []; }
 });
 
+const { fuzzyRank } = require('./lib/fuzzy-rank');
+ipcMain.handle('palette:rank', (_event, items, query) => fuzzyRank(items, query, x => x.label));
+
 const { lastAssistantContextTokens, modelContextLimit } = require('./lib/session-context-tokens');
 
 // One-shot read of the live context-token count for a session.
@@ -1886,6 +1918,42 @@ ipcMain.handle('sessions:search', async (_event, query, limit) => {
   return hits;
 });
 
+// Prompt-history search across ~/.claude/history.jsonl. Returns hits in
+// reverse-chronological order (most recent first). Distinct from sessions:search
+// — that one searches assistant transcripts; this one searches user prompts.
+ipcMain.handle('history:search', async (_event, query, limit) => {
+  if (!query || typeof query !== 'string' || query.length < 2) return [];
+  const max = Math.max(1, Math.min(200, limit || 100));
+  const file = path.join(os.homedir(), '.claude', 'history.jsonl');
+  let content;
+  try { content = await fs.promises.readFile(file, 'utf8'); } catch { return []; }
+  const needle = query.toLowerCase();
+  const lines = content.split('\n');
+  const hits = [];
+  for (let i = lines.length - 1; i >= 0 && hits.length < max; i--) {
+    const line = lines[i];
+    if (!line || line[0] !== '{') continue;
+    if (line.toLowerCase().indexOf(needle) === -1) continue;
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    const text = entry.display || '';
+    if (!text) continue;
+    if (text.toLowerCase().indexOf(needle) === -1) continue;
+    // Trim to ~200 chars around the needle
+    const matchIdx = text.toLowerCase().indexOf(needle);
+    const start = Math.max(0, matchIdx - 80);
+    const end = Math.min(text.length, matchIdx + 120);
+    const snippet = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+    hits.push({
+      text,
+      snippet,
+      project: entry.project || '',
+      ts: entry.timestamp || null
+    });
+  }
+  return hits;
+});
+
 // --- Auto Updater ---
 
 autoUpdater.autoDownload = true;
@@ -1962,13 +2030,118 @@ function startHookServer() {
       res.end();
     }
   });
-  hookServer.listen(0, '127.0.0.1', () => {
-    hookServerPort = hookServer.address().port;
+  hookServer.on('error', (err) => {
+    console.error('[hook-server] listen error:', err.message);
+  });
+  hookServer.listen(hookServerListenPort, '127.0.0.1', () => {
+    hookServerPort = hookServerListenPort;
     console.log('[hook-server] listening on port', hookServerPort);
   });
 }
 
 ipcMain.handle('hooks:getPort', () => hookServerPort);
+
+const HOOK_EVENTS = [
+  'PreToolUse', 'PostToolUse', 'UserPromptSubmit',
+  'Stop', 'SubagentStop', 'Notification',
+  'SessionStart', 'SessionEnd', 'PreCompact'
+];
+
+// Sentinel matcher we use to identify our hook entries on subsequent calls.
+const CLAUDES_HOOK_SENTINEL = '__claudes_inspector__';
+
+function buildHookCommand(port) {
+  // Cross-platform curl invocation. curl ships with Windows 10+, macOS, and
+  // every Linux distro this app runs on. -d @- reads stdin. The double-quoted
+  // header value is parsed identically by cmd.exe and POSIX shells.
+  return 'curl -s -X POST http://127.0.0.1:' + port + '/hook -d @- -H "Content-Type: application/json"';
+}
+
+function readClaudeSettings() {
+  const file = path.join(os.homedir(), '.claude', 'settings.json');
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    return { file, data: JSON.parse(raw) };
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { file, data: {} };
+    throw err;
+  }
+}
+
+function writeClaudeSettings(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+}
+
+ipcMain.handle('hooks:isConfigured', () => {
+  try {
+    const { data } = readClaudeSettings();
+    if (!data || !data.hooks) return false;
+    // Detect any of our entries by matcher sentinel.
+    for (const ev of HOOK_EVENTS) {
+      const groups = data.hooks[ev];
+      if (!Array.isArray(groups)) continue;
+      for (const g of groups) {
+        if (g && g.matcher === CLAUDES_HOOK_SENTINEL) return true;
+      }
+    }
+    return false;
+  } catch { return false; }
+});
+
+ipcMain.handle('hooks:configure', () => {
+  try {
+    const { file, data } = readClaudeSettings();
+    // Backup the current file (always — even if data was empty, mark the moment).
+    try {
+      const backupPath = file + '.claudes-bak.' + Date.now();
+      const exists = fs.existsSync(file);
+      if (exists) fs.copyFileSync(file, backupPath);
+    } catch { /* backup is best-effort */ }
+
+    if (!data.hooks) data.hooks = {};
+    const command = buildHookCommand(hookServerListenPort);
+    let added = 0;
+    for (const ev of HOOK_EVENTS) {
+      if (!Array.isArray(data.hooks[ev])) data.hooks[ev] = [];
+      // Skip if our sentinel entry already exists for this event.
+      const already = data.hooks[ev].some((g) => g && g.matcher === CLAUDES_HOOK_SENTINEL);
+      if (already) continue;
+      data.hooks[ev].push({
+        matcher: CLAUDES_HOOK_SENTINEL,
+        hooks: [{ type: 'command', command }]
+      });
+      added++;
+    }
+    writeClaudeSettings(file, data);
+    return { ok: true, added, port: hookServerListenPort };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('hooks:disconnect', () => {
+  try {
+    const { file, data } = readClaudeSettings();
+    if (!data || !data.hooks) return { ok: true, removed: 0 };
+    let removed = 0;
+    for (const ev of HOOK_EVENTS) {
+      const groups = data.hooks[ev];
+      if (!Array.isArray(groups)) continue;
+      const filtered = groups.filter((g) => {
+        if (g && g.matcher === CLAUDES_HOOK_SENTINEL) { removed++; return false; }
+        return true;
+      });
+      data.hooks[ev] = filtered;
+      // Drop the array entirely if it became empty (keeps settings.json tidy).
+      if (data.hooks[ev].length === 0) delete data.hooks[ev];
+    }
+    if (Object.keys(data.hooks).length === 0) delete data.hooks;
+    writeClaudeSettings(file, data);
+    return { ok: true, removed };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
 ipcMain.handle('pty:getPort', () => ptyPort);
 
 ipcMain.handle('window:flashFrame', () => {
@@ -2894,6 +3067,31 @@ ipcMain.handle('headless:cancel', (_event, runId) => {
 
 ipcMain.handle('headless:delete', (_event, projectPath, runId) => {
   return { deleted: deleteHeadless(projectPath, runId) };
+});
+
+ipcMain.handle('snippets:list', () => readSnippets().snippets || []);
+
+ipcMain.handle('snippets:save', (_event, snippet) => {
+  if (!snippet || typeof snippet !== 'object') return null;
+  const data = readSnippets();
+  if (!Array.isArray(data.snippets)) data.snippets = [];
+  if (snippet.id) {
+    const i = data.snippets.findIndex(s => s.id === snippet.id);
+    if (i >= 0) data.snippets[i] = snippet; else data.snippets.push(snippet);
+  } else {
+    snippet.id = 'snip_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    data.snippets.push(snippet);
+  }
+  writeSnippets(data);
+  return snippet;
+});
+
+ipcMain.handle('snippets:delete', (_event, id) => {
+  if (!id) return false;
+  const data = readSnippets();
+  data.snippets = (data.snippets || []).filter(s => s.id !== id);
+  writeSnippets(data);
+  return true;
 });
 
 // --- Automations Scheduler & Execution ---
