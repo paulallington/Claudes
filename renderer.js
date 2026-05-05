@@ -11837,13 +11837,18 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
 
   document.addEventListener('change', function (e) {
     var t = e.target;
-    if (!t || t.name !== 'search-mode') return;
+    if (!t || (t.name !== 'search-mode' && t.name !== 'search-scope')) return;
     var input2 = document.getElementById('session-search-input');
     if (!input2) return;
-    if (t.value === 'prompts') {
-      input2.placeholder = 'Search your past prompts…';
+    var modeRadio = document.querySelector('input[name=search-mode]:checked');
+    var scopeRadio = document.querySelector('input[name=search-scope]:checked');
+    var mode = (modeRadio && modeRadio.value) || 'transcripts';
+    var scope = (scopeRadio && scopeRadio.value) || 'all';
+    var scopeLabel = (scope === 'current') ? 'current project' : 'all projects';
+    if (mode === 'prompts') {
+      input2.placeholder = 'Search your past prompts (' + scopeLabel + ')…';
     } else {
-      input2.placeholder = 'Search across all session transcripts…';
+      input2.placeholder = 'Search session transcripts (' + scopeLabel + ')…';
     }
     var q = input2.value.trim();
     if (q.length >= 2) runSearch(q);
@@ -11853,13 +11858,18 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Searching…</div>';
     var modeRadio = document.querySelector('input[name=search-mode]:checked');
     var mode = (modeRadio && modeRadio.value) || 'transcripts';
+    var scopeRadio = document.querySelector('input[name=search-scope]:checked');
+    var scope = (scopeRadio && scopeRadio.value) || 'all';
+    // Scope to the focused project's path when "current". When no project is
+    // active, fall back to all-projects so the search still produces results.
+    var scopedPath = (scope === 'current' && activeProjectKey) ? activeProjectKey : null;
     var apiCall;
     if (mode === 'prompts') {
       if (!window.electronAPI || !window.electronAPI.searchHistory) {
         resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
         return;
       }
-      apiCall = window.electronAPI.searchHistory(q, 100).then(function (hits) {
+      apiCall = window.electronAPI.searchHistory(q, 100, scopedPath).then(function (hits) {
         // Normalize prompt hits to the same shape transcript hits use:
         // { projectKey, sessionId, snippet }. sessionId is empty for prompts —
         // openHit treats empty sessionId as "no resume; copy text instead".
@@ -11877,7 +11887,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
         resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
         return;
       }
-      apiCall = window.electronAPI.searchSessions(q, 50);
+      apiCall = window.electronAPI.searchSessions(q, 50, scopedPath);
     }
     apiCall.then(function (hits) {
       resultsEl.innerHTML = '';

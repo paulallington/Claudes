@@ -1892,13 +1892,23 @@ ipcMain.handle('usage:getCosts', async (_event, filter) => {
 // Full-text search across all session JSONLs. Streaming-style: returns first
 // `limit` hits with surrounding context. Case-insensitive substring match
 // (no regex for V1).
-ipcMain.handle('sessions:search', async (_event, query, limit) => {
+ipcMain.handle('sessions:search', async (_event, query, limit, projectPath) => {
   if (!query || typeof query !== 'string' || query.length < 2) return [];
   const max = Math.max(1, Math.min(200, limit || 50));
   const needle = query.toLowerCase();
   const root = path.join(os.homedir(), '.claude', 'projects');
   let projectDirs;
-  try { projectDirs = await fs.promises.readdir(root); } catch { return []; }
+  if (projectPath && typeof projectPath === 'string') {
+    // Scope: current project only — restrict the scan to a single dir.
+    const onlyDir = projectPathToClaudeKey(projectPath);
+    try {
+      const stat = await fs.promises.stat(path.join(root, onlyDir));
+      if (!stat.isDirectory()) return [];
+    } catch { return []; }
+    projectDirs = [onlyDir];
+  } else {
+    try { projectDirs = await fs.promises.readdir(root); } catch { return []; }
+  }
 
   // Extract the user/assistant message text from a parsed JSONL entry, or null
   // if the entry isn't a content-bearing message (tool calls, system events,
@@ -1969,13 +1979,17 @@ ipcMain.handle('sessions:search', async (_event, query, limit) => {
 // Prompt-history search across ~/.claude/history.jsonl. Returns hits in
 // reverse-chronological order (most recent first). Distinct from sessions:search
 // — that one searches assistant transcripts; this one searches user prompts.
-ipcMain.handle('history:search', async (_event, query, limit) => {
+ipcMain.handle('history:search', async (_event, query, limit, projectPath) => {
   if (!query || typeof query !== 'string' || query.length < 2) return [];
   const max = Math.max(1, Math.min(200, limit || 100));
   const file = path.join(os.homedir(), '.claude', 'history.jsonl');
   let content;
   try { content = await fs.promises.readFile(file, 'utf8'); } catch { return []; }
   const needle = query.toLowerCase();
+  // history.jsonl stores `entry.project` as the raw filesystem path. Compare
+  // raw-to-raw to keep the path-shape contract identical to what the entry
+  // already uses, avoiding any double-encoding mismatch.
+  const scopedProject = (projectPath && typeof projectPath === 'string') ? projectPath : null;
   const lines = content.split('\n');
   const hits = [];
   for (let i = lines.length - 1; i >= 0 && hits.length < max; i--) {
@@ -1984,6 +1998,7 @@ ipcMain.handle('history:search', async (_event, query, limit) => {
     if (line.toLowerCase().indexOf(needle) === -1) continue;
     let entry;
     try { entry = JSON.parse(line); } catch { continue; }
+    if (scopedProject && (entry.project || '') !== scopedProject) continue;
     const text = entry.display || '';
     if (!text) continue;
     if (text.toLowerCase().indexOf(needle) === -1) continue;
