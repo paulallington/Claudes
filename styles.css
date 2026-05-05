@@ -6375,3 +6375,13 @@ body.mode-popout #btn-add-project {
 .snippets-btn.primary { background: #4f8cff; color: white; border-color: #4f8cff; }
 .snippets-btn.primary:hover { background: #3a78ee; }
 .snippets-btn.danger:hover { color: #e05050; border-color: #e05050; }
+
+.col-failover-badge {
+  font-size: 10px;
+  color: #e0a020;
+  border: 1px solid #e0a020;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+}

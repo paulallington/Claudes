@@ -541,6 +541,17 @@ function connectWS() {
     } else if (msg.type === 'exit') {
       var col2 = allColumns.get(msg.id);
       if (col2) {
+        // Endpoint failover: if this is a Claude column that died early with a
+        // non-zero exit code, and the column was spawned with an endpoint that
+        // has a fallback configured, transparently respawn with the fallback
+        // before showing the user an exit overlay.
+        var lifetime = (typeof msg.lifetime_ms === 'number') ? msg.lifetime_ms : Infinity;
+        var earlyExit = lifetime < 5000;
+        var nonZero = msg.exitCode !== 0 && msg.exitCode != null;
+        if (!col2.cmd && earlyExit && nonZero && col2.endpointId && !col2.failedOver) {
+          tryEndpointFailover(msg.id);
+          return;  // skip the default exit overlay; respawn replaces the column in place
+        }
         col2.element.appendChild(createExitOverlay(msg.id, msg.exitCode, col2));
         setColumnActivity(msg.id, 'exited');
         // Refresh run configs to update stop/restart controls
@@ -2463,7 +2474,9 @@ function addColumn(args, targetRow, opts) {
     ctxFillEl: null,
     ctxTextEl: null,
     ctxPollTimer: null,
-    snippetBuffer: ''  // accumulates printable chars to detect "\\trigger" patterns
+    snippetBuffer: '',  // accumulates printable chars to detect "\\trigger" patterns
+    endpointId: opts.endpointId || (typeof currentEndpointId !== 'undefined' ? currentEndpointId : null) || null,
+    failedOver: false  // set true after one failover so we don't ping-pong
   };
 
   row.columnIds.push(id);
@@ -3243,6 +3256,58 @@ function restartColumn(id) {
   if (col.env) sendMsg.env = col.env;
   wsSend(sendMsg);
   setColumnActivity(id, 'working');
+}
+
+function tryEndpointFailover(colId) {
+  var col = allColumns.get(colId);
+  if (!col || col.failedOver) return;
+  if (!window.electronAPI || !window.electronAPI.endpointGet || !window.electronAPI.endpointGetEnv) return;
+  window.electronAPI.endpointGet(col.endpointId).then(function (preset) {
+    if (!preset || !preset.fallbackId) {
+      // No fallback configured — fall through to the normal exit overlay path.
+      col.element.appendChild(createExitOverlay(colId, null, col));
+      setColumnActivity(colId, 'exited');
+      return;
+    }
+    return window.electronAPI.endpointGetEnv(preset.fallbackId).then(function (envBlock) {
+      if (!envBlock) {
+        col.element.appendChild(createExitOverlay(colId, null, col));
+        setColumnActivity(colId, 'exited');
+        return;
+      }
+      col.failedOver = true;
+      col.endpointId = preset.fallbackId;
+      col.env = envBlock;
+
+      // Header badge
+      if (col.headerEl && !col.headerEl.querySelector('.col-failover-badge')) {
+        var badge = document.createElement('span');
+        badge.className = 'col-failover-badge';
+        badge.textContent = '↺ failover';
+        badge.title = 'Auto-failed-over to ' + preset.fallbackId;
+        col.headerEl.appendChild(badge);
+      }
+
+      // Re-create the pty with the same column id and the fallback env.
+      // Reuse existing args (--resume sessionId if present) so the user keeps their place.
+      try { col.terminal.clear(); } catch (e) {}
+      col.fitAddon.fit();
+      var respawnMsg = {
+        type: 'create',
+        id: colId,
+        cols: col.terminal.cols,
+        rows: col.terminal.rows,
+        cwd: col.cwd,
+        args: col.sessionId ? ['--resume', col.sessionId] : (col.cmdArgs || [])
+      };
+      respawnMsg.env = envBlock;
+      wsSend(respawnMsg);
+      setColumnActivity(colId, 'working');
+    });
+  }).catch(function () {
+    col.element.appendChild(createExitOverlay(colId, null, col));
+    setColumnActivity(colId, 'exited');
+  });
 }
 
 function setFocusedColumn(id) {

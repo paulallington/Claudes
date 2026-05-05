@@ -77,7 +77,7 @@ wss.on('connection', (ws) => {
         orphanBuffers.delete(id);
         setTimeout(() => {
           try {
-            ws.send(JSON.stringify({ type: 'exit', id, exitCode }));
+            ws.send(JSON.stringify({ type: 'exit', id, exitCode, lifetime_ms: p._createdAt ? (Date.now() - p._createdAt) : null }));
           } catch { /* ws closed */ }
         }, 200);
       }
@@ -134,6 +134,7 @@ wss.on('connection', (ws) => {
         }
 
         ptys.set(id, p);
+        p._createdAt = Date.now();
         attachPty(id, p);
         break;
       }
