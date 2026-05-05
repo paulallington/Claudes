@@ -840,6 +840,78 @@ function refocusActiveTerminal() {
   }
 }
 
+// Snippet expansion: when the user types "\\trigger" + Enter/Tab in a Claude
+// column, look up the snippet, prompt for any {{variables}}, then erase the
+// typed trigger and send the expanded body via the pty.
+//
+// Returns true if the keystroke was consumed (caller must NOT forward to pty),
+// or false if the keystroke should pass through normally.
+function handleSnippetExpansion(colId, data) {
+  var col = allColumns.get(colId);
+  if (!col) return false;
+  if (typeof col.snippetBuffer !== 'string') col.snippetBuffer = '';
+
+  // Backspace handling: pop one char off our buffer; let the pty handle echo
+  if (data === '\x7f' || data === '\b') {
+    col.snippetBuffer = col.snippetBuffer.slice(0, -1);
+    return false;
+  }
+
+  // Enter / Tab — try to expand
+  if (data === '\r' || data === '\n' || data === '\t') {
+    var m = /\\\\([a-zA-Z0-9_-]+)\s*$/.exec(col.snippetBuffer);
+    if (m) {
+      var trig = m[1];
+      var snip = (window.__snippetsCache || []).find(function (s) { return s.trigger === trig; });
+      if (snip) {
+        var body = snip.body || '';
+        // Collect unique variable names from {{name}} occurrences
+        var varNames = [];
+        body.replace(/\{\{(\w+)\}\}/g, function (_, n) {
+          if (varNames.indexOf(n) === -1) varNames.push(n);
+          return _;
+        });
+        var values = {};
+        for (var vi = 0; vi < varNames.length; vi++) {
+          var v = window.prompt('Value for {{' + varNames[vi] + '}}:');
+          if (v === null) {
+            // User cancelled — eat the keystroke, leave the typed trigger in
+            // the terminal as-is so they can edit. Reset our buffer.
+            col.snippetBuffer = '';
+            return true;
+          }
+          values[varNames[vi]] = v;
+        }
+        var expanded = body.replace(/\{\{(\w+)\}\}/g, function (_, n) { return values[n] || ''; });
+        // Erase the typed trigger from the terminal: send N backspaces (each
+        // erases the char to the left), then the body, then Enter if the
+        // original keystroke was Enter.
+        var eraseCount = m[0].length;
+        var eraseStr = '';
+        for (var ei = 0; ei < eraseCount; ei++) eraseStr += '\b \b';
+        var trailing = (data === '\r' || data === '\n') ? '\r' : '';
+        wsSend({ type: 'write', id: colId, data: eraseStr + expanded + trailing });
+        col.snippetBuffer = '';
+        return true;
+      }
+    }
+    // No match — clear buffer and let the keystroke pass through
+    col.snippetBuffer = '';
+    return false;
+  }
+
+  // Accumulate single printable chars (length 1, >= space) into the buffer.
+  // Bigger chunks (paste) reset rather than accumulate, since multi-char
+  // pastes don't represent typed triggers.
+  if (data.length === 1 && data >= ' ') {
+    col.snippetBuffer += data;
+    if (col.snippetBuffer.length > 200) col.snippetBuffer = col.snippetBuffer.slice(-200);
+  } else if (data.length > 1) {
+    col.snippetBuffer = '';
+  }
+  return false;
+}
+
 function saveColumnCounts() {
   for (var i = 0; i < config.projects.length; i++) {
     var key = config.projects[i].path;
@@ -2291,6 +2363,7 @@ function addColumn(args, targetRow, opts) {
   });
 
   terminal.onData(function (data) {
+    if (handleSnippetExpansion(id, data)) return;  // consumed by snippet expansion
     wsSend({ type: 'write', id: id, data: data });
     var c = allColumns.get(id);
     if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
@@ -2389,7 +2462,8 @@ function addColumn(args, targetRow, opts) {
     ctxMeterEl: null,
     ctxFillEl: null,
     ctxTextEl: null,
-    ctxPollTimer: null
+    ctxPollTimer: null,
+    snippetBuffer: ''  // accumulates printable chars to detect "\\trigger" patterns
   };
 
   row.columnIds.push(id);
