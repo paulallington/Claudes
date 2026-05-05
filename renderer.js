@@ -11414,12 +11414,18 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     try { cmd.run(); } catch (e) { console.error('palette command failed', e); }
   }
 
+  // Register Ctrl+K in capture phase so xterm can't swallow it.
   document.addEventListener('keydown', function (e) {
     if (e.ctrlKey && (e.key === 'k' || e.key === 'K') && !e.shiftKey && !e.altKey) {
       e.preventDefault();
+      e.stopPropagation();
       open();
-      return;
     }
+  }, true);
+
+  // Navigation / dismissal handler — only acts when palette is open, so it can
+  // stay in normal bubble phase and not interfere with anything else.
+  document.addEventListener('keydown', function (e) {
     if (overlay.classList.contains('hidden')) return;
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
     var rendered = results.querySelectorAll('.palette-row');
