@@ -6385,3 +6385,17 @@ body.mode-popout #btn-add-project {
   margin-left: 6px;
   font-variant-numeric: tabular-nums;
 }
+
+.session-search-mode {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.session-search-mode label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}

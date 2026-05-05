@@ -729,7 +729,11 @@
         <span id="session-search-close" class="modal-close">&times;</span>
       </div>
       <div class="modal-body">
-        <input type="search" id="session-search-input" placeholder="Search across all session transcripts…" autocomplete="off">
+            <div class="session-search-mode">
+              <label><input type="radio" name="search-mode" value="transcripts" checked> Transcripts</label>
+              <label><input type="radio" name="search-mode" value="prompts"> My prompts</label>
+            </div>
+            <input type="search" id="session-search-input" placeholder="Search across all session transcripts…" autocomplete="off">
         <div id="session-search-results" class="session-search-results"></div>
       </div>
     </div>

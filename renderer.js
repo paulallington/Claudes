@@ -11191,13 +11191,51 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     debounceTimer = setTimeout(function () { runSearch(q); }, 200);
   });
 
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (!t || t.name !== 'search-mode') return;
+    var input2 = document.getElementById('session-search-input');
+    if (!input2) return;
+    if (t.value === 'prompts') {
+      input2.placeholder = 'Search your past prompts…';
+    } else {
+      input2.placeholder = 'Search across all session transcripts…';
+    }
+    var q = input2.value.trim();
+    if (q.length >= 2) runSearch(q);
+  });
+
   function runSearch(q) {
     resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Searching…</div>';
-    if (!window.electronAPI || !window.electronAPI.searchSessions) {
-      resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
-      return;
+    var modeRadio = document.querySelector('input[name=search-mode]:checked');
+    var mode = (modeRadio && modeRadio.value) || 'transcripts';
+    var apiCall;
+    if (mode === 'prompts') {
+      if (!window.electronAPI || !window.electronAPI.searchHistory) {
+        resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
+        return;
+      }
+      apiCall = window.electronAPI.searchHistory(q, 100).then(function (hits) {
+        // Normalize prompt hits to the same shape transcript hits use:
+        // { projectKey, sessionId, snippet }. sessionId is empty for prompts —
+        // openHit treats empty sessionId as "no resume; copy text instead".
+        return (hits || []).map(function (h) {
+          return {
+            projectKey: h.project || '',
+            sessionId: '',
+            snippet: h.snippet || h.text || '',
+            text: h.text || ''
+          };
+        });
+      });
+    } else {
+      if (!window.electronAPI || !window.electronAPI.searchSessions) {
+        resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
+        return;
+      }
+      apiCall = window.electronAPI.searchSessions(q, 50);
     }
-    window.electronAPI.searchSessions(q, 50).then(function (hits) {
+    apiCall.then(function (hits) {
       resultsEl.innerHTML = '';
       if (!hits || !hits.length) {
         resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">No matches.</div>';
@@ -11208,7 +11246,9 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
         div.className = 'session-search-hit';
         var meta = document.createElement('div');
         meta.className = 'session-search-hit-meta';
-        meta.textContent = h.projectKey + '  •  ' + (h.sessionId ? h.sessionId.slice(0, 8) : '');
+        var metaParts = [h.projectKey || ''];
+        if (h.sessionId) metaParts.push(h.sessionId.slice(0, 8));
+        meta.textContent = metaParts.filter(Boolean).join('  •  ');
         var snip = document.createElement('div');
         snip.className = 'session-search-hit-snippet';
         snip.innerHTML = highlight(h.snippet || '', q);
@@ -11223,6 +11263,14 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   }
 
   function openHit(h) {
+    if (!h.sessionId) {
+      // Prompt-mode hit — copy the full prompt text to the clipboard.
+      if (window.electronAPI && window.electronAPI.clipboardWriteText) {
+        window.electronAPI.clipboardWriteText(h.text || h.snippet || '');
+      }
+      close();
+      return;
+    }
     if (!config || !config.projects) return;
     var idx = -1;
     for (var i = 0; i < config.projects.length; i++) {
@@ -11232,11 +11280,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       alert('That session\'s project is not in your project list. Add it first.');
       return;
     }
-    // skipDefaultSpawn = true so the project switch doesn't open a fresh column
-    // before our resume column lands.
     setActiveProject(idx, false, true);
-    // --resume in the args is what actually tells the Claude CLI to pick up the
-    // existing session; sessionId in opts is just tracking metadata for the column.
     addColumn(['--resume', h.sessionId], null, spawnOpts({ sessionId: h.sessionId }));
     close();
   }
