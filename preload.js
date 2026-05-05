@@ -143,5 +143,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   endpointDelete: (id) => ipcRenderer.invoke('endpoint:delete', id),
   endpointGetEnv: (id, modelOverride) => ipcRenderer.invoke('endpoint:getEnv', id, modelOverride),
   endpointFetchModels: (args) => ipcRenderer.invoke('endpoint:fetchModels', args),
-  onEndpointsUpdated: (callback) => ipcRenderer.on('endpoints:updated', () => callback())
+  onEndpointsUpdated: (callback) => ipcRenderer.on('endpoints:updated', () => callback()),
+
+  paletteRank: (items, query) => ipcRenderer.invoke('palette:rank', items, query)
 });

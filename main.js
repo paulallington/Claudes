@@ -1653,6 +1653,9 @@ ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
   try { return detectPlanLimitCrossings(prev, next); } catch { return []; }
 });
 
+const { fuzzyRank } = require('./lib/fuzzy-rank');
+ipcMain.handle('palette:rank', (_event, items, query) => fuzzyRank(items, query, x => x.label));
+
 const { lastAssistantContextTokens, modelContextLimit } = require('./lib/session-context-tokens');
 
 // One-shot read of the live context-token count for a session.

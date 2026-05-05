@@ -717,6 +717,15 @@
     </div>
   </div>
 
+  <!-- Command Palette -->
+  <div id="palette-overlay" class="palette-overlay hidden">
+    <div class="palette">
+      <input type="text" id="palette-input" class="palette-input" placeholder="Type a command, project, or slash command…" autocomplete="off">
+      <div id="palette-results" class="palette-results"></div>
+      <div class="palette-hint">↑↓ navigate · ↵ run · Esc close</div>
+    </div>
+  </div>
+
   <script src="./node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="./node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="./node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>

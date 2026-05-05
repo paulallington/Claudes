@@ -11083,3 +11083,176 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     });
   });
 })();
+
+(function setupPalette() {
+  var overlay = document.getElementById('palette-overlay');
+  var input = document.getElementById('palette-input');
+  var results = document.getElementById('palette-results');
+  if (!overlay) return;
+
+  var SLASH_COMMANDS = [
+    '/help', '/clear', '/compact', '/cost', '/usage', '/model', '/agents',
+    '/mcp', '/release', '/review', '/security-review', '/init'
+  ];
+
+  function buildCommands() {
+    var cmds = [];
+    if (config && config.projects) {
+      config.projects.forEach(function (p) {
+        cmds.push({
+          label: 'Switch to ' + (p.name || projectKeyToName(p.path)),
+          kind: 'project',
+          run: function () { setActiveProject(config.projects.indexOf(p), false); }
+        });
+        cmds.push({
+          label: 'Spawn in ' + (p.name || projectKeyToName(p.path)),
+          kind: 'spawn',
+          run: function () {
+            setActiveProject(config.projects.indexOf(p), false, true);
+            addColumn(null, null, spawnOpts());
+          }
+        });
+      });
+    }
+    SLASH_COMMANDS.forEach(function (s) {
+      cmds.push({
+        label: s,
+        kind: 'slash',
+        run: function () {
+          var st = getActiveState();
+          if (st && st.focusedColumnId != null) {
+            wsSend({ type: 'write', id: st.focusedColumnId, data: s + '\r' });
+          }
+        }
+      });
+    });
+    cmds.push({ label: 'Open Usage', kind: 'action', run: openUsageModal });
+    cmds.push({ label: 'Add project…', kind: 'action', run: function () {
+      var btn = document.getElementById('btn-add-project');
+      if (btn) btn.click();
+    }});
+    cmds.push({ label: 'Toggle sidebar', kind: 'action', run: function () {
+      var btn = document.getElementById('btn-toggle-sidebar');
+      if (btn) btn.click();
+    }});
+    cmds.push({ label: 'Kill focused column', kind: 'action', run: function () {
+      var st = getActiveState();
+      if (st && st.focusedColumnId != null) removeColumn(st.focusedColumnId);
+    }});
+    cmds.push({ label: 'Respawn focused column', kind: 'action', run: function () {
+      var st = getActiveState();
+      if (st && st.focusedColumnId != null) restartColumn(st.focusedColumnId);
+    }});
+    return cmds;
+  }
+
+  var commands = [];
+  var lastFiltered = [];
+  var selectedIdx = 0;
+
+  function open() {
+    commands = buildCommands();
+    lastFiltered = commands;
+    selectedIdx = 0;
+    overlay.classList.remove('hidden');
+    input.value = '';
+    // Blur active xterm so the input receives keystrokes immediately
+    if (typeof allColumns !== 'undefined') {
+      allColumns.forEach(function (c) {
+        if (c.terminal && typeof c.terminal.blur === 'function') c.terminal.blur();
+      });
+    }
+    setTimeout(function () { input.focus(); }, 0);
+    render(lastFiltered);
+  }
+  function close() {
+    overlay.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+
+  function render(list) {
+    results.innerHTML = '';
+    list.slice(0, 50).forEach(function (cmd, i) {
+      var row = document.createElement('div');
+      row.className = 'palette-row' + (i === selectedIdx ? ' active' : '');
+      row.dataset.idx = String(i);
+      var label = document.createElement('span');
+      label.textContent = cmd.label;
+      var kind = document.createElement('span');
+      kind.className = 'palette-row-kind';
+      kind.textContent = cmd.kind;
+      row.appendChild(label);
+      row.appendChild(kind);
+      row.addEventListener('click', function () { runAt(i, list); });
+      results.appendChild(row);
+    });
+  }
+
+  function runAt(i, list) {
+    var cmd = list[i];
+    if (!cmd) return;
+    close();
+    try { cmd.run(); } catch (e) { console.error('palette command failed', e); }
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.ctrlKey && (e.key === 'k' || e.key === 'K') && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      open();
+      return;
+    }
+    if (overlay.classList.contains('hidden')) return;
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    var rendered = results.querySelectorAll('.palette-row');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedIdx = Math.min(rendered.length - 1, selectedIdx + 1);
+      updateActive(rendered);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedIdx = Math.max(0, selectedIdx - 1);
+      updateActive(rendered);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      runAt(selectedIdx, lastFiltered);
+    }
+  });
+
+  function updateActive(rows) {
+    rows.forEach(function (r, i) { r.classList.toggle('active', i === selectedIdx); });
+    var active = rows[selectedIdx];
+    if (active && typeof active.scrollIntoView === 'function') {
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  input.addEventListener('input', function () {
+    var q = input.value;
+    if (!window.electronAPI || !window.electronAPI.paletteRank) {
+      lastFiltered = commands;
+      selectedIdx = 0;
+      render(lastFiltered);
+      return;
+    }
+    window.electronAPI.paletteRank(commands.map(function (c) {
+      return { label: c.label, kind: c.kind };
+    }), q).then(function (rankedShallow) {
+      // Map back to full commands by label::kind composite key
+      var byLabel = new Map();
+      commands.forEach(function (c) { byLabel.set(c.label + '::' + c.kind, c); });
+      lastFiltered = rankedShallow.map(function (s) {
+        return byLabel.get(s.label + '::' + s.kind);
+      }).filter(Boolean);
+      selectedIdx = 0;
+      render(lastFiltered);
+    }).catch(function () {
+      lastFiltered = commands;
+      selectedIdx = 0;
+      render(lastFiltered);
+    });
+  });
+
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) close();
+  });
+})();
