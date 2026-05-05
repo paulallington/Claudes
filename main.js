@@ -740,12 +740,27 @@ ipcMain.handle('endpoint:save', (event, preset) => {
   }
   const list = readEndpoints();
   const id = preset.id || ('ep_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+
+  // Optional fallbackId: must reference another existing preset, never self.
+  // Empty string / undefined / null all mean "no fallback".
+  let fallbackId = null;
+  if (preset.fallbackId) {
+    if (preset.fallbackId === id) {
+      return { ok: false, error: 'Fallback cannot be the same preset.' };
+    }
+    if (!list.find((e) => e && e.id === preset.fallbackId)) {
+      return { ok: false, error: 'Fallback endpoint does not exist.' };
+    }
+    fallbackId = String(preset.fallbackId);
+  }
+
   const stored = {
     id,
     name: String(preset.name || '').trim(),
     baseUrl: normalizeBaseUrl(preset.baseUrl),
     model: String(preset.model || '').trim(),
-    authToken: encryptToken(String(preset.authToken || ''))
+    authToken: encryptToken(String(preset.authToken || '')),
+    fallbackId
   };
   const idx = list.findIndex((e) => e && e.id === id);
   if (idx >= 0) list[idx] = stored;
@@ -755,7 +770,7 @@ ipcMain.handle('endpoint:save', (event, preset) => {
   BrowserWindow.getAllWindows().forEach((w) => {
     try { w.webContents.send('endpoints:updated'); } catch { /* ignore */ }
   });
-  return { id };
+  return { id, ok: true };
 });
 
 ipcMain.handle('endpoint:delete', (event, id) => {
