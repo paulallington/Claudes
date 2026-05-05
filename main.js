@@ -29,6 +29,7 @@ const AUTOMATIONS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'automations.jso
 const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-runs' : 'automation-runs-dev');
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
+const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
 
 // --- Config ---
 
@@ -238,6 +239,18 @@ function readAutomations() {
 function writeAutomations(data) {
   ensureConfigDir();
   fs.writeFileSync(AUTOMATIONS_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// Prompt snippet library — persists to ~/.claudes/snippets.json. Each snippet
+// has { id, trigger, label, body }. Triggered in the renderer by typing
+// "\trigger" in a column terminal.
+function readSnippets() {
+  try { return JSON.parse(fs.readFileSync(SNIPPETS_FILE, 'utf8')); }
+  catch { return { snippets: [] }; }
+}
+function writeSnippets(data) {
+  ensureConfigDir();
+  fs.writeFileSync(SNIPPETS_FILE, JSON.stringify(data, null, 2), 'utf8');
 }
 
 function ensureAgentRunsDir(automationId, agentId) {
@@ -2897,6 +2910,31 @@ ipcMain.handle('headless:cancel', (_event, runId) => {
 
 ipcMain.handle('headless:delete', (_event, projectPath, runId) => {
   return { deleted: deleteHeadless(projectPath, runId) };
+});
+
+ipcMain.handle('snippets:list', () => readSnippets().snippets || []);
+
+ipcMain.handle('snippets:save', (_event, snippet) => {
+  if (!snippet || typeof snippet !== 'object') return null;
+  const data = readSnippets();
+  if (!Array.isArray(data.snippets)) data.snippets = [];
+  if (snippet.id) {
+    const i = data.snippets.findIndex(s => s.id === snippet.id);
+    if (i >= 0) data.snippets[i] = snippet; else data.snippets.push(snippet);
+  } else {
+    snippet.id = 'snip_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    data.snippets.push(snippet);
+  }
+  writeSnippets(data);
+  return snippet;
+});
+
+ipcMain.handle('snippets:delete', (_event, id) => {
+  if (!id) return false;
+  const data = readSnippets();
+  data.snippets = (data.snippets || []).filter(s => s.id !== id);
+  writeSnippets(data);
+  return true;
 });
 
 // --- Automations Scheduler & Execution ---
