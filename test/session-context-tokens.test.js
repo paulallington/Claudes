@@ -42,3 +42,39 @@ test('skips non-assistant lines and malformed JSON', () => {
 test('returns null for nonexistent file', () => {
   assert.strictEqual(lastAssistantContextTokens('/no/such/file.jsonl'), null);
 });
+
+test('sinceMs skips assistant turns older than the cutoff', () => {
+  const p = tmpFile([
+    { type: 'assistant', timestamp: '2026-01-01T00:00:00Z', message: { usage: { input_tokens: 325000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }
+  ]);
+  const cutoff = Date.parse('2026-02-01T00:00:00Z');
+  assert.strictEqual(lastAssistantContextTokens(p, cutoff), null);
+  fs.unlinkSync(p);
+});
+
+test('sinceMs returns the most recent assistant turn at or after the cutoff', () => {
+  const p = tmpFile([
+    { type: 'assistant', timestamp: '2026-01-01T00:00:00Z', message: { usage: { input_tokens: 325000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } },
+    { type: 'user', message: { content: 'fresh' } },
+    { type: 'assistant', timestamp: '2026-03-01T00:00:00Z', message: { usage: { input_tokens: 1000, cache_creation_input_tokens: 0, cache_read_input_tokens: 200 } } }
+  ]);
+  const cutoff = Date.parse('2026-02-01T00:00:00Z');
+  assert.strictEqual(lastAssistantContextTokens(p, cutoff), 1200);
+  fs.unlinkSync(p);
+});
+
+test('sinceMs without a timestamp on the entry is treated as too-old', () => {
+  const p = tmpFile([
+    { type: 'assistant', message: { usage: { input_tokens: 999, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }
+  ]);
+  assert.strictEqual(lastAssistantContextTokens(p, Date.now() - 60_000), null);
+  fs.unlinkSync(p);
+});
+
+test('omitting sinceMs preserves prior behavior (no time filter)', () => {
+  const p = tmpFile([
+    { type: 'assistant', timestamp: '2020-01-01T00:00:00Z', message: { usage: { input_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }
+  ]);
+  assert.strictEqual(lastAssistantContextTokens(p), 50);
+  fs.unlinkSync(p);
+});

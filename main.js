@@ -1727,14 +1727,14 @@ const { lastAssistantContextTokens, modelContextLimit } = require('./lib/session
 
 // One-shot read of the live context-token count for a session.
 // Renderer calls this every ~10s while a Claude column is live.
-ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId) => {
+ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId, sinceMs) => {
   if (!projectPath || !sessionId) return null;
   // projectPath is the renderer's projectKey, which is the raw filesystem path
   // (e.g. "D:\\Git Repos\\Claudes"). Claude stores sessions under the encoded
   // form (e.g. "D--Git-Repos-Claudes"), so we must encode before joining.
   const claudeKey = projectPathToClaudeKey(projectPath);
   const filePath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
-  return lastAssistantContextTokens(filePath);
+  return lastAssistantContextTokens(filePath, sinceMs);
 });
 
 ipcMain.handle('session:modelContextLimit', (_event, model) => modelContextLimit(model));

@@ -2641,6 +2641,10 @@ function addColumn(args, targetRow, opts) {
     spawnSessionPct: null,    // (unused) five_hour.utilization at spawn — kept for backward compat
     spawnWeeklyPct: null,     // (unused) reserved
     spawnSessionTokens: null, // context-token count at spawn — set on first ctx poll
+    // For new (non-resume) columns we filter the JSONL by timestamp so a stale
+    // session's tokens never appear in the meter. Resumed columns must show
+    // their existing context, so we leave this null for them.
+    contextSinceMs: resumeSessionId ? null : Date.now(),
     deltaSessionEl: null,     // header element, captured below
     ctxMeterEl: null,
     ctxFillEl: null,
@@ -7867,7 +7871,7 @@ function startContextMeterPoll(colId) {
       console.log('[ctx-meter] electronAPI.getSessionContextTokens missing');
       return;
     }
-    window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId).then(function (tokens) {
+    window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId, col.contextSinceMs).then(function (tokens) {
       console.log('[ctx-meter ' + ts + '] col=' + colId + ' → tokens=' + tokens);
       if (tokens == null) {
         showCtxMeterPlaceholder(col, '0');
