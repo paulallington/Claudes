@@ -3519,16 +3519,30 @@ async function runAgent(automationId, agentId) {
     return;
   }
 
-  // Capacity gate: skip the run if the user's 5-hour session is too full.
-  // The gate is per-agent; absent / null means no gate.
-  const gatePct = agent.usageGate && typeof agent.usageGate.sessionMaxPct === 'number'
+  // Capacity gate: skip the run if any configured usage window is too full.
+  // Each gate is per-agent; absent / null means no gate for that window.
+  const sessionGate = agent.usageGate && typeof agent.usageGate.sessionMaxPct === 'number'
     ? agent.usageGate.sessionMaxPct
     : null;
-  if (gatePct != null && planUsageCache && planUsageCache.data && planUsageCache.data.five_hour
-      && typeof planUsageCache.data.five_hour.utilization === 'number') {
-    const util = planUsageCache.data.five_hour.utilization;
-    if (util > gatePct) {
-      const msg = 'Skipped: session usage ' + util.toFixed(1) + '% > gate ' + gatePct + '%';
+  const weeklyGate = agent.usageGate && typeof agent.usageGate.weeklyMaxPct === 'number'
+    ? agent.usageGate.weeklyMaxPct
+    : null;
+  if ((sessionGate != null || weeklyGate != null) && planUsageCache && planUsageCache.data) {
+    const planData = planUsageCache.data;
+    let skipReason = null;
+    if (sessionGate != null && planData.five_hour && typeof planData.five_hour.utilization === 'number') {
+      const util = planData.five_hour.utilization;
+      if (util > sessionGate) {
+        skipReason = 'Skipped: session usage ' + util.toFixed(1) + '% > gate ' + sessionGate + '%';
+      }
+    }
+    if (!skipReason && weeklyGate != null && planData.seven_day && typeof planData.seven_day.utilization === 'number') {
+      const util = planData.seven_day.utilization;
+      if (util > weeklyGate) {
+        skipReason = 'Skipped: weekly usage ' + util.toFixed(1) + '% > gate ' + weeklyGate + '%';
+      }
+    }
+    if (skipReason) {
       const skipData = readAutomations();
       const skipAuto = skipData.automations.find(a => a.id === automationId);
       if (skipAuto) {
@@ -3536,12 +3550,12 @@ async function runAgent(automationId, agentId) {
         if (skipAgent) {
           skipAgent.lastRunStatus = 'skipped';
           skipAgent.lastRunAt = new Date().toISOString();
-          skipAgent.lastError = msg;
+          skipAgent.lastError = skipReason;
           writeAutomations(skipData);
         }
       }
       if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
-        automationId, agentId, status: 'skipped', error: msg
+        automationId, agentId, status: 'skipped', error: skipReason
       });
       return;
     }

@@ -9241,9 +9241,15 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
     '</div>';
 
   var sessionMaxPct = agent && agent.usageGate && (typeof agent.usageGate.sessionMaxPct === 'number') ? agent.usageGate.sessionMaxPct : '';
+  var weeklyMaxPct = agent && agent.usageGate && (typeof agent.usageGate.weeklyMaxPct === 'number') ? agent.usageGate.weeklyMaxPct : '';
   var usageGateHtml = '<div class="automation-form-group">' +
     '<label>Skip if session usage above ' +
-      '<input type="number" class="automation-input agent-usage-gate" min="0" max="100" step="1" value="' + escapeHtml(String(sessionMaxPct)) + '" placeholder="e.g. 80" style="width:80px;display:inline-block;margin:0 6px;"> ' +
+      '<input type="number" class="automation-input agent-usage-gate-session" min="0" max="100" step="1" value="' + escapeHtml(String(sessionMaxPct)) + '" placeholder="e.g. 80" style="width:80px;display:inline-block;margin:0 6px;"> ' +
+      '%' +
+      ' <span class="automation-permission-hint">(blank to always run)</span>' +
+    '</label>' +
+    '<label style="margin-top:6px;display:block;">Skip if weekly usage above ' +
+      '<input type="number" class="automation-input agent-usage-gate-weekly" min="0" max="100" step="1" value="' + escapeHtml(String(weeklyMaxPct)) + '" placeholder="e.g. 80" style="width:80px;display:inline-block;margin:0 6px;"> ' +
       '%' +
       ' <span class="automation-permission-hint">(blank to always run)</span>' +
     '</label>' +
@@ -9611,15 +9617,19 @@ function syncAgentFromCard(card, agentIndex) {
     agent.isolation.enabled = isoCheckbox.checked;
   }
 
-  var usageGateEl = card.querySelector('.agent-usage-gate');
-  if (usageGateEl) {
-    var raw = (usageGateEl.value || '').trim();
-    if (raw === '' || isNaN(parseFloat(raw))) {
-      agent.usageGate = { sessionMaxPct: null };
-    } else {
-      var n = Math.max(0, Math.min(100, parseFloat(raw)));
-      agent.usageGate = { sessionMaxPct: n };
+  var usageGateSessionEl = card.querySelector('.agent-usage-gate-session');
+  var usageGateWeeklyEl = card.querySelector('.agent-usage-gate-weekly');
+  if (usageGateSessionEl || usageGateWeeklyEl) {
+    function readPct(el) {
+      if (!el) return null;
+      var raw = (el.value || '').trim();
+      if (raw === '' || isNaN(parseFloat(raw))) return null;
+      return Math.max(0, Math.min(100, parseFloat(raw)));
     }
+    agent.usageGate = {
+      sessionMaxPct: readPct(usageGateSessionEl),
+      weeklyMaxPct: readPct(usageGateWeeklyEl)
+    };
   }
 
   var schedTypeEl = card.querySelector('.agent-schedule-type');
