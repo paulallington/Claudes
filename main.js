@@ -680,7 +680,9 @@ ipcMain.handle('endpoint:list', () => {
     name: e.name || '',
     baseUrl: e.baseUrl || '',
     model: e.model || '',
-    hasToken: !!decryptToken(e.authToken)
+    hasToken: !!decryptToken(e.authToken),
+    fallbackId: e.fallbackId || null,
+    contextWindow: e.contextWindow || null
   }));
 });
 
@@ -692,7 +694,9 @@ ipcMain.handle('endpoint:get', (event, id) => {
     name: e.name || '',
     baseUrl: e.baseUrl || '',
     model: e.model || '',
-    authToken: decryptToken(e.authToken)
+    authToken: decryptToken(e.authToken),
+    fallbackId: e.fallbackId || null,
+    contextWindow: e.contextWindow || null
   };
 });
 
@@ -755,13 +759,22 @@ ipcMain.handle('endpoint:save', (event, preset) => {
     fallbackId = String(preset.fallbackId);
   }
 
+  // Optional context window — used by the column ctx meter as denominator.
+  // Falsy/invalid values are stored as null so renderer treats it as "unset".
+  let contextWindow = null;
+  if (preset.contextWindow != null) {
+    const n = typeof preset.contextWindow === 'string' ? parseInt(preset.contextWindow, 10) : preset.contextWindow;
+    if (Number.isFinite(n) && n > 0) contextWindow = n;
+  }
+
   const stored = {
     id,
     name: String(preset.name || '').trim(),
     baseUrl: normalizeBaseUrl(preset.baseUrl),
     model: String(preset.model || '').trim(),
     authToken: encryptToken(String(preset.authToken || '')),
-    fallbackId
+    fallbackId,
+    contextWindow
   };
   const idx = list.findIndex((e) => e && e.id === id);
   if (idx >= 0) list[idx] = stored;
@@ -819,7 +832,24 @@ ipcMain.handle('endpoint:fetchModels', async (event, args) => {
     const data = await res.json();
     const arr = Array.isArray(data && data.data) ? data.data : (Array.isArray(data) ? data : []);
     const models = arr.map((m) => (m && (m.id || m.model || m.name)) || '').filter(Boolean);
-    return { ok: true, models };
+    // Best-effort context-length probe. LM Studio surfaces these on /v1/models;
+    // vLLM uses max_model_len; some servers use context_length or n_ctx.
+    function pickCtx(m) {
+      if (!m || typeof m !== 'object') return null;
+      const candidates = [
+        m.loaded_context_length, m.max_context_length, m.context_length,
+        m.max_model_len, m.n_ctx, m.context_window
+      ];
+      for (const v of candidates) {
+        const n = typeof v === 'string' ? parseInt(v, 10) : v;
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return null;
+    }
+    const modelInfo = arr
+      .map((m) => ({ id: (m && (m.id || m.model || m.name)) || '', context: pickCtx(m) }))
+      .filter((m) => m.id);
+    return { ok: true, models, modelInfo };
   } catch (err) {
     const msg = err && err.name === 'AbortError' ? 'Request timed out' : (err && err.message) || 'Fetch failed';
     return { ok: false, error: msg };
@@ -919,9 +949,17 @@ ipcMain.handle('theme:setTitleBarOverlay', (event, colors) => {
 
 // --- Session Management ---
 
-// Convert a project path to Claude's project key format
+// Convert a project path to Claude's project key format.
+// Claude CLI encodes every non-alphanumeric character (colons, slashes,
+// backslashes, spaces, dots, underscores, …) as a single '-'. Consecutive
+// non-alphanumerics each become their own '-' (no collapsing). Leading '-'s
+// are stripped so unix paths starting with '/' don't begin with a separator.
+// Examples:
+//   D:\Git Repos\Claudes  → D--Git-Repos-Claudes
+//   /Users/devel          → Users-devel
+//   D:\foo\.bar           → D--foo--bar
 function projectPathToClaudeKey(projectPath) {
-  return projectPath.replace(/[:/\\]/g, '-').replace(/^-/, '');
+  return projectPath.replace(/[^a-zA-Z0-9]/g, '-').replace(/^-+/, '');
 }
 
 // Get recent session IDs for a project by scanning Claude's data directory
@@ -1691,9 +1729,11 @@ const { lastAssistantContextTokens, modelContextLimit } = require('./lib/session
 // Renderer calls this every ~10s while a Claude column is live.
 ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId) => {
   if (!projectPath || !sessionId) return null;
-  // projectPath is the renderer's projectKey (e.g. "D--Git-Repos-Claudes").
-  // Sessions live under ~/.claude/projects/<projectKey>/<sessionId>.jsonl.
-  const filePath = path.join(os.homedir(), '.claude', 'projects', projectPath, sessionId + '.jsonl');
+  // projectPath is the renderer's projectKey, which is the raw filesystem path
+  // (e.g. "D:\\Git Repos\\Claudes"). Claude stores sessions under the encoded
+  // form (e.g. "D--Git-Repos-Claudes"), so we must encode before joining.
+  const claudeKey = projectPathToClaudeKey(projectPath);
+  const filePath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
   return lastAssistantContextTokens(filePath);
 });
 
@@ -2036,7 +2076,42 @@ function startHookServer() {
   hookServer.listen(hookServerListenPort, '127.0.0.1', () => {
     hookServerPort = hookServerListenPort;
     console.log('[hook-server] listening on port', hookServerPort);
+    // Self-heal: if the user's settings.json already has our sentinel entries
+    // pointing at a different port (e.g. dev↔packaged switch), rewrite them to
+    // the current port so they don't have to disconnect+reconnect every launch.
+    try { syncHookPortInSettings(hookServerListenPort); } catch (err) {
+      console.error('[hook-server] failed to sync port in settings.json:', err && err.message);
+    }
   });
+}
+
+function syncHookPortInSettings(port) {
+  const file = path.join(os.homedir(), '.claude', 'settings.json');
+  if (!fs.existsSync(file)) return;  // no settings = nothing to sync
+  let data;
+  try { data = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { return; }  // malformed — leave alone
+  if (!data || !data.hooks) return;
+  const wanted = buildHookCommand(port);
+  let changed = 0;
+  for (const ev of Object.keys(data.hooks)) {
+    const groups = data.hooks[ev];
+    if (!Array.isArray(groups)) continue;
+    for (const g of groups) {
+      if (!g || g.matcher !== CLAUDES_HOOK_SENTINEL) continue;
+      if (!Array.isArray(g.hooks)) continue;
+      for (const h of g.hooks) {
+        if (h && h.type === 'command' && typeof h.command === 'string' && h.command !== wanted) {
+          h.command = wanted;
+          changed++;
+        }
+      }
+    }
+  }
+  if (changed > 0) {
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+    console.log('[hook-server] re-pointed', changed, 'sentinel hook(s) to port', port);
+  }
 }
 
 ipcMain.handle('hooks:getPort', () => hookServerPort);

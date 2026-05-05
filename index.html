@@ -24,11 +24,21 @@
     <div id="sidebar-resize-handle"></div>
     <div id="explorer-panel">
       <div class="explorer-tabs">
-        <button class="explorer-tab active" data-tab="files">Files</button>
-        <button class="explorer-tab" data-tab="git">Git</button>
-        <button class="explorer-tab" data-tab="run">Run</button>
-        <button class="explorer-tab" data-tab="automations">Automations</button>
-            <button class="explorer-tab" data-tab="hooks">Hooks</button>
+        <button class="explorer-tab active" data-tab="files" title="Files" aria-label="Files">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 2h4.3l1.4 1.5h7.3a1 1 0 0 1 1 1V13a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm0 3v8h13V4.5H6.6L5.2 3H1.5v2z"/></svg>
+        </button>
+        <button class="explorer-tab" data-tab="git" title="Source Control" aria-label="Source Control">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M11.5 3.5a2 2 0 1 0-2.45 1.95v1.6a2 2 0 0 1-2 2H5.45a3 3 0 0 0-1.95.72V5.45a2 2 0 1 0-1 0v5.1a2 2 0 1 0 1.04-.02 2 2 0 0 1 1.91-1.48h1.6a3 3 0 0 0 3-3v-1.6A2 2 0 0 0 11.5 3.5zM3 3.5a1 1 0 1 1 2 0 1 1 0 0 1-2 0zm1 10a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm5.5-9a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/></svg>
+        </button>
+        <button class="explorer-tab" data-tab="run" title="Run" aria-label="Run">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 2.5v11a.5.5 0 0 0 .77.42l8.5-5.5a.5.5 0 0 0 0-.84l-8.5-5.5A.5.5 0 0 0 4 2.5z"/></svg>
+        </button>
+        <button class="explorer-tab" data-tab="automations" title="Automations" aria-label="Automations">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M9 1L2.5 9.2a.5.5 0 0 0 .4.8H7l-1.5 5.2a.4.4 0 0 0 .7.36L13.5 6.8a.5.5 0 0 0-.4-.8H9.4l1.3-4.55A.4.4 0 0 0 9 1z"/></svg>
+        </button>
+        <button class="explorer-tab" data-tab="hooks" title="Hooks" aria-label="Hooks">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 8.5l-2 2a2.5 2.5 0 1 1-3.5-3.5l2.5-2.5a2.5 2.5 0 0 1 3.5 0"/><path d="M9.5 7.5l2-2a2.5 2.5 0 1 1 3.5 3.5l-2.5 2.5a2.5 2.5 0 0 1-3.5 0"/><path d="M6 10l4-4"/></svg>
+        </button>
       </div>
       <div class="explorer-content">
         <div id="tab-files" class="tab-content active">
@@ -179,16 +189,32 @@
             </svg>
           </button>
           <span class="app-title">Claudes</span><span id="app-version" class="app-version"></span>
-          <span id="active-project-name" class="active-project-name"></span>
+          <span class="active-project-wrap">
+            <svg class="active-project-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h4.3l1.4 1.5h7.3a1 1 0 0 1 1 1V13a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V5.5a1 1 0 0 1 1-1z"/></svg>
+            <span id="active-project-name" class="active-project-name"></span>
+          </span>
         </div>
         <div class="toolbar-actions">
-          <button id="btn-session-search" class="toolbar-btn" title="Search session transcripts (Ctrl+Shift+F)">🔎</button>
-          <button id="btn-broadcast" class="toolbar-btn" title="Broadcast a prompt to multiple columns">⤳</button>
-          <button id="btn-snippets" class="toolbar-btn" title="Prompt snippets">📝</button>
-          <button id="btn-shortcuts" class="toolbar-btn" title="Power-user shortcuts &amp; features (?)">❔</button>
-          <button id="btn-automations-flyout" class="toolbar-btn" title="Automations">&#8634;</button>
+          <button id="btn-session-search" class="toolbar-btn" title="Search session transcripts (Ctrl+Shift+F)" aria-label="Search session transcripts">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
+          </button>
+          <button id="btn-broadcast" class="toolbar-btn" title="Broadcast a prompt to multiple columns" aria-label="Broadcast">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h7"/><path d="M7.5 4.5L11 8l-3.5 3.5"/><path d="M13 4v8"/></svg>
+          </button>
+          <button id="btn-snippets" class="toolbar-btn" title="Prompt snippets" aria-label="Snippets">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2h6l3 3v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M10 2v3h3"/><path d="M5.5 8.5h5"/><path d="M5.5 11h5"/></svg>
+          </button>
+          <button id="btn-shortcuts" class="toolbar-btn" title="Power-user shortcuts &amp; features (?)" aria-label="Shortcuts">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M6 6.2a2 2 0 1 1 2.6 1.9c-.6.2-.6.7-.6 1.1"/><circle cx="8" cy="11.5" r="0.4" fill="currentColor"/></svg>
+          </button>
+          <button id="btn-automations-flyout" class="toolbar-btn" title="Automations" aria-label="Automations">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 8a6 6 0 1 1-1.8-4.3"/><path d="M14 2.5V5.5H11"/></svg>
+          </button>
+          <span class="toolbar-divider" aria-hidden="true"></span>
           <div class="toolbar-menu-wrap">
-            <button id="btn-toolbar-menu" class="toolbar-menu-btn" title="Tools &amp; settings">&#8943;</button>
+            <button id="btn-toolbar-menu" class="toolbar-btn" title="Tools &amp; settings" aria-label="Tools and settings">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="13" cy="8" r="1.3"/></svg>
+            </button>
             <div id="toolbar-menu" class="toolbar-menu hidden">
               <button class="toolbar-menu-item" id="btn-claude-md">CLAUDE.md</button>
               <button class="toolbar-menu-item" id="btn-usage">Usage</button>
@@ -284,7 +310,9 @@
               <div class="spawn-hint">Options apply to the Spawn button</div>
             </div>
           </div>
-          <button id="btn-add-row" title="Add Row (Ctrl+Shift+R)">+ Add Row</button>
+          <button id="btn-add-row" class="toolbar-btn" title="Add Row (Ctrl+Shift+R)" aria-label="Add Row">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="4" rx="1"/><rect x="2" y="8" width="8.5" height="4" rx="1"/><path d="M13 10h2.5M14.25 8.75v2.5"/></svg>
+          </button>
         </div>
       </div>
       <div id="columns-container"></div>
@@ -343,49 +371,62 @@
         <span id="settings-close" class="modal-close">&times;</span>
       </div>
       <div class="modal-body settings-body">
-        <div class="settings-section">
-          <h3 class="settings-section-title">General</h3>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-start-with-os">
-            <span>Start with OS (launches minimised to tray)</span>
-          </label>
+        <div class="settings-tabs" role="tablist">
+          <button class="settings-tab active" data-settings-tab="general" role="tab">General</button>
+          <button class="settings-tab" data-settings-tab="notifications" role="tab">Notifications</button>
+          <button class="settings-tab" data-settings-tab="automations" role="tab">Automations</button>
         </div>
-        <div class="settings-section">
-          <h3 class="settings-section-title">Notifications</h3>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-notif-taskbar" checked>
-            <span>Flash taskbar when Claude needs attention</span>
-          </label>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-notif-sidebar" checked>
-            <span>Flash sidebar project when Claude needs attention</span>
-          </label>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-notif-header" checked>
-            <span>Flash column header when Claude needs attention</span>
-          </label>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-notif-limits-70" checked>
-            <span>Notify when plan limits cross 70%</span>
-          </label>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-notif-limits-90" checked>
-            <span>Notify when plan limits cross 90%</span>
-          </label>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-notif-limits-pause" checked>
-            <span>At 90% weekly, prompt to pause automations</span>
-          </label>
-        </div>
-        <div class="settings-section">
-          <h3 class="settings-section-title">Automations</h3>
-          <div class="settings-field">
-            <label for="setting-agent-repos-dir">Agent repos directory</label>
-            <div class="settings-path-row">
-              <input type="text" id="setting-agent-repos-dir" class="settings-input" placeholder="~/.claudes/agents/" spellcheck="false">
-              <button id="btn-browse-agent-repos" class="settings-browse-btn" title="Browse...">...</button>
+        <div class="settings-panes">
+          <div class="settings-pane active" data-settings-pane="general">
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-start-with-os">
+              <span>Start with OS (launches minimised to tray)</span>
+            </label>
+            <div class="settings-field">
+              <label for="setting-ctx-default">Default context window</label>
+              <select id="setting-ctx-default" class="settings-input">
+                <option value="auto">Auto-detect (recommended)</option>
+                <option value="200000">200k tokens</option>
+                <option value="1000000">1M tokens (Claude Max / 1M-context preview)</option>
+              </select>
+              <span class="settings-hint">Used as the initial denominator for column context meters. "Auto" starts at 200k and promotes to 1M when usage exceeds 200k.</span>
             </div>
-            <span class="settings-hint">Base directory for isolated agent repository clones</span>
+          </div>
+          <div class="settings-pane" data-settings-pane="notifications">
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-taskbar" checked>
+              <span>Flash taskbar when Claude needs attention</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-sidebar" checked>
+              <span>Flash sidebar project when Claude needs attention</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-header" checked>
+              <span>Flash column header when Claude needs attention</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-limits-70" checked>
+              <span>Notify when plan limits cross 70%</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-limits-90" checked>
+              <span>Notify when plan limits cross 90%</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-limits-pause" checked>
+              <span>At 90% weekly, prompt to pause automations</span>
+            </label>
+          </div>
+          <div class="settings-pane" data-settings-pane="automations">
+            <div class="settings-field">
+              <label for="setting-agent-repos-dir">Agent repos directory</label>
+              <div class="settings-path-row">
+                <input type="text" id="setting-agent-repos-dir" class="settings-input" placeholder="~/.claudes/agents/" spellcheck="false">
+                <button id="btn-browse-agent-repos" class="settings-browse-btn" title="Browse...">...</button>
+              </div>
+              <span class="settings-hint">Base directory for isolated agent repository clones</span>
+            </div>
           </div>
         </div>
       </div>
@@ -500,10 +541,32 @@
         <span id="fileeditor-close" class="modal-close">&times;</span>
       </div>
       <div class="modal-body">
-        <textarea id="fileeditor-editor" spellcheck="false"></textarea>
+        <div id="fileeditor-find-bar" class="fileeditor-find-bar hidden">
+          <input type="text" id="fileeditor-find-input" class="fileeditor-find-input" placeholder="Find" spellcheck="false">
+          <span id="fileeditor-find-count" class="fileeditor-find-count">0 / 0</span>
+          <button id="fileeditor-find-prev" class="fileeditor-find-btn" title="Previous match (Shift+Enter)" aria-label="Previous match">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5L6 4.5L9 7.5"/></svg>
+          </button>
+          <button id="fileeditor-find-next" class="fileeditor-find-btn" title="Next match (Enter)" aria-label="Next match">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5L6 7.5L9 4.5"/></svg>
+          </button>
+          <label class="fileeditor-find-toggle" title="Match case"><input type="checkbox" id="fileeditor-find-case"> Aa</label>
+          <span class="fileeditor-find-sep"></span>
+          <input type="text" id="fileeditor-replace-input" class="fileeditor-find-input" placeholder="Replace with" spellcheck="false">
+          <button id="fileeditor-replace-one" class="fileeditor-find-btn fileeditor-find-btn-text" title="Replace current match">Replace</button>
+          <button id="fileeditor-replace-all" class="fileeditor-find-btn fileeditor-find-btn-text" title="Replace all matches">All</button>
+          <button id="fileeditor-find-close" class="fileeditor-find-btn" title="Close (Esc)" aria-label="Close find">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3L9 9M9 3L3 9"/></svg>
+          </button>
+        </div>
+        <div class="fileeditor-edit-area">
+          <div id="fileeditor-gutter" class="fileeditor-gutter" aria-hidden="true">1</div>
+          <textarea id="fileeditor-editor" spellcheck="false"></textarea>
+        </div>
       </div>
       <div class="modal-footer">
         <span id="fileeditor-status" class="modal-status"></span>
+        <span id="fileeditor-cursor-pos" class="fileeditor-cursor-pos">Ln 1, Col 1</span>
         <button id="fileeditor-save" class="modal-btn-save">Save</button>
       </div>
     </div>
@@ -552,6 +615,13 @@
                 <input type="text" id="ep-model" placeholder="qwen/qwen3-coder-next" autocomplete="off" spellcheck="false">
                 <select id="ep-model-select" class="hidden"></select>
                 <button type="button" id="ep-model-fetch" class="endpoints-icon-btn" title="Fetch loaded models from endpoint">&#8634;</button>
+              </div>
+            </label>
+            <label class="endpoints-field">
+              <span>Context window <em class="endpoints-field-hint">(tokens — used by the column meter as denominator)</em></span>
+              <div class="endpoints-context-row">
+                <input type="number" id="ep-context-window" placeholder="e.g. 262144" autocomplete="off" min="1024" step="1024">
+                <button type="button" id="ep-context-fetch" class="endpoints-icon-btn" title="Fetch context length from endpoint /v1/models">&#8634;</button>
               </div>
             </label>
             <label class="endpoints-field">

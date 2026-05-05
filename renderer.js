@@ -1836,19 +1836,103 @@ function setActiveProject(index, isStartup, skipDefaultSpawn) {
 
 function restoreProjectSessions(projectPath, project) {
   window.electronAPI.loadSessions(projectPath).then(function (savedSessions) {
-    var spawnArgs = buildSpawnArgs();
+    var globalArgs = buildSpawnArgs();
     if (savedSessions && savedSessions.length > 0) {
-      for (var i = 0; i < savedSessions.length; i++) {
-        // Support both old format (plain string) and new format ({sessionId, title})
-        var entry = savedSessions[i];
-        var sessionId = typeof entry === 'string' ? entry : entry.sessionId;
-        var title = typeof entry === 'object' ? entry.title : null;
-        addColumn(spawnArgs.concat(['--resume', sessionId]), null, spawnOpts(title ? { title: title } : null));
-      }
+      // Resume each column with its previously-recorded endpoint where possible.
+      // Sessions saved without endpointId are treated as Cloud (Anthropic) and
+      // explicitly do NOT inherit the dropdown's currentEndpointEnv — otherwise
+      // a cloud column would silently get a local server's URL injected.
+      var seq = Promise.resolve();
+      savedSessions.forEach(function (entry) {
+        seq = seq.then(function () {
+          var sessionId = typeof entry === 'string' ? entry : entry.sessionId;
+          var title = typeof entry === 'object' ? entry.title : null;
+          var endpointId = (typeof entry === 'object' && entry.endpointId) || null;
+          var baseExtra = title ? { title: title } : {};
+
+          if (endpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
+            return window.electronAPI.endpointGetEnv(endpointId).then(function (envBlock) {
+              if (!envBlock) {
+                // Preset was deleted — fall back to cloud-style restore.
+                resumeAsCloud(sessionId, baseExtra);
+                return;
+              }
+              var args = rewriteArgsForEndpoint(globalArgs, /* isLocal */ true);
+              args.push('--resume', sessionId);
+              var extra = Object.assign({}, baseExtra, { endpointId: endpointId, env: envBlock });
+              addColumn(args, null, extra);
+            }).catch(function () { resumeAsCloud(sessionId, baseExtra); });
+          }
+          resumeAsCloud(sessionId, baseExtra);
+        });
+      });
     } else {
-      addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, spawnOpts());
+      addColumn(globalArgs.length > 0 ? globalArgs : null, null, spawnOpts());
     }
   });
+
+  // Cloud restore: build cloud-safe args and pass NO env. We must not call
+  // spawnOpts() here because it would attach currentEndpointEnv if the global
+  // dropdown is currently on a local preset, which would break Anthropic auth.
+  function resumeAsCloud(sessionId, baseExtra) {
+    var args = rewriteArgsForEndpoint(buildSpawnArgs(), /* isLocal */ false);
+    args.push('--resume', sessionId);
+    addColumn(args, null, baseExtra || {});
+  }
+}
+
+// Strip args that don't apply to the target column's endpoint kind.
+// - --effort 'xhigh' is a Claude-Code-only extension and 400s on local servers.
+// - When restoring a cloud column while the global dropdown points at a local
+//   preset (or vice-versa), we must rewrite the effort to the kind appropriate
+//   for the column's actual endpoint, not the dropdown's.
+function rewriteArgsForEndpoint(args, isLocal) {
+  var out = [];
+  var sawEffort = false;
+  for (var i = 0; i < args.length; i++) {
+    if (args[i] === '--effort' && i + 1 < args.length) {
+      var raw = args[i + 1];
+      var safeEffort;
+      if (isLocal) {
+        safeEffort = isValidLocalEffort(raw) ? raw : defaultEffortLocal;
+      } else {
+        // Cloud accepts everything; just pass through unless it's empty.
+        safeEffort = raw && isValidEffort(raw) ? raw : defaultEffortCloud;
+      }
+      out.push('--effort', safeEffort);
+      sawEffort = true;
+      i++;
+      continue;
+    }
+    // --model is owned by the endpoint env block on local presets; skip any
+    // explicit cloud-side --model flag so we don't override the env model.
+    if (args[i] === '--model' && i + 1 < args.length && isLocal) {
+      i++;
+      continue;
+    }
+    // --bare is an API-key/proxy-auth flag: it tells Claude to trust
+    // ANTHROPIC_API_KEY without prompting, which suppresses the OAuth
+    // credential lookup. On cloud restores we have neither an API key nor
+    // an auth token in env, so --bare leaves the CLI with no credentials
+    // and it errors with "Not logged in · Please run /login". Strip it.
+    if (args[i] === '--bare' && !isLocal) {
+      continue;
+    }
+    out.push(args[i]);
+  }
+  // If --effort wasn't in the global args at all, append the kind-appropriate
+  // default so the column at least uses its own type's preference.
+  if (!sawEffort) {
+    var def = isLocal ? defaultEffortLocal : defaultEffortCloud;
+    if (isValidEffort(def)) out.push('--effort', def);
+  }
+  return out;
+}
+
+// Local Anthropic-compat servers (LM Studio etc.) accept low/medium/high/max
+// for output_config.effort — 'xhigh' is a Claude-Code-only extension that 400s.
+function isValidLocalEffort(e) {
+  return e === 'low' || e === 'medium' || e === 'high' || e === 'max';
 }
 
 function addProject(folderPath) {
@@ -2083,15 +2167,6 @@ function createColumnHeader(id, customTitle, opts) {
     actions.appendChild(effortSelect);
   }
 
-  var maximizeBtn = document.createElement('span');
-  maximizeBtn.className = 'col-maximize';
-  maximizeBtn.title = 'Maximize';
-  maximizeBtn.textContent = '\u25A1';
-  maximizeBtn.addEventListener('click', function () {
-    toggleMaximizeColumn(id);
-  });
-  actions.appendChild(maximizeBtn);
-
   if (!opts.isDiff) {
     var deltaPill = document.createElement('span');
     deltaPill.className = 'col-delta-pill';
@@ -2120,6 +2195,15 @@ function createColumnHeader(id, customTitle, opts) {
     restartBtn.textContent = '↻';
     actions.appendChild(restartBtn);
   }
+
+  var maximizeBtn = document.createElement('span');
+  maximizeBtn.className = 'col-maximize';
+  maximizeBtn.title = 'Maximize';
+  maximizeBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" rx="1"/></svg>';
+  maximizeBtn.addEventListener('click', function () {
+    toggleMaximizeColumn(id);
+  });
+  actions.appendChild(maximizeBtn);
 
   var closeBtn = document.createElement('span');
   closeBtn.className = 'col-close';
@@ -2506,6 +2590,15 @@ function addColumn(args, targetRow, opts) {
   for (var ai = 0; ai < claudeArgs.length - 1; ai++) {
     if (claudeArgs[ai] === '--resume') { resumeSessionId = claudeArgs[ai + 1]; break; }
   }
+  // Detect the model from --model flag or ANTHROPIC_MODEL env, so the ctx meter
+  // can pick the correct limit (200k vs 1M). Falls back to 'sonnet' (200k).
+  var detectedModel = null;
+  for (var mi = 0; mi < claudeArgs.length - 1; mi++) {
+    if (claudeArgs[mi] === '--model') { detectedModel = claudeArgs[mi + 1]; break; }
+  }
+  if (!detectedModel && opts.env && opts.env.ANTHROPIC_MODEL) {
+    detectedModel = opts.env.ANTHROPIC_MODEL;
+  }
 
   var colData = {
     element: col,
@@ -2519,6 +2612,7 @@ function addColumn(args, targetRow, opts) {
     customTitle: opts.title || null,
     cmd: cmd,
     cmdArgs: claudeArgs,
+    model: detectedModel,    // for ctx meter limit (200k vs 1M)
     env: opts.env || null,
     launchUrl: opts.launchUrl || null,
     launchUrlOpened: false,
@@ -2526,8 +2620,9 @@ function addColumn(args, targetRow, opts) {
     lastInputAt: 0,
     hasUserInput: false,
     notified: false,
-    spawnSessionPct: null,    // five_hour.utilization at spawn time
-    spawnWeeklyPct: null,  // reserved: weekly-delta pill in a follow-up task
+    spawnSessionPct: null,    // (unused) five_hour.utilization at spawn — kept for backward compat
+    spawnWeeklyPct: null,     // (unused) reserved
+    spawnSessionTokens: null, // context-token count at spawn — set on first ctx poll
     deltaSessionEl: null,     // header element, captured below
     ctxMeterEl: null,
     ctxFillEl: null,
@@ -3087,15 +3182,20 @@ function getClaimedSessionIds(excludeColumnId) {
 
 // Detect which session ID was created by a newly spawned Claude
 function detectSession(columnId, projectPath, preExistingIds, attempt) {
-  if (attempt > 15) return;
+  if (attempt > 15) {
+    console.log('[detectSession] col=' + columnId + ' GAVE UP after 15 attempts. preIds count=' + Object.keys(preExistingIds).length);
+    return;
+  }
   setTimeout(function () {
     window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
       var claimed = getClaimedSessionIds(columnId);
+      console.log('[detectSession] col=' + columnId + ' attempt=' + attempt + ' projectPath=' + projectPath + ' got ' + sessions.length + ' sessions, ' + Object.keys(preExistingIds).length + ' preIds, ' + Object.keys(claimed).length + ' claimed');
       for (var i = 0; i < sessions.length; i++) {
         var sid = sessions[i].sessionId;
         if (!preExistingIds[sid] && !claimed[sid]) {
           var col = allColumns.get(columnId);
           if (col) {
+            console.log('[detectSession] col=' + columnId + ' MATCHED sessionId=' + sid);
             col.sessionId = sid;
             col.sessionMtime = sessions[i].modified || 0;
             persistSessions(col.projectKey);
@@ -3201,7 +3301,14 @@ function persistSessions(projectKey) {
   var sessionData = [];
   state.columns.forEach(function (col) {
     if (col.sessionId) {
-      sessionData.push({ sessionId: col.sessionId, title: col.customTitle || null });
+      sessionData.push({
+        sessionId: col.sessionId,
+        title: col.customTitle || null,
+        // Persist endpoint association so restored columns come back on the
+        // same local endpoint (LM Studio, Ollama, etc.) instead of defaulting
+        // to whatever the global Spawn dropdown is currently pointing at.
+        endpointId: col.endpointId || null
+      });
     }
   });
   window.electronAPI.saveSessions(projectKey, sessionData);
@@ -3287,13 +3394,10 @@ function restartColumn(id) {
   // Kill the current process
   wsSend({ type: 'kill', id: id });
 
-  // Re-snapshot plan-limits so the Δ pill measures from this respawn, not the first spawn
-  if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
-    var d0 = lastPlanLimitsResult.data;
-    col.spawnSessionPct = d0.five_hour ? d0.five_hour.utilization : null;
-    col.spawnWeeklyPct = d0.seven_day ? d0.seven_day.utilization : null;
-    updateColumnDeltaPills(lastPlanLimitsResult.data);
-  }
+  // Reset the per-column delta baseline so the Δ pill measures from this respawn,
+  // not from the original spawn. The next ctx poll repopulates spawnSessionTokens.
+  col.spawnSessionTokens = null;
+  if (col.deltaSessionEl) col.deltaSessionEl.setAttribute('hidden', '');
 
   // Hide the context meter — the new session's first poll will repopulate it.
   if (col && col.ctxMeterEl) col.ctxMeterEl.setAttribute('hidden', '');
@@ -6505,6 +6609,12 @@ function loadEndpointPresets() {
   if (!window.electronAPI || !window.electronAPI.endpointList) return Promise.resolve();
   return window.electronAPI.endpointList().then(function (list) {
     endpointPresets = Array.isArray(list) ? list : [];
+    // Invalidate the cached effective limit on every column so the next ctx
+    // poll re-resolves it against the freshly-loaded preset data. Cheap, and
+    // it means saving a new contextWindow takes effect on existing columns.
+    if (typeof allColumns !== 'undefined') {
+      allColumns.forEach(function (c) { if (c) c.effectiveLimit = null; });
+    }
     renderEndpointDropdown();
     // Re-load spawn options so the active project's persisted endpointId can
     // be validated and applied. Without this, app startup races —
@@ -6581,6 +6691,8 @@ var epModelInput = document.getElementById('ep-model');
 var epModelSelect = document.getElementById('ep-model-select');
 var epModelFetchBtn = document.getElementById('ep-model-fetch');
 var epFallback = document.getElementById('ep-fallback');
+var epContextWindow = document.getElementById('ep-context-window');
+var epContextFetchBtn = document.getElementById('ep-context-fetch');
 var epStatus = document.getElementById('ep-status');
 var epTestBtn = document.getElementById('ep-test');
 var epDeleteBtn = document.getElementById('ep-delete');
@@ -6615,6 +6727,7 @@ function clearEndpointForm() {
   epModelInput.value = '';
   epModelInput.classList.remove('hidden');
   epModelSelect.classList.add('hidden');
+  if (epContextWindow) epContextWindow.value = '';
   while (epModelSelect.firstChild) epModelSelect.removeChild(epModelSelect.firstChild);
   if (epFallback) {
     while (epFallback.firstChild) epFallback.removeChild(epFallback.firstChild);
@@ -6681,6 +6794,7 @@ function selectEndpointForEdit(id) {
     epModelInput.value = preset.model || '';
     epModelInput.classList.remove('hidden');
     epModelSelect.classList.add('hidden');
+    if (epContextWindow) epContextWindow.value = preset.contextWindow || '';
     populateFallbackOptions(preset.id, preset.fallbackId || '');
     setEpStatus('');
     showEndpointForm(true);
@@ -6725,6 +6839,7 @@ function closeEndpointsModal() {
 }
 
 function collectFormPayload() {
+  var ctx = epContextWindow ? parseInt(epContextWindow.value, 10) : NaN;
   return {
     id: editingPresetId === '__new__' ? null : editingPresetId,
     name: epName.value.trim(),
@@ -6733,22 +6848,31 @@ function collectFormPayload() {
     model: epModelInput.classList.contains('hidden')
       ? epModelSelect.value
       : epModelInput.value.trim(),
-    fallbackId: (epFallback && epFallback.value) || null
+    fallbackId: (epFallback && epFallback.value) || null,
+    contextWindow: Number.isFinite(ctx) && ctx > 0 ? ctx : null
   };
 }
 
 function saveCurrentPreset() {
+  console.log('[ep-save] clicked');
   var payload = collectFormPayload();
+  console.log('[ep-save] payload', JSON.stringify(payload));
   if (!payload.name) { setEpStatus('Name is required', 'error'); return; }
   if (!payload.baseUrl) { setEpStatus('Base URL is required', 'error'); return; }
   if (!payload.model) { setEpStatus('Model is required', 'error'); return; }
   setEpStatus('Saving…');
   window.electronAPI.endpointSave(payload).then(function (result) {
+    console.log('[ep-save] result', result);
     if (result && result.ok === false) {
       setEpStatus(result.error || 'Save failed', 'error');
       return;
     }
-    setEpStatus('Saved', 'ok');
+    setEpStatus('Saved ✓', 'ok');
+    // Also flash the save button briefly so the success is unmissable.
+    if (epSaveBtn) {
+      epSaveBtn.classList.add('save-flash');
+      setTimeout(function () { epSaveBtn.classList.remove('save-flash'); }, 1200);
+    }
     var newId = (result && result.id) || payload.id;
     return loadEndpointPresets().then(function () {
       if (newId) {
@@ -6829,7 +6953,45 @@ function fetchModelsFromForm() {
     }
     epModelInput.classList.add('hidden');
     epModelSelect.classList.remove('hidden');
+    // Auto-fill context window from the selected model's metadata when present.
+    if (epContextWindow && Array.isArray(result.modelInfo)) {
+      var sel = epModelSelect.value;
+      var info = result.modelInfo.find(function (m) { return m.id === sel; });
+      if (info && info.context && !epContextWindow.value) {
+        epContextWindow.value = info.context;
+      }
+    }
     setEpStatus('Loaded ' + result.models.length + ' model' + (result.models.length === 1 ? '' : 's'), 'ok');
+  }).catch(function (err) {
+    setEpStatus('Fetch failed: ' + (err && err.message ? err.message : err), 'error');
+  });
+}
+
+function fetchContextLengthOnly() {
+  var baseUrl = epBaseUrl.value.trim();
+  var authToken = epAuthToken.value;
+  var modelName = epModelInput.classList.contains('hidden') ? epModelSelect.value : epModelInput.value.trim();
+  if (!baseUrl) { setEpStatus('Base URL is required', 'error'); return; }
+  setEpStatus('Probing context length…');
+  window.electronAPI.endpointFetchModels({ baseUrl: baseUrl, authToken: authToken }).then(function (result) {
+    if (!result || !result.ok) {
+      setEpStatus('Fetch failed: ' + ((result && result.error) || 'unknown'), 'error');
+      return;
+    }
+    var info = (result.modelInfo || []).find(function (m) { return m.id === modelName; });
+    if (info && info.context) {
+      if (epContextWindow) epContextWindow.value = info.context;
+      setEpStatus('Set context length to ' + info.context.toLocaleString(), 'ok');
+    } else {
+      // Fall back to the largest reported across models if our model isn't matched.
+      var max = (result.modelInfo || []).reduce(function (acc, m) { return m.context && m.context > acc ? m.context : acc; }, 0);
+      if (max && epContextWindow) {
+        epContextWindow.value = max;
+        setEpStatus('Endpoint did not report context length for that model; used largest seen (' + max.toLocaleString() + ')', 'ok');
+      } else {
+        setEpStatus('Endpoint did not report a context length — enter manually', 'error');
+      }
+    }
   }).catch(function (err) {
     setEpStatus('Fetch failed: ' + (err && err.message ? err.message : err), 'error');
   });
@@ -6862,6 +7024,7 @@ endpointsNewBtn.addEventListener('click', startNewEndpoint);
 epSaveBtn.addEventListener('click', saveCurrentPreset);
 epDeleteBtn.addEventListener('click', deleteCurrentPreset);
 epModelFetchBtn.addEventListener('click', fetchModelsFromForm);
+if (epContextFetchBtn) epContextFetchBtn.addEventListener('click', fetchContextLengthOnly);
 epTestBtn.addEventListener('click', testConnection);
 epTokenToggle.addEventListener('click', function () {
   epAuthToken.type = epAuthToken.type === 'password' ? 'text' : 'password';
@@ -6950,11 +7113,26 @@ var settingsModal = document.getElementById('settings-modal');
 document.getElementById('btn-settings').addEventListener('click', function () {
   loadNotifSettings();
   loadStartWithOS();
+  var ctxSel = document.getElementById('setting-ctx-default');
+  if (ctxSel) ctxSel.value = getCtxDefaultPref();
   window.electronAPI.getAutomationSettings().then(function (settings) {
     document.getElementById('setting-agent-repos-dir').value = settings.agentReposBaseDir || '';
   });
   settingsModal.classList.remove('hidden');
 });
+
+(function wireCtxDefaultSetting() {
+  var sel = document.getElementById('setting-ctx-default');
+  if (!sel) return;
+  sel.addEventListener('change', function () {
+    setCtxDefaultPref(sel.value);
+    // Apply immediately to live columns: clear cached effectiveLimit so the
+    // next poll picks up the new pref. (Heuristic still promotes if tokens > 200k.)
+    if (typeof allColumns !== 'undefined') {
+      allColumns.forEach(function (c) { c.effectiveLimit = null; });
+    }
+  });
+})();
 
 document.getElementById('settings-close').addEventListener('click', function () {
   settingsModal.classList.add('hidden');
@@ -6962,6 +7140,16 @@ document.getElementById('settings-close').addEventListener('click', function () 
 
 settingsModal.addEventListener('click', function (e) {
   if (e.target === settingsModal) settingsModal.classList.add('hidden');
+});
+
+settingsModal.querySelectorAll('.settings-tab').forEach(function (tab) {
+  tab.addEventListener('click', function () {
+    var key = tab.getAttribute('data-settings-tab');
+    settingsModal.querySelectorAll('.settings-tab').forEach(function (t) { t.classList.toggle('active', t === tab); });
+    settingsModal.querySelectorAll('.settings-pane').forEach(function (p) {
+      p.classList.toggle('active', p.getAttribute('data-settings-pane') === key);
+    });
+  });
 });
 
 document.getElementById('setting-notif-taskbar').addEventListener('change', saveNotifSettings);
@@ -7053,6 +7241,10 @@ function openFileEditor(filePath) {
       fileEditorEditor.disabled = false;
       fileEditorSave.disabled = false;
       fileEditorStatus.textContent = '';
+      updateFileEditorGutter();
+      updateCursorPos();
+      fileEditorEditor.scrollTop = 0;
+      syncGutterScroll();
     }
   });
 }
@@ -7064,6 +7256,7 @@ function closeFileEditor() {
   fileEditorModal.classList.add('hidden');
   fileEditorCurrentPath = null;
   fileEditorOriginal = '';
+  if (typeof findBar !== 'undefined' && findBar) findBar.classList.add('hidden');
 }
 
 function saveFileEditor() {
@@ -7096,10 +7289,21 @@ fileEditorEditor.addEventListener('keydown', function (e) {
     e.preventDefault();
     saveFileEditor();
   }
+  // Ctrl+F to open find bar
+  if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault();
+    openFindBar(false);
+  }
+  // Ctrl+H to open find+replace
+  if (e.ctrlKey && (e.key === 'h' || e.key === 'H')) {
+    e.preventDefault();
+    openFindBar(true);
+  }
   // Escape to close
   if (e.key === 'Escape') {
     e.preventDefault();
-    closeFileEditor();
+    if (!findBar.classList.contains('hidden')) closeFindBar();
+    else closeFileEditor();
   }
   // Tab inserts spaces instead of changing focus
   if (e.key === 'Tab') {
@@ -7108,10 +7312,209 @@ fileEditorEditor.addEventListener('keydown', function (e) {
     var end = fileEditorEditor.selectionEnd;
     fileEditorEditor.value = fileEditorEditor.value.substring(0, start) + '  ' + fileEditorEditor.value.substring(end);
     fileEditorEditor.selectionStart = fileEditorEditor.selectionEnd = start + 2;
+    updateFileEditorGutter();
   }
-  // Prevent shortcuts from bubbling to terminal
   e.stopPropagation();
 });
+
+// ─────────────────────────────────────────────────────────
+// File editor: line-number gutter + find/replace
+// ─────────────────────────────────────────────────────────
+var fileEditorGutter = document.getElementById('fileeditor-gutter');
+var fileEditorCursorPos = document.getElementById('fileeditor-cursor-pos');
+var findBar = document.getElementById('fileeditor-find-bar');
+var findInput = document.getElementById('fileeditor-find-input');
+var findCount = document.getElementById('fileeditor-find-count');
+var findPrev = document.getElementById('fileeditor-find-prev');
+var findNext = document.getElementById('fileeditor-find-next');
+var findCase = document.getElementById('fileeditor-find-case');
+var replaceInput = document.getElementById('fileeditor-replace-input');
+var replaceOne = document.getElementById('fileeditor-replace-one');
+var replaceAll = document.getElementById('fileeditor-replace-all');
+var findClose = document.getElementById('fileeditor-find-close');
+
+var findMatches = [];
+var findCurrentIdx = -1;
+
+function updateFileEditorGutter() {
+  if (!fileEditorGutter) return;
+  var lines = fileEditorEditor.value.split('\n').length;
+  // Cap is generous; assembling huge strings is still cheap (<200k lines is fine).
+  var nums = '';
+  for (var i = 1; i <= lines; i++) nums += (i === 1 ? '' : '\n') + i;
+  fileEditorGutter.textContent = nums;
+}
+
+function syncGutterScroll() {
+  if (!fileEditorGutter) return;
+  fileEditorGutter.scrollTop = fileEditorEditor.scrollTop;
+}
+
+function updateCursorPos() {
+  if (!fileEditorCursorPos) return;
+  var pos = fileEditorEditor.selectionStart;
+  var before = fileEditorEditor.value.substring(0, pos);
+  var line = before.split('\n').length;
+  var col = pos - before.lastIndexOf('\n');
+  fileEditorCursorPos.textContent = 'Ln ' + line + ', Col ' + col;
+}
+
+fileEditorEditor.addEventListener('input', function () {
+  updateFileEditorGutter();
+  updateCursorPos();
+  // Re-run search if find bar is open
+  if (!findBar.classList.contains('hidden')) runFind(false);
+});
+fileEditorEditor.addEventListener('scroll', syncGutterScroll);
+fileEditorEditor.addEventListener('keyup', updateCursorPos);
+fileEditorEditor.addEventListener('click', updateCursorPos);
+
+function openFindBar(focusReplace) {
+  findBar.classList.remove('hidden');
+  // Pre-fill with selected text if any
+  var start = fileEditorEditor.selectionStart;
+  var end = fileEditorEditor.selectionEnd;
+  if (start !== end) findInput.value = fileEditorEditor.value.substring(start, end);
+  runFind(false);
+  if (focusReplace) replaceInput.focus();
+  else { findInput.focus(); findInput.select(); }
+}
+
+function closeFindBar() {
+  findBar.classList.add('hidden');
+  findMatches = [];
+  findCurrentIdx = -1;
+  fileEditorEditor.focus();
+}
+
+function runFind(advance) {
+  var needle = findInput.value;
+  if (!needle) {
+    findMatches = [];
+    findCurrentIdx = -1;
+    findCount.textContent = '0 / 0';
+    return;
+  }
+  var hay = fileEditorEditor.value;
+  var caseSensitive = findCase.checked;
+  if (!caseSensitive) { hay = hay.toLowerCase(); needle = needle.toLowerCase(); }
+  findMatches = [];
+  var idx = 0;
+  while ((idx = hay.indexOf(needle, idx)) !== -1) {
+    findMatches.push(idx);
+    idx += needle.length || 1;
+  }
+  if (!findMatches.length) {
+    findCurrentIdx = -1;
+    findCount.textContent = '0 / 0';
+    return;
+  }
+  // Pick the match nearest to (or after) the current caret
+  var caret = fileEditorEditor.selectionStart;
+  var pick = 0;
+  for (var i = 0; i < findMatches.length; i++) {
+    if (findMatches[i] >= caret) { pick = i; break; }
+    pick = i;
+  }
+  findCurrentIdx = advance ? (pick + 1) % findMatches.length : pick;
+  highlightCurrentMatch();
+}
+
+function highlightCurrentMatch() {
+  if (findCurrentIdx < 0 || !findMatches.length) {
+    findCount.textContent = '0 / 0';
+    return;
+  }
+  findCount.textContent = (findCurrentIdx + 1) + ' / ' + findMatches.length;
+  var pos = findMatches[findCurrentIdx];
+  var len = findInput.value.length;
+  fileEditorEditor.focus();
+  fileEditorEditor.setSelectionRange(pos, pos + len);
+  // Scroll the selection into view (textarea has no native scroll-to-selection)
+  scrollSelectionIntoView();
+  updateCursorPos();
+}
+
+function scrollSelectionIntoView() {
+  // Approximate: put the selection's line at the centre of the visible area.
+  var pos = fileEditorEditor.selectionStart;
+  var line = fileEditorEditor.value.substring(0, pos).split('\n').length;
+  var lineHeight = parseFloat(getComputedStyle(fileEditorEditor).lineHeight) || 21;
+  var target = Math.max(0, line * lineHeight - fileEditorEditor.clientHeight / 2);
+  fileEditorEditor.scrollTop = target;
+}
+
+function findNextMatch() {
+  if (!findMatches.length) { runFind(false); if (!findMatches.length) return; }
+  findCurrentIdx = (findCurrentIdx + 1) % findMatches.length;
+  highlightCurrentMatch();
+}
+
+function findPrevMatch() {
+  if (!findMatches.length) { runFind(false); if (!findMatches.length) return; }
+  findCurrentIdx = (findCurrentIdx - 1 + findMatches.length) % findMatches.length;
+  highlightCurrentMatch();
+}
+
+function replaceCurrent() {
+  if (findCurrentIdx < 0 || !findMatches.length) return;
+  var needle = findInput.value;
+  var replacement = replaceInput.value;
+  var pos = findMatches[findCurrentIdx];
+  var content = fileEditorEditor.value;
+  fileEditorEditor.value = content.substring(0, pos) + replacement + content.substring(pos + needle.length);
+  fileEditorEditor.setSelectionRange(pos + replacement.length, pos + replacement.length);
+  updateFileEditorGutter();
+  runFind(false);
+  // Re-locate to the next match after this position
+  for (var i = 0; i < findMatches.length; i++) {
+    if (findMatches[i] >= pos + replacement.length) { findCurrentIdx = i; highlightCurrentMatch(); return; }
+  }
+  if (findMatches.length) { findCurrentIdx = 0; highlightCurrentMatch(); }
+}
+
+function replaceAllMatches() {
+  if (!findInput.value) return;
+  var needle = findInput.value;
+  var replacement = replaceInput.value;
+  var caseSensitive = findCase.checked;
+  var content = fileEditorEditor.value;
+  var out = '';
+  var i = 0;
+  var hay = caseSensitive ? content : content.toLowerCase();
+  var n = caseSensitive ? needle : needle.toLowerCase();
+  var count = 0;
+  while (i < hay.length) {
+    var found = hay.indexOf(n, i);
+    if (found === -1) { out += content.substring(i); break; }
+    out += content.substring(i, found) + replacement;
+    i = found + n.length;
+    count++;
+  }
+  if (count === 0) return;
+  fileEditorEditor.value = out;
+  updateFileEditorGutter();
+  runFind(false);
+  findCount.textContent = count + ' replaced';
+}
+
+findInput.addEventListener('input', function () { runFind(false); });
+findInput.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? findPrevMatch() : findNextMatch(); }
+  if (e.key === 'Escape') { e.preventDefault(); closeFindBar(); }
+  e.stopPropagation();
+});
+replaceInput.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') { e.preventDefault(); replaceCurrent(); }
+  if (e.key === 'Escape') { e.preventDefault(); closeFindBar(); }
+  e.stopPropagation();
+});
+findCase.addEventListener('change', function () { runFind(false); });
+findNext.addEventListener('click', findNextMatch);
+findPrev.addEventListener('click', findPrevMatch);
+replaceOne.addEventListener('click', replaceCurrent);
+replaceAll.addEventListener('click', replaceAllMatches);
+findClose.addEventListener('click', closeFindBar);
 
 // ============================================================
 // Usage Modal
@@ -7278,15 +7681,22 @@ function renderPlanLimits(result) {
 // persistent sidebar mini-bar). Refreshed by loadPlanLimits().
 var lastPlanLimitsResult = null;
 var prevPlanLimitsData = null;  // last successful data, used for crossing detection
+// Stickiness: hold on to the last *successful* render so transient API failures
+// during background polls don't make the sidebar bar vanish.
+var lastGoodPlanLimitsData = null;
 
 function renderPlanLimitsMini(result) {
   var el = document.getElementById('plan-limits-mini');
   if (!el) return;
-  if (!result || !result.ok || !result.data) {
-    el.classList.add('hidden');
+  var ok = result && result.ok && result.data;
+  // If this poll failed, do nothing — leave whatever is currently rendered in
+  // place. The bar should never flicker just because a single refresh blipped.
+  if (!ok) {
+    if (!lastGoodPlanLimitsData) el.classList.add('hidden');
     return;
   }
   var d = result.data;
+  lastGoodPlanLimitsData = d;
   // Hide if the API returned nothing useful (e.g. API-key user).
   if (!d.five_hour && !d.seven_day) {
     el.classList.add('hidden');
@@ -7380,30 +7790,108 @@ function handleThresholdCrossings(crossings) {
 var CTX_POLL_MS = 10000;  // 10s — JSONL grows on every assistant turn
 var CTX_LIMIT_CACHE = new Map();  // model -> max tokens, populated lazily
 
+// User preference for the meter's denominator. Persisted in config.ctxDefault
+// so it survives across launches in the same place as other app settings.
+// 'auto' (default) | '200000' | '1000000'
+function getCtxDefaultPref() {
+  return (config && config.ctxDefault) ? config.ctxDefault : 'auto';
+}
+function setCtxDefaultPref(v) {
+  if (!config) return;
+  config.ctxDefault = v;
+  saveConfig();
+}
+
+function showCtxMeterPlaceholder(col, label) {
+  if (!col || !col.ctxMeterEl) return;
+  col.ctxMeterEl.removeAttribute('hidden');
+  if (col.ctxFillEl) col.ctxFillEl.style.width = '0%';
+  if (col.ctxTextEl) col.ctxTextEl.textContent = label;
+  col.ctxMeterEl.title = label;
+}
+
+function showDeltaPillPlaceholder(col) {
+  if (!col || !col.deltaSessionEl) return;
+  col.deltaSessionEl.removeAttribute('hidden');
+  col.deltaSessionEl.textContent = 'Δ —';
+  col.deltaSessionEl.title = 'Waiting for first assistant turn…';
+}
+
 function startContextMeterPoll(colId) {
   var c = allColumns.get(colId);
   if (!c || c.cmd) return;  // skip non-Claude columns (custom commands)
+  // Show placeholders immediately so the user can see the widgets exist.
+  showCtxMeterPlaceholder(c, '—');
+  showDeltaPillPlaceholder(c);
   function tick() {
+    var ts = new Date().toISOString().slice(11, 19);
     var col = allColumns.get(colId);
     if (!col || !col.ctxMeterEl) return;
-    if (!col.sessionId) return;  // session not yet detected — try again next tick
-    if (!window.electronAPI || !window.electronAPI.getSessionContextTokens) return;
+    console.log('[ctx-meter ' + ts + '] tick col=' + colId + ' sessionId=' + col.sessionId + ' projectKey=' + col.projectKey + ' cmd=' + col.cmd);
+    if (!col.sessionId) {
+      showCtxMeterPlaceholder(col, '…');
+      return;
+    }
+    if (!window.electronAPI || !window.electronAPI.getSessionContextTokens) {
+      console.log('[ctx-meter] electronAPI.getSessionContextTokens missing');
+      return;
+    }
     window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId).then(function (tokens) {
-      if (tokens == null) return;
-      // TODO: col.model is not yet populated — colData has no model field. All
-      // current 4.x models are 200k; if 1M-context sessions need accurate limits,
-      // parse --model from claudeArgs in addColumn or read opts.env.ANTHROPIC_MODEL.
+      console.log('[ctx-meter ' + ts + '] col=' + colId + ' → tokens=' + tokens);
+      if (tokens == null) {
+        showCtxMeterPlaceholder(col, '0');
+        return;
+      }
+      if (col.spawnSessionTokens == null) {
+        col.spawnSessionTokens = tokens;
+      } else if (tokens < col.spawnSessionTokens * 0.6) {
+        // Tokens dropped sharply → compaction (or /clear). Reset baseline so the
+        // delta starts counting from the post-compaction state.
+        console.log('[ctx-meter] col=' + colId + ' detected compaction (' + col.spawnSessionTokens + ' → ' + tokens + '); resetting baseline');
+        col.spawnSessionTokens = tokens;
+      }
+      updateColumnDeltaFromTokens(col, tokens);
       var modelKey = col.model || 'sonnet';
       var limit = CTX_LIMIT_CACHE.get(modelKey);
+      // Endpoint-aware: if this column is on a local-endpoint preset that
+      // declares a context window, use that as the limit. Beats the global pref.
+      if (!col.effectiveLimit && col.endpointId) {
+        var ep = (typeof endpointPresets !== 'undefined' ? endpointPresets : [])
+          .find(function (p) { return p && p.id === col.endpointId; });
+        console.log('[ctx-meter] col=' + colId + ' endpoint lookup: id=' + col.endpointId + ' ep=' + (ep ? ep.name : 'NOT FOUND') + ' contextWindow=' + (ep ? ep.contextWindow : 'n/a'));
+        if (ep && ep.contextWindow && ep.contextWindow > 0) {
+          col.effectiveLimit = ep.contextWindow;
+        }
+      }
+      // Pref-driven baseline: user can lock 200k or 1M via Settings.
+      if (!col.effectiveLimit) {
+        var pref = getCtxDefaultPref();
+        if (pref === '1000000') col.effectiveLimit = 1000000;
+        else if (pref === '200000') col.effectiveLimit = 200000;
+      }
+      // Heuristic fallback: if observed tokens exceed 200k, the session must be
+      // on 1M-context (otherwise the API would error). Promote regardless of pref.
+      if (tokens > 200000 && (!col.effectiveLimit || col.effectiveLimit < 1000000)) {
+        console.log('[ctx-meter] col=' + colId + ' tokens=' + tokens + ' exceed 200k → promoting to 1M');
+        col.effectiveLimit = 1000000;
+      }
       function draw() {
+        var effLim = col.effectiveLimit || limit;
         col.ctxMeterEl.removeAttribute('hidden');
-        var pct = Math.min(100, (tokens / limit) * 100);
+        var pct = Math.min(100, (tokens / effLim) * 100);
         col.ctxFillEl.style.width = pct + '%';
         col.ctxFillEl.classList.toggle('warning', pct >= 70 && pct < 90);
         col.ctxFillEl.classList.toggle('critical', pct >= 90);
         function k(n) { return n >= 1000 ? Math.round(n / 1000) + 'k' : String(n); }
-        col.ctxTextEl.textContent = k(tokens) + '/' + k(limit);
-        col.ctxMeterEl.title = tokens.toLocaleString() + ' / ' + limit.toLocaleString() + ' tokens (' + Math.round(pct) + '%)';
+        function kLim(n) {
+          if (n >= 1000000) return (n / 1000000) + 'M';
+          if (n >= 1000) return Math.round(n / 1000) + 'k';
+          return String(n);
+        }
+        col.ctxTextEl.textContent = k(tokens) + '/' + kLim(effLim);
+        col.ctxMeterEl.title =
+          'Context window: ' + tokens.toLocaleString() + ' / ' + effLim.toLocaleString() + ' tokens (' + Math.round(pct) + '%)\n' +
+          'Cumulative tokens currently held in this session\'s context.';
       }
       if (limit) { draw(); return; }
       window.electronAPI.getModelContextLimit(modelKey).then(function (lim) {
@@ -7411,7 +7899,7 @@ function startContextMeterPoll(colId) {
         limit = lim;
         draw();
       }).catch(function () { /* fall back silently — pill stays hidden */ });
-    }).catch(function () {});
+    }).catch(function (err) { console.debug('[ctx-meter] error', err); });
   }
   tick();  // immediate first poll
   c.ctxPollTimer = setInterval(tick, CTX_POLL_MS);
@@ -7425,30 +7913,32 @@ function stopContextMeterPoll(colId) {
   }
 }
 
-function updateColumnDeltaPills(data) {
-  if (!data || !data.five_hour) return;
-  var nowSession = data.five_hour.utilization;
-  if (typeof nowSession !== 'number') return;
-  allColumns.forEach(function (c) {
-    if (!c.deltaSessionEl) return;
-    if (c.spawnSessionPct == null) {
-      // Late snapshot: column was spawned before plan-limits data was available.
-      // Treat this poll as the baseline so the pill becomes meaningful from now on.
-      c.spawnSessionPct = nowSession;
-      if (data.seven_day && typeof data.seven_day.utilization === 'number') {
-        c.spawnWeeklyPct = data.seven_day.utilization;
-      }
-    }
-    var delta = nowSession - c.spawnSessionPct;
-    if (delta < 0) delta = 0;
-    c.deltaSessionEl.removeAttribute('hidden');
-    c.deltaSessionEl.textContent = 'Δ ' + delta.toFixed(1) + '%';
-    c.deltaSessionEl.title =
-      'Session usage spent by this column since spawn\n' +
-      'Spawn snapshot: ' + c.spawnSessionPct.toFixed(1) + '%\n' +
-      'Now: ' + nowSession.toFixed(1) + '%';
-  });
+// Per-column delta: tokens added to this session's context since the column spawned.
+// Driven from the same JSONL read as the context-meter poll, so it's truly per-column
+// (not the global plan-limits 5h utilisation, which mixes all concurrent sessions).
+function updateColumnDeltaFromTokens(col, tokens) {
+  if (!col || !col.deltaSessionEl) return;
+  if (col.spawnSessionTokens == null || typeof tokens !== 'number') return;
+  var delta = tokens - col.spawnSessionTokens;
+  if (delta < 0) delta = 0;  // compaction can shrink context — clamp to 0
+  function k(n) {
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k';
+    return String(n);
+  }
+  col.deltaSessionEl.removeAttribute('hidden');
+  col.deltaSessionEl.textContent = 'Δ ' + k(delta);
+  col.deltaSessionEl.title =
+    'Δ — context growth in THIS column since you opened it.\n' +
+    'Different from the bar, which shows TOTAL context tokens currently in the session.\n\n' +
+    'Spawn baseline: ' + col.spawnSessionTokens.toLocaleString() + '\n' +
+    'Now:            ' + tokens.toLocaleString() + '\n' +
+    'Δ (clamped ≥0): ' + delta.toLocaleString() + '\n\n' +
+    'Resets after /compact or /clear.';
 }
+
+// Kept as a no-op shim for the old global-plan-limits trigger sites.
+// Per-column delta is now driven by updateColumnDeltaFromTokens via the ctx poll.
+function updateColumnDeltaPills(_data) { /* no-op */ }
 
 function promptPauseAutomations(c) {
   if (!window.electronAPI || !window.electronAPI.getAutomationSettings || !window.electronAPI.toggleAutomationsGlobal) return;
@@ -11585,6 +12075,128 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     return hay.toLowerCase().indexOf(q) !== -1;
   }
 
+  // Primary fields render full-width stacked (label above value).
+  var HOOK_PRIMARY = [
+    'last_assistant_message', 'tool_name', 'tool_input', 'tool_response', 'reason'
+  ];
+  // Metadata fields render as a compact 2-col grid at the bottom.
+  var HOOK_META = [
+    'hook_event_name', 'permission_mode', 'stop_hook_active', 'matcher',
+    'cwd', 'transcript_path', 'session_id'
+  ];
+  // Pure noise — already represented in the collapsed row.
+  var HOOK_FIELD_HIDE = { received_at: 1, event: 1 };
+
+  function shortPath(p) {
+    if (typeof p !== 'string') return p;
+    if (p.length <= 64) return p;
+    var parts = p.replace(/\\/g, '/').split('/');
+    return '…/' + parts.slice(-3).join('/');
+  }
+
+  function prettyLabel(key) {
+    return key.replace(/_/g, ' ');
+  }
+
+  function renderHookFieldValue(key, value) {
+    var el = document.createElement('div');
+    el.className = 'hook-field-value';
+    if (value == null) { el.textContent = '(null)'; el.classList.add('muted'); return el; }
+    if (typeof value === 'boolean' || typeof value === 'number') {
+      el.textContent = String(value);
+      el.classList.add('mono');
+      return el;
+    }
+    if (typeof value === 'string') {
+      if (key === 'transcript_path' || key === 'cwd') {
+        el.textContent = shortPath(value);
+        el.title = value;
+        el.classList.add('mono', 'truncate');
+        return el;
+      }
+      if (value.indexOf('\n') !== -1 || value.length > 80) {
+        var pre = document.createElement('pre');
+        pre.className = 'hook-message';
+        pre.textContent = value;
+        el.appendChild(pre);
+        return el;
+      }
+      el.textContent = value;
+      return el;
+    }
+    var pre2 = document.createElement('pre');
+    pre2.className = 'hook-json';
+    try { pre2.textContent = JSON.stringify(value, null, 2); }
+    catch { pre2.textContent = String(value); }
+    el.appendChild(pre2);
+    return el;
+  }
+
+  function renderHookDetail(container, ev) {
+    container.innerHTML = '';
+    var seen = {};
+
+    // Primary fields — stacked, full width.
+    HOOK_PRIMARY.forEach(function (k) {
+      if (!Object.prototype.hasOwnProperty.call(ev, k)) return;
+      if (HOOK_FIELD_HIDE[k]) return;
+      seen[k] = 1;
+      var row = document.createElement('div');
+      row.className = 'hook-field';
+      var label = document.createElement('div');
+      label.className = 'hook-field-label';
+      label.textContent = prettyLabel(k);
+      row.appendChild(label);
+      row.appendChild(renderHookFieldValue(k, ev[k]));
+      container.appendChild(row);
+    });
+
+    // Anything not declared primary/meta but present (custom fields) → primary.
+    Object.keys(ev).forEach(function (k) {
+      if (seen[k] || HOOK_FIELD_HIDE[k]) return;
+      if (HOOK_META.indexOf(k) !== -1) return;
+      seen[k] = 1;
+      var row = document.createElement('div');
+      row.className = 'hook-field';
+      var label = document.createElement('div');
+      label.className = 'hook-field-label';
+      label.textContent = prettyLabel(k);
+      row.appendChild(label);
+      row.appendChild(renderHookFieldValue(k, ev[k]));
+      container.appendChild(row);
+    });
+
+    // Meta — compact 2-col grid.
+    var meta = null;
+    HOOK_META.forEach(function (k) {
+      if (!Object.prototype.hasOwnProperty.call(ev, k)) return;
+      if (HOOK_FIELD_HIDE[k]) return;
+      if (!meta) {
+        meta = document.createElement('div');
+        meta.className = 'hook-meta';
+        container.appendChild(meta);
+      }
+      var lab = document.createElement('div');
+      lab.className = 'hook-meta-label';
+      lab.textContent = prettyLabel(k);
+      var val = document.createElement('div');
+      val.className = 'hook-meta-value';
+      var v = ev[k];
+      if (k === 'transcript_path' || k === 'cwd') {
+        val.textContent = shortPath(typeof v === 'string' ? v : String(v));
+        val.title = String(v);
+        val.classList.add('truncate');
+      } else if (k === 'session_id' && typeof v === 'string') {
+        val.textContent = v.slice(0, 8) + '…';
+        val.title = v;
+      } else {
+        val.textContent = String(v);
+      }
+      meta.appendChild(lab);
+      meta.appendChild(val);
+    });
+  }
+
   function renderEvent(ev) {
     var row = document.createElement('div');
     row.className = 'hook-row';
@@ -11607,7 +12219,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     var detail = document.createElement('div');
     detail.className = 'hook-detail';
     detail.style.display = 'none';
-    detail.textContent = JSON.stringify(ev, null, 2);
+    renderHookDetail(detail, ev);
     row.appendChild(detail);
 
     row.addEventListener('click', function () {
