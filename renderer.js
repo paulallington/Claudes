@@ -52,6 +52,7 @@ var endpointPresets = [];        // [{ id, name, baseUrl, model, hasToken }]
 var currentEndpointId = null;    // active project's selected preset id (null = Anthropic)
 var currentEndpointModel = null; // user-selected model override for active project (null = use preset default)
 var currentEndpointEnv = null;   // env block returned by endpoint:getEnv, or null
+var firstSpawnLoadComplete = false;  // gate for cloud-default-on-boot
 // Cache of fetched models per endpoint id to avoid refetching on every selection.
 // { [endpointId]: { models: string[], fetchedAt: number, ok: boolean } }
 var endpointModelsCache = {};
@@ -868,12 +869,17 @@ function handleSnippetExpansion(colId, data) {
     return false;
   }
 
-  // Enter / Tab — try to expand
-  if (data === '\r' || data === '\n' || data === '\t') {
+  // Enter / Tab — try to expand. xterm may send '\r', '\n', '\r\n', or '\t';
+  // accept any input that contains an Enter/Tab char.
+  var isEnterTab = data === '\r' || data === '\n' || data === '\t' ||
+                   data === '\r\n' || data === '\n\r';
+  if (isEnterTab) {
     var m = /\\\\([a-zA-Z0-9_-]+)\s*$/.exec(col.snippetBuffer);
     if (m) {
       var trig = m[1];
-      var snip = (window.__snippetsCache || []).find(function (s) { return s.trigger === trig; });
+      var cache = window.__snippetsCache || [];
+      console.log('[snippets] match:', trig, 'cache size:', cache.length);
+      var snip = cache.find(function (s) { return s.trigger === trig; });
       if (snip) {
         var body = snip.body || '';
         // Collect unique variable names from {{name}} occurrences
@@ -900,7 +906,7 @@ function handleSnippetExpansion(colId, data) {
         var eraseCount = m[0].length;
         var eraseStr = '';
         for (var ei = 0; ei < eraseCount; ei++) eraseStr += '\b \b';
-        var trailing = (data === '\r' || data === '\n') ? '\r' : '';
+        var trailing = (data === '\r' || data === '\n' || data === '\r\n' || data === '\n\r') ? '\r' : '';
         wsSend({ type: 'write', id: colId, data: eraseStr + expanded + trailing });
         col.snippetBuffer = '';
         return true;
@@ -6152,11 +6158,20 @@ function loadSpawnOptions() {
   optWorktree.value = opts.worktree || '';
   optCustomArgs.value = opts.customArgs || '';
 
-  // If the persisted endpointId no longer refers to a known preset (deleted in
-  // the meantime), silently fall back to the default Anthropic endpoint.
-  var endpointId = opts.endpointId || null;
-  if (endpointId && !endpointPresets.find(function (p) { return p.id === endpointId; })) {
+  // First call on app boot always defaults to cloud (Anthropic), regardless of
+  // what was saved. Subsequent calls (project switches within the session)
+  // respect the saved endpointId.
+  var endpointId;
+  if (!firstSpawnLoadComplete) {
     endpointId = null;
+    firstSpawnLoadComplete = true;
+  } else {
+    // If the persisted endpointId no longer refers to a known preset (deleted in
+    // the meantime), silently fall back to the default Anthropic endpoint.
+    endpointId = opts.endpointId || null;
+    if (endpointId && !endpointPresets.find(function (p) { return p.id === endpointId; })) {
+      endpointId = null;
+    }
   }
   // Restore the per-project model selection BEFORE applyEndpointSelection so
   // populateEndpointModelDropdown can preselect it.
@@ -11490,6 +11505,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   if (!listEl) return;
 
   var MAX_EVENTS = 1000;  // ring buffer
+  var hintEl = document.getElementById('hooks-empty-hint');
   var events = [];
   var filterQuery = '';
   var paused = false;
@@ -11560,7 +11576,11 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     filterQuery = filterEl.value.trim();
     rerender();
   });
-  clearBtn.addEventListener('click', function () { events = []; rerender(); });
+  clearBtn.addEventListener('click', function () {
+    events = [];
+    rerender();
+    if (hintEl) hintEl.classList.remove('hidden');
+  });
   pauseEl.addEventListener('change', function () { paused = pauseEl.checked; });
 
   if (window.electronAPI && window.electronAPI.onHookEvent) {
@@ -11569,6 +11589,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       ev.received_at = Date.now();
       events.push(ev);
       if (events.length > MAX_EVENTS) events.shift();
+      if (hintEl && !hintEl.classList.contains('hidden')) hintEl.classList.add('hidden');
       // Append-only when the new event passes the current filter
       if (eventMatchesFilter(ev)) {
         var row = renderEvent(ev);

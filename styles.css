@@ -6271,7 +6271,7 @@ body.mode-popout #btn-add-project {
   max-height: 60vh;
   display: flex;
   flex-direction: column;
-  background: #1a1a2e;
+  background: var(--bg-deep);
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
   box-shadow: 0 12px 40px rgba(0,0,0,0.6);
@@ -6399,3 +6399,17 @@ body.mode-popout #btn-add-project {
   gap: 4px;
   cursor: pointer;
 }
+.hooks-empty-hint {
+  padding: 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-subtle);
+  line-height: 1.4;
+}
+.hooks-empty-hint code {
+  font-size: 10px;
+  background: rgba(255,255,255,0.04);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.hooks-empty-hint.hidden { display: none; }

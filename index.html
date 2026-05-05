@@ -148,6 +148,9 @@
               <input type="checkbox" id="hooks-pause"> Pause
             </label>
           </div>
+            <div id="hooks-empty-hint" class="hooks-empty-hint">
+              No hook events yet. Claudes runs a local hook server (see startup logs), but Claude CLI only forwards events to it when configured in <code>~/.claude/settings.json</code>. Add hook entries there pointing to the local server URL to see live tool calls here.
+            </div>
           <div id="hooks-list" class="hooks-list"></div>
         </div>
       </div>
