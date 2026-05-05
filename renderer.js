@@ -11830,3 +11830,35 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   // Pre-warm the cache so trigger expansion works immediately on app start
   refresh();
 })();
+
+(function setupShortcutsModal() {
+  var btn = document.getElementById('btn-shortcuts');
+  var modal = document.getElementById('shortcuts-modal');
+  var closeBtn = document.getElementById('shortcuts-close');
+  if (!modal) return;
+
+  function open() { modal.classList.remove('hidden'); }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+
+  if (btn) btn.addEventListener('click', open);
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+
+  // ? hotkey — only fires when no input/textarea/select has focus, so it
+  // doesn't interfere with typing a literal "?" into a form.
+  document.addEventListener('keydown', function (e) {
+    if (e.key === '?' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      var t = e.target;
+      var tag = t && t.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (t && t.classList && t.classList.contains('xterm-helper-textarea')) return;
+      e.preventDefault();
+      open();
+      return;
+    }
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
+})();

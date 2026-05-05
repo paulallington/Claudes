@@ -6491,3 +6491,70 @@ body.mode-popout #btn-add-project {
 }
 .snippet-prompt-ok:hover { background: #3a78ee; }
 .snippet-prompt-cancel:hover { border-color: #4f8cff; }
+
+/* === Shortcuts Reference Modal === */
+.shortcuts-dialog { width: 760px; max-height: 85vh; }
+.shortcuts-dialog .modal-body {
+  flex-direction: column;
+  padding: 16px 20px;
+  overflow-y: auto;
+  gap: 18px;
+}
+.shortcuts-section h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin: 0 0 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 4px;
+}
+.shortcuts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.shortcuts-table td {
+  padding: 4px 8px;
+  vertical-align: top;
+}
+.shortcuts-table td:first-child {
+  width: 200px;
+  white-space: nowrap;
+}
+.shortcuts-table kbd {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin: 0 1px;
+  color: var(--text-primary);
+}
+.shortcuts-features {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+.shortcuts-features li::before {
+  content: "•";
+  margin-right: 6px;
+  color: var(--text-dim);
+}
+.shortcuts-features code {
+  font-size: 11px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.shortcuts-features strong {
+  color: var(--text-primary);
+}
