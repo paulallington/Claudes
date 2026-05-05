@@ -7305,7 +7305,10 @@ function openUsageModal() {
     renderUsageDaily(data);
     renderUsageSessions(data);
     if (window.electronAPI && window.electronAPI.getUsageCosts) {
-      window.electronAPI.getUsageCosts().then(renderCostTab).catch(function () {});
+      // Default to whatever filter button is currently active (defaults to 'all' on first open)
+      var activeBtn = document.querySelector('.cost-filter-btn.active');
+      var filter = activeBtn ? activeBtn.dataset.costFilter : 'all';
+      window.electronAPI.getUsageCosts(filter).then(renderCostTab).catch(function () {});
     }
   });
 }
@@ -10843,11 +10846,19 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
 
   function refreshTargets() {
     targetsEl.innerHTML = '';
+    var ordinalByProject = new Map();  // projectKey -> running count
     var any = false;
     allColumns.forEach(function (c, id) {
-      if (c.cmd) return;  // only Claude columns
-      if (c.isDiff) return;
+      if (c.cmd) return;       // skip custom-command columns
+      if (c.isDiff) return;    // skip diff columns
       any = true;
+      var ord = (ordinalByProject.get(c.projectKey) || 0) + 1;
+      ordinalByProject.set(c.projectKey, ord);
+      var proj = (config && config.projects)
+        ? config.projects.find(function (p) { return p.path === c.projectKey; })
+        : null;
+      var projName = (proj && proj.name)
+        || (typeof projectKeyToName === 'function' ? projectKeyToName(c.projectKey) : c.projectKey);
       var label = document.createElement('label');
       label.className = 'broadcast-target';
       var cb = document.createElement('input');
@@ -10855,8 +10866,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       cb.dataset.colId = id;
       cb.checked = true;
       var span = document.createElement('span');
-      var title = c.customTitle || c.cwd || ('column ' + id);
-      span.textContent = title;
+      span.textContent = projName + ' — Claude #' + ord;
       label.appendChild(cb);
       label.appendChild(span);
       targetsEl.appendChild(label);
@@ -10873,12 +10883,21 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   btn.addEventListener('click', function () {
     refreshTargets();
     popover.classList.remove('hidden');
-    textEl.focus();
+    // Blur all xterm terminals so they release keyboard capture; the textarea
+    // can then receive keystrokes without needing an OS-level focus bounce.
+    allColumns.forEach(function (c) {
+      if (c.terminal && typeof c.terminal.blur === 'function') c.terminal.blur();
+    });
+    setTimeout(function () { textEl.focus(); }, 0);
   });
-  closeBtn.addEventListener('click', function () { popover.classList.add('hidden'); });
+  closeBtn.addEventListener('click', function () {
+    popover.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && !popover.classList.contains('hidden')) {
       popover.classList.add('hidden');
+      if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
     }
   });
 
@@ -10894,6 +10913,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       wsSend({ type: 'write', id: id, data: text + (pressEnter ? '\r' : '') });
     });
     popover.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
     textEl.value = '';
   });
 })();
@@ -10987,4 +11007,18 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     addColumn(null, null, { sessionId: h.sessionId });
     close();
   }
+})();
+
+(function setupCostFilters() {
+  var btns = document.querySelectorAll('.cost-filter-btn');
+  if (!btns.length) return;
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      btns.forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      if (window.electronAPI && window.electronAPI.getUsageCosts) {
+        window.electronAPI.getUsageCosts(b.dataset.costFilter).then(renderCostTab).catch(function () {});
+      }
+    });
+  });
 })();

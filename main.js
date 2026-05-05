@@ -1762,7 +1762,7 @@ const { sessionCost: calcSessionCost } = require('./lib/cost-calc');
 // Uses the digest cached by usage:getAll (call usage:getAll first; otherwise
 // returns zeros). Costs are computed from each session's single `model` plus
 // its aggregate token counts — see plan note about multi-model sessions.
-function rollupCosts(digests) {
+function rollupCosts(digests, sinceMs) {
   const byModel = { opus: 0, sonnet: 0, haiku: 0, unknown: 0 };
   const byProject = {};
   const byDay = {};
@@ -1770,6 +1770,7 @@ function rollupCosts(digests) {
   if (!Array.isArray(digests)) return { total, byModel, byProject, byDay };
   for (const d of digests) {
     if (!d) continue;
+    if (sinceMs && d.lastTimestamp && d.lastTimestamp < sinceMs) continue;
     const c = calcSessionCost({
       model: d.model || '',
       input: d.inputTokens || 0,
@@ -1779,7 +1780,6 @@ function rollupCosts(digests) {
     });
     if (!c) continue;
     total += c;
-    // Classify into model bucket
     const m = String(d.model || '').toLowerCase();
     if (m.indexOf('opus') !== -1) byModel.opus += c;
     else if (m.indexOf('sonnet') !== -1) byModel.sonnet += c;
@@ -1787,15 +1787,26 @@ function rollupCosts(digests) {
     else byModel.unknown += c;
     if (d.projectKey) byProject[d.projectKey] = (byProject[d.projectKey] || 0) + c;
     if (d.lastTimestamp) {
-      const day = new Date(d.lastTimestamp).toISOString().slice(0, 10);  // YYYY-MM-DD
+      const day = new Date(d.lastTimestamp).toISOString().slice(0, 10);
       byDay[day] = (byDay[day] || 0) + c;
     }
   }
   return { total, byModel, byProject, byDay };
 }
 
-ipcMain.handle('usage:getCosts', async () => {
-  return rollupCosts(global.__lastUsageDigest || []);
+ipcMain.handle('usage:getCosts', async (_event, filter) => {
+  const now = Date.now();
+  let sinceMs = null;
+  if (filter === 'today') {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    sinceMs = start.getTime();
+  } else if (filter === '7d') {
+    sinceMs = now - 7 * 24 * 60 * 60 * 1000;
+  } else if (filter === '30d') {
+    sinceMs = now - 30 * 24 * 60 * 60 * 1000;
+  }
+  return rollupCosts(global.__lastUsageDigest || [], sinceMs);
 });
 
 // Full-text search across all session JSONLs. Streaming-style: returns first

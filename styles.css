@@ -3968,6 +3968,26 @@ html, body {
 .cost-day-fill { height: 100%; background: #4f8cff; border-radius: 4px; }
 .cost-day-val { color: var(--text-primary); text-align: right; font-variant-numeric: tabular-nums; }
 .cost-disclaimer { font-size: 10px; color: var(--text-dimmer); margin-top: 12px; line-height: 1.4; }
+.cost-filter-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.cost-filter-btn {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-dim);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cost-filter-btn:hover { color: var(--text-primary); }
+.cost-filter-btn.active {
+  background: rgba(79,140,255,0.12);
+  border-color: #4f8cff;
+  color: var(--text-primary);
+}
 
 /* Environmental impact */
 
@@ -6199,6 +6219,11 @@ body.mode-popout #btn-add-project {
 .broadcast-send-btn:hover { background: #3a78ee; }
 
 .session-search-dialog { width: 720px; max-height: 80vh; }
+.session-search-dialog .modal-body {
+  flex-direction: column;
+  padding: 12px;
+  gap: 8px;
+}
 #session-search-input {
   width: 100%;
   background: rgba(255,255,255,0.04);
