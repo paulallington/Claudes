@@ -6413,3 +6413,62 @@ body.mode-popout #btn-add-project {
   border-radius: 3px;
 }
 .hooks-empty-hint.hidden { display: none; }
+
+/* Inline async prompt for snippet variable input (replacement for window.prompt). */
+
+.snippet-prompt-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.4);
+  z-index: 3000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.snippet-prompt-dialog {
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 14px 16px;
+  min-width: 360px;
+  max-width: 80vw;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+.snippet-prompt-label {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.snippet-prompt-input {
+  width: 100%;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+}
+.snippet-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.snippet-prompt-ok,
+.snippet-prompt-cancel {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.snippet-prompt-ok {
+  background: #4f8cff;
+  color: white;
+  border-color: #4f8cff;
+}
+.snippet-prompt-ok:hover { background: #3a78ee; }
+.snippet-prompt-cancel:hover { border-color: #4f8cff; }

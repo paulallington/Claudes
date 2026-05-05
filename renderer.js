@@ -878,37 +878,15 @@ function handleSnippetExpansion(colId, data) {
     if (m) {
       var trig = m[1];
       var cache = window.__snippetsCache || [];
-      console.log('[snippets] match:', trig, 'cache size:', cache.length);
       var snip = cache.find(function (s) { return s.trigger === trig; });
       if (snip) {
-        var body = snip.body || '';
-        // Collect unique variable names from {{name}} occurrences
-        var varNames = [];
-        body.replace(/\{\{(\w+)\}\}/g, function (_, n) {
-          if (varNames.indexOf(n) === -1) varNames.push(n);
-          return _;
-        });
-        var values = {};
-        for (var vi = 0; vi < varNames.length; vi++) {
-          var v = window.prompt('Value for {{' + varNames[vi] + '}}:');
-          if (v === null) {
-            // User cancelled — eat the keystroke, leave the typed trigger in
-            // the terminal as-is so they can edit. Reset our buffer.
-            col.snippetBuffer = '';
-            return true;
-          }
-          values[varNames[vi]] = v;
-        }
-        var expanded = body.replace(/\{\{(\w+)\}\}/g, function (_, n) { return values[n] || ''; });
-        // Erase the typed trigger from the terminal: send N backspaces (each
-        // erases the char to the left), then the body, then Enter if the
-        // original keystroke was Enter.
-        var eraseCount = m[0].length;
-        var eraseStr = '';
-        for (var ei = 0; ei < eraseCount; ei++) eraseStr += '\b \b';
+        // Eat the keystroke now; run the async expansion separately. We can't
+        // use window.prompt() — Electron disables it. promptForValue() is an
+        // inline DOM modal that returns Promise<string|null>.
+        var triggerLen = m[0].length;
         var trailing = (data === '\r' || data === '\n' || data === '\r\n' || data === '\n\r') ? '\r' : '';
-        wsSend({ type: 'write', id: colId, data: eraseStr + expanded + trailing });
         col.snippetBuffer = '';
+        runSnippetExpansion(colId, snip, triggerLen, trailing);
         return true;
       }
     }
@@ -927,6 +905,81 @@ function handleSnippetExpansion(colId, data) {
     col.snippetBuffer = '';
   }
   return false;
+}
+
+// Async snippet expansion: collects {{var}} values one-by-one via an inline
+// modal, then erases the typed trigger and sends the expanded body to the
+// column's pty. Cancel aborts cleanly.
+function runSnippetExpansion(colId, snip, triggerLen, trailing) {
+  var body = snip.body || '';
+  var varNames = [];
+  body.replace(/\{\{(\w+)\}\}/g, function (_, n) {
+    if (varNames.indexOf(n) === -1) varNames.push(n);
+    return _;
+  });
+  var values = {};
+  function next(i) {
+    if (i >= varNames.length) {
+      var expanded = body.replace(/\{\{(\w+)\}\}/g, function (_, n) { return values[n] || ''; });
+      var eraseStr = '';
+      for (var ei = 0; ei < triggerLen; ei++) eraseStr += '\b \b';
+      wsSend({ type: 'write', id: colId, data: eraseStr + expanded + trailing });
+      return;
+    }
+    promptForValue('Value for {{' + varNames[i] + '}}:').then(function (v) {
+      if (v === null) return;  // cancelled — abort the whole expansion
+      values[varNames[i]] = v;
+      next(i + 1);
+    });
+  }
+  next(0);
+}
+
+// Inline async prompt: returns Promise<string|null>. null = cancelled.
+// Replacement for window.prompt() which Electron disables.
+function promptForValue(message) {
+  return new Promise(function (resolve) {
+    var overlay = document.createElement('div');
+    overlay.className = 'snippet-prompt-overlay';
+    var dialog = document.createElement('div');
+    dialog.className = 'snippet-prompt-dialog';
+    var label = document.createElement('div');
+    label.className = 'snippet-prompt-label';
+    label.textContent = message;
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'snippet-prompt-input';
+    var actions = document.createElement('div');
+    actions.className = 'snippet-prompt-actions';
+    var cancel = document.createElement('button');
+    cancel.className = 'snippet-prompt-cancel';
+    cancel.textContent = 'Cancel';
+    var ok = document.createElement('button');
+    ok.className = 'snippet-prompt-ok';
+    ok.textContent = 'OK';
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    dialog.appendChild(label);
+    dialog.appendChild(input);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    setTimeout(function () { input.focus(); }, 0);
+
+    function done(value) {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      resolve(value);
+    }
+    ok.addEventListener('click', function () { done(input.value); });
+    cancel.addEventListener('click', function () { done(null); });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); done(input.value); }
+      else if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    });
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) done(null);
+    });
+  });
 }
 
 function saveColumnCounts() {
