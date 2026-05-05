@@ -6447,6 +6447,7 @@ var epTokenToggle = document.getElementById('ep-token-toggle');
 var epModelInput = document.getElementById('ep-model');
 var epModelSelect = document.getElementById('ep-model-select');
 var epModelFetchBtn = document.getElementById('ep-model-fetch');
+var epFallback = document.getElementById('ep-fallback');
 var epStatus = document.getElementById('ep-status');
 var epTestBtn = document.getElementById('ep-test');
 var epDeleteBtn = document.getElementById('ep-delete');
@@ -6482,7 +6483,32 @@ function clearEndpointForm() {
   epModelInput.classList.remove('hidden');
   epModelSelect.classList.add('hidden');
   while (epModelSelect.firstChild) epModelSelect.removeChild(epModelSelect.firstChild);
+  if (epFallback) {
+    while (epFallback.firstChild) epFallback.removeChild(epFallback.firstChild);
+    var noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = '(none)';
+    epFallback.appendChild(noneOpt);
+  }
   setEpStatus('');
+}
+
+function populateFallbackOptions(currentEditingId, currentFallbackId) {
+  if (!epFallback) return;
+  while (epFallback.firstChild) epFallback.removeChild(epFallback.firstChild);
+  var none = document.createElement('option');
+  none.value = '';
+  none.textContent = '(none)';
+  epFallback.appendChild(none);
+  for (var i = 0; i < endpointPresets.length; i++) {
+    var p = endpointPresets[i];
+    if (p.id === currentEditingId) continue;  // can't fallback to self
+    var opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name || '(unnamed)';
+    if (p.id === currentFallbackId) opt.selected = true;
+    epFallback.appendChild(opt);
+  }
 }
 
 function renderEndpointsListUI() {
@@ -6522,6 +6548,7 @@ function selectEndpointForEdit(id) {
     epModelInput.value = preset.model || '';
     epModelInput.classList.remove('hidden');
     epModelSelect.classList.add('hidden');
+    populateFallbackOptions(preset.id, preset.fallbackId || '');
     setEpStatus('');
     showEndpointForm(true);
     renderEndpointsListUI();
@@ -6532,6 +6559,7 @@ function selectEndpointForEdit(id) {
 function startNewEndpoint() {
   editingPresetId = '__new__';
   clearEndpointForm();
+  populateFallbackOptions(null, '');
   showEndpointForm(true);
   renderEndpointsListUI();
   epName.focus();
@@ -6571,7 +6599,8 @@ function collectFormPayload() {
     authToken: epAuthToken.value, // pass as-is; main encrypts
     model: epModelInput.classList.contains('hidden')
       ? epModelSelect.value
-      : epModelInput.value.trim()
+      : epModelInput.value.trim(),
+    fallbackId: (epFallback && epFallback.value) || null
   };
 }
 
@@ -6582,6 +6611,10 @@ function saveCurrentPreset() {
   if (!payload.model) { setEpStatus('Model is required', 'error'); return; }
   setEpStatus('Saving…');
   window.electronAPI.endpointSave(payload).then(function (result) {
+    if (result && result.ok === false) {
+      setEpStatus(result.error || 'Save failed', 'error');
+      return;
+    }
     setEpStatus('Saved', 'ok');
     var newId = (result && result.id) || payload.id;
     return loadEndpointPresets().then(function () {
