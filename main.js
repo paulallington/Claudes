@@ -3519,6 +3519,34 @@ async function runAgent(automationId, agentId) {
     return;
   }
 
+  // Capacity gate: skip the run if the user's 5-hour session is too full.
+  // The gate is per-agent; absent / null means no gate.
+  const gatePct = agent.usageGate && typeof agent.usageGate.sessionMaxPct === 'number'
+    ? agent.usageGate.sessionMaxPct
+    : null;
+  if (gatePct != null && planUsageCache && planUsageCache.data && planUsageCache.data.five_hour
+      && typeof planUsageCache.data.five_hour.utilization === 'number') {
+    const util = planUsageCache.data.five_hour.utilization;
+    if (util > gatePct) {
+      const msg = 'Skipped: session usage ' + util.toFixed(1) + '% > gate ' + gatePct + '%';
+      const skipData = readAutomations();
+      const skipAuto = skipData.automations.find(a => a.id === automationId);
+      if (skipAuto) {
+        const skipAgent = skipAuto.agents.find(ag => ag.id === agentId);
+        if (skipAgent) {
+          skipAgent.lastRunStatus = 'skipped';
+          skipAgent.lastRunAt = new Date().toISOString();
+          skipAgent.lastError = msg;
+          writeAutomations(skipData);
+        }
+      }
+      if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
+        automationId, agentId, status: 'skipped', error: msg
+      });
+      return;
+    }
+  }
+
   // Mark as running
   const freshData1 = readAutomations();
   const freshAuto1 = freshData1.automations.find(a => a.id === automationId);

@@ -9240,6 +9240,15 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
     '</div>' +
     '</div>';
 
+  var sessionMaxPct = agent && agent.usageGate && (typeof agent.usageGate.sessionMaxPct === 'number') ? agent.usageGate.sessionMaxPct : '';
+  var usageGateHtml = '<div class="automation-form-group">' +
+    '<label>Skip if session usage above ' +
+      '<input type="number" class="automation-input agent-usage-gate" min="0" max="100" step="1" value="' + escapeHtml(String(sessionMaxPct)) + '" placeholder="e.g. 80" style="width:80px;display:inline-block;margin:0 6px;"> ' +
+      '%' +
+      ' <span class="automation-permission-hint">(blank to always run)</span>' +
+    '</label>' +
+    '</div>';
+
   var scheduleDisplay = runMode === 'run_after' ? 'display:none;' : '';
   var bodyStyle = isCollapsed ? 'display:none;' : '';
 
@@ -9269,6 +9278,7 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
       runAfterHtml +
       passContextHtml +
       isolationHtml +
+      usageGateHtml +
       '<div class="agent-schedule-section" style="' + scheduleDisplay + '">' +
         '<div class="automation-form-group">' +
           '<label>Schedule</label>' +
@@ -9599,6 +9609,17 @@ function syncAgentFromCard(card, agentIndex) {
   if (isoCheckbox) {
     agent.isolation = agent.isolation || {};
     agent.isolation.enabled = isoCheckbox.checked;
+  }
+
+  var usageGateEl = card.querySelector('.agent-usage-gate');
+  if (usageGateEl) {
+    var raw = (usageGateEl.value || '').trim();
+    if (raw === '' || isNaN(parseFloat(raw))) {
+      agent.usageGate = { sessionMaxPct: null };
+    } else {
+      var n = Math.max(0, Math.min(100, parseFloat(raw)));
+      agent.usageGate = { sessionMaxPct: n };
+    }
   }
 
   var schedTypeEl = card.querySelector('.agent-schedule-type');
