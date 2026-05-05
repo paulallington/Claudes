@@ -11653,6 +11653,69 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       }
     });
   }
+
+  // Hooks auto-config wiring
+  var connectBtn = document.getElementById('btn-hooks-connect');
+  var disconnectBtn = document.getElementById('btn-hooks-disconnect');
+  var statusEl = document.getElementById('hooks-config-status');
+
+  function refreshConfigState() {
+    if (!window.electronAPI || !window.electronAPI.isHooksConfigured) return;
+    window.electronAPI.isHooksConfigured().then(function (configured) {
+      if (configured) {
+        if (connectBtn) connectBtn.classList.add('hidden');
+        if (disconnectBtn) disconnectBtn.classList.remove('hidden');
+        if (statusEl) {
+          statusEl.textContent = 'Connected. Restart any open Claude sessions to start receiving events.';
+          statusEl.classList.remove('error');
+          statusEl.classList.add('ok');
+        }
+      } else {
+        if (connectBtn) connectBtn.classList.remove('hidden');
+        if (disconnectBtn) disconnectBtn.classList.add('hidden');
+        if (statusEl) {
+          statusEl.textContent = '';
+          statusEl.classList.remove('ok', 'error');
+        }
+      }
+    }).catch(function () {});
+  }
+
+  if (connectBtn) connectBtn.addEventListener('click', function () {
+    if (!window.electronAPI || !window.electronAPI.configureHooks) return;
+    if (statusEl) {
+      statusEl.textContent = 'Configuring…';
+      statusEl.classList.remove('ok', 'error');
+    }
+    window.electronAPI.configureHooks().then(function (result) {
+      if (result && result.ok) {
+        refreshConfigState();
+      } else {
+        if (statusEl) {
+          statusEl.textContent = (result && result.error) ? ('Failed: ' + result.error) : 'Failed to configure hooks.';
+          statusEl.classList.add('error');
+        }
+      }
+    });
+  });
+
+  if (disconnectBtn) disconnectBtn.addEventListener('click', function () {
+    if (!window.electronAPI || !window.electronAPI.disconnectHooks) return;
+    if (!confirm('Remove Claudes hook entries from your ~/.claude/settings.json?')) return;
+    window.electronAPI.disconnectHooks().then(function (result) {
+      if (result && result.ok) {
+        refreshConfigState();
+      } else {
+        if (statusEl) {
+          statusEl.textContent = (result && result.error) ? ('Failed: ' + result.error) : 'Failed to disconnect.';
+          statusEl.classList.add('error');
+        }
+      }
+    });
+  });
+
+  // Initial check
+  refreshConfigState();
 })();
 
 (function setupSnippets() {

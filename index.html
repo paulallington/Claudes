@@ -149,7 +149,14 @@
             </label>
           </div>
             <div id="hooks-empty-hint" class="hooks-empty-hint">
-              No hook events yet. Claudes runs a local hook server (see startup logs), but Claude CLI only forwards events to it when configured in <code>~/.claude/settings.json</code>. Add hook entries there pointing to the local server URL to see live tool calls here.
+              <div id="hooks-empty-text">
+                No hook events yet. Claude CLI needs hooks configured in <code>~/.claude/settings.json</code> to forward tool events here.
+              </div>
+              <div id="hooks-config-actions" class="hooks-config-actions">
+                <button id="btn-hooks-connect" class="hooks-btn hooks-connect-btn">Connect hooks</button>
+                <button id="btn-hooks-disconnect" class="hooks-btn hooks-disconnect-btn hidden">Disconnect</button>
+                <span id="hooks-config-status" class="hooks-config-status"></span>
+              </div>
             </div>
           <div id="hooks-list" class="hooks-list"></div>
         </div>

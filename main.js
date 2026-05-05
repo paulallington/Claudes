@@ -16,6 +16,7 @@ let isQuitting = false;
 let hookServer;
 let hookServerPort;
 const ptyPort = app.isPackaged ? 3456 : 3457;
+const hookServerListenPort = app.isPackaged ? 53456 : 53457;
 let ptyServerProcess;
 
 const CONFIG_DIR = path.join(os.homedir(), '.claudes');
@@ -2029,13 +2030,118 @@ function startHookServer() {
       res.end();
     }
   });
-  hookServer.listen(0, '127.0.0.1', () => {
-    hookServerPort = hookServer.address().port;
+  hookServer.on('error', (err) => {
+    console.error('[hook-server] listen error:', err.message);
+  });
+  hookServer.listen(hookServerListenPort, '127.0.0.1', () => {
+    hookServerPort = hookServerListenPort;
     console.log('[hook-server] listening on port', hookServerPort);
   });
 }
 
 ipcMain.handle('hooks:getPort', () => hookServerPort);
+
+const HOOK_EVENTS = [
+  'PreToolUse', 'PostToolUse', 'UserPromptSubmit',
+  'Stop', 'SubagentStop', 'Notification',
+  'SessionStart', 'SessionEnd', 'PreCompact'
+];
+
+// Sentinel matcher we use to identify our hook entries on subsequent calls.
+const CLAUDES_HOOK_SENTINEL = '__claudes_inspector__';
+
+function buildHookCommand(port) {
+  // Cross-platform curl invocation. curl ships with Windows 10+, macOS, and
+  // every Linux distro this app runs on. -d @- reads stdin. The double-quoted
+  // header value is parsed identically by cmd.exe and POSIX shells.
+  return 'curl -s -X POST http://127.0.0.1:' + port + '/hook -d @- -H "Content-Type: application/json"';
+}
+
+function readClaudeSettings() {
+  const file = path.join(os.homedir(), '.claude', 'settings.json');
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    return { file, data: JSON.parse(raw) };
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { file, data: {} };
+    throw err;
+  }
+}
+
+function writeClaudeSettings(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+}
+
+ipcMain.handle('hooks:isConfigured', () => {
+  try {
+    const { data } = readClaudeSettings();
+    if (!data || !data.hooks) return false;
+    // Detect any of our entries by matcher sentinel.
+    for (const ev of HOOK_EVENTS) {
+      const groups = data.hooks[ev];
+      if (!Array.isArray(groups)) continue;
+      for (const g of groups) {
+        if (g && g.matcher === CLAUDES_HOOK_SENTINEL) return true;
+      }
+    }
+    return false;
+  } catch { return false; }
+});
+
+ipcMain.handle('hooks:configure', () => {
+  try {
+    const { file, data } = readClaudeSettings();
+    // Backup the current file (always — even if data was empty, mark the moment).
+    try {
+      const backupPath = file + '.claudes-bak.' + Date.now();
+      const exists = fs.existsSync(file);
+      if (exists) fs.copyFileSync(file, backupPath);
+    } catch { /* backup is best-effort */ }
+
+    if (!data.hooks) data.hooks = {};
+    const command = buildHookCommand(hookServerListenPort);
+    let added = 0;
+    for (const ev of HOOK_EVENTS) {
+      if (!Array.isArray(data.hooks[ev])) data.hooks[ev] = [];
+      // Skip if our sentinel entry already exists for this event.
+      const already = data.hooks[ev].some((g) => g && g.matcher === CLAUDES_HOOK_SENTINEL);
+      if (already) continue;
+      data.hooks[ev].push({
+        matcher: CLAUDES_HOOK_SENTINEL,
+        hooks: [{ type: 'command', command }]
+      });
+      added++;
+    }
+    writeClaudeSettings(file, data);
+    return { ok: true, added, port: hookServerListenPort };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('hooks:disconnect', () => {
+  try {
+    const { file, data } = readClaudeSettings();
+    if (!data || !data.hooks) return { ok: true, removed: 0 };
+    let removed = 0;
+    for (const ev of HOOK_EVENTS) {
+      const groups = data.hooks[ev];
+      if (!Array.isArray(groups)) continue;
+      const filtered = groups.filter((g) => {
+        if (g && g.matcher === CLAUDES_HOOK_SENTINEL) { removed++; return false; }
+        return true;
+      });
+      data.hooks[ev] = filtered;
+      // Drop the array entirely if it became empty (keeps settings.json tidy).
+      if (data.hooks[ev].length === 0) delete data.hooks[ev];
+    }
+    if (Object.keys(data.hooks).length === 0) delete data.hooks;
+    writeClaudeSettings(file, data);
+    return { ok: true, removed };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
 ipcMain.handle('pty:getPort', () => ptyPort);
 
 ipcMain.handle('window:flashFrame', () => {

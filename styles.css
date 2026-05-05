@@ -6413,6 +6413,25 @@ body.mode-popout #btn-add-project {
   border-radius: 3px;
 }
 .hooks-empty-hint.hidden { display: none; }
+.hooks-config-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.hooks-connect-btn {
+  background: #4f8cff;
+  color: white;
+  border-color: #4f8cff;
+}
+.hooks-connect-btn:hover { background: #3a78ee; color: white; }
+.hooks-config-status {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.hooks-config-status.ok { color: #22c55e; }
+.hooks-config-status.error { color: #e05050; }
+.hooks-btn.hidden { display: none; }
 
 /* Inline async prompt for snippet variable input (replacement for window.prompt). */
 
