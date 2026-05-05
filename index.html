@@ -161,6 +161,8 @@
           <span id="active-project-name" class="active-project-name"></span>
         </div>
         <div class="toolbar-actions">
+          <button id="btn-session-search" class="toolbar-btn" title="Search session transcripts (Ctrl+Shift+F)">🔎</button>
+          <button id="btn-broadcast" class="toolbar-btn" title="Broadcast a prompt to multiple columns">⤳</button>
           <button id="btn-automations-flyout" class="toolbar-btn" title="Automations">&#8634;</button>
           <div class="toolbar-menu-wrap">
             <button id="btn-toolbar-menu" class="toolbar-menu-btn" title="Tools &amp; settings">&#8943;</button>
@@ -339,6 +341,18 @@
             <input type="checkbox" id="setting-notif-header" checked>
             <span>Flash column header when Claude needs attention</span>
           </label>
+          <label class="settings-toggle">
+            <input type="checkbox" id="setting-notif-limits-70" checked>
+            <span>Notify when plan limits cross 70%</span>
+          </label>
+          <label class="settings-toggle">
+            <input type="checkbox" id="setting-notif-limits-90" checked>
+            <span>Notify when plan limits cross 90%</span>
+          </label>
+          <label class="settings-toggle">
+            <input type="checkbox" id="setting-notif-limits-pause" checked>
+            <span>At 90% weekly, prompt to pause automations</span>
+          </label>
         </div>
         <div class="settings-section">
           <h3 class="settings-section-title">Automations</h3>
@@ -379,6 +393,7 @@
             <button class="usage-tab active" data-usage-tab="summary">Summary</button>
             <button class="usage-tab" data-usage-tab="daily">Daily</button>
             <button class="usage-tab" data-usage-tab="sessions">Sessions</button>
+            <button class="usage-tab" data-usage-tab="cost">Cost</button>
           </div>
           <div id="usage-tab-summary" class="usage-tab-content active">
             <div id="plan-limits-section" class="plan-limits-section"></div>
@@ -408,6 +423,28 @@
               </select>
             </div>
             <div class="usage-table-container" id="usage-sessions-table"></div>
+          </div>
+          <div id="usage-tab-cost" class="usage-tab-content">
+            <div class="cost-filter-row">
+              <button class="cost-filter-btn" data-cost-filter="today">Today</button>
+              <button class="cost-filter-btn" data-cost-filter="7d">Last 7 days</button>
+              <button class="cost-filter-btn" data-cost-filter="30d">Last 30 days</button>
+              <button class="cost-filter-btn active" data-cost-filter="all">All time</button>
+            </div>
+            <div class="cost-summary">
+              <div class="cost-card"><div class="cost-label">Total</div><div class="cost-value" id="cost-total">—</div></div>
+              <div class="cost-card"><div class="cost-label">Opus</div><div class="cost-value" id="cost-opus">—</div></div>
+              <div class="cost-card"><div class="cost-label">Sonnet</div><div class="cost-value" id="cost-sonnet">—</div></div>
+              <div class="cost-card"><div class="cost-label">Haiku</div><div class="cost-value" id="cost-haiku">—</div></div>
+            </div>
+            <h3 class="usage-section-title">By project</h3>
+            <div id="cost-by-project" class="cost-table"></div>
+            <h3 class="usage-section-title">Last 30 days</h3>
+            <div id="cost-by-day" class="cost-chart"></div>
+            <div class="cost-disclaimer">
+              Approximate, based on Anthropic public list prices. Plan-included usage is billed differently;
+              these figures show what the same tokens would cost at API rates.
+            </div>
           </div>
         </div>
       </div>
@@ -650,6 +687,35 @@
         </div>
       </div>
     </div>
+
+  <div id="broadcast-popover" class="broadcast-popover hidden">
+    <div class="broadcast-header">
+      <span class="broadcast-title">Broadcast prompt</span>
+      <button id="broadcast-close" class="broadcast-close">&times;</button>
+    </div>
+    <textarea id="broadcast-text" rows="4" placeholder="Type a prompt to send to selected columns…"></textarea>
+    <div id="broadcast-targets" class="broadcast-targets"></div>
+    <div class="broadcast-actions">
+      <label class="broadcast-press-enter">
+        <input type="checkbox" id="broadcast-press-enter" checked> Press Enter after send
+      </label>
+      <button id="broadcast-send" class="broadcast-send-btn">Send to selected</button>
+    </div>
+  </div>
+
+  <!-- Session Search Modal -->
+  <div id="session-search-modal" class="modal-overlay hidden">
+    <div class="modal-dialog session-search-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Search sessions</span>
+        <span id="session-search-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <input type="search" id="session-search-input" placeholder="Search across all session transcripts…" autocomplete="off">
+        <div id="session-search-results" class="session-search-results"></div>
+      </div>
+    </div>
+  </div>
 
   <script src="./node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="./node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>

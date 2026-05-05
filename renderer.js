@@ -718,24 +718,33 @@ function updateSidebarActivity() {
 }
 
 // Notification settings (defaults: all on)
-var notifSettings = { taskbar: true, sidebar: true, header: true };
+var notifSettings = { taskbar: true, sidebar: true, header: true, limits70: true, limits90: true, limitsPause: true };
 
 function loadNotifSettings() {
   if (config.notifications) {
-    notifSettings = Object.assign({ taskbar: true, sidebar: true, header: true }, config.notifications);
+    notifSettings = Object.assign({ taskbar: true, sidebar: true, header: true, limits70: true, limits90: true, limitsPause: true }, config.notifications);
   }
   var el1 = document.getElementById('setting-notif-taskbar');
   var el2 = document.getElementById('setting-notif-sidebar');
   var el3 = document.getElementById('setting-notif-header');
+  var el4 = document.getElementById('setting-notif-limits-70');
+  var el5 = document.getElementById('setting-notif-limits-90');
+  var el6 = document.getElementById('setting-notif-limits-pause');
   if (el1) el1.checked = notifSettings.taskbar;
   if (el2) el2.checked = notifSettings.sidebar;
   if (el3) el3.checked = notifSettings.header;
+  if (el4) el4.checked = notifSettings.limits70 !== false;
+  if (el5) el5.checked = notifSettings.limits90 !== false;
+  if (el6) el6.checked = notifSettings.limitsPause !== false;
 }
 
 function saveNotifSettings() {
   notifSettings.taskbar = document.getElementById('setting-notif-taskbar').checked;
   notifSettings.sidebar = document.getElementById('setting-notif-sidebar').checked;
   notifSettings.header = document.getElementById('setting-notif-header').checked;
+  notifSettings.limits70 = document.getElementById('setting-notif-limits-70').checked;
+  notifSettings.limits90 = document.getElementById('setting-notif-limits-90').checked;
+  notifSettings.limitsPause = document.getElementById('setting-notif-limits-pause').checked;
   config.notifications = notifSettings;
   saveConfig();
 }
@@ -1623,7 +1632,7 @@ function renderProjectList() {
   updateAutomationSidebarBadges();
 }
 
-function setActiveProject(index, isStartup) {
+function setActiveProject(index, isStartup, skipDefaultSpawn) {
   var project = config.projects[index];
   if (!project) return;
 
@@ -1670,7 +1679,7 @@ function setActiveProject(index, isStartup) {
   if (state.columns.size === 0) {
     if (isStartup && window.electronAPI) {
       restoreProjectSessions(newKey, project);
-    } else {
+    } else if (!skipDefaultSpawn) {
       var spawnArgs = buildSpawnArgs();
       addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, spawnOpts());
     }
@@ -1942,11 +1951,31 @@ function createColumnHeader(id, customTitle, opts) {
   actions.appendChild(maximizeBtn);
 
   if (!opts.isDiff) {
+    var deltaPill = document.createElement('span');
+    deltaPill.className = 'col-delta-pill';
+    deltaPill.dataset.colDelta = '';
+    deltaPill.setAttribute('hidden', '');
+    deltaPill.textContent = 'Δ —';
+    actions.appendChild(deltaPill);
+
+    var ctxMeter = document.createElement('div');
+    ctxMeter.className = 'col-ctx-meter';
+    ctxMeter.dataset.colCtx = '';
+    ctxMeter.setAttribute('hidden', '');
+    ctxMeter.title = 'Context window usage';
+    var ctxFill = document.createElement('div');
+    ctxFill.className = 'col-ctx-fill';
+    var ctxText = document.createElement('span');
+    ctxText.className = 'col-ctx-text';
+    ctxMeter.appendChild(ctxFill);
+    ctxMeter.appendChild(ctxText);
+    actions.appendChild(ctxMeter);
+
     var restartBtn = document.createElement('span');
     restartBtn.className = 'col-restart';
     restartBtn.dataset.id = String(id);
     restartBtn.title = 'Restart';
-    restartBtn.textContent = '\u21bb';
+    restartBtn.textContent = '↻';
     actions.appendChild(restartBtn);
   }
 
@@ -2353,16 +2382,38 @@ function addColumn(args, targetRow, opts) {
     createdAt: Date.now(),
     lastInputAt: 0,
     hasUserInput: false,
-    notified: false
+    notified: false,
+    spawnSessionPct: null,    // five_hour.utilization at spawn time
+    spawnWeeklyPct: null,  // reserved: weekly-delta pill in a follow-up task
+    deltaSessionEl: null,     // header element, captured below
+    ctxMeterEl: null,
+    ctxFillEl: null,
+    ctxTextEl: null,
+    ctxPollTimer: null
   };
 
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
+  colData.deltaSessionEl = header.querySelector('[data-col-delta]');
+  colData.ctxMeterEl = header.querySelector('[data-col-ctx]');
+  colData.ctxFillEl = colData.ctxMeterEl ? colData.ctxMeterEl.querySelector('.col-ctx-fill') : null;
+  colData.ctxTextEl = colData.ctxMeterEl ? colData.ctxMeterEl.querySelector('.col-ctx-text') : null;
+  startContextMeterPoll(id);
   setFocusedColumn(id);
+  if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
+    var d0 = lastPlanLimitsResult.data;
+    colData.spawnSessionPct = d0.five_hour ? d0.five_hour.utilization : null;
+    colData.spawnWeeklyPct = d0.seven_day ? d0.seven_day.utilization : null;
+  }
   refitAll();
   saveColumnCounts();
   updateProjectBadges();
+
+  // Render delta pill immediately (shows Δ 0.0% right away if we have data)
+  if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
+    updateColumnDeltaPills(lastPlanLimitsResult.data);
+  }
 
   // Auto-fetch title from session if resuming without a saved title
   if (resumeSessionId && !opts.title && !cmd) {
@@ -3024,6 +3075,7 @@ function removeColumn(id) {
   if (timer) clearTimeout(timer);
   activityTimers.delete(id);
   stopSessionSync(id);
+  stopContextMeterPoll(id);
 
   if (!col.isDiff) wsSend({ type: 'kill', id: id });
 
@@ -3088,6 +3140,17 @@ function restartColumn(id) {
 
   // Kill the current process
   wsSend({ type: 'kill', id: id });
+
+  // Re-snapshot plan-limits so the Δ pill measures from this respawn, not the first spawn
+  if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
+    var d0 = lastPlanLimitsResult.data;
+    col.spawnSessionPct = d0.five_hour ? d0.five_hour.utilization : null;
+    col.spawnWeeklyPct = d0.seven_day ? d0.seven_day.utilization : null;
+    updateColumnDeltaPills(lastPlanLimitsResult.data);
+  }
+
+  // Hide the context meter — the new session's first poll will repopulate it.
+  if (col && col.ctxMeterEl) col.ctxMeterEl.setAttribute('hidden', '');
 
   // Remove any existing exit overlay
   var overlay = col.element.querySelector('.exit-overlay');
@@ -6851,6 +6914,13 @@ function projectKeyToName(key) {
   return parts[parts.length - 1] || key;
 }
 
+function projectPathToKey(p) {
+  if (!p) return '';
+  // Claude encodes the project directory by replacing every non-alphanumeric
+  // character with '-' (this includes ':', '\', '/', spaces, and underscores).
+  return String(p).replace(/[^a-zA-Z0-9]/g, '-').replace(/^-+/, '');
+}
+
 function fmtResetsIn(iso) {
   if (!iso) return '—';
   var diff = new Date(iso).getTime() - Date.now();
@@ -6967,6 +7037,7 @@ function renderPlanLimits(result) {
 // Most recent plan-limits result (used by both the Usage modal panel and the
 // persistent sidebar mini-bar). Refreshed by loadPlanLimits().
 var lastPlanLimitsResult = null;
+var prevPlanLimitsData = null;  // last successful data, used for crossing detection
 
 function renderPlanLimitsMini(result) {
   var el = document.getElementById('plan-limits-mini');
@@ -7033,6 +7104,15 @@ function loadPlanLimits(force) {
     lastPlanLimitsResult = r;
     if (!usageModal.classList.contains('hidden')) renderPlanLimits(r);
     renderPlanLimitsMini(r);
+    if (r && r.ok && r.data) {
+      if (prevPlanLimitsData) {
+        window.electronAPI.detectThresholdCrossings(prevPlanLimitsData, r.data).then(function (crossings) {
+          if (crossings && crossings.length) handleThresholdCrossings(crossings);
+        });
+      }
+      prevPlanLimitsData = r.data;
+      updateColumnDeltaPills(r.data);
+    }
     return r;
   }).catch(function (e) {
     var err = { ok: false, message: e && e.message ? e.message : String(e) };
@@ -7041,6 +7121,127 @@ function loadPlanLimits(force) {
     renderPlanLimitsMini(err);
     return err;
   });
+}
+
+function handleThresholdCrossings(crossings) {
+  for (var i = 0; i < crossings.length; i++) {
+    var c = crossings[i];
+    var enabled70 = !notifSettings || notifSettings.limits70 !== false;
+    var enabled90 = !notifSettings || notifSettings.limits90 !== false;
+    if (c.threshold === 70 && !enabled70) continue;
+    if (c.threshold === 90 && !enabled90) continue;
+    showThresholdNotification(c);
+    if (c.threshold === 90 && c.window === 'seven_day' && (!notifSettings || notifSettings.limitsPause !== false)) {
+      promptPauseAutomations(c);
+    }
+  }
+}
+
+var CTX_POLL_MS = 10000;  // 10s — JSONL grows on every assistant turn
+var CTX_LIMIT_CACHE = new Map();  // model -> max tokens, populated lazily
+
+function startContextMeterPoll(colId) {
+  var c = allColumns.get(colId);
+  if (!c || c.cmd) return;  // skip non-Claude columns (custom commands)
+  function tick() {
+    var col = allColumns.get(colId);
+    if (!col || !col.ctxMeterEl) return;
+    if (!col.sessionId) return;  // session not yet detected — try again next tick
+    if (!window.electronAPI || !window.electronAPI.getSessionContextTokens) return;
+    window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId).then(function (tokens) {
+      if (tokens == null) return;
+      // TODO: col.model is not yet populated — colData has no model field. All
+      // current 4.x models are 200k; if 1M-context sessions need accurate limits,
+      // parse --model from claudeArgs in addColumn or read opts.env.ANTHROPIC_MODEL.
+      var modelKey = col.model || 'sonnet';
+      var limit = CTX_LIMIT_CACHE.get(modelKey);
+      function draw() {
+        col.ctxMeterEl.removeAttribute('hidden');
+        var pct = Math.min(100, (tokens / limit) * 100);
+        col.ctxFillEl.style.width = pct + '%';
+        col.ctxFillEl.classList.toggle('warning', pct >= 70 && pct < 90);
+        col.ctxFillEl.classList.toggle('critical', pct >= 90);
+        function k(n) { return n >= 1000 ? Math.round(n / 1000) + 'k' : String(n); }
+        col.ctxTextEl.textContent = k(tokens) + '/' + k(limit);
+        col.ctxMeterEl.title = tokens.toLocaleString() + ' / ' + limit.toLocaleString() + ' tokens (' + Math.round(pct) + '%)';
+      }
+      if (limit) { draw(); return; }
+      window.electronAPI.getModelContextLimit(modelKey).then(function (lim) {
+        CTX_LIMIT_CACHE.set(modelKey, lim);
+        limit = lim;
+        draw();
+      }).catch(function () { /* fall back silently — pill stays hidden */ });
+    }).catch(function () {});
+  }
+  tick();  // immediate first poll
+  c.ctxPollTimer = setInterval(tick, CTX_POLL_MS);
+}
+
+function stopContextMeterPoll(colId) {
+  var c = allColumns.get(colId);
+  if (c && c.ctxPollTimer) {
+    clearInterval(c.ctxPollTimer);
+    c.ctxPollTimer = null;
+  }
+}
+
+function updateColumnDeltaPills(data) {
+  if (!data || !data.five_hour) return;
+  var nowSession = data.five_hour.utilization;
+  if (typeof nowSession !== 'number') return;
+  allColumns.forEach(function (c) {
+    if (!c.deltaSessionEl) return;
+    if (c.spawnSessionPct == null) {
+      // Late snapshot: column was spawned before plan-limits data was available.
+      // Treat this poll as the baseline so the pill becomes meaningful from now on.
+      c.spawnSessionPct = nowSession;
+      if (data.seven_day && typeof data.seven_day.utilization === 'number') {
+        c.spawnWeeklyPct = data.seven_day.utilization;
+      }
+    }
+    var delta = nowSession - c.spawnSessionPct;
+    if (delta < 0) delta = 0;
+    c.deltaSessionEl.removeAttribute('hidden');
+    c.deltaSessionEl.textContent = 'Δ ' + delta.toFixed(1) + '%';
+    c.deltaSessionEl.title =
+      'Session usage spent by this column since spawn\n' +
+      'Spawn snapshot: ' + c.spawnSessionPct.toFixed(1) + '%\n' +
+      'Now: ' + nowSession.toFixed(1) + '%';
+  });
+}
+
+function promptPauseAutomations(c) {
+  if (!window.electronAPI || !window.electronAPI.getAutomationSettings || !window.electronAPI.toggleAutomationsGlobal) return;
+  // window.confirm blocks the renderer thread. TODO: replace with a
+  // dialog.showMessageBox-backed IPC if blocking becomes a problem.
+  var ok = window.confirm(
+    'You\'ve crossed 90% of your weekly limit (' + Math.round(c.value) + '%).\n\n' +
+    'Pause all your automations? You can re-enable them any time from the Automations panel.'
+  );
+  if (!ok) return;
+  // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
+  window.electronAPI.getAutomationSettings().then(function (settings) {
+    if (settings && settings.globalEnabled) {
+      window.electronAPI.toggleAutomationsGlobal();
+    }
+  }).catch(function () { /* ignore — silent failure is acceptable here */ });
+}
+
+function showThresholdNotification(c) {
+  var label = ({
+    five_hour: 'Current session',
+    seven_day: 'Weekly (all models)',
+    seven_day_sonnet: 'Weekly (Sonnet)',
+    seven_day_opus: 'Weekly (Opus)',
+    seven_day_omelette: 'Weekly (Claude Design)'
+  })[c.window] || c.window;
+  var msg = label + ' just crossed ' + c.threshold + '% (' + Math.round(c.value) + '% used).';
+  if (!document.hasFocus() && window.electronAPI && window.electronAPI.flashFrame) {
+    window.electronAPI.flashFrame();
+  }
+  if (window.electronAPI && window.electronAPI.showSystemNotification) {
+    window.electronAPI.showSystemNotification({ title: 'Claude usage limit', body: msg });
+  }
 }
 
 // Background polling for the sidebar mini-bar.
@@ -7067,6 +7268,23 @@ window.addEventListener('focus', function () {
   startPlanLimitsPolling();
 });
 window.addEventListener('blur', stopPlanLimitsPolling);
+
+// When any non-xterm input/textarea/select gains focus, blur every xterm
+// terminal so they release keystroke capture. Without this, freshly-focused
+// inputs (rename inline edit, settings fields, modal inputs) sometimes don't
+// receive keystrokes until the user alt-tabs to break xterm's capture.
+document.addEventListener('focusin', function (e) {
+  var t = e.target;
+  if (!t || !t.tagName) return;
+  var tag = t.tagName;
+  if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return;
+  // Don't blur if the focused element IS xterm's own helper textarea.
+  if (t.classList && t.classList.contains('xterm-helper-textarea')) return;
+  if (typeof allColumns === 'undefined') return;
+  allColumns.forEach(function (c) {
+    if (c.terminal && typeof c.terminal.blur === 'function') c.terminal.blur();
+  });
+});
 
 // Initial fetch on app start, only if the page already has focus.
 if (document.hasFocus()) {
@@ -7110,6 +7328,12 @@ function openUsageModal() {
     renderUsageSummary(data);
     renderUsageDaily(data);
     renderUsageSessions(data);
+    if (window.electronAPI && window.electronAPI.getUsageCosts) {
+      // Default to whatever filter button is currently active (defaults to 'all' on first open)
+      var activeBtn = document.querySelector('.cost-filter-btn.active');
+      var filter = activeBtn ? activeBtn.dataset.costFilter : 'all';
+      window.electronAPI.getUsageCosts(filter).then(renderCostTab).catch(function () {});
+    }
   });
 }
 
@@ -7828,6 +8052,83 @@ function renderUsageSessions(data, filterProject) {
   }
   table.appendChild(tbody);
   tableContainer.appendChild(table);
+}
+
+function fmtUsd(n) {
+  if (!n) return '$0.00';
+  if (n < 0.01) return '<$0.01';
+  return '$' + n.toFixed(2);
+}
+
+function renderCostTab(c) {
+  if (!c) return;
+  var totalEl = document.getElementById('cost-total');
+  if (totalEl) totalEl.textContent = fmtUsd(c.total);
+  var opusEl = document.getElementById('cost-opus');
+  if (opusEl) opusEl.textContent = fmtUsd(c.byModel && c.byModel.opus);
+  var sonnetEl = document.getElementById('cost-sonnet');
+  if (sonnetEl) sonnetEl.textContent = fmtUsd(c.byModel && c.byModel.sonnet);
+  var haikuEl = document.getElementById('cost-haiku');
+  if (haikuEl) haikuEl.textContent = fmtUsd(c.byModel && c.byModel.haiku);
+
+  var byProj = document.getElementById('cost-by-project');
+  if (byProj) {
+    byProj.innerHTML = '';
+    var keys = c.byProject ? Object.keys(c.byProject) : [];
+    var rows = keys.map(function (k) { return [k, c.byProject[k]]; });
+    rows.sort(function (a, b) { return b[1] - a[1]; });
+    if (!rows.length) {
+      byProj.innerHTML = '<div class="cost-row" style="opacity:.6">No usage recorded.</div>';
+    } else {
+      rows.forEach(function (r) {
+        var d = document.createElement('div');
+        d.className = 'cost-row';
+        var name = document.createElement('span');
+        name.className = 'cost-row-name';
+        name.textContent = r[0];
+        var val = document.createElement('span');
+        val.className = 'cost-row-val';
+        val.textContent = fmtUsd(r[1]);
+        d.appendChild(name);
+        d.appendChild(val);
+        byProj.appendChild(d);
+      });
+    }
+  }
+
+  var byDayEl = document.getElementById('cost-by-day');
+  if (byDayEl) {
+    byDayEl.innerHTML = '';
+    var dayKeys = c.byDay ? Object.keys(c.byDay) : [];
+    var days = dayKeys.sort().slice(-30);
+    if (!days.length) {
+      byDayEl.innerHTML = '<div class="cost-row" style="opacity:.6">No daily data.</div>';
+    } else {
+      var max = 0;
+      for (var di = 0; di < days.length; di++) if (c.byDay[days[di]] > max) max = c.byDay[days[di]];
+      if (!max) max = 1;
+      days.forEach(function (d) {
+        var row = document.createElement('div');
+        row.className = 'cost-day-row';
+        var label = document.createElement('span');
+        label.className = 'cost-day-label';
+        label.textContent = d;
+        var bar = document.createElement('div');
+        bar.className = 'cost-day-bar';
+        var fill = document.createElement('div');
+        fill.className = 'cost-day-fill';
+        fill.style.width = ((c.byDay[d] / max) * 100) + '%';
+        bar.appendChild(fill);
+        var val = document.createElement('span');
+        val.className = 'cost-day-val';
+        val.textContent = fmtUsd(c.byDay[d]);
+        row.appendChild(label);
+        row.appendChild(bar);
+        row.appendChild(val);
+        byDayEl.appendChild(row);
+      });
+    }
+  }
 }
 
 btnUsage.addEventListener('click', openUsageModal);
@@ -8963,6 +9264,21 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
     '</div>' +
     '</div>';
 
+  var sessionMaxPct = agent && agent.usageGate && (typeof agent.usageGate.sessionMaxPct === 'number') ? agent.usageGate.sessionMaxPct : '';
+  var weeklyMaxPct = agent && agent.usageGate && (typeof agent.usageGate.weeklyMaxPct === 'number') ? agent.usageGate.weeklyMaxPct : '';
+  var usageGateHtml = '<div class="automation-form-group">' +
+    '<label>Skip if session usage above ' +
+      '<input type="number" class="automation-input agent-usage-gate-session" min="0" max="100" step="1" value="' + escapeHtml(String(sessionMaxPct)) + '" placeholder="e.g. 80" style="width:80px;display:inline-block;margin:0 6px;"> ' +
+      '%' +
+      ' <span class="automation-permission-hint">(blank to always run)</span>' +
+    '</label>' +
+    '<label style="margin-top:6px;display:block;">Skip if weekly usage above ' +
+      '<input type="number" class="automation-input agent-usage-gate-weekly" min="0" max="100" step="1" value="' + escapeHtml(String(weeklyMaxPct)) + '" placeholder="e.g. 80" style="width:80px;display:inline-block;margin:0 6px;"> ' +
+      '%' +
+      ' <span class="automation-permission-hint">(blank to always run)</span>' +
+    '</label>' +
+    '</div>';
+
   var scheduleDisplay = runMode === 'run_after' ? 'display:none;' : '';
   var bodyStyle = isCollapsed ? 'display:none;' : '';
 
@@ -8992,6 +9308,7 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
       runAfterHtml +
       passContextHtml +
       isolationHtml +
+      usageGateHtml +
       '<div class="agent-schedule-section" style="' + scheduleDisplay + '">' +
         '<div class="automation-form-group">' +
           '<label>Schedule</label>' +
@@ -9322,6 +9639,21 @@ function syncAgentFromCard(card, agentIndex) {
   if (isoCheckbox) {
     agent.isolation = agent.isolation || {};
     agent.isolation.enabled = isoCheckbox.checked;
+  }
+
+  var usageGateSessionEl = card.querySelector('.agent-usage-gate-session');
+  var usageGateWeeklyEl = card.querySelector('.agent-usage-gate-weekly');
+  if (usageGateSessionEl || usageGateWeeklyEl) {
+    function readPct(el) {
+      if (!el) return null;
+      var raw = (el.value || '').trim();
+      if (raw === '' || isNaN(parseFloat(raw))) return null;
+      return Math.max(0, Math.min(100, parseFloat(raw)));
+    }
+    agent.usageGate = {
+      sessionMaxPct: readPct(usageGateSessionEl),
+      weeklyMaxPct: readPct(usageGateWeeklyEl)
+    };
   }
 
   var schedTypeEl = card.querySelector('.agent-schedule-type');
@@ -10555,4 +10887,199 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     updateAction.style.display = '';
     updateBar.classList.remove('hidden');
   };
+})();
+
+(function setupBroadcast() {
+  var btn = document.getElementById('btn-broadcast');
+  var popover = document.getElementById('broadcast-popover');
+  var closeBtn = document.getElementById('broadcast-close');
+  var sendBtn = document.getElementById('broadcast-send');
+  var textEl = document.getElementById('broadcast-text');
+  var targetsEl = document.getElementById('broadcast-targets');
+  var pressEnterEl = document.getElementById('broadcast-press-enter');
+  if (!btn || !popover) return;
+
+  function refreshTargets() {
+    targetsEl.innerHTML = '';
+    var ordinalByProject = new Map();  // projectKey -> running count
+    var any = false;
+    allColumns.forEach(function (c, id) {
+      if (c.cmd) return;       // skip custom-command columns
+      if (c.isDiff) return;    // skip diff columns
+      any = true;
+      var ord = (ordinalByProject.get(c.projectKey) || 0) + 1;
+      ordinalByProject.set(c.projectKey, ord);
+      var proj = (config && config.projects)
+        ? config.projects.find(function (p) { return p.path === c.projectKey; })
+        : null;
+      var projName = (proj && proj.name)
+        || (typeof projectKeyToName === 'function' ? projectKeyToName(c.projectKey) : c.projectKey);
+      var label = document.createElement('label');
+      label.className = 'broadcast-target';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.dataset.colId = id;
+      cb.checked = true;
+      var span = document.createElement('span');
+      span.textContent = c.customTitle
+        ? projName + ' — ' + c.customTitle
+        : projName + ' — Claude #' + ord;
+      label.appendChild(cb);
+      label.appendChild(span);
+      targetsEl.appendChild(label);
+    });
+    if (!any) {
+      var empty = document.createElement('div');
+      empty.className = 'broadcast-target';
+      empty.style.opacity = '0.6';
+      empty.textContent = 'No Claude columns open.';
+      targetsEl.appendChild(empty);
+    }
+  }
+
+  btn.addEventListener('click', function () {
+    refreshTargets();
+    popover.classList.remove('hidden');
+    // Blur all xterm terminals so they release keyboard capture; the textarea
+    // can then receive keystrokes without needing an OS-level focus bounce.
+    allColumns.forEach(function (c) {
+      if (c.terminal && typeof c.terminal.blur === 'function') c.terminal.blur();
+    });
+    setTimeout(function () { textEl.focus(); }, 0);
+  });
+  closeBtn.addEventListener('click', function () {
+    popover.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !popover.classList.contains('hidden')) {
+      popover.classList.add('hidden');
+      if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+    }
+  });
+
+  sendBtn.addEventListener('click', function () {
+    var text = textEl.value;
+    if (!text) return;
+    var checks = targetsEl.querySelectorAll('input[type=checkbox]:checked');
+    var pressEnter = pressEnterEl.checked;
+    checks.forEach(function (cb) {
+      var id = parseInt(cb.dataset.colId, 10);
+      var col = allColumns.get(id);
+      if (!col) return;
+      wsSend({ type: 'write', id: id, data: text + (pressEnter ? '\r' : '') });
+    });
+    popover.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+    textEl.value = '';
+  });
+})();
+
+(function setupSessionSearch() {
+  var btn = document.getElementById('btn-session-search');
+  var modal = document.getElementById('session-search-modal');
+  var closeBtn = document.getElementById('session-search-close');
+  var input = document.getElementById('session-search-input');
+  var resultsEl = document.getElementById('session-search-results');
+  if (!btn || !modal) return;
+
+  function open() {
+    modal.classList.remove('hidden');
+    input.focus();
+    input.select();
+  }
+  function close() { modal.classList.add('hidden'); }
+
+  btn.addEventListener('click', open);
+  closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.ctrlKey && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); open(); }
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (m) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m];
+    });
+  }
+
+  function highlight(text, q) {
+    var safe = escapeHtml(text);
+    var idx = safe.toLowerCase().indexOf(q.toLowerCase());
+    if (idx === -1) return safe;
+    return safe.slice(0, idx) + '<mark>' + safe.slice(idx, idx + q.length) + '</mark>' + safe.slice(idx + q.length);
+  }
+
+  var debounceTimer = null;
+  input.addEventListener('input', function () {
+    clearTimeout(debounceTimer);
+    var q = input.value.trim();
+    if (q.length < 2) { resultsEl.innerHTML = ''; return; }
+    debounceTimer = setTimeout(function () { runSearch(q); }, 200);
+  });
+
+  function runSearch(q) {
+    resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Searching…</div>';
+    if (!window.electronAPI || !window.electronAPI.searchSessions) {
+      resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
+      return;
+    }
+    window.electronAPI.searchSessions(q, 50).then(function (hits) {
+      resultsEl.innerHTML = '';
+      if (!hits || !hits.length) {
+        resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">No matches.</div>';
+        return;
+      }
+      hits.forEach(function (h) {
+        var div = document.createElement('div');
+        div.className = 'session-search-hit';
+        var meta = document.createElement('div');
+        meta.className = 'session-search-hit-meta';
+        meta.textContent = h.projectKey + '  •  ' + (h.sessionId ? h.sessionId.slice(0, 8) : '');
+        var snip = document.createElement('div');
+        snip.className = 'session-search-hit-snippet';
+        snip.innerHTML = highlight(h.snippet || '', q);
+        div.appendChild(meta);
+        div.appendChild(snip);
+        div.addEventListener('click', function () { openHit(h); });
+        resultsEl.appendChild(div);
+      });
+    }).catch(function () {
+      resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search failed.</div>';
+    });
+  }
+
+  function openHit(h) {
+    if (!config || !config.projects) return;
+    var idx = -1;
+    for (var i = 0; i < config.projects.length; i++) {
+      if (projectPathToKey(config.projects[i].path) === h.projectKey) { idx = i; break; }
+    }
+    if (idx < 0) {
+      alert('That session\'s project is not in your project list. Add it first.');
+      return;
+    }
+    // skipDefaultSpawn = true so the project switch doesn't open a fresh column
+    // before our resume column lands.
+    setActiveProject(idx, false, true);
+    // --resume in the args is what actually tells the Claude CLI to pick up the
+    // existing session; sessionId in opts is just tracking metadata for the column.
+    addColumn(['--resume', h.sessionId], null, spawnOpts({ sessionId: h.sessionId }));
+    close();
+  }
+})();
+
+(function setupCostFilters() {
+  var btns = document.querySelectorAll('.cost-filter-btn');
+  if (!btns.length) return;
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      btns.forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      if (window.electronAPI && window.electronAPI.getUsageCosts) {
+        window.electronAPI.getUsageCosts(b.dataset.costFilter).then(renderCostTab).catch(function () {});
+      }
+    });
+  });
 })();

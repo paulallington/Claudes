@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
+const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-thresholds');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
@@ -1648,6 +1649,34 @@ ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
   }
 });
 
+ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
+  try { return detectPlanLimitCrossings(prev, next); } catch { return []; }
+});
+
+const { lastAssistantContextTokens, modelContextLimit } = require('./lib/session-context-tokens');
+
+// One-shot read of the live context-token count for a session.
+// Renderer calls this every ~10s while a Claude column is live.
+ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId) => {
+  if (!projectPath || !sessionId) return null;
+  // projectPath is the renderer's projectKey (e.g. "D--Git-Repos-Claudes").
+  // Sessions live under ~/.claude/projects/<projectKey>/<sessionId>.jsonl.
+  const filePath = path.join(os.homedir(), '.claude', 'projects', projectPath, sessionId + '.jsonl');
+  return lastAssistantContextTokens(filePath);
+});
+
+ipcMain.handle('session:modelContextLimit', (_event, model) => modelContextLimit(model));
+
+ipcMain.handle('notify:show', (_event, opts) => {
+  try {
+    if (!opts || typeof opts !== 'object') return false;
+    if (!Notification.isSupported()) return false;
+    const notif = new Notification({ title: opts.title || 'Claudes', body: opts.body || '' });
+    notif.show();
+    return true;
+  } catch { return false; }
+});
+
 ipcMain.handle('usage:getAll', async () => {
   const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
   const results = [];
@@ -1723,7 +1752,138 @@ ipcMain.handle('usage:getAll', async () => {
   }
 
   writeUsageCache(nextCache);
+  global.__lastUsageDigest = results;
   return results;
+});
+
+const { sessionCost: calcSessionCost } = require('./lib/cost-calc');
+
+// Roll up per-session costs into totals by model, project, and day.
+// Uses the digest cached by usage:getAll (call usage:getAll first; otherwise
+// returns zeros). Costs are computed from each session's single `model` plus
+// its aggregate token counts — see plan note about multi-model sessions.
+function rollupCosts(digests, sinceMs) {
+  const byModel = { opus: 0, sonnet: 0, haiku: 0, unknown: 0 };
+  const byProject = {};
+  const byDay = {};
+  let total = 0;
+  if (!Array.isArray(digests)) return { total, byModel, byProject, byDay };
+  for (const d of digests) {
+    if (!d) continue;
+    if (sinceMs && d.lastTimestamp && d.lastTimestamp < sinceMs) continue;
+    const c = calcSessionCost({
+      model: d.model || '',
+      input: d.inputTokens || 0,
+      cacheCreation: d.cacheCreationTokens || 0,
+      cacheRead: d.cacheReadTokens || 0,
+      output: d.outputTokens || 0
+    });
+    if (!c) continue;
+    total += c;
+    const m = String(d.model || '').toLowerCase();
+    if (m.indexOf('opus') !== -1) byModel.opus += c;
+    else if (m.indexOf('sonnet') !== -1) byModel.sonnet += c;
+    else if (m.indexOf('haiku') !== -1) byModel.haiku += c;
+    else byModel.unknown += c;
+    if (d.projectKey) byProject[d.projectKey] = (byProject[d.projectKey] || 0) + c;
+    if (d.lastTimestamp) {
+      const day = new Date(d.lastTimestamp).toISOString().slice(0, 10);
+      byDay[day] = (byDay[day] || 0) + c;
+    }
+  }
+  return { total, byModel, byProject, byDay };
+}
+
+ipcMain.handle('usage:getCosts', async (_event, filter) => {
+  const now = Date.now();
+  let sinceMs = null;
+  if (filter === 'today') {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    sinceMs = start.getTime();
+  } else if (filter === '7d') {
+    sinceMs = now - 7 * 24 * 60 * 60 * 1000;
+  } else if (filter === '30d') {
+    sinceMs = now - 30 * 24 * 60 * 60 * 1000;
+  }
+  return rollupCosts(global.__lastUsageDigest || [], sinceMs);
+});
+
+// Full-text search across all session JSONLs. Streaming-style: returns first
+// `limit` hits with surrounding context. Case-insensitive substring match
+// (no regex for V1).
+ipcMain.handle('sessions:search', async (_event, query, limit) => {
+  if (!query || typeof query !== 'string' || query.length < 2) return [];
+  const max = Math.max(1, Math.min(200, limit || 50));
+  const needle = query.toLowerCase();
+  const root = path.join(os.homedir(), '.claude', 'projects');
+  let projectDirs;
+  try { projectDirs = await fs.promises.readdir(root); } catch { return []; }
+
+  // Extract the user/assistant message text from a parsed JSONL entry, or null
+  // if the entry isn't a content-bearing message (tool calls, system events,
+  // file metadata, etc.). We only want hits that match real conversation text,
+  // not tool inputs or paths.
+  function extractMessageText(obj) {
+    if (!obj || !obj.message || !obj.message.content) return null;
+    if (obj.type !== 'user' && obj.type !== 'assistant') return null;
+    const c = obj.message.content;
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) {
+      // Assistant messages may interleave text + tool_use parts; we only want text.
+      return c.map(p => (p && typeof p.text === 'string') ? p.text : '').join(' ');
+    }
+    return null;
+  }
+
+  const hits = [];
+  outer:
+  for (const dir of projectDirs) {
+    const projDir = path.join(root, dir);
+    let entries;
+    try { entries = await fs.promises.readdir(projDir); } catch { continue; }
+    for (const file of entries) {
+      if (!file.endsWith('.jsonl')) continue;
+      const filePath = path.join(projDir, file);
+      let content;
+      try { content = await fs.promises.readFile(filePath, 'utf8'); } catch { continue; }
+      // Cheap pre-filter: skip files where the needle doesn't appear at all.
+      if (content.toLowerCase().indexOf(needle) === -1) continue;
+
+      // Walk lines; first line whose extracted message-text contains the needle is the hit.
+      const lines = content.split('\n');
+      let matched = null;
+      for (let li = 0; li < lines.length; li++) {
+        const line = lines[li];
+        if (!line || line[0] !== '{') continue;
+        if (line.toLowerCase().indexOf(needle) === -1) continue;
+        let obj;
+        try { obj = JSON.parse(line); } catch { continue; }
+        const text = extractMessageText(obj);
+        if (!text) continue;
+        if (text.toLowerCase().indexOf(needle) === -1) continue;
+        matched = { text, lineIndex: li };
+        break;
+      }
+      if (!matched) continue;  // matches were only in tool inputs / metadata — skip the file
+
+      // Trim to ~200 chars around the needle for display
+      const text = matched.text;
+      const matchInText = text.toLowerCase().indexOf(needle);
+      const start = Math.max(0, matchInText - 80);
+      const end = Math.min(text.length, matchInText + 120);
+      const trimmed = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+
+      hits.push({
+        projectKey: dir,
+        sessionId: file.replace('.jsonl', ''),
+        snippet: trimmed,
+        matchedAt: matched.lineIndex
+      });
+      if (hits.length >= max) break outer;
+    }
+  }
+  return hits;
 });
 
 // --- Auto Updater ---
@@ -2554,6 +2714,7 @@ ipcMain.handle('automations:validateDependencies', (event, agents) => {
 ipcMain.handle('automations:getSettings', () => {
   const data = readAutomations();
   return {
+    globalEnabled: data.globalEnabled !== undefined ? data.globalEnabled : true,
     agentReposBaseDir: data.agentReposBaseDir || AGENTS_DIR_DEFAULT,
     runWindow: data.runWindow || null
   };
@@ -3375,6 +3536,48 @@ async function runAgent(automationId, agentId) {
       automationId, agentId, status: 'error', error: agent.lastError
     });
     return;
+  }
+
+  // Capacity gate: skip the run if any configured usage window is too full.
+  // Each gate is per-agent; absent / null means no gate for that window.
+  const sessionGate = agent.usageGate && typeof agent.usageGate.sessionMaxPct === 'number'
+    ? agent.usageGate.sessionMaxPct
+    : null;
+  const weeklyGate = agent.usageGate && typeof agent.usageGate.weeklyMaxPct === 'number'
+    ? agent.usageGate.weeklyMaxPct
+    : null;
+  if ((sessionGate != null || weeklyGate != null) && planUsageCache && planUsageCache.data) {
+    const planData = planUsageCache.data;
+    let skipReason = null;
+    if (sessionGate != null && planData.five_hour && typeof planData.five_hour.utilization === 'number') {
+      const util = planData.five_hour.utilization;
+      if (util > sessionGate) {
+        skipReason = 'Skipped: session usage ' + util.toFixed(1) + '% > gate ' + sessionGate + '%';
+      }
+    }
+    if (!skipReason && weeklyGate != null && planData.seven_day && typeof planData.seven_day.utilization === 'number') {
+      const util = planData.seven_day.utilization;
+      if (util > weeklyGate) {
+        skipReason = 'Skipped: weekly usage ' + util.toFixed(1) + '% > gate ' + weeklyGate + '%';
+      }
+    }
+    if (skipReason) {
+      const skipData = readAutomations();
+      const skipAuto = skipData.automations.find(a => a.id === automationId);
+      if (skipAuto) {
+        const skipAgent = skipAuto.agents.find(ag => ag.id === agentId);
+        if (skipAgent) {
+          skipAgent.lastRunStatus = 'skipped';
+          skipAgent.lastRunAt = new Date().toISOString();
+          skipAgent.lastError = skipReason;
+          writeAutomations(skipData);
+        }
+      }
+      if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
+        automationId, agentId, status: 'skipped', error: skipReason
+      });
+      return;
+    }
   }
 
   // Mark as running
