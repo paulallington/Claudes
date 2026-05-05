@@ -1632,7 +1632,7 @@ function renderProjectList() {
   updateAutomationSidebarBadges();
 }
 
-function setActiveProject(index, isStartup) {
+function setActiveProject(index, isStartup, skipDefaultSpawn) {
   var project = config.projects[index];
   if (!project) return;
 
@@ -1679,7 +1679,7 @@ function setActiveProject(index, isStartup) {
   if (state.columns.size === 0) {
     if (isStartup && window.electronAPI) {
       restoreProjectSessions(newKey, project);
-    } else {
+    } else if (!skipDefaultSpawn) {
       var spawnArgs = buildSpawnArgs();
       addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, spawnOpts());
     }
@@ -11060,8 +11060,12 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       alert('That session\'s project is not in your project list. Add it first.');
       return;
     }
-    setActiveProject(idx, true);
-    addColumn(null, null, { sessionId: h.sessionId });
+    // skipDefaultSpawn = true so the project switch doesn't open a fresh column
+    // before our resume column lands.
+    setActiveProject(idx, false, true);
+    // --resume in the args is what actually tells the Claude CLI to pick up the
+    // existing session; sessionId in opts is just tracking metadata for the column.
+    addColumn(['--resume', h.sessionId], null, spawnOpts({ sessionId: h.sessionId }));
     close();
   }
 })();
