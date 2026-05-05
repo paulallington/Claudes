@@ -6914,6 +6914,11 @@ function projectKeyToName(key) {
   return parts[parts.length - 1] || key;
 }
 
+function projectPathToKey(p) {
+  if (!p) return '';
+  return String(p).replace(/[:/\\\s]/g, '-').replace(/^-+/, '');
+}
+
 function fmtResetsIn(iso) {
   if (!iso) return '—';
   var diff = new Date(iso).getTime() - Date.now();
@@ -7261,6 +7266,23 @@ window.addEventListener('focus', function () {
   startPlanLimitsPolling();
 });
 window.addEventListener('blur', stopPlanLimitsPolling);
+
+// When any non-xterm input/textarea/select gains focus, blur every xterm
+// terminal so they release keystroke capture. Without this, freshly-focused
+// inputs (rename inline edit, settings fields, modal inputs) sometimes don't
+// receive keystrokes until the user alt-tabs to break xterm's capture.
+document.addEventListener('focusin', function (e) {
+  var t = e.target;
+  if (!t || !t.tagName) return;
+  var tag = t.tagName;
+  if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return;
+  // Don't blur if the focused element IS xterm's own helper textarea.
+  if (t.classList && t.classList.contains('xterm-helper-textarea')) return;
+  if (typeof allColumns === 'undefined') return;
+  allColumns.forEach(function (c) {
+    if (c.terminal && typeof c.terminal.blur === 'function') c.terminal.blur();
+  });
+});
 
 // Initial fetch on app start, only if the page already has focus.
 if (document.hasFocus()) {
@@ -10897,7 +10919,9 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       cb.dataset.colId = id;
       cb.checked = true;
       var span = document.createElement('span');
-      span.textContent = projName + ' — Claude #' + ord;
+      span.textContent = c.customTitle
+        ? projName + ' — ' + c.customTitle
+        : projName + ' — Claude #' + ord;
       label.appendChild(cb);
       label.appendChild(span);
       targetsEl.appendChild(label);
@@ -11028,7 +11052,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     if (!config || !config.projects) return;
     var idx = -1;
     for (var i = 0; i < config.projects.length; i++) {
-      if (config.projects[i].path === h.projectKey) { idx = i; break; }
+      if (projectPathToKey(config.projects[i].path) === h.projectKey) { idx = i; break; }
     }
     if (idx < 0) {
       alert('That session\'s project is not in your project list. Add it first.');
