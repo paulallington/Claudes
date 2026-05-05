@@ -174,6 +174,7 @@
         <div class="toolbar-actions">
           <button id="btn-session-search" class="toolbar-btn" title="Search session transcripts (Ctrl+Shift+F)">🔎</button>
           <button id="btn-broadcast" class="toolbar-btn" title="Broadcast a prompt to multiple columns">⤳</button>
+          <button id="btn-snippets" class="toolbar-btn" title="Prompt snippets">📝</button>
           <button id="btn-automations-flyout" class="toolbar-btn" title="Automations">&#8634;</button>
           <div class="toolbar-menu-wrap">
             <button id="btn-toolbar-menu" class="toolbar-menu-btn" title="Tools &amp; settings">&#8943;</button>
@@ -724,6 +725,37 @@
       <div class="modal-body">
         <input type="search" id="session-search-input" placeholder="Search across all session transcripts…" autocomplete="off">
         <div id="session-search-results" class="session-search-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Snippets Modal -->
+  <div id="snippets-modal" class="modal-overlay hidden">
+    <div class="modal-dialog snippets-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Prompt snippets</span>
+        <span id="snippets-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body snippets-body">
+        <div class="snippets-list-pane">
+          <button id="snippets-new" class="snippets-btn">+ New</button>
+          <div id="snippets-list" class="snippets-list"></div>
+        </div>
+        <div class="snippets-edit-pane">
+          <label>Trigger (typed as <code>\trigger</code>):
+            <input type="text" id="snippet-trigger" placeholder="e.g. review">
+          </label>
+          <label>Label:
+            <input type="text" id="snippet-label" placeholder="e.g. Code review prompt">
+          </label>
+          <label>Body (use <code>{{name}}</code> for variables):
+            <textarea id="snippet-body" rows="10" placeholder="Please review {{file}} for {{focus_area}}…"></textarea>
+          </label>
+          <div class="snippets-edit-actions">
+            <button id="snippet-save" class="snippets-btn primary">Save</button>
+            <button id="snippet-delete" class="snippets-btn danger">Delete</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>

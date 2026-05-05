@@ -11127,6 +11127,9 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       });
     });
     cmds.push({ label: 'Open Usage', kind: 'action', run: openUsageModal });
+    cmds.push({ label: 'Open snippet library', kind: 'action', run: function () {
+      if (typeof window.openSnippetsManager === 'function') window.openSnippetsManager();
+    }});
     cmds.push({ label: 'Add project…', kind: 'action', run: function () {
       var btn = document.getElementById('btn-add-project');
       if (btn) btn.click();
@@ -11354,4 +11357,117 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       }
     });
   }
+})();
+
+(function setupSnippets() {
+  var btn = document.getElementById('btn-snippets');
+  var modal = document.getElementById('snippets-modal');
+  var closeBtn = document.getElementById('snippets-close');
+  var newBtn = document.getElementById('snippets-new');
+  var listEl = document.getElementById('snippets-list');
+  var trigEl = document.getElementById('snippet-trigger');
+  var labelEl = document.getElementById('snippet-label');
+  var bodyEl = document.getElementById('snippet-body');
+  var saveBtn = document.getElementById('snippet-save');
+  var delBtn = document.getElementById('snippet-delete');
+  if (!modal) return;
+
+  var snippets = [];
+  var editing = null;
+
+  function open() { modal.classList.remove('hidden'); refresh(); }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
+
+  function refresh() {
+    if (!window.electronAPI || !window.electronAPI.listSnippets) return Promise.resolve();
+    return window.electronAPI.listSnippets().then(function (list) {
+      snippets = list || [];
+      renderList();
+      // Update the in-memory cache used by trigger expansion (Task 3.3)
+      window.__snippetsCache = snippets;
+      if (editing) {
+        var match = snippets.find(function (s) { return s.id === editing.id; });
+        if (match) editing = match;
+        else editing = snippets.length ? snippets[0] : { trigger: '', label: '', body: '' };
+      } else if (snippets.length) {
+        editing = snippets[0];
+      } else {
+        editing = { trigger: '', label: '', body: '' };
+      }
+      paintEdit(editing);
+    });
+  }
+
+  function renderList() {
+    listEl.innerHTML = '';
+    snippets.forEach(function (s) {
+      var d = document.createElement('div');
+      d.className = 'snippet-item' + (editing && editing.id === s.id ? ' active' : '');
+      var name = document.createElement('div');
+      name.textContent = s.label || '(unnamed)';
+      var trig = document.createElement('div');
+      trig.className = 'snippet-item-trigger';
+      trig.textContent = '\\' + (s.trigger || '');
+      d.appendChild(name);
+      d.appendChild(trig);
+      d.addEventListener('click', function () { editing = s; paintEdit(s); renderList(); });
+      listEl.appendChild(d);
+    });
+  }
+
+  function paintEdit(s) {
+    trigEl.value = s.trigger || '';
+    labelEl.value = s.label || '';
+    bodyEl.value = s.body || '';
+  }
+
+  if (newBtn) newBtn.addEventListener('click', function () {
+    editing = { trigger: '', label: '', body: '' };
+    paintEdit(editing);
+    renderList();
+    trigEl.focus();
+  });
+
+  if (saveBtn) saveBtn.addEventListener('click', function () {
+    var snip = Object.assign({}, editing, {
+      trigger: trigEl.value.trim(),
+      label: labelEl.value.trim(),
+      body: bodyEl.value
+    });
+    if (!snip.trigger) { alert('Trigger required'); return; }
+    if (!window.electronAPI || !window.electronAPI.saveSnippet) return;
+    window.electronAPI.saveSnippet(snip).then(function (saved) {
+      editing = saved;
+      refresh();
+    });
+  });
+
+  if (delBtn) delBtn.addEventListener('click', function () {
+    if (!editing || !editing.id) return;
+    if (!confirm('Delete snippet "' + (editing.label || editing.trigger) + '"?')) return;
+    if (!window.electronAPI || !window.electronAPI.deleteSnippet) return;
+    window.electronAPI.deleteSnippet(editing.id).then(function () {
+      editing = null;
+      refresh();
+    });
+  });
+
+  if (btn) btn.addEventListener('click', open);
+
+  // Expose for the palette command (Task 1.2's setupPalette IIFE) and for
+  // the trigger expansion layer (Task 3.3) to refresh the in-memory cache.
+  window.openSnippetsManager = open;
+  window.refreshSnippetsCache = refresh;
+
+  // Pre-warm the cache so trigger expansion works immediately on app start
+  refresh();
 })();

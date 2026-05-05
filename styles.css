@@ -6344,3 +6344,34 @@ body.mode-popout #btn-add-project {
 .hook-row .hook-tool { color: #8be9fd; margin-right: 6px; }
 .hook-row.expanded { background: rgba(79,140,255,0.06); white-space: pre-wrap; }
 .hook-detail { margin-top: 4px; color: var(--text-dim); font-size: 10.5px; white-space: pre-wrap; word-break: break-word; }
+
+/* ── Snippets Modal ─────────────────────────────────────────────────────── */
+.snippets-dialog { width: 880px; max-height: 80vh; }
+.snippets-dialog .modal-body { flex-direction: row; padding: 12px; gap: 12px; }
+.snippets-body { display: grid; grid-template-columns: 240px 1fr; gap: 12px; height: 60vh; }
+.snippets-list-pane { display: flex; flex-direction: column; gap: 6px; border-right: 1px solid var(--border-subtle); padding-right: 8px; }
+.snippets-list { overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.snippet-item { padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; color: var(--text-primary); }
+.snippet-item:hover { background: rgba(255,255,255,0.04); }
+.snippet-item.active { background: rgba(79,140,255,0.18); }
+.snippet-item-trigger { color: var(--text-dim); font-size: 10px; margin-top: 2px; }
+.snippets-edit-pane { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.snippets-edit-pane label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-dim); }
+.snippets-edit-pane input,
+.snippets-edit-pane textarea {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+.snippets-edit-pane textarea { resize: vertical; }
+.snippets-edit-actions { display: flex; gap: 8px; margin-top: auto; }
+.snippets-btn { background: transparent; border: 1px solid var(--border-subtle); color: var(--text-primary); border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 12px; }
+.snippets-btn:hover { border-color: #4f8cff; }
+.snippets-btn.primary { background: #4f8cff; color: white; border-color: #4f8cff; }
+.snippets-btn.primary:hover { background: #3a78ee; }
+.snippets-btn.danger:hover { color: #e05050; border-color: #e05050; }
