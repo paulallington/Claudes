@@ -6315,3 +6315,32 @@ body.mode-popout #btn-add-project {
   border-top: 1px solid var(--border-subtle);
   text-align: right;
 }
+.hooks-toolbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border-subtle); }
+#hooks-filter {
+  flex: 1;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+.hooks-btn { background: transparent; border: 1px solid var(--border-subtle); color: var(--text-dim); border-radius: 4px; padding: 4px 8px; font-size: 11px; cursor: pointer; }
+.hooks-btn:hover { color: var(--text-primary); }
+.hooks-pause-toggle { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; }
+.hooks-list { overflow-y: auto; flex: 1; }
+.hook-row {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  font-family: var(--mono-font, monospace);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.hook-row:hover { background: rgba(255,255,255,0.03); }
+.hook-row .hook-time { color: var(--text-dimmer); margin-right: 6px; font-variant-numeric: tabular-nums; }
+.hook-row .hook-event { color: #4f8cff; margin-right: 6px; }
+.hook-row .hook-tool { color: #8be9fd; margin-right: 6px; }
+.hook-row.expanded { background: rgba(79,140,255,0.06); white-space: pre-wrap; }
+.hook-detail { margin-top: 4px; color: var(--text-dim); font-size: 10.5px; white-space: pre-wrap; word-break: break-word; }

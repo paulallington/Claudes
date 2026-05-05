@@ -28,6 +28,7 @@
         <button class="explorer-tab" data-tab="git">Git</button>
         <button class="explorer-tab" data-tab="run">Run</button>
         <button class="explorer-tab" data-tab="automations">Automations</button>
+            <button class="explorer-tab" data-tab="hooks">Hooks</button>
       </div>
       <div class="explorer-content">
         <div id="tab-files" class="tab-content active">
@@ -138,6 +139,16 @@
             </div>
             <pre id="automation-detail-output" class="automation-detail-output"></pre>
           </div>
+        </div>
+        <div id="tab-hooks" class="tab-content">
+          <div class="hooks-toolbar">
+            <input type="search" id="hooks-filter" placeholder="Filter events…" autocomplete="off">
+            <button id="hooks-clear" class="hooks-btn" title="Clear">Clear</button>
+            <label class="hooks-pause-toggle">
+              <input type="checkbox" id="hooks-pause"> Pause
+            </label>
+          </div>
+          <div id="hooks-list" class="hooks-list"></div>
         </div>
       </div>
     </div>

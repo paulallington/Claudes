@@ -11256,3 +11256,102 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     if (e.target === overlay) close();
   });
 })();
+
+(function setupHooks() {
+  var listEl = document.getElementById('hooks-list');
+  var filterEl = document.getElementById('hooks-filter');
+  var clearBtn = document.getElementById('hooks-clear');
+  var pauseEl = document.getElementById('hooks-pause');
+  if (!listEl) return;
+
+  var MAX_EVENTS = 1000;  // ring buffer
+  var events = [];
+  var filterQuery = '';
+  var paused = false;
+
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    return d.toTimeString().slice(0, 8);
+  }
+
+  function summarize(input) {
+    if (!input) return '';
+    if (typeof input === 'string') return input.slice(0, 80);
+    if (input.command) return String(input.command).slice(0, 80);
+    if (input.file_path) return input.file_path;
+    if (input.path) return input.path;
+    if (input.pattern) return input.pattern;
+    return '';
+  }
+
+  function eventMatchesFilter(ev) {
+    if (!filterQuery) return true;
+    var q = filterQuery.toLowerCase();
+    var hay = (ev.event || '') + ' ' + (ev.tool_name || '') + ' ' + (ev.session_id || '') + ' ' + JSON.stringify(ev.tool_input || {});
+    return hay.toLowerCase().indexOf(q) !== -1;
+  }
+
+  function renderEvent(ev) {
+    var row = document.createElement('div');
+    row.className = 'hook-row';
+    var time = document.createElement('span');
+    time.className = 'hook-time';
+    time.textContent = fmtTime(ev.received_at || Date.now());
+    var name = document.createElement('span');
+    name.className = 'hook-event';
+    name.textContent = ev.event || '?';
+    var tool = document.createElement('span');
+    tool.className = 'hook-tool';
+    tool.textContent = ev.tool_name || '';
+    var summary = document.createElement('span');
+    summary.textContent = ev.tool_input ? summarize(ev.tool_input) : (ev.session_id ? ev.session_id.slice(0, 8) : '');
+    row.appendChild(time);
+    row.appendChild(name);
+    row.appendChild(tool);
+    row.appendChild(summary);
+
+    var detail = document.createElement('div');
+    detail.className = 'hook-detail';
+    detail.style.display = 'none';
+    detail.textContent = JSON.stringify(ev, null, 2);
+    row.appendChild(detail);
+
+    row.addEventListener('click', function () {
+      row.classList.toggle('expanded');
+      detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
+    });
+    return row;
+  }
+
+  function rerender() {
+    listEl.innerHTML = '';
+    events.filter(eventMatchesFilter).slice(-200).forEach(function (ev) {
+      listEl.appendChild(renderEvent(ev));
+    });
+    listEl.scrollTop = listEl.scrollHeight;
+  }
+
+  filterEl.addEventListener('input', function () {
+    filterQuery = filterEl.value.trim();
+    rerender();
+  });
+  clearBtn.addEventListener('click', function () { events = []; rerender(); });
+  pauseEl.addEventListener('change', function () { paused = pauseEl.checked; });
+
+  if (window.electronAPI && window.electronAPI.onHookEvent) {
+    window.electronAPI.onHookEvent(function (ev) {
+      if (paused) return;
+      ev.received_at = Date.now();
+      events.push(ev);
+      if (events.length > MAX_EVENTS) events.shift();
+      // Append-only when the new event passes the current filter
+      if (eventMatchesFilter(ev)) {
+        var row = renderEvent(ev);
+        listEl.appendChild(row);
+        // Trim DOM to last 200 to keep things responsive
+        while (listEl.children.length > 200) listEl.removeChild(listEl.firstChild);
+        listEl.scrollTop = listEl.scrollHeight;
+      }
+    });
+  }
+})();
