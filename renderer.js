@@ -6916,7 +6916,9 @@ function projectKeyToName(key) {
 
 function projectPathToKey(p) {
   if (!p) return '';
-  return String(p).replace(/[:/\\\s]/g, '-').replace(/^-+/, '');
+  // Claude encodes the project directory by replacing every non-alphanumeric
+  // character with '-' (this includes ':', '\', '/', spaces, and underscores).
+  return String(p).replace(/[^a-zA-Z0-9]/g, '-').replace(/^-+/, '');
 }
 
 function fmtResetsIn(iso) {
