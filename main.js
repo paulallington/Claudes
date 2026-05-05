@@ -1820,6 +1820,22 @@ ipcMain.handle('sessions:search', async (_event, query, limit) => {
   let projectDirs;
   try { projectDirs = await fs.promises.readdir(root); } catch { return []; }
 
+  // Extract the user/assistant message text from a parsed JSONL entry, or null
+  // if the entry isn't a content-bearing message (tool calls, system events,
+  // file metadata, etc.). We only want hits that match real conversation text,
+  // not tool inputs or paths.
+  function extractMessageText(obj) {
+    if (!obj || !obj.message || !obj.message.content) return null;
+    if (obj.type !== 'user' && obj.type !== 'assistant') return null;
+    const c = obj.message.content;
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) {
+      // Assistant messages may interleave text + tool_use parts; we only want text.
+      return c.map(p => (p && typeof p.text === 'string') ? p.text : '').join(' ');
+    }
+    return null;
+  }
+
   const hits = [];
   outer:
   for (const dir of projectDirs) {
@@ -1831,35 +1847,38 @@ ipcMain.handle('sessions:search', async (_event, query, limit) => {
       const filePath = path.join(projDir, file);
       let content;
       try { content = await fs.promises.readFile(filePath, 'utf8'); } catch { continue; }
-      const idx = content.toLowerCase().indexOf(needle);
-      if (idx === -1) continue;
-      // Find the JSONL line containing the match
-      const lineStart = content.lastIndexOf('\n', idx) + 1;
-      const lineEnd = content.indexOf('\n', idx);
-      const line = content.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
-      let snippet = line;
-      try {
-        const obj = JSON.parse(line);
-        if (obj && obj.message && obj.message.content) {
-          const c = obj.message.content;
-          snippet = typeof c === 'string'
-            ? c
-            : Array.isArray(c)
-              ? c.map(p => (p && p.text) || '').join(' ')
-              : JSON.stringify(c);
-        }
-      } catch { /* keep raw line */ }
+      // Cheap pre-filter: skip files where the needle doesn't appear at all.
+      if (content.toLowerCase().indexOf(needle) === -1) continue;
+
+      // Walk lines; first line whose extracted message-text contains the needle is the hit.
+      const lines = content.split('\n');
+      let matched = null;
+      for (let li = 0; li < lines.length; li++) {
+        const line = lines[li];
+        if (!line || line[0] !== '{') continue;
+        if (line.toLowerCase().indexOf(needle) === -1) continue;
+        let obj;
+        try { obj = JSON.parse(line); } catch { continue; }
+        const text = extractMessageText(obj);
+        if (!text) continue;
+        if (text.toLowerCase().indexOf(needle) === -1) continue;
+        matched = { text, lineIndex: li };
+        break;
+      }
+      if (!matched) continue;  // matches were only in tool inputs / metadata — skip the file
+
       // Trim to ~200 chars around the needle for display
-      const matchInSnippet = snippet.toLowerCase().indexOf(needle);
-      const start = Math.max(0, matchInSnippet - 80);
-      const end = Math.min(snippet.length, matchInSnippet + 120);
-      const trimmed = (start > 0 ? '…' : '') + snippet.slice(start, end) + (end < snippet.length ? '…' : '');
+      const text = matched.text;
+      const matchInText = text.toLowerCase().indexOf(needle);
+      const start = Math.max(0, matchInText - 80);
+      const end = Math.min(text.length, matchInText + 120);
+      const trimmed = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
 
       hits.push({
         projectKey: dir,
         sessionId: file.replace('.jsonl', ''),
         snippet: trimmed,
-        matchedAt: idx
+        matchedAt: matched.lineIndex
       });
       if (hits.length >= max) break outer;
     }
