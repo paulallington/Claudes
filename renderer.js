@@ -4722,12 +4722,25 @@ function renderGraphSvg(commit) {
   return svg;
 }
 
+// Turn git's verbose "4 hours ago" into a tight "4h" so the date column
+// stays narrow and the subject can breathe in a sidebar-width panel.
+function compactRelativeDate(rel) {
+  if (!rel || typeof rel !== 'string') return rel || '';
+  var s = rel.trim().toLowerCase();
+  if (s === 'just now' || s.indexOf('seconds') !== -1 || s.indexOf('second ') !== -1) return 'now';
+  var m = s.match(/^(\d+)\s+(minute|hour|day|week|month|year)s?\s*ago$/);
+  if (!m) return rel;
+  var unit = m[2][0];
+  if (m[2] === 'month') unit = 'mo';
+  return m[1] + unit;
+}
+
 function createGitGraphSection(graphLog) {
   var state = computeGraphLanes(graphLog, graphLaneState);
   graphLaneState = { lanes: state.lanes, commitLanes: state.commitLanes };
 
   var section = document.createElement('div');
-  section.className = 'git-section';
+  section.className = 'git-section git-graph-section';
 
   var header = document.createElement('div');
   header.className = 'git-section-header';
@@ -4748,6 +4761,8 @@ function createGitGraphSection(graphLog) {
     (function (commit) {
       var row = document.createElement('div');
       row.className = 'git-graph-row';
+      // Full info on hover (truncated subject + author + full date).
+      row.title = commit.message + '\n\n' + commit.author + ' \u00b7 ' + commit.relativeDate;
       row.addEventListener('click', function () {
         addDiffColumn({
           commitHash: commit.hash,
@@ -4760,34 +4775,30 @@ function createGitGraphSection(graphLog) {
 
       var hashEl = document.createElement('span');
       hashEl.className = 'git-graph-hash';
-      hashEl.textContent = commit.abbrev;
+      hashEl.textContent = commit.abbrev.slice(0, 7);
 
+      // Inline ref chips render before the subject so they don't get pushed
+      // off-screen when the row is narrow.
       var msgEl = document.createElement('span');
       msgEl.className = 'git-graph-msg';
-      msgEl.textContent = commit.message;
-
-      var refsEl = document.createElement('span');
-      refsEl.className = 'git-graph-refs';
       for (var r = 0; r < commit.refs.length; r++) {
         var ref = commit.refs[r];
         var badge = document.createElement('span');
         badge.className = 'git-graph-ref' + (ref.startsWith('tag:') ? ' git-graph-tag' : '');
         badge.textContent = ref.replace(/^HEAD -> /, '').replace(/^tag: /, '');
-        refsEl.appendChild(badge);
+        msgEl.appendChild(badge);
       }
-
-      var authorEl = document.createElement('span');
-      authorEl.className = 'git-graph-author';
-      authorEl.textContent = commit.author;
+      var subjectEl = document.createElement('span');
+      subjectEl.className = 'git-graph-subject';
+      subjectEl.textContent = commit.message;
+      msgEl.appendChild(subjectEl);
 
       var dateEl = document.createElement('span');
       dateEl.className = 'git-graph-date';
-      dateEl.textContent = commit.relativeDate;
+      dateEl.textContent = compactRelativeDate(commit.relativeDate);
 
       row.appendChild(hashEl);
       row.appendChild(msgEl);
-      row.appendChild(refsEl);
-      row.appendChild(authorEl);
       row.appendChild(dateEl);
       list.appendChild(row);
     })(state.commits[i]);
@@ -8862,6 +8873,15 @@ function renderCostTab(c) {
   if (sonnetEl) sonnetEl.textContent = fmtUsd(c.byModel && c.byModel.sonnet);
   var haikuEl = document.getElementById('cost-haiku');
   if (haikuEl) haikuEl.textContent = fmtUsd(c.byModel && c.byModel.haiku);
+  var bucket = c.byBucket || {};
+  var crEl = document.getElementById('cost-bucket-cache-read');
+  if (crEl) crEl.textContent = fmtUsd(bucket.cacheRead);
+  var ccEl = document.getElementById('cost-bucket-cache-creation');
+  if (ccEl) ccEl.textContent = fmtUsd(bucket.cacheCreation);
+  var inEl = document.getElementById('cost-bucket-input');
+  if (inEl) inEl.textContent = fmtUsd(bucket.input);
+  var outEl = document.getElementById('cost-bucket-output');
+  if (outEl) outEl.textContent = fmtUsd(bucket.output);
 
   var byProj = document.getElementById('cost-by-project');
   if (byProj) {

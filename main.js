@@ -1838,19 +1838,27 @@ function rollupCosts(digests, sinceMs) {
   const byModel = { opus: 0, sonnet: 0, haiku: 0, unknown: 0 };
   const byProject = {};
   const byDay = {};
+  // Per-bucket breakdown so the user can see *where* the cost is coming from
+  // (cache reads on long sessions are usually the dominant chunk).
+  const byBucket = { input: 0, cacheRead: 0, cacheCreation: 0, output: 0 };
   let total = 0;
-  if (!Array.isArray(digests)) return { total, byModel, byProject, byDay };
+  if (!Array.isArray(digests)) return { total, byModel, byProject, byDay, byBucket };
   for (const d of digests) {
     if (!d) continue;
     if (sinceMs && d.lastTimestamp && d.lastTimestamp < sinceMs) continue;
-    const c = calcSessionCost({
-      model: d.model || '',
-      input: d.inputTokens || 0,
-      cacheCreation: d.cacheCreationTokens || 0,
-      cacheRead: d.cacheReadTokens || 0,
-      output: d.outputTokens || 0
-    });
+    const inp = d.inputTokens || 0;
+    const cc = d.cacheCreationTokens || 0;
+    const cr = d.cacheReadTokens || 0;
+    const out = d.outputTokens || 0;
+    const c = calcSessionCost({ model: d.model || '', input: inp, cacheCreation: cc, cacheRead: cr, output: out });
     if (!c) continue;
+    // Per-bucket breakdown reuses the same calc (zero out the others) so the
+    // pieces always add up to the total — no risk of drift from a separate
+    // pricing path.
+    byBucket.input         += calcSessionCost({ model: d.model || '', input: inp });
+    byBucket.cacheCreation += calcSessionCost({ model: d.model || '', cacheCreation: cc });
+    byBucket.cacheRead     += calcSessionCost({ model: d.model || '', cacheRead: cr });
+    byBucket.output        += calcSessionCost({ model: d.model || '', output: out });
     total += c;
     const m = String(d.model || '').toLowerCase();
     if (m.indexOf('opus') !== -1) byModel.opus += c;
@@ -1863,7 +1871,7 @@ function rollupCosts(digests, sinceMs) {
       byDay[day] = (byDay[day] || 0) + c;
     }
   }
-  return { total, byModel, byProject, byDay };
+  return { total, byModel, byProject, byDay, byBucket };
 }
 
 ipcMain.handle('usage:getCosts', async (_event, filter) => {

@@ -495,19 +495,33 @@
               <button class="cost-filter-btn" data-cost-filter="30d">Last 30 days</button>
               <button class="cost-filter-btn active" data-cost-filter="all">All time</button>
             </div>
+            <div class="cost-banner">
+              <strong>API list-price equivalent</strong> — what these tokens
+              would cost on pay-as-you-go API. <em>Not your actual bill</em>:
+              Pro / Max subscriptions are flat. Cache re-reads are the usual
+              culprit on long agentic sessions.
+            </div>
             <div class="cost-summary">
               <div class="cost-card"><div class="cost-label">Total</div><div class="cost-value" id="cost-total">—</div></div>
               <div class="cost-card"><div class="cost-label">Opus</div><div class="cost-value" id="cost-opus">—</div></div>
               <div class="cost-card"><div class="cost-label">Sonnet</div><div class="cost-value" id="cost-sonnet">—</div></div>
               <div class="cost-card"><div class="cost-label">Haiku</div><div class="cost-value" id="cost-haiku">—</div></div>
             </div>
+            <h3 class="usage-section-title">Where the cost comes from</h3>
+            <div class="cost-summary">
+              <div class="cost-card"><div class="cost-label">Cache reads</div><div class="cost-value" id="cost-bucket-cache-read">—</div></div>
+              <div class="cost-card"><div class="cost-label">Cache writes</div><div class="cost-value" id="cost-bucket-cache-creation">—</div></div>
+              <div class="cost-card"><div class="cost-label">Input</div><div class="cost-value" id="cost-bucket-input">—</div></div>
+              <div class="cost-card"><div class="cost-label">Output</div><div class="cost-value" id="cost-bucket-output">—</div></div>
+            </div>
             <h3 class="usage-section-title">By project</h3>
             <div id="cost-by-project" class="cost-table"></div>
             <h3 class="usage-section-title">Last 30 days</h3>
             <div id="cost-by-day" class="cost-chart"></div>
             <div class="cost-disclaimer">
-              Approximate, based on Anthropic public list prices. Plan-included usage is billed differently;
-              these figures show what the same tokens would cost at API rates.
+              Token counts come straight from each session's <code>usage</code> blocks; prices are
+              Anthropic's public list rates as of v1.7.x of this app. If list prices have moved since,
+              update <code>lib/cost-calc.js</code> and rebuild.
             </div>
           </div>
         </div>

@@ -2227,6 +2227,7 @@ html, body {
 
 .tab-content {
   display: none;
+  overflow-x: hidden;
 }
 
 .tab-content.active {
@@ -2847,78 +2848,111 @@ html, body {
 /* Commit Graph */
 
 .git-graph-list {
-  max-height: 400px;
+  flex: 1;
+  min-height: 0;
+  /* Fallback cap for cases where the panel height isn't propagated all
+     the way down (e.g. mid-render before flex is established). */
+  max-height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
-.git-graph-row {
+/* Make the git tab a vertical flex column so the commits section can
+   take all leftover height instead of being capped at 400px. Branch
+   row, commit input, Changes section keep their natural height; only
+   the commits list scrolls internally. */
+#tab-git.tab-content.active {
   display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+#tab-git #git-changes {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+#tab-git .git-graph-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Grid keeps the subject column fluid (minmax(0, 1fr) is the magic that
+   lets the cell shrink so text-overflow: ellipsis can engage), while the
+   graph / hash / date columns stay sized to their contents. Previously
+   this was flexbox without `min-width: 0` on the message, so the subject
+   refused to shrink and the row pushed past the panel — that's where the
+   horizontal scrollbar was coming from. */
+.git-graph-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: center;
-  height: 28px;
-  padding-right: 8px;
+  height: 30px;
+  padding: 0 8px 0 0;
   cursor: pointer;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
+  border-left: 2px solid transparent;
+  transition: background 80ms ease, border-color 80ms ease;
 }
 
 .git-graph-row:hover {
   background: var(--hover-subtle);
+  border-left-color: rgba(79, 140, 255, 0.6);
 }
 
 .git-graph-hash {
   font-family: 'Cascadia Code', 'Consolas', monospace;
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-dimmer);
-  flex-shrink: 0;
-  min-width: 58px;
-  overflow: hidden;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
 }
 
 .git-graph-msg {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   color: var(--text-body);
 }
 
-.git-graph-refs {
-  display: flex;
-  gap: 3px;
-  flex-shrink: 0;
-}
-
-.git-graph-ref {
-  font-size: 9px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: rgba(233, 69, 96, 0.15);
-  color: var(--accent);
-  white-space: nowrap;
-}
-
-.git-graph-tag {
-  background: rgba(0, 200, 200, 0.15);
-  color: var(--color-cyan);
-}
-
-.git-graph-author {
-  font-size: 11px;
-  color: var(--text-dimmer);
-  flex-shrink: 0;
-  width: 55px;
+.git-graph-subject {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.git-graph-date {
-  font-size: 10px;
-  color: var(--text-dimmer);
+.git-graph-ref {
   flex-shrink: 0;
-  width: 55px;
-  text-align: right;
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(233, 69, 96, 0.18);
+  color: var(--accent);
   white-space: nowrap;
+  letter-spacing: 0.2px;
+}
+
+.git-graph-tag {
+  background: rgba(0, 200, 200, 0.18);
+  color: var(--color-cyan);
+}
+
+.git-graph-date {
+  font-size: 10.5px;
+  color: var(--text-dimmer);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+  min-width: 26px;
 }
 
 .git-empty,
@@ -4281,6 +4315,20 @@ html, body {
 .cost-day-fill { height: 100%; background: #4f8cff; border-radius: 4px; }
 .cost-day-val { color: var(--text-primary); text-align: right; font-variant-numeric: tabular-nums; }
 .cost-disclaimer { font-size: 10px; color: var(--text-dimmer); margin-top: 12px; line-height: 1.4; }
+.cost-disclaimer code { font-size: 10px; padding: 1px 4px; background: rgba(255,255,255,0.05); border-radius: 3px; }
+.cost-banner {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: rgba(224, 160, 32, 0.08);
+  border: 1px solid rgba(224, 160, 32, 0.35);
+  border-left-width: 3px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+.cost-banner strong { color: #e0a020; }
+.cost-banner em { color: var(--text-dim); font-style: normal; font-weight: 500; }
 .cost-filter-row {
   display: flex;
   gap: 6px;
