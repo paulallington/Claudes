@@ -1917,6 +1917,42 @@ ipcMain.handle('sessions:search', async (_event, query, limit) => {
   return hits;
 });
 
+// Prompt-history search across ~/.claude/history.jsonl. Returns hits in
+// reverse-chronological order (most recent first). Distinct from sessions:search
+// — that one searches assistant transcripts; this one searches user prompts.
+ipcMain.handle('history:search', async (_event, query, limit) => {
+  if (!query || typeof query !== 'string' || query.length < 2) return [];
+  const max = Math.max(1, Math.min(200, limit || 100));
+  const file = path.join(os.homedir(), '.claude', 'history.jsonl');
+  let content;
+  try { content = await fs.promises.readFile(file, 'utf8'); } catch { return []; }
+  const needle = query.toLowerCase();
+  const lines = content.split('\n');
+  const hits = [];
+  for (let i = lines.length - 1; i >= 0 && hits.length < max; i--) {
+    const line = lines[i];
+    if (!line || line[0] !== '{') continue;
+    if (line.toLowerCase().indexOf(needle) === -1) continue;
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    const text = entry.display || '';
+    if (!text) continue;
+    if (text.toLowerCase().indexOf(needle) === -1) continue;
+    // Trim to ~200 chars around the needle
+    const matchIdx = text.toLowerCase().indexOf(needle);
+    const start = Math.max(0, matchIdx - 80);
+    const end = Math.min(text.length, matchIdx + 120);
+    const snippet = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+    hits.push({
+      text,
+      snippet,
+      project: entry.project || '',
+      ts: entry.timestamp || null
+    });
+  }
+  return hits;
+});
+
 // --- Auto Updater ---
 
 autoUpdater.autoDownload = true;

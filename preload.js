@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getUsage: () => ipcRenderer.invoke('usage:getAll'),
   getUsageCosts: (filter) => ipcRenderer.invoke('usage:getCosts', filter),
   searchSessions: (query, limit) => ipcRenderer.invoke('sessions:search', query, limit),
+  searchHistory: (query, limit) => ipcRenderer.invoke('history:search', query, limit),
   listSnippets: () => ipcRenderer.invoke('snippets:list'),
   saveSnippet: (snippet) => ipcRenderer.invoke('snippets:save', snippet),
   deleteSnippet: (id) => ipcRenderer.invoke('snippets:delete', id),
