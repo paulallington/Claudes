@@ -6837,13 +6837,19 @@ body.mode-popout #btn-add-project {
   font-variant-numeric: tabular-nums;
 }
 
+.session-search-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
 .session-search-mode,
 .session-search-scope {
   display: flex;
   gap: 12px;
-  margin-bottom: 6px;
-  font-size: 11px;
-  color: var(--text-dim);
 }
 .session-search-mode label,
 .session-search-scope label {
@@ -6851,6 +6857,11 @@ body.mode-popout #btn-add-project {
   align-items: center;
   gap: 4px;
   cursor: pointer;
+}
+.session-search-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border-color, rgba(128,128,128,0.3));
 }
 .hooks-empty-hint {
   padding: 12px;
