@@ -3,11 +3,49 @@ const pty = require('node-pty');
 const { execFileSync } = require('child_process');
 
 const PORT = parseInt(process.env.PTY_PORT || '3456', 10);
+const AUTH_TOKEN = process.env.PTY_AUTH_TOKEN || '';
+// Subprotocol the renderer presents on the WebSocket handshake. The token is
+// passed via env from the parent Electron process and never logged. If the
+// token is missing or wrong, handleProtocols returns false and the WS
+// handshake fails — closing the local-RCE drive-by vector where any browser
+// page could `new WebSocket('ws://127.0.0.1:<port>')` and spawn processes.
+const AUTH_PROTOCOL_PREFIX = 'claudes-auth-';
 const ptys = new Map();
 const orphanTimers = new Map();      // id -> timeout handle for grace period cleanup
 const orphanBuffers = new Map();     // id -> { chunks: string[], bytes: number } buffered while disconnected
 const ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000; // 24h — survive long laptop-lid closes
 const ORPHAN_BUFFER_MAX_BYTES = 2 * 1024 * 1024; // 2 MB per pty — dropping oldest output on overflow
+// Caps to bound DoS exposure even from an authenticated peer.
+const MAX_WS_PAYLOAD = 1 * 1024 * 1024;        // 1 MB per message — generous for paste, way under fork-bomb territory
+const MAX_PTYS_GLOBAL = 256;                    // hard ceiling across the process
+const MAX_PTYS_PER_CONNECTION = 64;             // per renderer
+const MAX_WRITE_BYTES = 256 * 1024;             // 256 KB per write — single keystroke / paste batch
+const MAX_COLS = 1000;
+const MAX_ROWS = 1000;
+
+// Strip env keys that change interpreter loading or process behavior. A
+// renderer can set per-spawn env (legit: ANTHROPIC_BASE_URL etc.) but must
+// not be able to inject NODE_OPTIONS / LD_PRELOAD / DYLD_INSERT_LIBRARIES /
+// PATH override and turn an allow-listed `claude` invocation into RCE.
+const ENV_BLOCKLIST = new Set([
+  'NODE_OPTIONS', 'NODE_PATH', 'NODE_PRESERVE_SYMLINKS',
+  'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT',
+  'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH', 'DYLD_FRAMEWORK_PATH', 'DYLD_FALLBACK_LIBRARY_PATH',
+  'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME',
+  'PERL5LIB', 'PERL5OPT', 'RUBYLIB', 'RUBYOPT',
+  'PATH', 'Path' // PATH is intentionally excluded so a renderer can't shadow `claude` or `node` with an attacker-controlled directory.
+]);
+function sanitiseEnv(input) {
+  if (!input || typeof input !== 'object') return null;
+  const out = {};
+  for (const k of Object.keys(input)) {
+    if (typeof input[k] !== 'string') continue;
+    if (ENV_BLOCKLIST.has(k)) continue;
+    if (/^LD_/.test(k) || /^DYLD_/.test(k)) continue;
+    out[k] = input[k];
+  }
+  return out;
+}
 
 // Resolve claude executable path
 function findClaude() {
@@ -36,12 +74,31 @@ try {
   console.error('claude update failed:', err.message);
 }
 
-const wss = new WebSocketServer({ port: PORT, host: '127.0.0.1' }, () => {
+const wss = new WebSocketServer({
+  port: PORT,
+  host: '127.0.0.1',
+  maxPayload: MAX_WS_PAYLOAD,
+  // Reject the WS handshake unless the renderer presents the per-launch
+  // token as a Sec-WebSocket-Protocol entry. A drive-by browser page won't
+  // know the token and is refused before any message is processed.
+  handleProtocols: (protocols /*, req*/) => {
+    if (!AUTH_TOKEN) return false; // misconfigured launch — fail closed
+    const wanted = AUTH_PROTOCOL_PREFIX + AUTH_TOKEN;
+    for (const p of protocols) if (p === wanted) return p;
+    return false;
+  }
+}, () => {
   // Signal readiness to parent process
   console.log('READY:' + PORT);
 });
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  // Belt-and-braces: if for any reason a connection lands here without the
+  // authenticated subprotocol selected, drop it.
+  if (!ws.protocol || ws.protocol !== AUTH_PROTOCOL_PREFIX + AUTH_TOKEN) {
+    try { ws.close(1008, 'unauthorized'); } catch { /* ignore */ }
+    return;
+  }
   const connectionPtys = new Set();
 
   // Wire up a pty's data/exit events to this WebSocket
@@ -105,6 +162,17 @@ wss.on('connection', (ws) => {
       case 'create': {
         const { id, cols, rows, cwd, args, cmd, env } = msg;
 
+        // Reject if global or per-connection caps would be exceeded. Without
+        // these, an authenticated peer can fork-bomb the host by looping
+        // 'create' messages.
+        if (ptys.size >= MAX_PTYS_GLOBAL || connectionPtys.size >= MAX_PTYS_PER_CONNECTION) {
+          try { ws.send(JSON.stringify({ type: 'exit', id, exitCode: 1 })); } catch { /* ws closed */ }
+          break;
+        }
+
+        const safeCols = Math.max(1, Math.min(MAX_COLS, parseInt(cols, 10) || 120));
+        const safeRows = Math.max(1, Math.min(MAX_ROWS, parseInt(rows, 10) || 30));
+
         // Spawn directly so the child process owns the conpty: this matters
         // for interactive long-running run-tab launches (dotnet run, blazor,
         // npm start, python REPL) — under a cmd.exe /c wrapper the inner
@@ -114,10 +182,15 @@ wss.on('connection', (ws) => {
         // short-lived commands, so the wrapper is no longer needed.
         const ptyOpts = {
           name: 'xterm-256color',
-          cols: cols || 120,
-          rows: rows || 30,
+          cols: safeCols,
+          rows: safeRows,
           cwd: cwd || process.cwd(),
-          env: env ? { ...process.env, ...env } : { ...process.env }
+          // Filter the renderer-supplied env so it cannot inject NODE_OPTIONS,
+          // LD_PRELOAD, PATH overrides, etc. The parent process env is still
+          // inherited (so legitimate vars like USERPROFILE, HOME, locale set
+          // by Electron flow through), only the per-spawn additions are
+          // blocklist-checked.
+          env: { ...process.env, ...(sanitiseEnv(env) || {}) }
         };
 
         let p;
@@ -167,7 +240,9 @@ wss.on('connection', (ws) => {
 
           // Resize to current terminal dimensions
           if (cols && rows) {
-            try { p.resize(cols, rows); } catch { /* ignore */ }
+            const safeCols = Math.max(1, Math.min(MAX_COLS, parseInt(cols, 10) || 120));
+            const safeRows = Math.max(1, Math.min(MAX_ROWS, parseInt(rows, 10) || 30));
+            try { p.resize(safeCols, safeRows); } catch { /* ignore */ }
           }
 
           // Flush any buffered output
@@ -191,13 +266,19 @@ wss.on('connection', (ws) => {
 
       case 'write': {
         const p = ptys.get(msg.id);
-        if (p) p.write(msg.data);
+        if (!p) break;
+        const data = typeof msg.data === 'string' ? msg.data : '';
+        if (Buffer.byteLength(data, 'utf8') > MAX_WRITE_BYTES) break;
+        p.write(data);
         break;
       }
 
       case 'resize': {
         const p = ptys.get(msg.id);
-        if (p) p.resize(msg.cols, msg.rows);
+        if (!p) break;
+        const safeCols = Math.max(1, Math.min(MAX_COLS, parseInt(msg.cols, 10) || 0));
+        const safeRows = Math.max(1, Math.min(MAX_ROWS, parseInt(msg.rows, 10) || 0));
+        if (safeCols && safeRows) p.resize(safeCols, safeRows);
         break;
       }
 

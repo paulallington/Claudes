@@ -2,10 +2,19 @@ const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-thresholds');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
+
+// Per-launch auth token for the local pty-server WebSocket. Generated fresh
+// each time Electron starts, passed to pty-server via env, and handed to the
+// renderer via IPC. The renderer presents it as a Sec-WebSocket-Protocol on
+// connect; pty-server rejects the handshake if it doesn't match. Without
+// this, any local process (including any web page in any browser) could
+// connect to 127.0.0.1:<ptyPort> and spawn arbitrary commands as the user.
+const PTY_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
 
 // Set appUserModelId early so Windows uses a consistent taskbar icon across restarts
 app.setAppUserModelId('com.thecodeguy.claudes');
@@ -31,6 +40,54 @@ const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
 const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
+
+// --- Path containment ---
+//
+// Many IPC handlers accept renderer-supplied paths. Without containment, any
+// renderer compromise (XSS, malicious paste, future bug) can read or write
+// any file the desktop user can — ssh keys, browser cookies, system files.
+// `assertInsideAllowedRoots` resolves the input and verifies it sits within
+// one of:
+//   - any project root the user has explicitly added (config.projects[].path)
+//   - ~/.claudes/                 (this app's config)
+//   - ~/.claude/                  (Claude CLI's data — sessions, history)
+// Symlink escapes are blocked via realpath when the target exists.
+function listAllowedRoots() {
+  const roots = [path.resolve(CONFIG_DIR), path.resolve(path.join(os.homedir(), '.claude'))];
+  try {
+    const cfg = readConfig();
+    if (Array.isArray(cfg.projects)) {
+      for (const p of cfg.projects) {
+        if (p && typeof p.path === 'string' && p.path) roots.push(path.resolve(p.path));
+      }
+    }
+  } catch { /* fall through with built-in roots */ }
+  return roots;
+}
+function isInsideRoot(target, root) {
+  // Case-insensitive containment check on win32 to match the FS contract.
+  const tNorm = process.platform === 'win32' ? target.toLowerCase() : target;
+  const rNorm = process.platform === 'win32' ? root.toLowerCase() : root;
+  if (tNorm === rNorm) return true;
+  const sep = rNorm.endsWith(path.sep) ? '' : path.sep;
+  return tNorm.startsWith(rNorm + sep);
+}
+function assertInsideAllowedRoots(input) {
+  if (typeof input !== 'string' || !input) throw new Error('refused: empty path');
+  // Reject UNC paths outright — they are network locations and a renderer
+  // should never need to push the app at one.
+  if (/^\\\\/.test(input) || /^\/\//.test(input)) throw new Error('refused: UNC path');
+  let resolved = path.resolve(input);
+  // If the path exists and is a symlink (or under one), realpath will reveal
+  // the true target so we can check containment against the real FS location.
+  try { resolved = fs.realpathSync.native ? fs.realpathSync.native(resolved) : fs.realpathSync(resolved); }
+  catch { /* doesn't exist yet (e.g. write-then-create) — that's ok */ }
+  const roots = listAllowedRoots();
+  for (const r of roots) {
+    if (isInsideRoot(resolved, r)) return resolved;
+  }
+  throw new Error('refused: path outside allowed roots');
+}
 
 // --- Config ---
 
@@ -415,7 +472,7 @@ function startPtyServer() {
 
     ptyServerProcess = spawn(nodePath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PTY_PORT: String(ptyPort) }
+      env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN }
     });
 
     ptyServerProcess.stderr.on('data', (data) => {
@@ -455,6 +512,40 @@ function wasLaunchedAtLogin() {
   return process.argv.includes('--hidden');
 }
 
+// Defense-in-depth: prevent renderer-induced navigation away from the
+// loaded index.html and refuse all window.open / target=_blank requests.
+// shell.openExternal is the only sanctioned way to escape the app.
+function lockdownWebContents(wc) {
+  wc.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+        shell.openExternal(parsed.toString()).catch(() => {});
+      }
+    } catch { /* ignore unparseable URLs */ }
+    return { action: 'deny' };
+  });
+  wc.on('will-navigate', (event, url) => {
+    // Allow navigation only within the app's own file:// origin (initial load).
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'file:') {
+        event.preventDefault();
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+          shell.openExternal(parsed.toString()).catch(() => {});
+        }
+      }
+    } catch {
+      event.preventDefault();
+    }
+  });
+  // Refuse webview tag attachment outright — there are none today, but if a
+  // future template snuck one in we don't want it inheriting privileges.
+  wc.on('will-attach-webview', (event /*, webPreferences, params*/) => {
+    event.preventDefault();
+  });
+}
+
 function createWindow() {
   const config = readConfig();
   const isLight = config.theme === 'auto' ? !nativeTheme.shouldUseDarkColors : config.theme === 'light';
@@ -482,6 +573,7 @@ function createWindow() {
     }
   });
 
+  lockdownWebContents(mainWindow.webContents);
   mainWindow.loadFile('index.html');
 
   if (startHidden && process.platform === 'darwin') {
@@ -560,6 +652,7 @@ function createProjectWindow(projectKey) {
     }
   });
 
+  lockdownWebContents(win.webContents);
   win.loadFile('index.html', {
     query: { mode: 'popout', projectKey: projectKey }
   });
@@ -1023,17 +1116,21 @@ ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId) => {
 
 // Save/load session state per project (which sessions were open in columns)
 ipcMain.handle('sessions:save', (event, projectPath, sessionData) => {
-  const claudesDir = path.join(projectPath, '.claudes');
-  if (!fs.existsSync(claudesDir)) {
-    fs.mkdirSync(claudesDir, { recursive: true });
-  }
-  const sessionsFile = path.join(claudesDir, 'sessions.json');
-  fs.writeFileSync(sessionsFile, JSON.stringify({ sessions: sessionData }, null, 2), 'utf8');
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const claudesDir = path.join(safeBase, '.claudes');
+    if (!fs.existsSync(claudesDir)) {
+      fs.mkdirSync(claudesDir, { recursive: true });
+    }
+    const sessionsFile = path.join(claudesDir, 'sessions.json');
+    fs.writeFileSync(sessionsFile, JSON.stringify({ sessions: sessionData }, null, 2), 'utf8');
+  } catch (err) { return { error: err.message }; }
 });
 
 ipcMain.handle('sessions:load', (event, projectPath) => {
-  const sessionsFile = path.join(projectPath, '.claudes', 'sessions.json');
   try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const sessionsFile = path.join(safeBase, '.claudes', 'sessions.json');
     const data = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
     return data.sessions || [];
   } catch {
@@ -1044,8 +1141,9 @@ ipcMain.handle('sessions:load', (event, projectPath) => {
 // --- CLAUDE.md Management ---
 
 ipcMain.handle('claudemd:read', (event, projectPath) => {
-  const filePath = path.join(projectPath, 'CLAUDE.md');
   try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const filePath = path.join(safeBase, 'CLAUDE.md');
     if (!fs.existsSync(filePath)) return { exists: false, content: '' };
     return { exists: true, content: fs.readFileSync(filePath, 'utf8') };
   } catch {
@@ -1054,8 +1152,13 @@ ipcMain.handle('claudemd:read', (event, projectPath) => {
 });
 
 ipcMain.handle('claudemd:save', (event, projectPath, content) => {
-  const filePath = path.join(projectPath, 'CLAUDE.md');
   try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const filePath = path.join(safeBase, 'CLAUDE.md');
+    if (typeof content !== 'string') return { success: false, error: 'content must be a string' };
+    if (Buffer.byteLength(content, 'utf8') > FS_WRITE_MAX_BYTES) {
+      return { success: false, error: 'content exceeds write size cap (5MB)' };
+    }
     fs.writeFileSync(filePath, content, 'utf8');
     return { success: true };
   } catch (err) {
@@ -1065,13 +1168,16 @@ ipcMain.handle('claudemd:save', (event, projectPath, content) => {
 
 // --- Explorer Panel IPC ---
 
+const FS_WRITE_MAX_BYTES = 5 * 1024 * 1024;  // 5 MB cap on writes — well above any text file the editor handles
+
 ipcMain.handle('fs:readFile', (event, filePath) => {
   try {
-    const stats = fs.statSync(filePath);
+    const safe = assertInsideAllowedRoots(filePath);
+    const stats = fs.statSync(safe);
     if (stats.size > 2 * 1024 * 1024) {
       return { error: 'File is too large to edit (>2MB)' };
     }
-    const buf = fs.readFileSync(filePath);
+    const buf = fs.readFileSync(safe);
     // Check for binary content (null bytes in first 8KB)
     const sample = buf.slice(0, 8192);
     for (let i = 0; i < sample.length; i++) {
@@ -1085,7 +1191,12 @@ ipcMain.handle('fs:readFile', (event, filePath) => {
 
 ipcMain.handle('fs:writeFile', (event, filePath, content) => {
   try {
-    fs.writeFileSync(filePath, content, 'utf8');
+    const safe = assertInsideAllowedRoots(filePath);
+    if (typeof content !== 'string') return { success: false, error: 'content must be a string' };
+    if (Buffer.byteLength(content, 'utf8') > FS_WRITE_MAX_BYTES) {
+      return { success: false, error: 'content exceeds write size cap (5MB)' };
+    }
+    fs.writeFileSync(safe, content, 'utf8');
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1094,13 +1205,14 @@ ipcMain.handle('fs:writeFile', (event, filePath, content) => {
 
 ipcMain.handle('fs:readDir', (event, dirPath) => {
   try {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const safe = assertInsideAllowedRoots(dirPath);
+    const entries = fs.readdirSync(safe, { withFileTypes: true });
     const excluded = new Set(['node_modules', '.git', '__pycache__', '.next', '.nuxt']);
     return entries
       .filter(e => !excluded.has(e.name))
       .map(e => ({
         name: e.name,
-        path: path.join(dirPath, e.name),
+        path: path.join(safe, e.name),
         isDirectory: e.isDirectory()
       }))
       .sort((a, b) => {
@@ -1113,9 +1225,11 @@ ipcMain.handle('fs:readDir', (event, dirPath) => {
 });
 
 ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
+  let safeRoot;
+  try { safeRoot = assertInsideAllowedRoots(rootDir); } catch { return []; }
   const excluded = new Set(['node_modules', '.git', '__pycache__', '.next', '.nuxt', 'dist', '.cache', 'coverage']);
   const results = [];
-  const lowerQuery = query.toLowerCase();
+  const lowerQuery = String(query || '').toLowerCase();
   const MAX_RESULTS = 100;
 
   function walk(dir) {
@@ -1126,7 +1240,7 @@ ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
         if (results.length >= MAX_RESULTS) return;
         if (excluded.has(e.name)) continue;
         const fullPath = path.join(dir, e.name);
-        const relativePath = path.relative(rootDir, fullPath);
+        const relativePath = path.relative(safeRoot, fullPath);
         if (e.name.toLowerCase().includes(lowerQuery)) {
           results.push({ name: e.name, path: fullPath, relativePath, isDirectory: e.isDirectory() });
         }
@@ -1135,7 +1249,7 @@ ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
     } catch { /* skip inaccessible dirs */ }
   }
 
-  walk(rootDir);
+  walk(safeRoot);
   return results;
 });
 
@@ -1259,9 +1373,27 @@ ipcMain.handle('git:branches', async (event, projectPath) => {
   }
 });
 
+// Reject branch names that look like option flags or that contain shell-ish
+// metacharacters. Without this, `git checkout --orphan` and similar are
+// reachable from the renderer. Pattern conforms to the safe subset of
+// git-check-ref-format(1).
+function isSafeGitRefName(name) {
+  if (typeof name !== 'string' || !name) return false;
+  if (name.startsWith('-')) return false;
+  if (name.length > 200) return false;
+  if (!/^[A-Za-z0-9._/+-]+$/.test(name)) return false;
+  if (name.includes('..')) return false;
+  if (name.endsWith('.lock')) return false;
+  return true;
+}
+
 ipcMain.handle('git:checkout', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) {
+    return { success: false, error: 'refused: invalid branch name' };
+  }
   try {
-    await runGit(projectPath, ['checkout', branchName], 10000);
+    // Trailing `--` ensures git treats branchName as a ref, not an option.
+    await runGit(projectPath, ['checkout', branchName, '--'], 10000);
     return { success: true };
   } catch (err) {
     return { success: false, error: (err.stderr || err.message).toString().trim() };
@@ -1269,8 +1401,11 @@ ipcMain.handle('git:checkout', async (event, projectPath, branchName) => {
 });
 
 ipcMain.handle('git:createBranch', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) {
+    return { success: false, error: 'refused: invalid branch name' };
+  }
   try {
-    await runGit(projectPath, ['checkout', '-b', branchName], 10000);
+    await runGit(projectPath, ['checkout', '-b', branchName, '--'], 10000);
     return { success: true };
   } catch (err) {
     return { success: false, error: (err.stderr || err.message).toString().trim() };
@@ -1506,26 +1641,36 @@ ipcMain.handle('launch:getConfigs', (event, projectPath) => {
 });
 
 ipcMain.handle('launch:saveRecentLaunches', (event, projectPath, recentLaunches) => {
-  const dirPath = path.join(projectPath, '.claudes');
-  try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
-  fs.writeFileSync(path.join(dirPath, 'recent-launches.json'), JSON.stringify(recentLaunches, null, 2), 'utf8');
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const dirPath = path.join(safeBase, '.claudes');
+    try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
+    fs.writeFileSync(path.join(dirPath, 'recent-launches.json'), JSON.stringify(recentLaunches, null, 2), 'utf8');
+  } catch (err) { return { error: err.message }; }
 });
 
 ipcMain.handle('launch:saveConfigs', (event, projectPath, configurations) => {
-  const dirPath = path.join(projectPath, '.claudes');
-  try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
-  fs.writeFileSync(path.join(dirPath, 'launch.json'), JSON.stringify({ configurations }, null, 2), 'utf8');
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const dirPath = path.join(safeBase, '.claudes');
+    try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
+    fs.writeFileSync(path.join(dirPath, 'launch.json'), JSON.stringify({ configurations }, null, 2), 'utf8');
+  } catch (err) { return { error: err.message }; }
 });
 
 ipcMain.handle('launch:saveEnvProfiles', (event, projectPath, profiles) => {
-  const dirPath = path.join(projectPath, '.claudes');
-  try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
-  fs.writeFileSync(path.join(dirPath, 'env-profiles.json'), JSON.stringify(profiles, null, 2), 'utf8');
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const dirPath = path.join(safeBase, '.claudes');
+    try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
+    fs.writeFileSync(path.join(dirPath, 'env-profiles.json'), JSON.stringify(profiles, null, 2), 'utf8');
+  } catch (err) { return { error: err.message }; }
 });
 
 ipcMain.handle('launch:scanCsproj', (event, dirPath) => {
   try {
-    return fs.readdirSync(dirPath).filter(f => f.endsWith('.csproj'));
+    const safe = assertInsideAllowedRoots(dirPath);
+    return fs.readdirSync(safe).filter(f => f.endsWith('.csproj'));
   } catch { return []; }
 });
 
@@ -1540,7 +1685,8 @@ ipcMain.handle('launch:browseFile', async (event, filters) => {
 
 ipcMain.handle('launch:readEnvFile', (event, filePath) => {
   try {
-    const content = fs.readFileSync(filePath, 'utf8');
+    const safe = assertInsideAllowedRoots(filePath);
+    const content = fs.readFileSync(safe, 'utf8');
     const env = {};
     for (const line of content.split(/\r?\n/)) {
       const trimmed = line.trim();
@@ -2241,6 +2387,7 @@ ipcMain.handle('hooks:disconnect', () => {
   }
 });
 ipcMain.handle('pty:getPort', () => ptyPort);
+ipcMain.handle('pty:getAuthToken', () => PTY_AUTH_TOKEN);
 
 ipcMain.handle('window:flashFrame', () => {
   if (mainWindow && !mainWindow.isFocused()) {
@@ -2254,16 +2401,52 @@ ipcMain.handle('window:stopFlashFrame', () => {
   }
 });
 
+// Allow only navigable web schemes through openExternal. Without this filter
+// a renderer compromise (XSS, malicious markdown, etc.) could trigger
+// file://, vscode://, ms-msdt:, and similar handlers that lead to local
+// code execution (Follina-class).
+const SAFE_EXTERNAL_SCHEMES = new Set(['http:', 'https:', 'mailto:']);
 ipcMain.handle('shell:openExternal', (event, url) => {
-  return shell.openExternal(url);
+  try {
+    const parsed = new URL(String(url));
+    if (!SAFE_EXTERNAL_SCHEMES.has(parsed.protocol)) {
+      console.warn('[shell:openExternal] refused scheme:', parsed.protocol);
+      return Promise.reject(new Error('refused: unsupported URL scheme'));
+    }
+    return shell.openExternal(parsed.toString());
+  } catch (err) {
+    console.warn('[shell:openExternal] invalid URL:', err.message);
+    return Promise.reject(new Error('refused: invalid URL'));
+  }
 });
 
 ipcMain.handle('shell:showItemInFolder', (event, fullPath) => {
   shell.showItemInFolder(fullPath);
 });
 
+// Refuse the OS handler-launch surface for executable file types and UNC
+// paths. shell.openPath happily runs .bat / .lnk / .scr / .hta etc. with the
+// user's privileges; combined with any renderer XSS that becomes RCE.
+const UNSAFE_OPENPATH_EXTS = new Set([
+  '.exe', '.bat', '.cmd', '.com', '.scr', '.hta', '.pif', '.msi', '.msp',
+  '.lnk', '.url', '.vbs', '.vbe', '.js', '.jse', '.ws', '.wsf', '.wsh',
+  '.ps1', '.psm1', '.cpl', '.reg', '.jar', '.dll', '.app'
+]);
 ipcMain.handle('shell:openPath', (event, fullPath) => {
-  return shell.openPath(fullPath);
+  const p = String(fullPath || '');
+  if (!p) return Promise.resolve('refused: empty path');
+  // Block UNC paths — they can trigger DLL search-order hijacks and cross
+  // a network trust boundary in a way the user never asked for.
+  if (/^\\\\/.test(p) || /^\/\//.test(p)) {
+    console.warn('[shell:openPath] refused UNC:', p);
+    return Promise.resolve('refused: UNC path');
+  }
+  const ext = path.extname(p).toLowerCase();
+  if (UNSAFE_OPENPATH_EXTS.has(ext)) {
+    console.warn('[shell:openPath] refused exec extension:', ext);
+    return Promise.resolve('refused: executable extension');
+  }
+  return shell.openPath(p);
 });
 
 // --- Automations IPC Handlers ---
@@ -2577,13 +2760,36 @@ ipcMain.handle('automations:runAutomationNow', async (event, automationId) => {
   return true;
 });
 
+// Sanitise a single path segment so it cannot escape its parent directory
+// (no '..', no separators) and is safe on Windows (no reserved chars). Used
+// where renderer-supplied automation/project metadata flows into a path.
+function sanitiseDirSegment(name) {
+  return String(name || '').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^-+|-+$/g, '') || 'unnamed';
+}
+
+// Verify that a constructed path resolves to a location strictly inside the
+// expected parent directory. Combined with sanitiseDirSegment, this catches
+// any future regression where a segment leaks past the sanitiser.
+function assertInsideParent(child, parent) {
+  const c = path.resolve(child);
+  const p = path.resolve(parent);
+  if (c === p) return c;
+  const sep = p.endsWith(path.sep) ? '' : path.sep;
+  const ok = process.platform === 'win32'
+    ? c.toLowerCase().startsWith((p + sep).toLowerCase())
+    : c.startsWith(p + sep);
+  if (!ok) throw new Error('refused: child path escapes parent');
+  return c;
+}
+
 function safeRemoveDir(dirPath) {
+  // Use fs.rmSync on every platform (Node 16+ handles Windows locked files
+  // and long paths via maxRetries/retryDelay). Previously this branched to
+  // `cmd /c rmdir /s /q <dirPath>` on Windows; cmd re-parses its tail, so
+  // metacharacters (& | ^ %) in dirPath could result in command injection
+  // if the path ever flowed from renderer-controlled data.
   try {
-    if (process.platform === 'win32') {
-      execFileSync('cmd', ['/c', 'rmdir', '/s', '/q', dirPath], { encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
-    } else {
-      fs.rmSync(dirPath, { recursive: true, force: true });
-    }
+    fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } catch { /* ignore — directory may be partially removed or locked */ }
 }
 
@@ -2595,11 +2801,15 @@ ipcMain.handle('automations:setupAgentClone', async (event, automationId, agentI
   if (!agent) return { error: 'Agent not found' };
   if (!agent.isolation || !agent.isolation.enabled) return { error: 'Agent does not have isolation enabled' };
 
-  // Determine clone path
+  // Determine clone path. Both segments are sanitised — `automation.projectPath`
+  // can be persisted with `..` or odd characters and would otherwise let
+  // safeRemoveDir delete arbitrary directories outside agentReposBaseDir.
   const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
-  const projectName = automation.projectPath.split(/[/\\]/).pop();
-  const agentDirName = agent.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  const projectName = sanitiseDirSegment((automation.projectPath || '').split(/[/\\]/).pop());
+  const agentDirName = sanitiseDirSegment(agent.name).toLowerCase();
   const clonePath = path.join(baseDir, projectName, agentDirName);
+  try { assertInsideParent(clonePath, baseDir); }
+  catch (err) { return { error: err.message }; }
 
   // Check if clone already exists with correct remote
   if (fs.existsSync(clonePath)) {
@@ -2638,7 +2848,10 @@ ipcMain.handle('automations:setupAgentClone', async (event, automationId, agentI
 
   // Clone
   return new Promise((resolve) => {
-    const child = spawn('git', ['clone', remoteUrl, clonePath], {
+    // Trailing `--` between flags and positional args defends against the
+    // "remote URL begins with --upload-pack=..." class of git CVEs where a
+    // repo's saved remote URL is parsed as a git option.
+    const child = spawn('git', ['clone', '--', remoteUrl, clonePath], {
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
@@ -3074,9 +3287,11 @@ ipcMain.handle('automations:setupManagerClone', async (event, automationId) => {
   if (!automation.manager.isolation || !automation.manager.isolation.enabled) return { error: 'Manager isolation not enabled' };
 
   const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
-  const projectName = automation.projectPath.split(/[/\\]/).pop();
-  const automationDirName = automation.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  const projectName = sanitiseDirSegment((automation.projectPath || '').split(/[/\\]/).pop());
+  const automationDirName = sanitiseDirSegment(automation.name).toLowerCase();
   const clonePath = path.join(baseDir, projectName, '_manager-' + automationDirName);
+  try { assertInsideParent(clonePath, baseDir); }
+  catch (err) { return { error: err.message }; }
 
   if (fs.existsSync(clonePath)) {
     try {
@@ -3112,7 +3327,7 @@ ipcMain.handle('automations:setupManagerClone', async (event, automationId) => {
   fs.mkdirSync(path.dirname(clonePath), { recursive: true });
 
   return new Promise((resolve) => {
-    const child = spawn('git', ['clone', remoteUrl, clonePath], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('git', ['clone', '--', remoteUrl, clonePath], { stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', (chunk) => {
       if (mainWindow) mainWindow.webContents.send('automations:clone-progress', { automationId, agentId: '_manager', line: chunk.toString() });
     });
@@ -4130,9 +4345,11 @@ async function runManager(automationId) {
     if (!manager.isolation.clonePath || !fs.existsSync(manager.isolation.clonePath)) {
       // Auto-setup clone for manager
       const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
-      const projectName = automation.projectPath.split(/[/\\]/).pop();
-      const automationDirName = automation.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+      const projectName = sanitiseDirSegment((automation.projectPath || '').split(/[/\\]/).pop());
+      const automationDirName = sanitiseDirSegment(automation.name).toLowerCase();
       const clonePath = path.join(baseDir, projectName, '_manager-' + automationDirName);
+      try { assertInsideParent(clonePath, baseDir); }
+      catch (err) { console.error('[Manager] Refused clone path:', err.message); return; }
 
       if (!fs.existsSync(clonePath)) {
         // Clone the repo
@@ -4144,7 +4361,7 @@ async function runManager(automationId) {
         }
         fs.mkdirSync(path.dirname(clonePath), { recursive: true });
         try {
-          execFileSync('git', ['clone', remoteUrl, clonePath], { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
+          execFileSync('git', ['clone', '--', remoteUrl, clonePath], { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
         } catch (e) {
           console.error('[Manager] Clone failed:', e.message);
           // Fall back to project path

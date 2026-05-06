@@ -77,6 +77,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getStartWithOS: () => ipcRenderer.invoke('app:getStartWithOS'),
   setStartWithOS: (enabled) => ipcRenderer.invoke('app:setStartWithOS', enabled),
   getPtyPort: () => ipcRenderer.invoke('pty:getPort'),
+  getPtyAuthToken: () => ipcRenderer.invoke('pty:getAuthToken'),
   flashFrame: () => ipcRenderer.invoke('window:flashFrame'),
   stopFlashFrame: () => ipcRenderer.invoke('window:stopFlashFrame'),
   getHookServerPort: () => ipcRenderer.invoke('hooks:getPort'),
