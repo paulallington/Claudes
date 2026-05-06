@@ -512,6 +512,40 @@ function wasLaunchedAtLogin() {
   return process.argv.includes('--hidden');
 }
 
+// Defense-in-depth: prevent renderer-induced navigation away from the
+// loaded index.html and refuse all window.open / target=_blank requests.
+// shell.openExternal is the only sanctioned way to escape the app.
+function lockdownWebContents(wc) {
+  wc.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+        shell.openExternal(parsed.toString()).catch(() => {});
+      }
+    } catch { /* ignore unparseable URLs */ }
+    return { action: 'deny' };
+  });
+  wc.on('will-navigate', (event, url) => {
+    // Allow navigation only within the app's own file:// origin (initial load).
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'file:') {
+        event.preventDefault();
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+          shell.openExternal(parsed.toString()).catch(() => {});
+        }
+      }
+    } catch {
+      event.preventDefault();
+    }
+  });
+  // Refuse webview tag attachment outright — there are none today, but if a
+  // future template snuck one in we don't want it inheriting privileges.
+  wc.on('will-attach-webview', (event /*, webPreferences, params*/) => {
+    event.preventDefault();
+  });
+}
+
 function createWindow() {
   const config = readConfig();
   const isLight = config.theme === 'auto' ? !nativeTheme.shouldUseDarkColors : config.theme === 'light';
@@ -539,6 +573,7 @@ function createWindow() {
     }
   });
 
+  lockdownWebContents(mainWindow.webContents);
   mainWindow.loadFile('index.html');
 
   if (startHidden && process.platform === 'darwin') {
@@ -617,6 +652,7 @@ function createProjectWindow(projectKey) {
     }
   });
 
+  lockdownWebContents(win.webContents);
   win.loadFile('index.html', {
     query: { mode: 'popout', projectKey: projectKey }
   });
@@ -2724,13 +2760,36 @@ ipcMain.handle('automations:runAutomationNow', async (event, automationId) => {
   return true;
 });
 
+// Sanitise a single path segment so it cannot escape its parent directory
+// (no '..', no separators) and is safe on Windows (no reserved chars). Used
+// where renderer-supplied automation/project metadata flows into a path.
+function sanitiseDirSegment(name) {
+  return String(name || '').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^-+|-+$/g, '') || 'unnamed';
+}
+
+// Verify that a constructed path resolves to a location strictly inside the
+// expected parent directory. Combined with sanitiseDirSegment, this catches
+// any future regression where a segment leaks past the sanitiser.
+function assertInsideParent(child, parent) {
+  const c = path.resolve(child);
+  const p = path.resolve(parent);
+  if (c === p) return c;
+  const sep = p.endsWith(path.sep) ? '' : path.sep;
+  const ok = process.platform === 'win32'
+    ? c.toLowerCase().startsWith((p + sep).toLowerCase())
+    : c.startsWith(p + sep);
+  if (!ok) throw new Error('refused: child path escapes parent');
+  return c;
+}
+
 function safeRemoveDir(dirPath) {
+  // Use fs.rmSync on every platform (Node 16+ handles Windows locked files
+  // and long paths via maxRetries/retryDelay). Previously this branched to
+  // `cmd /c rmdir /s /q <dirPath>` on Windows; cmd re-parses its tail, so
+  // metacharacters (& | ^ %) in dirPath could result in command injection
+  // if the path ever flowed from renderer-controlled data.
   try {
-    if (process.platform === 'win32') {
-      execFileSync('cmd', ['/c', 'rmdir', '/s', '/q', dirPath], { encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
-    } else {
-      fs.rmSync(dirPath, { recursive: true, force: true });
-    }
+    fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } catch { /* ignore — directory may be partially removed or locked */ }
 }
 
@@ -2742,11 +2801,15 @@ ipcMain.handle('automations:setupAgentClone', async (event, automationId, agentI
   if (!agent) return { error: 'Agent not found' };
   if (!agent.isolation || !agent.isolation.enabled) return { error: 'Agent does not have isolation enabled' };
 
-  // Determine clone path
+  // Determine clone path. Both segments are sanitised — `automation.projectPath`
+  // can be persisted with `..` or odd characters and would otherwise let
+  // safeRemoveDir delete arbitrary directories outside agentReposBaseDir.
   const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
-  const projectName = automation.projectPath.split(/[/\\]/).pop();
-  const agentDirName = agent.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  const projectName = sanitiseDirSegment((automation.projectPath || '').split(/[/\\]/).pop());
+  const agentDirName = sanitiseDirSegment(agent.name).toLowerCase();
   const clonePath = path.join(baseDir, projectName, agentDirName);
+  try { assertInsideParent(clonePath, baseDir); }
+  catch (err) { return { error: err.message }; }
 
   // Check if clone already exists with correct remote
   if (fs.existsSync(clonePath)) {
@@ -3224,9 +3287,11 @@ ipcMain.handle('automations:setupManagerClone', async (event, automationId) => {
   if (!automation.manager.isolation || !automation.manager.isolation.enabled) return { error: 'Manager isolation not enabled' };
 
   const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
-  const projectName = automation.projectPath.split(/[/\\]/).pop();
-  const automationDirName = automation.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  const projectName = sanitiseDirSegment((automation.projectPath || '').split(/[/\\]/).pop());
+  const automationDirName = sanitiseDirSegment(automation.name).toLowerCase();
   const clonePath = path.join(baseDir, projectName, '_manager-' + automationDirName);
+  try { assertInsideParent(clonePath, baseDir); }
+  catch (err) { return { error: err.message }; }
 
   if (fs.existsSync(clonePath)) {
     try {
@@ -4280,9 +4345,11 @@ async function runManager(automationId) {
     if (!manager.isolation.clonePath || !fs.existsSync(manager.isolation.clonePath)) {
       // Auto-setup clone for manager
       const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
-      const projectName = automation.projectPath.split(/[/\\]/).pop();
-      const automationDirName = automation.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+      const projectName = sanitiseDirSegment((automation.projectPath || '').split(/[/\\]/).pop());
+      const automationDirName = sanitiseDirSegment(automation.name).toLowerCase();
       const clonePath = path.join(baseDir, projectName, '_manager-' + automationDirName);
+      try { assertInsideParent(clonePath, baseDir); }
+      catch (err) { console.error('[Manager] Refused clone path:', err.message); return; }
 
       if (!fs.existsSync(clonePath)) {
         // Clone the repo
