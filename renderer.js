@@ -500,10 +500,15 @@ var FONT_SIZE_DEFAULT = 14;
 // ============================================================
 
 var wsPort = 3456;
+var wsAuthToken = null;
 var wsHasConnectedBefore = false;
 
 function connectWS() {
-  ws = new WebSocket('ws://127.0.0.1:' + wsPort);
+  // Per-launch token presented as a subprotocol. pty-server rejects the WS
+  // handshake if the token is missing or wrong, so a drive-by browser page
+  // pointed at ws://127.0.0.1:<port> can't open a connection.
+  var protocols = wsAuthToken ? ['claudes-auth-' + wsAuthToken] : undefined;
+  ws = new WebSocket('ws://127.0.0.1:' + wsPort, protocols);
   ws.onopen = function () {
     if (wsHasConnectedBefore) {
       reattachAllColumns();
@@ -8967,10 +8972,16 @@ document.getElementById('usage-project-filter').addEventListener('change', funct
   if (usageData) renderUsageSessions(usageData, this.value);
 });
 
-// Fetch PTY port (dev uses 3457 to avoid conflict with production on 3456)
+// Fetch PTY port + per-launch auth token before connecting. The token must
+// be in hand before connectWS so the WebSocket handshake includes it as a
+// subprotocol — without it, pty-server refuses the connection.
 if (window.electronAPI && window.electronAPI.getPtyPort) {
-  window.electronAPI.getPtyPort().then(function (port) {
-    if (port) wsPort = port;
+  Promise.all([
+    window.electronAPI.getPtyPort(),
+    window.electronAPI.getPtyAuthToken ? window.electronAPI.getPtyAuthToken() : Promise.resolve(null)
+  ]).then(function (results) {
+    if (results[0]) wsPort = results[0];
+    if (results[1]) wsAuthToken = results[1];
     connectWS();
   });
 } else {

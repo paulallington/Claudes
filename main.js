@@ -2,10 +2,19 @@ const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-thresholds');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
+
+// Per-launch auth token for the local pty-server WebSocket. Generated fresh
+// each time Electron starts, passed to pty-server via env, and handed to the
+// renderer via IPC. The renderer presents it as a Sec-WebSocket-Protocol on
+// connect; pty-server rejects the handshake if it doesn't match. Without
+// this, any local process (including any web page in any browser) could
+// connect to 127.0.0.1:<ptyPort> and spawn arbitrary commands as the user.
+const PTY_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
 
 // Set appUserModelId early so Windows uses a consistent taskbar icon across restarts
 app.setAppUserModelId('com.thecodeguy.claudes');
@@ -415,7 +424,7 @@ function startPtyServer() {
 
     ptyServerProcess = spawn(nodePath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PTY_PORT: String(ptyPort) }
+      env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN }
     });
 
     ptyServerProcess.stderr.on('data', (data) => {
@@ -2241,6 +2250,7 @@ ipcMain.handle('hooks:disconnect', () => {
   }
 });
 ipcMain.handle('pty:getPort', () => ptyPort);
+ipcMain.handle('pty:getAuthToken', () => PTY_AUTH_TOKEN);
 
 ipcMain.handle('window:flashFrame', () => {
   if (mainWindow && !mainWindow.isFocused()) {
