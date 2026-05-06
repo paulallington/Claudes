@@ -1008,8 +1008,15 @@ ipcMain.handle('project:closePopoutWindow', (event, projectKey) => {
 });
 
 ipcMain.handle('app:getStartWithOS', () => {
-  const settings = app.getLoginItemSettings();
-  return settings.openAtLogin;
+  // On Windows, getLoginItemSettings only reports openAtLogin: true when the
+  // stored registry entry's args exactly match what we query with. Since the
+  // setter writes ['--hidden'], the getter must query with ['--hidden'] too —
+  // querying with the default [] silently returned false even when the
+  // registry entry was present, so the checkbox un-ticked itself on every
+  // re-open of the Settings modal. macOS ignores `args`, so this is a no-op
+  // there.
+  const lookup = process.platform === 'darwin' ? {} : { args: ['--hidden'] };
+  return app.getLoginItemSettings(lookup).openAtLogin;
 });
 
 ipcMain.handle('app:setStartWithOS', (event, enabled) => {
