@@ -2307,8 +2307,21 @@ function createExitOverlay(id, exitCode, col) {
     wsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
+    // Run-tab launches: the previous exit fired refreshRunConfigs and set the
+    // config row back to "stopped". Now that we've re-spawned the same column
+    // (col.cmd / customTitle unchanged → findRunningColumn matches again),
+    // refresh so the UI flips back to the playing/stop state. Without this
+    // the user's only signal that the restart worked is terminal output.
+    if (col.cmd) setTimeout(refreshRunConfigs, 300);
   });
-  closeBtn.addEventListener('click', function () { removeColumn(id); });
+  closeBtn.addEventListener('click', function () {
+    var hadCmd = !!col.cmd;
+    removeColumn(id);
+    // Sync the run tab — without this, closing a finished run leaves the
+    // config showing as "playing" (the column was the only thing pinning
+    // findRunningColumn's result, and removeColumn doesn't itself notify).
+    if (hadCmd) setTimeout(refreshRunConfigs, 0);
+  });
 
   overlay.appendChild(msg);
   overlay.appendChild(restartBtn);
@@ -5941,7 +5954,24 @@ function launchConfig(config) {
     }
 
     var launchUrl = (config.openBrowserOnLaunch !== false && config.applicationUrl) ? config.applicationUrl : null;
-    addColumn(cmdArgs, null, { cmd: cmd, title: config.name, cwd: cwd, env: env, launchUrl: launchUrl });
+    // Run-tab launches share a dedicated row so multiple runs stack
+    // alongside each other without shoving Claude columns around. If a row
+    // already contains run columns (col.cmd set on any of its members),
+    // append into that row; otherwise spawn a fresh one.
+    var state = getActiveState();
+    var row = null;
+    if (state) {
+      for (var ri = 0; ri < state.rows.length; ri++) {
+        var ids = state.rows[ri].columnIds;
+        for (var ci = 0; ci < ids.length; ci++) {
+          var c = allColumns.get(ids[ci]);
+          if (c && c.cmd) { row = state.rows[ri]; break; }
+        }
+        if (row) break;
+      }
+      if (!row) row = addRowToProject(state);
+    }
+    addColumn(cmdArgs, row, { cmd: cmd, title: config.name, cwd: cwd, env: env, launchUrl: launchUrl });
 
     // Track in recent launches and refresh list to show stop/restart controls
     trackRecentLaunch(config);
