@@ -9007,8 +9007,14 @@ window.electronAPI.getVersion().then(function(v) {
 // ============================================================
 
 function escapeHtml(str) {
-  if (!str) return '';
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // Coerce so 0 / false / numbers serialise correctly; only null/undefined skip.
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function runWindowBadgeHtml(auto) {
@@ -10959,7 +10965,7 @@ function showImportProgress(importResult, needsClone) {
     var statusIcon = auto.needsClone ? '&#9711;' : '&#10003;';
     var statusColor = auto.needsClone ? '' : 'color:#22c55e;';
     row.innerHTML = '<span class="import-progress-icon" style="' + statusColor + '">' + statusIcon + '</span>' +
-      '<span class="import-progress-name">' + auto.name + '</span>' +
+      '<span class="import-progress-name">' + escapeHtml(auto.name) + '</span>' +
       '<span class="import-progress-status">' + (auto.needsClone ? 'Pending clone...' : 'Ready') + '</span>';
     progressList.appendChild(row);
   });
@@ -11683,12 +11689,11 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
 
   updateNotesToggle.addEventListener('click', function () {
     if (updateNotesEl.classList.contains('hidden')) {
-      // Release notes can be HTML (from GitHub) or plain text
-      if (updateReleaseNotes.indexOf('<') !== -1) {
-        updateNotesEl.innerHTML = updateReleaseNotes;
-      } else {
-        updateNotesEl.textContent = updateReleaseNotes;
-      }
+      // Release notes come from the GitHub release feed via electron-updater.
+      // Render as text only — never as HTML — so a poisoned release (or any
+      // future change to how the feed is fetched) can't inject script via
+      // `<img onerror>`-style payloads in this Electron renderer.
+      updateNotesEl.textContent = updateReleaseNotes || '';
       updateNotesEl.classList.remove('hidden');
       updateNotesToggle.textContent = 'Hide notes';
     } else {
