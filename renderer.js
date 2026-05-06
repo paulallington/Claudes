@@ -2575,6 +2575,13 @@ function addColumn(args, targetRow, opts) {
       // Only set hasUserInput when user actually submits (Enter key = \r or \n)
       // Not on typing/pasting, which happens before submission
       if (data.indexOf('\r') !== -1 || data.indexOf('\n') !== -1) {
+        if (!c.hasUserInput && !c.contextEnabled) {
+          // First submission on a brand-new column — enable the ctx meter
+          // and lock a `since` timestamp so the synthetic system-prompt
+          // assistant entry Claude wrote at startup is filtered out.
+          c.contextEnabled = true;
+          c.contextSinceMs = Date.now();
+        }
         c.hasUserInput = true;
         c.notified = false;
       }
@@ -2646,10 +2653,14 @@ function addColumn(args, targetRow, opts) {
     spawnSessionPct: null,    // (unused) five_hour.utilization at spawn — kept for backward compat
     spawnWeeklyPct: null,     // (unused) reserved
     spawnSessionTokens: null, // context-token count at spawn — set on first ctx poll
-    // For new (non-resume) columns we filter the JSONL by timestamp so a stale
-    // session's tokens never appear in the meter. Resumed columns must show
-    // their existing context, so we leave this null for them.
-    contextSinceMs: resumeSessionId ? null : Date.now(),
+    // For resumed columns the meter is enabled immediately so the existing
+    // context is shown. For brand-new columns it stays disabled until the
+    // user actually submits — Claude CLI writes a synthetic assistant entry
+    // with the system-prompt + CLAUDE.md usage at startup (~40k+) whose
+    // timestamp lands just after spawn, so a pure timestamp filter doesn't
+    // suppress it. Gating on real user interaction does.
+    contextEnabled: !!resumeSessionId,
+    contextSinceMs: null,
     deltaSessionEl: null,     // header element, captured below
     ctxMeterEl: null,
     ctxFillEl: null,
@@ -7870,6 +7881,12 @@ function startContextMeterPoll(colId) {
     console.log('[ctx-meter ' + ts + '] tick col=' + colId + ' sessionId=' + col.sessionId + ' projectKey=' + col.projectKey + ' cmd=' + col.cmd);
     if (!col.sessionId) {
       showCtxMeterPlaceholder(col, '…');
+      return;
+    }
+    if (!col.contextEnabled) {
+      // Brand-new column, no user submission yet — don't surface Claude's
+      // startup system-prompt entry as if it were live conversation context.
+      showCtxMeterPlaceholder(col, '—');
       return;
     }
     if (!window.electronAPI || !window.electronAPI.getSessionContextTokens) {
