@@ -2264,16 +2264,52 @@ ipcMain.handle('window:stopFlashFrame', () => {
   }
 });
 
+// Allow only navigable web schemes through openExternal. Without this filter
+// a renderer compromise (XSS, malicious markdown, etc.) could trigger
+// file://, vscode://, ms-msdt:, and similar handlers that lead to local
+// code execution (Follina-class).
+const SAFE_EXTERNAL_SCHEMES = new Set(['http:', 'https:', 'mailto:']);
 ipcMain.handle('shell:openExternal', (event, url) => {
-  return shell.openExternal(url);
+  try {
+    const parsed = new URL(String(url));
+    if (!SAFE_EXTERNAL_SCHEMES.has(parsed.protocol)) {
+      console.warn('[shell:openExternal] refused scheme:', parsed.protocol);
+      return Promise.reject(new Error('refused: unsupported URL scheme'));
+    }
+    return shell.openExternal(parsed.toString());
+  } catch (err) {
+    console.warn('[shell:openExternal] invalid URL:', err.message);
+    return Promise.reject(new Error('refused: invalid URL'));
+  }
 });
 
 ipcMain.handle('shell:showItemInFolder', (event, fullPath) => {
   shell.showItemInFolder(fullPath);
 });
 
+// Refuse the OS handler-launch surface for executable file types and UNC
+// paths. shell.openPath happily runs .bat / .lnk / .scr / .hta etc. with the
+// user's privileges; combined with any renderer XSS that becomes RCE.
+const UNSAFE_OPENPATH_EXTS = new Set([
+  '.exe', '.bat', '.cmd', '.com', '.scr', '.hta', '.pif', '.msi', '.msp',
+  '.lnk', '.url', '.vbs', '.vbe', '.js', '.jse', '.ws', '.wsf', '.wsh',
+  '.ps1', '.psm1', '.cpl', '.reg', '.jar', '.dll', '.app'
+]);
 ipcMain.handle('shell:openPath', (event, fullPath) => {
-  return shell.openPath(fullPath);
+  const p = String(fullPath || '');
+  if (!p) return Promise.resolve('refused: empty path');
+  // Block UNC paths — they can trigger DLL search-order hijacks and cross
+  // a network trust boundary in a way the user never asked for.
+  if (/^\\\\/.test(p) || /^\/\//.test(p)) {
+    console.warn('[shell:openPath] refused UNC:', p);
+    return Promise.resolve('refused: UNC path');
+  }
+  const ext = path.extname(p).toLowerCase();
+  if (UNSAFE_OPENPATH_EXTS.has(ext)) {
+    console.warn('[shell:openPath] refused exec extension:', ext);
+    return Promise.resolve('refused: executable extension');
+  }
+  return shell.openPath(p);
 });
 
 // --- Automations IPC Handlers ---
