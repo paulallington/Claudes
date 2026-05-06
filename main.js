@@ -1337,9 +1337,27 @@ ipcMain.handle('git:branches', async (event, projectPath) => {
   }
 });
 
+// Reject branch names that look like option flags or that contain shell-ish
+// metacharacters. Without this, `git checkout --orphan` and similar are
+// reachable from the renderer. Pattern conforms to the safe subset of
+// git-check-ref-format(1).
+function isSafeGitRefName(name) {
+  if (typeof name !== 'string' || !name) return false;
+  if (name.startsWith('-')) return false;
+  if (name.length > 200) return false;
+  if (!/^[A-Za-z0-9._/+-]+$/.test(name)) return false;
+  if (name.includes('..')) return false;
+  if (name.endsWith('.lock')) return false;
+  return true;
+}
+
 ipcMain.handle('git:checkout', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) {
+    return { success: false, error: 'refused: invalid branch name' };
+  }
   try {
-    await runGit(projectPath, ['checkout', branchName], 10000);
+    // Trailing `--` ensures git treats branchName as a ref, not an option.
+    await runGit(projectPath, ['checkout', branchName, '--'], 10000);
     return { success: true };
   } catch (err) {
     return { success: false, error: (err.stderr || err.message).toString().trim() };
@@ -1347,8 +1365,11 @@ ipcMain.handle('git:checkout', async (event, projectPath, branchName) => {
 });
 
 ipcMain.handle('git:createBranch', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) {
+    return { success: false, error: 'refused: invalid branch name' };
+  }
   try {
-    await runGit(projectPath, ['checkout', '-b', branchName], 10000);
+    await runGit(projectPath, ['checkout', '-b', branchName, '--'], 10000);
     return { success: true };
   } catch (err) {
     return { success: false, error: (err.stderr || err.message).toString().trim() };
@@ -2764,7 +2785,10 @@ ipcMain.handle('automations:setupAgentClone', async (event, automationId, agentI
 
   // Clone
   return new Promise((resolve) => {
-    const child = spawn('git', ['clone', remoteUrl, clonePath], {
+    // Trailing `--` between flags and positional args defends against the
+    // "remote URL begins with --upload-pack=..." class of git CVEs where a
+    // repo's saved remote URL is parsed as a git option.
+    const child = spawn('git', ['clone', '--', remoteUrl, clonePath], {
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
@@ -3238,7 +3262,7 @@ ipcMain.handle('automations:setupManagerClone', async (event, automationId) => {
   fs.mkdirSync(path.dirname(clonePath), { recursive: true });
 
   return new Promise((resolve) => {
-    const child = spawn('git', ['clone', remoteUrl, clonePath], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('git', ['clone', '--', remoteUrl, clonePath], { stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', (chunk) => {
       if (mainWindow) mainWindow.webContents.send('automations:clone-progress', { automationId, agentId: '_manager', line: chunk.toString() });
     });
@@ -4270,7 +4294,7 @@ async function runManager(automationId) {
         }
         fs.mkdirSync(path.dirname(clonePath), { recursive: true });
         try {
-          execFileSync('git', ['clone', remoteUrl, clonePath], { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
+          execFileSync('git', ['clone', '--', remoteUrl, clonePath], { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
         } catch (e) {
           console.error('[Manager] Clone failed:', e.message);
           // Fall back to project path
