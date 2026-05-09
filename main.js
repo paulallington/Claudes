@@ -3587,8 +3587,9 @@ function reconcileInterruptedHeadlessRuns() {
 }
 
 function findClaudePath() {
+  const lookup = process.platform === 'win32' ? 'where' : 'which';
   try {
-    const result = execFileSync('where', ['claude'], { encoding: 'utf8' });
+    const result = execFileSync(lookup, ['claude'], { encoding: 'utf8' });
     return result.trim().split(/\r?\n/)[0];
   } catch {
     return 'claude';

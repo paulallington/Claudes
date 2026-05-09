@@ -50,10 +50,12 @@ function sanitiseEnv(input) {
 // Resolve claude executable path
 function findClaude() {
   if (process.env.CLAUDE_PATH) return process.env.CLAUDE_PATH;
+  const isWin = process.platform === 'win32';
+  const lookup = isWin ? 'where' : 'which';
   try {
-    return execFileSync('where', ['claude'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
+    return execFileSync(lookup, ['claude'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
   } catch {
-    return 'claude.exe';
+    return isWin ? 'claude.exe' : 'claude';
   }
 }
 
