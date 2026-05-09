@@ -449,13 +449,56 @@ function generateAgentId() {
 // --- Pty Server ---
 
 function findSystemNode() {
+  // macOS GUI apps launched from Finder/Dock inherit a minimal PATH that
+  // omits Homebrew and nvm, so plain `which node` fails and a bare `node`
+  // spawn ENOENTs. Augment PATH with the usual install dirs before probing,
+  // and fall back to scanning known locations directly.
+  const extraDirs = [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    path.join(os.homedir(), '.volta/bin'),
+    path.join(os.homedir(), '.fnm'),
+    path.join(os.homedir(), 'n/bin'),
+  ];
+  const augmentedPath = [process.env.PATH || '', ...extraDirs]
+    .filter(Boolean)
+    .join(path.delimiter);
+
   try {
     const cmd = process.platform === 'win32' ? 'where' : 'which';
-    const result = execFileSync(cmd, ['node'], { encoding: 'utf8' });
-    return result.trim().split(/\r?\n/)[0];
-  } catch {
-    return 'node';
+    const result = execFileSync(cmd, ['node'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: augmentedPath },
+    });
+    const found = result.trim().split(/\r?\n/)[0];
+    if (found) return found;
+  } catch { /* fall through to direct probing */ }
+
+  const candidates = [
+    '/opt/homebrew/bin/node',
+    '/usr/local/bin/node',
+    '/usr/bin/node',
+  ];
+
+  try {
+    const nvmDir = path.join(os.homedir(), '.nvm/versions/node');
+    const versions = fs.readdirSync(nvmDir)
+      .filter((v) => v.startsWith('v'))
+      .sort()
+      .reverse();
+    for (const v of versions) {
+      candidates.push(path.join(nvmDir, v, 'bin/node'));
+    }
+  } catch { /* no nvm install */ }
+
+  for (const p of candidates) {
+    try {
+      if (fs.statSync(p).isFile()) return p;
+    } catch { /* not present */ }
   }
+
+  return 'node';
 }
 
 function getPtyServerScript() {
@@ -469,10 +512,28 @@ function startPtyServer() {
   return new Promise((resolve, reject) => {
     const nodePath = findSystemNode();
     const serverScript = getPtyServerScript();
+    let resolved = false;
 
     ptyServerProcess = spawn(nodePath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN }
+    });
+
+    ptyServerProcess.on('error', (err) => {
+      if (err && err.code === 'ENOENT') {
+        dialog.showErrorBox(
+          'Node.js not found',
+          `Claudes needs Node.js to run its terminal server, but couldn't find a "node" binary.\n\n` +
+          `Tried: ${nodePath}\n\n` +
+          `Install Node.js (e.g. via Homebrew: "brew install node") and relaunch Claudes.`
+        );
+      } else {
+        dialog.showErrorBox('Failed to start terminal server', String(err && err.message || err));
+      }
+      if (!resolved) {
+        resolved = true;
+        reject(err);
+      }
     });
 
     ptyServerProcess.stderr.on('data', (data) => {
@@ -483,8 +544,6 @@ function startPtyServer() {
       console.log('[pty-server] exited with code', code);
     });
 
-    // Wait for ready signal
-    let resolved = false;
     ptyServerProcess.stdout.on('data', (data) => {
       const output = data.toString();
       if (!resolved && output.includes('READY:')) {
