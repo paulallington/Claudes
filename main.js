@@ -1067,6 +1067,11 @@ ipcMain.handle('project:closePopoutWindow', (event, projectKey) => {
 });
 
 ipcMain.handle('app:getStartWithOS', () => {
+  // In dev (`npm start`), process.execPath is the bundled electron.exe with no
+  // app-path arg, so any registration would launch Electron's default welcome
+  // screen on boot. Pretend the setting is off so the UI stays consistent with
+  // setStartWithOS being a no-op.
+  if (!app.isPackaged) return false;
   // On Windows, getLoginItemSettings only reports openAtLogin: true when the
   // stored registry entry's args exactly match what we query with. Since the
   // setter writes ['--hidden'], the getter must query with ['--hidden'] too —
@@ -1079,6 +1084,10 @@ ipcMain.handle('app:getStartWithOS', () => {
 });
 
 ipcMain.handle('app:setStartWithOS', (event, enabled) => {
+  // Refuse to register a startup item from dev — process.execPath points at
+  // node_modules\electron\dist\electron.exe and Windows would launch the
+  // default Electron welcome screen on boot.
+  if (!app.isPackaged) return;
   if (process.platform === 'darwin') {
     app.setLoginItemSettings({
       openAtLogin: enabled,
