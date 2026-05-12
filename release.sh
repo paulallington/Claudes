@@ -6,8 +6,8 @@ set -e
 # Default: patch bump
 #
 # This bumps the version, commits, tags, and pushes.
-# GitHub Actions builds Windows + macOS installers and creates the release.
-# For local-only builds, use: npm run dist:win or npm run dist:mac
+# GitHub Actions builds Windows + macOS + Linux installers and creates the release.
+# For local-only builds, use: npm run dist:win, dist:mac, or dist:linux
 
 CURRENT=$(node -p "require('./package.json').version")
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
@@ -58,6 +58,6 @@ git push --tags
 echo "==> Pushed to origin"
 
 echo ""
-echo "==> Tag v${VERSION} pushed. GitHub Actions will build and release for Windows + macOS."
+echo "==> Tag v${VERSION} pushed. GitHub Actions will build and release for Windows + macOS + Linux."
 echo "    Watch progress: https://github.com/paulallington/Claudes/actions"
 echo "    Release will appear at: https://github.com/paulallington/Claudes/releases/tag/v${VERSION}"

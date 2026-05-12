@@ -10,6 +10,7 @@
     "dist": "electron-builder",
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux",
     "dist:publish": "electron-builder --publish always",
     "test": "node --test \"test/*.test.js\""
   },
@@ -81,6 +82,15 @@
       "installerIcon": "icon-tray.ico",
       "uninstallerIcon": "icon-tray.ico",
       "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage" },
+        { "target": "deb" }
+      ],
+      "icon": "icon.png",
+      "category": "Development",
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}"
     },
     "publish": {
       "provider": "github",
