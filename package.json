@@ -74,7 +74,10 @@
       "category": "public.app-category.developer-tools",
       "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
       "hardenedRuntime": false,
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "signIgnore": [
+        "/Contents/Resources/app.asar.unpacked/node_modules/node-pty/.*"
+      ]
     },
     "dmg": {
       "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
