@@ -1,6 +1,27 @@
 const { WebSocketServer } = require('ws');
-const pty = require('node-pty');
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
 const { execFileSync } = require('child_process');
+
+// node-pty ships a `spawn-helper` binary under prebuilds/<platform-arch>/ on
+// macOS that posix_spawn execs as argv[0]. npm strips the executable bit when
+// extracting the tarball, and electron-builder loses it again when packing,
+// so by the time the app runs the file is 0644 — every pty.spawn() throws
+// "posix_spawnp failed." Self-heal: chmod +x if it exists but isn't
+// executable. Runs before `require('node-pty')` so the first spawn works.
+if (process.platform !== 'win32') {
+  try {
+    const dir = path.join(__dirname, 'node_modules', 'node-pty', 'prebuilds', `${process.platform}-${process.arch}`);
+    const helper = path.join(dir, 'spawn-helper');
+    const st = fs.statSync(helper);
+    if (!(st.mode & 0o111)) {
+      fs.chmodSync(helper, st.mode | 0o755);
+      console.log('[pty-server] chmod +x', helper);
+    }
+  } catch { /* not present (e.g. running on Linux where node-pty uses a different path) — let node-pty fail loudly if it matters */ }
+}
+const pty = require('node-pty');
 
 const PORT = parseInt(process.env.PTY_PORT || '3456', 10);
 const AUTH_TOKEN = process.env.PTY_AUTH_TOKEN || '';
@@ -47,16 +68,54 @@ function sanitiseEnv(input) {
   return out;
 }
 
+// On macOS, GUI-launched apps inherit a minimal PATH that omits Homebrew,
+// nvm, ~/.local/bin, etc. Augment PATH for our `which claude` lookup AND
+// for any pty we spawn so the resolved CLAUDE_PATH (and any tools claude
+// itself shells out to) can be found.
+function augmentedPath() {
+  const home = os.homedir();
+  const extras = process.platform === 'win32' ? [] : [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    path.join(home, '.local/bin'),
+    path.join(home, '.volta/bin'),
+    path.join(home, '.fnm'),
+    path.join(home, 'bin'),
+  ];
+  return [process.env.PATH || '', ...extras].filter(Boolean).join(path.delimiter);
+}
+const AUGMENTED_PATH = augmentedPath();
+
 // Resolve claude executable path
 function findClaude() {
   if (process.env.CLAUDE_PATH) return process.env.CLAUDE_PATH;
   const isWin = process.platform === 'win32';
   const lookup = isWin ? 'where' : 'which';
   try {
-    return execFileSync(lookup, ['claude'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
-  } catch {
-    return isWin ? 'claude.exe' : 'claude';
+    const out = execFileSync(lookup, ['claude'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: AUGMENTED_PATH },
+    }).trim().split(/\r?\n/)[0];
+    if (out) return out;
+  } catch { /* fall through to direct probing */ }
+
+  // Direct probing of common install locations for non-Windows hosts.
+  if (!isWin) {
+    const home = os.homedir();
+    const candidates = [
+      path.join(home, '.local/bin/claude'),
+      '/opt/homebrew/bin/claude',
+      '/usr/local/bin/claude',
+      path.join(home, '.claude/local/claude'),
+    ];
+    for (const c of candidates) {
+      try { if (fs.statSync(c).isFile()) return c; } catch { /* not present */ }
+    }
+    return 'claude';
   }
+  return 'claude.exe';
 }
 
 const CLAUDE_PATH = findClaude();
@@ -191,8 +250,10 @@ wss.on('connection', (ws, req) => {
           // LD_PRELOAD, PATH overrides, etc. The parent process env is still
           // inherited (so legitimate vars like USERPROFILE, HOME, locale set
           // by Electron flow through), only the per-spawn additions are
-          // blocklist-checked.
-          env: { ...process.env, ...(sanitiseEnv(env) || {}) }
+          // blocklist-checked. PATH is overridden with AUGMENTED_PATH so
+          // GUI-launched macOS instances (which inherit a minimal PATH from
+          // launchd) can still find Homebrew/nvm/~/.local/bin tools.
+          env: { ...process.env, ...(sanitiseEnv(env) || {}), PATH: AUGMENTED_PATH }
         };
 
         let p;

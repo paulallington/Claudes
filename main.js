@@ -7,6 +7,7 @@ const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
+const https = require('https');
 
 // Per-launch auth token for the local pty-server WebSocket. Generated fresh
 // each time Electron starts, passed to pty-server via env, and handed to the
@@ -2239,11 +2240,26 @@ ipcMain.handle('history:search', async (_event, query, limit, projectPath) => {
 });
 
 // --- Auto Updater ---
+//
+// electron-updater on macOS is backed by Squirrel.Mac, which refuses to apply
+// an update unless both the running app and the new bundle have matching
+// valid Developer ID signatures. We don't sign the macOS build, so on darwin
+// we replace the Squirrel flow with a custom GitHub-polling updater that
+// downloads the DMG to ~/Downloads and opens it in Finder — the user drags
+// the new Claudes.app over the old one. The renderer-side IPC contract
+// (`update:available`, `update:progress`, `update:downloaded`, `update:error`,
+// and the `update:install` handler) is identical on both code paths, so the
+// existing update banner in renderer.js works unchanged.
 
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
 function setupAutoUpdater() {
+  if (process.platform === 'darwin') {
+    setupDarwinUpdater();
+    return;
+  }
+
   autoUpdater.on('update-available', (info) => {
     mainWindow?.webContents.send('update:available', {
       version: info.version,
@@ -2268,11 +2284,163 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.checkForUpdatesAndNotify();
+
+  ipcMain.handle('update:install', () => {
+    autoUpdater.quitAndInstall();
+  });
 }
 
-ipcMain.handle('update:install', () => {
-  autoUpdater.quitAndInstall();
-});
+// --- macOS custom updater ---
+
+// Integer-triplet comparison sufficient for our X.Y.Z release scheme — avoids
+// pulling in a real semver dep.
+function isNewerVersion(latestTag, current) {
+  const norm = (v) => String(v || '').replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const [la, lb, lc] = norm(latestTag);
+  const [ca, cb, cc] = norm(current);
+  if (la !== ca) return la > ca;
+  if (lb !== cb) return lb > cb;
+  return lc > cc;
+}
+
+function setupDarwinUpdater() {
+  const REPO = 'paulallington/Claudes';
+  const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64';
+  const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1h
+  const INITIAL_DELAY_MS = 30 * 1000;       // give the window a moment to render
+
+  let downloadedDmgPath = null;
+  let downloading = false;
+  let notifiedVersion = null;
+
+  function fetchJson(url) {
+    return new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const req = https.request({
+        method: 'GET',
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        headers: {
+          'Accept': 'application/vnd.github+json',
+          'User-Agent': 'Claudes-Updater'
+        }
+      }, (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error('HTTP ' + res.statusCode));
+        }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          try { resolve(JSON.parse(body)); }
+          catch (err) { reject(err); }
+        });
+      });
+      req.on('error', reject);
+      req.setTimeout(15000, () => req.destroy(new Error('timeout')));
+      req.end();
+    });
+  }
+
+  function downloadFile(url, targetPath, onProgress) {
+    return new Promise((resolve, reject) => {
+      const sink = fs.createWriteStream(targetPath);
+      sink.on('error', reject);
+
+      function get(href, redirects) {
+        const u = new URL(href);
+        const req = https.request({
+          method: 'GET',
+          hostname: u.hostname,
+          path: u.pathname + u.search,
+          headers: { 'User-Agent': 'Claudes-Updater' }
+        }, (res) => {
+          if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+            res.resume();
+            if (redirects > 5) return reject(new Error('too many redirects'));
+            // GitHub release asset URLs redirect to S3 with a presigned URL.
+            return get(res.headers.location, redirects + 1);
+          }
+          if (res.statusCode !== 200) {
+            res.resume();
+            return reject(new Error('HTTP ' + res.statusCode));
+          }
+          const total = parseInt(res.headers['content-length'] || '0', 10);
+          let received = 0;
+          res.on('data', (chunk) => {
+            received += chunk.length;
+            sink.write(chunk);
+            if (total && onProgress) onProgress((received / total) * 100);
+          });
+          res.on('end', () => { sink.end(resolve); });
+          res.on('error', reject);
+        });
+        req.on('error', reject);
+        req.setTimeout(60000, () => req.destroy(new Error('timeout')));
+        req.end();
+      }
+      get(url, 0);
+    });
+  }
+
+  async function checkForUpdates() {
+    try {
+      const release = await fetchJson(`https://api.github.com/repos/${REPO}/releases/latest`);
+      const tag = release && release.tag_name;
+      if (!tag || !isNewerVersion(tag, app.getVersion())) return;
+      const version = tag.replace(/^v/, '');
+
+      // Only re-notify when a *different* newer version appears (otherwise
+      // every hourly check would re-fire the banner and spam the user).
+      if (notifiedVersion !== version) {
+        notifiedVersion = version;
+        mainWindow?.webContents.send('update:available', {
+          version,
+          releaseNotes: release.body || ''
+        });
+      }
+
+      if (downloading || downloadedDmgPath) return;
+
+      const asset = (release.assets || []).find((a) => a.name && a.name.endsWith(`-mac-${ARCH}.dmg`));
+      if (!asset) {
+        console.error('[darwin-updater] no DMG asset for arch', ARCH, 'in', tag);
+        return;
+      }
+
+      downloading = true;
+      const target = path.join(app.getPath('temp'), asset.name);
+      try {
+        await downloadFile(asset.browser_download_url, target, (pct) => {
+          mainWindow?.webContents.send('update:progress', { percent: pct });
+        });
+        downloadedDmgPath = target;
+        mainWindow?.webContents.send('update:downloaded', {
+          version,
+          releaseNotes: release.body || ''
+        });
+      } finally {
+        downloading = false;
+      }
+    } catch (err) {
+      console.error('[darwin-updater]', err.message);
+      mainWindow?.webContents.send('update:error', { message: err.message });
+    }
+  }
+
+  ipcMain.handle('update:install', async () => {
+    if (!downloadedDmgPath) return;
+    // Tell Finder to mount + open the DMG before we quit, so the user lands
+    // on the drag-to-Applications window with no app left to block the
+    // replace.
+    await shell.openPath(downloadedDmgPath);
+    setTimeout(() => app.quit(), 1500);
+  });
+
+  setTimeout(checkForUpdates, INITIAL_DELAY_MS);
+  setInterval(checkForUpdates, CHECK_INTERVAL_MS);
+}
 
 ipcMain.handle('app:getVersion', () => {
   return app.getVersion();
