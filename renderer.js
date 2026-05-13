@@ -284,6 +284,30 @@ function renderHeadlessDetail() {
   });
   header.appendChild(copyBtn);
 
+  // Re-run: fire a fresh headless run with the same prompt and switch the
+  // detail pane to the new entry. Disabled mid-stream so a still-running
+  // task can't be queued twice by accident.
+  var rerunBtn = document.createElement('button');
+  rerunBtn.textContent = 'Re-run';
+  rerunBtn.disabled = entry.status === 'running';
+  rerunBtn.addEventListener('click', function () {
+    if (!projectPath || !entry.prompt) return;
+    rerunBtn.disabled = true;
+    window.electronAPI.headlessRun(projectPath, entry.prompt).then(function (res) {
+      if (res && res.error) {
+        alert('Headless re-run failed: ' + res.error);
+        rerunBtn.disabled = false;
+        return;
+      }
+      if (res && res.runId) {
+        headlessSelectedRunId = res.runId;
+        headlessOutputBuffer = '';
+        renderHeadlessDock();
+      }
+    });
+  });
+  header.appendChild(rerunBtn);
+
   var deleteBtn = document.createElement('button');
   deleteBtn.textContent = 'Delete';
   deleteBtn.addEventListener('click', function () {

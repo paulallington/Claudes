@@ -1153,7 +1153,12 @@ ipcMain.handle('theme:setTitleBarOverlay', (event, colors) => {
 //   /Users/devel          → Users-devel
 //   D:\foo\.bar           → D--foo--bar
 function projectPathToClaudeKey(projectPath) {
-  return projectPath.replace(/[^a-zA-Z0-9]/g, '-').replace(/^-+/, '');
+  // Claude CLI uses the raw substitution, keeping any leading dashes — so
+  // /Users/ashleypayne/Repos/Claudes becomes -Users-ashleypayne-Repos-Claudes
+  // on macOS/Linux. The earlier `.replace(/^-+/, '')` stripped that leading
+  // dash, making session discovery silently miss every directory on Unix
+  // hosts (Windows paths start with a drive letter so they weren't affected).
+  return projectPath.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 // Get recent session IDs for a project by scanning Claude's data directory
