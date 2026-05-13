@@ -21,6 +21,30 @@ if (process.platform !== 'win32') {
     }
   } catch { /* not present (e.g. running on Linux where node-pty uses a different path) — let node-pty fail loudly if it matters */ }
 }
+
+// node-pty 1.1.0's unixTerminal.js does:
+//   helperPath = helperPath.replace('app.asar', 'app.asar.unpacked');
+// String.replace matches the FIRST occurrence — when the path is already
+// `…/app.asar.unpacked/…` (because electron-builder unpacked node-pty via
+// asarUnpack), the prefix `app.asar` of `app.asar.unpacked` matches and the
+// path becomes `…/app.asar.unpacked.unpacked/…`. spawn-helper isn't there →
+// every pty.spawn() throws "posix_spawnp failed." Patch the source so the
+// replace is a no-op when the path is already unpacked.
+if (process.platform === 'darwin') {
+  try {
+    const ut = path.join(__dirname, 'node_modules', 'node-pty', 'lib', 'unixTerminal.js');
+    const src = fs.readFileSync(ut, 'utf8');
+    const buggy = "helperPath = helperPath.replace('app.asar', 'app.asar.unpacked');";
+    const fixed = "helperPath = helperPath.includes('app.asar.unpacked') ? helperPath : helperPath.replace('app.asar', 'app.asar.unpacked');";
+    if (src.includes(buggy)) {
+      fs.writeFileSync(ut, src.replace(buggy, fixed));
+      console.log('[pty-server] patched node-pty helperPath');
+    }
+  } catch (err) {
+    console.error('[pty-server] could not patch node-pty:', err && err.message);
+  }
+}
+
 const pty = require('node-pty');
 
 const PORT = parseInt(process.env.PTY_PORT || '3456', 10);
