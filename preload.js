@@ -153,5 +153,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   endpointFetchModels: (args) => ipcRenderer.invoke('endpoint:fetchModels', args),
   onEndpointsUpdated: (callback) => ipcRenderer.on('endpoints:updated', () => callback()),
 
-  paletteRank: (items, query) => ipcRenderer.invoke('palette:rank', items, query)
+  paletteRank: (items, query) => ipcRenderer.invoke('palette:rank', items, query),
+
+  // Cross-device session sync
+  syncGetSettings: () => ipcRenderer.invoke('sync:getSettings'),
+  syncSetSettings: (settings) => ipcRenderer.invoke('sync:setSettings', settings),
+  syncBrowseFolder: (opts) => ipcRenderer.invoke('sync:browseFolder', opts),
+  syncSetProjectExport: (projectPath, enabled) => ipcRenderer.invoke('sync:setProjectExport', projectPath, enabled),
+  syncAddProjectImport: (projectPath, importFolder) => ipcRenderer.invoke('sync:addProjectImport', projectPath, importFolder),
+  syncRemoveProjectImport: (projectPath, importFolder) => ipcRenderer.invoke('sync:removeProjectImport', projectPath, importFolder),
+  syncGetProjectStatus: (projectPath) => ipcRenderer.invoke('sync:getProjectStatus', projectPath)
 });

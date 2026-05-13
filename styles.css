@@ -550,6 +550,13 @@ html[data-platform="darwin"] .sidebar-header {
   -webkit-app-region: drag;
 }
 
+/* macOS traffic-lights live on the LEFT (offset by the sidebar margin), so
+   the right-side reserved space is dead air there. Drop it back to the
+   normal 12px gutter. */
+html[data-platform="darwin"] #toolbar {
+  padding-right: 12px;
+}
+
 .toolbar-left {
   display: flex;
   align-items: center;

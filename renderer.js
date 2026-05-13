@@ -1629,6 +1629,30 @@ function buildProjectItem(project, index) {
       addMenuItem('Open in new window', 'pop-out');
     }
 
+    // Sync entries — populated async so the labels reflect the current state.
+    var syncDivider = document.createElement('div');
+    syncDivider.className = 'project-context-item project-context-divider';
+    syncDivider.style.cssText = 'border-top:1px solid var(--border-primary); padding:0; margin:4px 0; cursor:default;';
+    menu.appendChild(syncDivider);
+    var syncPlaceholder = document.createElement('div');
+    syncPlaceholder.className = 'project-context-item';
+    syncPlaceholder.textContent = 'Sync…';
+    syncPlaceholder.style.opacity = '0.5';
+    menu.appendChild(syncPlaceholder);
+
+    if (window.electronAPI && window.electronAPI.syncGetProjectStatus) {
+      window.electronAPI.syncGetProjectStatus(project.path).then(function (status) {
+        if (menu.contains(syncPlaceholder)) menu.removeChild(syncPlaceholder);
+        var exportLabel = status && status.syncExport ? '✓ Sync convos (on)' : 'Sync convos';
+        addMenuItem(exportLabel, 'sync-toggle-export');
+        addMenuItem('Import syncs…', 'sync-add-import');
+        var imports = (status && status.syncImports) || [];
+        if (imports.length > 0) {
+          addMenuItem('Manage imports… (' + imports.length + ')', 'sync-manage-imports');
+        }
+      });
+    }
+
     menu.style.left = e.clientX + 'px';
     menu.style.top = e.clientY + 'px';
     menu.style.display = 'block';
@@ -1655,6 +1679,12 @@ function buildProjectItem(project, index) {
         if (window.electronAPI && window.electronAPI.popInProject) {
           window.electronAPI.popInProject(config.projects[projIndex].path);
         }
+      } else if (action === 'sync-toggle-export') {
+        handleSyncToggleExport(config.projects[projIndex].path);
+      } else if (action === 'sync-add-import') {
+        handleSyncAddImport(config.projects[projIndex].path);
+      } else if (action === 'sync-manage-imports') {
+        handleSyncManageImports(config.projects[projIndex].path);
       }
       menu.style.display = 'none';
     };
@@ -2010,6 +2040,67 @@ function togglePinProject(index) {
   project.pinned = !project.pinned;
   saveConfig();
   renderProjectList();
+}
+
+// --- Cross-device session sync ---
+//
+// All persistence and watcher orchestration lives in main; these helpers
+// just nudge it via IPC and surface result toasts via alert() for now.
+
+function handleSyncToggleExport(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.syncSetProjectExport) return;
+  window.electronAPI.syncGetProjectStatus(projectPath).then(function (status) {
+    var nowEnabled = !(status && status.syncExport);
+    // Refuse to enable if the global sync source isn't set yet — otherwise
+    // toggling silently does nothing and users wonder why.
+    if (nowEnabled) {
+      return window.electronAPI.syncGetSettings().then(function (s) {
+        if (!s || !s.sourcePath) {
+          alert('Set a sync source path in Settings → Sync first, then toggle "Sync convos" on this project.');
+          return null;
+        }
+        return s;
+      }).then(function (s) {
+        if (!s) return;
+        return window.electronAPI.syncSetProjectExport(projectPath, true);
+      });
+    }
+    return window.electronAPI.syncSetProjectExport(projectPath, false);
+  });
+}
+
+function handleSyncAddImport(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.syncBrowseFolder) return;
+  window.electronAPI.syncGetSettings().then(function (s) {
+    var defaultPath = (s && s.sourcePath) || undefined;
+    return window.electronAPI.syncBrowseFolder({ defaultPath: defaultPath });
+  }).then(function (chosen) {
+    if (!chosen) return;
+    window.electronAPI.syncAddProjectImport(projectPath, chosen).then(function (res) {
+      if (res && res.error) alert('Import add failed: ' + res.error);
+    });
+  });
+}
+
+function handleSyncManageImports(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.syncGetProjectStatus) return;
+  window.electronAPI.syncGetProjectStatus(projectPath).then(function (status) {
+    var imports = (status && status.syncImports) || [];
+    if (imports.length === 0) {
+      alert('No import sources configured for this project.');
+      return;
+    }
+    // Lightweight UI for v1: a numbered prompt asking which to remove.
+    var lines = imports.map(function (p, i) { return (i + 1) + '. ' + p; });
+    var answer = prompt(
+      'Imports for this project:\n\n' + lines.join('\n') +
+      '\n\nEnter number to remove (or Cancel to keep all):'
+    );
+    if (!answer) return;
+    var idx = parseInt(answer, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= imports.length) return;
+    window.electronAPI.syncRemoveProjectImport(projectPath, imports[idx]);
+  });
 }
 
 function setGroupPinned(groupKey, pinned) {
@@ -7221,8 +7312,52 @@ document.getElementById('btn-settings').addEventListener('click', function () {
   window.electronAPI.getAutomationSettings().then(function (settings) {
     document.getElementById('setting-agent-repos-dir').value = settings.agentReposBaseDir || '';
   });
+  // Sync settings: pulled lazily so changes in main.js persist round-trip.
+  if (window.electronAPI && window.electronAPI.syncGetSettings) {
+    window.electronAPI.syncGetSettings().then(function (s) {
+      var nameEl = document.getElementById('setting-sync-device-name');
+      var pathEl = document.getElementById('setting-sync-source-path');
+      if (nameEl) nameEl.value = (s && s.deviceName) || '';
+      if (pathEl) pathEl.value = (s && s.sourcePath) || '';
+      var status = document.getElementById('sync-save-status');
+      if (status) status.textContent = '';
+    });
+  }
   settingsModal.classList.remove('hidden');
 });
+
+(function wireSyncSettings() {
+  var browseBtn = document.getElementById('btn-browse-sync-source');
+  var saveBtn = document.getElementById('btn-sync-save');
+  var pathEl = document.getElementById('setting-sync-source-path');
+  var nameEl = document.getElementById('setting-sync-device-name');
+  var status = document.getElementById('sync-save-status');
+  if (!browseBtn || !saveBtn || !pathEl || !nameEl) return;
+
+  browseBtn.addEventListener('click', function () {
+    window.electronAPI.syncBrowseFolder({ defaultPath: pathEl.value || undefined }).then(function (chosen) {
+      if (chosen) pathEl.value = chosen;
+    });
+  });
+
+  saveBtn.addEventListener('click', function () {
+    saveBtn.disabled = true;
+    if (status) status.textContent = 'Saving…';
+    window.electronAPI.syncSetSettings({
+      sourcePath: pathEl.value.trim(),
+      deviceName: nameEl.value.trim()
+    }).then(function (saved) {
+      saveBtn.disabled = false;
+      if (status) {
+        if (saved && saved.sourcePath) status.textContent = 'Saved. Watchers will pick up enabled projects.';
+        else status.textContent = 'Saved (no source path → sync inactive).';
+      }
+    }).catch(function (err) {
+      saveBtn.disabled = false;
+      if (status) status.textContent = 'Save failed: ' + (err && err.message || err);
+    });
+  });
+})();
 
 (function wireCtxDefaultSetting() {
   var sel = document.getElementById('setting-ctx-default');

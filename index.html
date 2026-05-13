@@ -383,6 +383,7 @@
           <button class="settings-tab active" data-settings-tab="general" role="tab">General</button>
           <button class="settings-tab" data-settings-tab="notifications" role="tab">Notifications</button>
           <button class="settings-tab" data-settings-tab="automations" role="tab">Automations</button>
+          <button class="settings-tab" data-settings-tab="sync" role="tab">Sync</button>
         </div>
         <div class="settings-panes">
           <div class="settings-pane active" data-settings-pane="general">
@@ -434,6 +435,33 @@
                 <button id="btn-browse-agent-repos" class="settings-browse-btn" title="Browse...">...</button>
               </div>
               <span class="settings-hint">Base directory for isolated agent repository clones</span>
+            </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="sync">
+            <div class="settings-field">
+              <label for="setting-sync-device-name">Device name</label>
+              <input type="text" id="setting-sync-device-name" class="settings-input" placeholder="e.g. ashleys-mac" spellcheck="false">
+              <span class="settings-hint">Identifies this device's exported sessions inside the sync folder. Defaults to the machine's hostname.</span>
+            </div>
+            <div class="settings-field">
+              <label for="setting-sync-source-path">Sync source path</label>
+              <div class="settings-path-row">
+                <input type="text" id="setting-sync-source-path" class="settings-input" placeholder="e.g. ~/Google Drive/Claudes-Sync" spellcheck="false">
+                <button id="btn-browse-sync-source" class="settings-browse-btn" title="Browse...">...</button>
+              </div>
+              <span class="settings-hint">A local folder synced to the cloud by your tool of choice (Google Drive Desktop, OneDrive, iCloud, Syncthing&hellip;). Claudes mirrors your project sessions in/out of here. We never talk to a cloud API directly.</span>
+            </div>
+            <div class="settings-field">
+              <button id="btn-sync-save" class="settings-browse-btn" style="padding: 6px 14px;">Save</button>
+              <span id="sync-save-status" class="settings-hint"></span>
+            </div>
+            <hr style="border:none; border-top:1px solid var(--border-primary); margin: 16px 0;">
+            <div class="settings-hint" style="line-height:1.55">
+              <strong>How to use:</strong><br>
+              1. Set the path above on each device (pointing to the same cloud-synced folder).<br>
+              2. Right-click a project in the sidebar &rarr; "Sync convos" to start uploading that project's chats.<br>
+              3. On the other device, right-click the matching project &rarr; "Import syncs&hellip;" and pick this device's folder under the sync source.<br>
+              4. Resumed sessions show up in <code>/resume</code> on either machine.
             </div>
           </div>
         </div>

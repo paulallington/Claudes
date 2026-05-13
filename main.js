@@ -843,6 +843,115 @@ ipcMain.handle('config:getProjects', () => {
 
 ipcMain.handle('config:saveProjects', (event, config) => {
   scheduleWriteConfig(config);
+  // A project's sync flags may have just changed — re-apply watchers so the
+  // change takes effect without an app restart. Cheap when nothing relevant
+  // moved; lib/sync stops + restarts per-project watchers atomically.
+  try { reapplySyncFromConfig(config); } catch (err) { console.error('sync re-apply failed:', err); }
+});
+
+// --- Cross-device session sync ---
+//
+// Glues lib/sync.js to the IPC layer. Global settings (sync source path,
+// device name) live on the root of projects.json alongside `projects`.
+// Per-project state lives on each project entry as { syncExport, syncImports }.
+
+const sessionSync = require('./lib/sync');
+
+function syncLog(line) { console.log(line); }
+
+function reapplySyncFromConfig(cfg) {
+  const c = cfg || readConfig();
+  const settings = (c && c.sync) || {};
+  sessionSync.applyAllProjects({
+    homedir: os.homedir(),
+    projects: c.projects || [],
+    syncSource: settings.sourcePath || null,
+    deviceName: settings.deviceName || null,
+    log: syncLog
+  });
+}
+
+ipcMain.handle('sync:getSettings', () => {
+  const cfg = readConfig();
+  const s = (cfg && cfg.sync) || {};
+  return {
+    sourcePath: s.sourcePath || '',
+    deviceName: s.deviceName || os.hostname() || ''
+  };
+});
+
+ipcMain.handle('sync:setSettings', (_event, settings) => {
+  if (!settings || typeof settings !== 'object') return { error: 'invalid settings' };
+  const cfg = readConfig();
+  cfg.sync = {
+    sourcePath: typeof settings.sourcePath === 'string' ? settings.sourcePath : '',
+    deviceName: typeof settings.deviceName === 'string' && settings.deviceName.trim()
+      ? settings.deviceName.trim()
+      : (os.hostname() || 'device')
+  };
+  writeConfig(cfg);
+  reapplySyncFromConfig(cfg);
+  return cfg.sync;
+});
+
+ipcMain.handle('sync:browseFolder', async (_event, opts) => {
+  const defaultPath = (opts && opts.defaultPath) || os.homedir();
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    defaultPath
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle('sync:setProjectExport', (_event, projectPath, enabled) => {
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  if (!project) return { error: 'project not found' };
+  project.syncExport = !!enabled;
+  writeConfig(cfg);
+  reapplySyncFromConfig(cfg);
+  return { ok: true };
+});
+
+ipcMain.handle('sync:addProjectImport', (_event, projectPath, importFolder) => {
+  if (!importFolder) return { error: 'no folder' };
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  if (!project) return { error: 'project not found' };
+  if (!Array.isArray(project.syncImports)) project.syncImports = [];
+  if (!project.syncImports.includes(importFolder)) {
+    project.syncImports.push(importFolder);
+  }
+  writeConfig(cfg);
+  reapplySyncFromConfig(cfg);
+  return { ok: true, imports: project.syncImports };
+});
+
+ipcMain.handle('sync:removeProjectImport', (_event, projectPath, importFolder) => {
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  if (!project) return { error: 'project not found' };
+  project.syncImports = (project.syncImports || []).filter((p) => p !== importFolder);
+  writeConfig(cfg);
+  reapplySyncFromConfig(cfg);
+  return { ok: true, imports: project.syncImports };
+});
+
+ipcMain.handle('sync:getProjectStatus', (_event, projectPath) => {
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  const settings = (cfg && cfg.sync) || {};
+  if (!project) return { syncExport: false, syncImports: [], exportFolder: null };
+  return {
+    syncExport: !!project.syncExport,
+    syncImports: project.syncImports || [],
+    exportFolder: sessionSync.resolveExportFolder(
+      settings.sourcePath || '',
+      settings.deviceName || os.hostname() || '',
+      project.name || path.basename(project.path)
+    )
+  };
 });
 
 // --- Endpoint preset IPC handlers ---
@@ -5148,6 +5257,9 @@ if (!gotLock) {
     startAutomationScheduler();
 
     const cfg = readConfig();
+    // Spin up sync watchers for any project that already has sync enabled
+    // from a previous session.
+    try { reapplySyncFromConfig(cfg); } catch (err) { console.error('sync boot failed:', err); }
     for (const p of cfg.projects) {
       if (p && p.poppedOut) {
         createProjectWindow(p.path);
