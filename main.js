@@ -9,6 +9,31 @@ const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
 const https = require('https');
 
+// macOS GUI launches (Dock/Finder) inherit launchd's minimal PATH —
+// `/usr/bin:/bin:/usr/sbin:/sbin` — which omits Homebrew, ~/.local/bin, nvm,
+// etc. That's why `which claude` returns nothing and every `spawn(claude,…)`
+// or `spawn(node,…)` ENOENTs (e.g. headless runs produce "no output"). Fix
+// it once at process start so EVERY subsequent spawn/execFile inherits a
+// real PATH.
+if (process.platform !== 'win32') {
+  const extras = [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    path.join(os.homedir(), '.local/bin'),
+    path.join(os.homedir(), '.volta/bin'),
+    path.join(os.homedir(), '.fnm'),
+    path.join(os.homedir(), 'bin'),
+    path.join(os.homedir(), '.claude/bin'),
+  ];
+  const have = new Set((process.env.PATH || '').split(path.delimiter).filter(Boolean));
+  const missing = extras.filter((p) => !have.has(p));
+  if (missing.length) {
+    process.env.PATH = [process.env.PATH || '', ...missing].filter(Boolean).join(path.delimiter);
+  }
+}
+
 // Per-launch auth token for the local pty-server WebSocket. Generated fresh
 // each time Electron starts, passed to pty-server via env, and handed to the
 // renderer via IPC. The renderer presents it as a Sec-WebSocket-Protocol on
@@ -1911,7 +1936,25 @@ ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
     const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
     token = creds?.claudeAiOauth?.accessToken;
   } catch {
-    return { ok: false, error: 'no-creds', message: 'Could not read ~/.claude/.credentials.json — Claude Code not logged in?' };
+    // macOS: Claude CLI stores credentials in the login keychain under
+    // service "Claude Code-credentials" instead of the plaintext file.
+    // Without this fallback the mini usage bar silently stays blank on Mac.
+    if (process.platform === 'darwin') {
+      try {
+        const raw = execFileSync('/usr/bin/security', [
+          'find-generic-password',
+          '-s', 'Claude Code-credentials',
+          '-a', os.userInfo().username,
+          '-w'
+        ], { encoding: 'utf8' }).trim();
+        const creds = JSON.parse(raw);
+        token = creds?.claudeAiOauth?.accessToken;
+      } catch {
+        return { ok: false, error: 'no-creds', message: 'Could not read Claude credentials from the macOS keychain — is Claude Code logged in?' };
+      }
+    } else {
+      return { ok: false, error: 'no-creds', message: 'Could not read ~/.claude/.credentials.json — Claude Code not logged in?' };
+    }
   }
   if (!token) {
     return { ok: false, error: 'no-oauth', message: 'No OAuth token found (API-key users do not have plan limits).' };
