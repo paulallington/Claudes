@@ -842,6 +842,28 @@ ipcMain.handle('config:getProjects', () => {
 });
 
 ipcMain.handle('config:saveProjects', (event, config) => {
+  // The renderer doesn't manage sync state — those fields are written via
+  // the dedicated sync:* IPC handlers. If we accept the renderer's payload
+  // verbatim every column close/resize would clobber sync.sourcePath and
+  // per-project syncExport/syncImports. Merge the on-disk authoritative
+  // sync state back on top before persisting.
+  try {
+    const onDisk = readConfig();
+    if (onDisk && onDisk.sync) config.sync = onDisk.sync;
+    const onDiskByPath = new Map();
+    for (const p of (onDisk.projects || [])) {
+      if (p && p.path) onDiskByPath.set(p.path, p);
+    }
+    for (const p of (config.projects || [])) {
+      if (!p || !p.path) continue;
+      const auth = onDiskByPath.get(p.path);
+      if (auth) {
+        if ('syncExport' in auth) p.syncExport = auth.syncExport;
+        if ('syncImports' in auth) p.syncImports = auth.syncImports;
+      }
+    }
+  } catch (err) { console.error('sync-preserve merge failed:', err); }
+
   scheduleWriteConfig(config);
   // A project's sync flags may have just changed — re-apply watchers so the
   // change takes effect without an app restart. Cheap when nothing relevant
@@ -952,6 +974,10 @@ ipcMain.handle('sync:getProjectStatus', (_event, projectPath) => {
       project.name || path.basename(project.path)
     )
   };
+});
+
+ipcMain.handle('sync:forceProject', async (_event, projectPath) => {
+  return sessionSync.forceSyncProject(projectPath, { log: syncLog });
 });
 
 // --- Endpoint preset IPC handlers ---
@@ -2447,6 +2473,28 @@ function setupAutoUpdater() {
   });
 }
 
+// Manual "Check for updates" trigger from the toolbar. On darwin it pokes
+// our custom GitHub-polling updater; elsewhere it asks electron-updater to
+// re-check (which the auto flow only does once at startup).
+ipcMain.handle('update:checkNow', async () => {
+  if (process.platform === 'darwin') {
+    if (typeof darwinCheckForUpdates !== 'function') return { error: 'updater not initialised' };
+    return darwinCheckForUpdates({ manual: true });
+  }
+  try {
+    const result = await autoUpdater.checkForUpdatesAndNotify();
+    const latest = result && result.updateInfo && result.updateInfo.version;
+    if (!latest || !isNewerVersion(latest, app.getVersion())) {
+      mainWindow?.webContents.send('update:none', { version: app.getVersion() });
+      return { available: false };
+    }
+    return { available: true, version: latest };
+  } catch (err) {
+    mainWindow?.webContents.send('update:error', { message: err.message });
+    return { error: err.message };
+  }
+});
+
 // --- macOS custom updater ---
 
 // Integer-triplet comparison sufficient for our X.Y.Z release scheme — avoids
@@ -2459,6 +2507,11 @@ function isNewerVersion(latestTag, current) {
   if (lb !== cb) return lb > cb;
   return lc > cc;
 }
+
+// Manual-trigger entry point — populated by setupDarwinUpdater so the
+// toolbar "Check for updates" item can poke the same check function the
+// hourly timer uses.
+let darwinCheckForUpdates = null;
 
 function setupDarwinUpdater() {
   const REPO = 'paulallington/Claudes';
@@ -2541,16 +2594,23 @@ function setupDarwinUpdater() {
     });
   }
 
-  async function checkForUpdates() {
+  async function checkForUpdates(opts) {
+    const manual = !!(opts && opts.manual);
     try {
       const release = await fetchJson(`https://api.github.com/repos/${REPO}/releases/latest`);
       const tag = release && release.tag_name;
-      if (!tag || !isNewerVersion(tag, app.getVersion())) return;
+      if (!tag || !isNewerVersion(tag, app.getVersion())) {
+        // Manual check needs to tell the user nothing's there so they don't
+        // wonder if it silently failed.
+        if (manual) mainWindow?.webContents.send('update:none', { version: app.getVersion() });
+        return { available: false };
+      }
       const version = tag.replace(/^v/, '');
 
       // Only re-notify when a *different* newer version appears (otherwise
       // every hourly check would re-fire the banner and spam the user).
-      if (notifiedVersion !== version) {
+      // Manual checks always re-notify so the user gets visible feedback.
+      if (notifiedVersion !== version || manual) {
         notifiedVersion = version;
         mainWindow?.webContents.send('update:available', {
           version,
@@ -2558,12 +2618,12 @@ function setupDarwinUpdater() {
         });
       }
 
-      if (downloading || downloadedDmgPath) return;
+      if (downloading || downloadedDmgPath) return { available: true, version };
 
       const asset = (release.assets || []).find((a) => a.name && a.name.endsWith(`-mac-${ARCH}.dmg`));
       if (!asset) {
         console.error('[darwin-updater] no DMG asset for arch', ARCH, 'in', tag);
-        return;
+        return { available: true, version, error: 'no-asset' };
       }
 
       downloading = true;
@@ -2580,11 +2640,14 @@ function setupDarwinUpdater() {
       } finally {
         downloading = false;
       }
+      return { available: true, version };
     } catch (err) {
       console.error('[darwin-updater]', err.message);
       mainWindow?.webContents.send('update:error', { message: err.message });
+      return { error: err.message };
     }
   }
+  darwinCheckForUpdates = checkForUpdates;
 
   ipcMain.handle('update:install', async () => {
     if (!downloadedDmgPath) return;

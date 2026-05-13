@@ -1645,10 +1645,18 @@ function buildProjectItem(project, index) {
         if (menu.contains(syncPlaceholder)) menu.removeChild(syncPlaceholder);
         var exportLabel = status && status.syncExport ? '✓ Sync convos (on)' : 'Sync convos';
         addMenuItem(exportLabel, 'sync-toggle-export');
-        addMenuItem('Import syncs…', 'sync-add-import');
         var imports = (status && status.syncImports) || [];
-        if (imports.length > 0) {
-          addMenuItem('Manage imports… (' + imports.length + ')', 'sync-manage-imports');
+        // Single entry-point: opens a modal that lists existing imports
+        // with Remove buttons and includes an "Add import…" action. No
+        // separate Manage item — pre-existing imports show in the same
+        // modal as the add action.
+        var importsLabel = imports.length > 0
+          ? 'Import syncs… (' + imports.length + ')'
+          : 'Import syncs…';
+        addMenuItem(importsLabel, 'sync-imports');
+        // Force sync: only useful once something is actually being synced.
+        if ((status && status.syncExport) || imports.length > 0) {
+          addMenuItem('Force sync now', 'sync-force');
         }
       });
     }
@@ -1681,10 +1689,10 @@ function buildProjectItem(project, index) {
         }
       } else if (action === 'sync-toggle-export') {
         handleSyncToggleExport(config.projects[projIndex].path);
-      } else if (action === 'sync-add-import') {
-        handleSyncAddImport(config.projects[projIndex].path);
-      } else if (action === 'sync-manage-imports') {
-        handleSyncManageImports(config.projects[projIndex].path);
+      } else if (action === 'sync-imports') {
+        handleSyncImports(config.projects[projIndex].path);
+      } else if (action === 'sync-force') {
+        handleSyncForce(config.projects[projIndex].path);
       }
       menu.style.display = 'none';
     };
@@ -2069,38 +2077,139 @@ function handleSyncToggleExport(projectPath) {
   });
 }
 
-function handleSyncAddImport(projectPath) {
-  if (!window.electronAPI || !window.electronAPI.syncBrowseFolder) return;
-  window.electronAPI.syncGetSettings().then(function (s) {
-    var defaultPath = (s && s.sourcePath) || undefined;
-    return window.electronAPI.syncBrowseFolder({ defaultPath: defaultPath });
-  }).then(function (chosen) {
-    if (!chosen) return;
-    window.electronAPI.syncAddProjectImport(projectPath, chosen).then(function (res) {
-      if (res && res.error) alert('Import add failed: ' + res.error);
-    });
-  });
-}
-
-function handleSyncManageImports(projectPath) {
+// One entry point. If no imports yet, open the folder picker directly.
+// Otherwise open the modal so the user can see what's configured and
+// add another / remove one.
+function handleSyncImports(projectPath) {
   if (!window.electronAPI || !window.electronAPI.syncGetProjectStatus) return;
   window.electronAPI.syncGetProjectStatus(projectPath).then(function (status) {
     var imports = (status && status.syncImports) || [];
     if (imports.length === 0) {
-      alert('No import sources configured for this project.');
+      pickAndAddImport(projectPath);
+    } else {
+      showSyncImportsModal(projectPath, imports);
+    }
+  });
+}
+
+function pickAndAddImport(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.syncBrowseFolder) return Promise.resolve(null);
+  return window.electronAPI.syncGetSettings().then(function (s) {
+    var defaultPath = (s && s.sourcePath) || undefined;
+    return window.electronAPI.syncBrowseFolder({ defaultPath: defaultPath });
+  }).then(function (chosen) {
+    if (!chosen) return null;
+    return window.electronAPI.syncAddProjectImport(projectPath, chosen).then(function (res) {
+      if (res && res.error) { console.warn('[sync] add import failed:', res.error); return null; }
+      return chosen;
+    });
+  });
+}
+
+function handleSyncForce(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.syncForceProject) return;
+  // Optimistic feedback in console; the IPC promise resolves once mirroring
+  // is done in main, which can take a moment for big sessions.
+  console.log('[sync] forcing sync for', projectPath);
+  window.electronAPI.syncForceProject(projectPath).then(function (res) {
+    if (res && res.error) {
+      console.warn('[sync] force failed:', res.error);
+    } else {
+      console.log('[sync] force complete');
+    }
+  });
+}
+
+// Renderer-side modal — Electron's window.prompt is a no-op so we build
+// our own. Plain DOM with a backdrop so it can't drift behind the dock.
+// `.modal-body` defaults to flex-row in this app's CSS, hence the explicit
+// `flex-direction: column` here — otherwise import rows render side-by-side.
+function showSyncImportsModal(projectPath, imports) {
+  var existing = document.getElementById('sync-imports-modal');
+  if (existing) existing.remove();
+
+  var backdrop = document.createElement('div');
+  backdrop.id = 'sync-imports-modal';
+  backdrop.className = 'modal-overlay';
+  backdrop.style.zIndex = '10000';
+
+  var dialog = document.createElement('div');
+  dialog.className = 'modal-dialog';
+  dialog.style.cssText = 'max-width: 720px; width: 90%;';
+
+  var header = document.createElement('div');
+  header.className = 'modal-header';
+  var title = document.createElement('span');
+  title.className = 'modal-title';
+  title.textContent = 'Sync Imports';
+  var close = document.createElement('span');
+  close.className = 'modal-close';
+  close.textContent = '×';
+  close.addEventListener('click', function () { backdrop.remove(); });
+  header.appendChild(title);
+  header.appendChild(close);
+
+  var body = document.createElement('div');
+  body.className = 'modal-body';
+  body.style.cssText = 'padding: 16px; display: flex; flex-direction: column; gap: 0;';
+
+  var list = document.createElement('div');
+  list.style.cssText = 'display: flex; flex-direction: column;';
+  body.appendChild(list);
+
+  function renderRows(rows) {
+    list.innerHTML = '';
+    if (!rows || rows.length === 0) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'opacity:0.7; padding: 12px 0;';
+      empty.textContent = 'No imports configured for this project.';
+      list.appendChild(empty);
       return;
     }
-    // Lightweight UI for v1: a numbered prompt asking which to remove.
-    var lines = imports.map(function (p, i) { return (i + 1) + '. ' + p; });
-    var answer = prompt(
-      'Imports for this project:\n\n' + lines.join('\n') +
-      '\n\nEnter number to remove (or Cancel to keep all):'
-    );
-    if (!answer) return;
-    var idx = parseInt(answer, 10) - 1;
-    if (isNaN(idx) || idx < 0 || idx >= imports.length) return;
-    window.electronAPI.syncRemoveProjectImport(projectPath, imports[idx]);
+    rows.forEach(function (p) {
+      var row = document.createElement('div');
+      row.style.cssText = 'display:flex; align-items:center; gap:12px; padding: 8px 0; border-bottom: 1px solid var(--border-primary);';
+      var pathEl = document.createElement('div');
+      pathEl.style.cssText = 'flex:1; min-width:0; font-family: monospace; font-size: 12px; word-break: break-all;';
+      pathEl.textContent = p;
+      var rm = document.createElement('button');
+      rm.textContent = 'Remove';
+      rm.style.cssText = 'padding: 4px 10px; cursor: pointer; flex-shrink: 0;';
+      rm.addEventListener('click', function () {
+        rm.disabled = true;
+        window.electronAPI.syncRemoveProjectImport(projectPath, p).then(function (res) {
+          renderRows((res && res.imports) || []);
+        });
+      });
+      row.appendChild(pathEl);
+      row.appendChild(rm);
+      list.appendChild(row);
+    });
+  }
+  renderRows(imports);
+
+  var addBtn = document.createElement('button');
+  addBtn.textContent = '+ Add import…';
+  addBtn.style.cssText = 'margin-top: 12px; padding: 6px 14px; align-self: flex-start; cursor: pointer;';
+  addBtn.addEventListener('click', function () {
+    addBtn.disabled = true;
+    pickAndAddImport(projectPath).then(function () {
+      addBtn.disabled = false;
+      // Refresh the list from authoritative state.
+      window.electronAPI.syncGetProjectStatus(projectPath).then(function (status) {
+        renderRows((status && status.syncImports) || []);
+      });
+    });
   });
+  body.appendChild(addBtn);
+
+  dialog.appendChild(header);
+  dialog.appendChild(body);
+  backdrop.appendChild(dialog);
+  backdrop.addEventListener('click', function (e) {
+    if (e.target === backdrop) backdrop.remove();
+  });
+  document.body.appendChild(backdrop);
 }
 
 function setGroupPinned(groupKey, pinned) {
@@ -7420,6 +7529,45 @@ document.getElementById('btn-claude-config').addEventListener('click', function 
     openFileEditor(configPath);
   });
 });
+
+(function wireCheckForUpdates() {
+  var btn = document.getElementById('btn-check-updates');
+  if (!btn || !window.electronAPI || !window.electronAPI.checkForUpdates) return;
+  btn.addEventListener('click', function () {
+    btn.disabled = true;
+    var origLabel = btn.textContent;
+    btn.textContent = 'Checking…';
+    window.electronAPI.checkForUpdates().then(function (res) {
+      btn.disabled = false;
+      btn.textContent = origLabel;
+      // We rely on the existing update banner events (update:available /
+      // update:downloaded / update:none) for visible feedback, so nothing
+      // more to do here. Errors get surfaced via update:error.
+      if (res && res.error) console.warn('[update] check failed:', res.error);
+    }).catch(function (err) {
+      btn.disabled = false;
+      btn.textContent = origLabel;
+      console.warn('[update] check threw:', err && err.message);
+    });
+  });
+
+  // "You're up to date" toast — surfaced as a transient update bar
+  // message so we don't add a new UI element.
+  if (window.electronAPI.onUpdateNone) {
+    window.electronAPI.onUpdateNone(function (info) {
+      var bar = document.getElementById('update-bar');
+      var msg = document.getElementById('update-message');
+      var action = document.getElementById('update-action');
+      var notes = document.getElementById('update-notes-toggle');
+      if (!bar || !msg) return;
+      msg.textContent = "You're on the latest version (v" + (info && info.version) + ').';
+      if (action) action.style.display = 'none';
+      if (notes) notes.classList.add('hidden');
+      bar.classList.remove('hidden');
+      setTimeout(function () { bar.classList.add('hidden'); }, 4000);
+    });
+  }
+})();
 claudeMdClose.addEventListener('click', closeClaudeMdModal);
 claudeMdSave.addEventListener('click', saveClaudeMd);
 

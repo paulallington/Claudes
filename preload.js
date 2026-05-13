@@ -162,5 +162,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   syncSetProjectExport: (projectPath, enabled) => ipcRenderer.invoke('sync:setProjectExport', projectPath, enabled),
   syncAddProjectImport: (projectPath, importFolder) => ipcRenderer.invoke('sync:addProjectImport', projectPath, importFolder),
   syncRemoveProjectImport: (projectPath, importFolder) => ipcRenderer.invoke('sync:removeProjectImport', projectPath, importFolder),
-  syncGetProjectStatus: (projectPath) => ipcRenderer.invoke('sync:getProjectStatus', projectPath)
+  syncGetProjectStatus: (projectPath) => ipcRenderer.invoke('sync:getProjectStatus', projectPath),
+  syncForceProject: (projectPath) => ipcRenderer.invoke('sync:forceProject', projectPath),
+
+  // Manual update check (toolbar menu → "Check for updates")
+  checkForUpdates: () => ipcRenderer.invoke('update:checkNow'),
+  onUpdateNone: (callback) => ipcRenderer.on('update:none', (_, info) => callback(info))
 });
