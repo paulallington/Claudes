@@ -5335,8 +5335,9 @@ window.addEventListener('resize', function () {
   clearTimeout(resizeTimeout);
   resizeTimeout = setTimeout(function () {
     var state = getActiveState();
-    if (state && state.rows.length > 0 && !state.maximizedColumnId &&
-        !(state.containerEl && state.containerEl.offsetParent === null)) {
+    if (state && state.rows.length > 0 && maximizedColumnId == null &&
+        !(state.containerEl && state.containerEl.offsetParent === null) &&
+        !document.querySelector('.row-resize-handle.active')) {
       var heights = [];
       for (var i = 0; i < state.rows.length; i++) {
         heights.push(state.rows[i].el.getBoundingClientRect().height);
