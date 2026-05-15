@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { computeProportionalRowRatios } = require('../lib/row-layout');
+const { computeProportionalRowRatios, computeResizeRedistribution } = require('../lib/row-layout');
 
 test('computeProportionalRowRatios: empty array returns []', () => {
   assert.deepEqual(computeProportionalRowRatios([]), []);
@@ -38,4 +38,15 @@ test('computeProportionalRowRatios: null returns []', () => {
 
 test('computeProportionalRowRatios: undefined returns []', () => {
   assert.deepEqual(computeProportionalRowRatios(undefined), []);
+});
+
+test('computeResizeRedistribution: mixed pixel heights produce proportional flex ops with empty heights', () => {
+  var ops = computeResizeRedistribution([400, 300, 200]);
+  assert.equal(ops.length, 3);
+  assert.equal(ops[0].flex, (400 / 900) + ' 1 0');
+  assert.equal(ops[1].flex, (300 / 900) + ' 1 0');
+  assert.equal(ops[2].flex, (200 / 900) + ' 1 0');
+  assert.equal(ops[0].height, '');
+  assert.equal(ops[1].height, '');
+  assert.equal(ops[2].height, '');
 });

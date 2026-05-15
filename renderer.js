@@ -5333,7 +5333,27 @@ function refitAll() {
 var resizeTimeout;
 window.addEventListener('resize', function () {
   clearTimeout(resizeTimeout);
-  resizeTimeout = setTimeout(refitAll, 100);
+  resizeTimeout = setTimeout(function () {
+    var state = getActiveState();
+    if (state && state.rows.length > 0 && maximizedColumnId == null &&
+        !(state.containerEl && state.containerEl.offsetParent === null) &&
+        !document.querySelector('.row-resize-handle.active')) {
+      var heights = [];
+      for (var i = 0; i < state.rows.length; i++) {
+        heights.push(state.rows[i].el.getBoundingClientRect().height);
+      }
+      var ops = window.RowLayout.computeResizeRedistribution(heights);
+      for (var j = 0; j < state.rows.length; j++) {
+        state.rows[j].el.style.flex = ops[j].flex;
+        state.rows[j].el.style.height = ops[j].height;
+        var ratio = parseFloat(ops[j].flex);
+        if (isFinite(ratio) && ratio > 0) {
+          state.rows[j].lastHeightRatio = ratio;
+        }
+      }
+    }
+    refitAll();
+  }, 100);
 });
 
 // ============================================================
