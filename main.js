@@ -42,6 +42,15 @@ if (process.platform !== 'win32') {
 // connect to 127.0.0.1:<ptyPort> and spawn arbitrary commands as the user.
 const PTY_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
 
+// Per-launch token gating the local hook HTTP server (POST /hook). Without this,
+// any local process — including a JS payload running in any browser tab — could
+// fabricate a hook event that gets forwarded into the renderer over IPC, which
+// is exactly the cross-process attack surface Electron CSP doesn't cover.
+// Token is included in the curl command we write into the user's settings.json,
+// re-synced on every launch (same flow as the port). Re-syncs cost one file
+// write at startup, which is negligible.
+const HOOK_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
+
 // Set appUserModelId early so Windows uses a consistent taskbar icon across restarts
 app.setAppUserModelId('com.thecodeguy.claudes');
 
@@ -1496,9 +1505,21 @@ ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
 
 // Async git runner — never block the Electron main thread.
 // execFile() preserves stderr/stdout on error like execFileSync does.
+//
+// cwd is constrained to the configured allowed roots so a compromised renderer
+// can't aim destructive git ops (checkout/discardFile/pull/push/stashPop) at an
+// arbitrary directory on disk. Read-only ops are also restricted so we don't
+// leak the contents of arbitrary repos.
 function runGit(cwd, args, timeout) {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, encoding: 'utf8', timeout: timeout || 5000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    let safeCwd;
+    try { safeCwd = assertInsideAllowedRoots(cwd); }
+    catch (e) {
+      const err = new Error('refused: cwd outside allowed roots');
+      err.stderr = e && e.message ? e.message : 'forbidden';
+      return reject(err);
+    }
+    execFile('git', args, { cwd: safeCwd, encoding: 'utf8', timeout: timeout || 5000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         err.stderr = err.stderr || stderr;
         err.stdout = err.stdout || stdout;
@@ -1507,6 +1528,13 @@ function runGit(cwd, args, timeout) {
       resolve(stdout);
     });
   });
+}
+
+// Accepts a 4-64 hex commit hash and rejects anything that could be parsed by
+// git as an option (leading `-`) or that contains shell-ish chars. Used by the
+// commit/diff handlers that take an arbitrary ref from the renderer.
+function isSafeGitHash(hash) {
+  return typeof hash === 'string' && /^[0-9a-fA-F]{4,64}$/.test(hash);
 }
 
 ipcMain.handle('git:status', async (event, projectPath) => {
@@ -1730,10 +1758,13 @@ ipcMain.handle('git:stashPop', async (event, projectPath) => {
 });
 
 ipcMain.handle('git:commitDetail', async (event, projectPath, hash) => {
+  if (!isSafeGitHash(hash)) {
+    return { hash: '', message: '', author: '', date: '', files: [], error: 'refused: invalid commit hash' };
+  }
   try {
     const [metaOutput, statOutput] = await Promise.all([
-      runGit(projectPath, ['show', '--format=%H|%s|%an|%aI', '-s', hash, '--no-color'], 10000),
-      runGit(projectPath, ['show', '--numstat', '--format=', hash, '--no-color'], 10000)
+      runGit(projectPath, ['show', '--format=%H|%s|%an|%aI', '-s', hash, '--no-color', '--'], 10000),
+      runGit(projectPath, ['show', '--numstat', '--format=', hash, '--no-color', '--'], 10000)
     ]);
     const meta = metaOutput.trim().split('|');
     const files = [];
@@ -1755,10 +1786,11 @@ ipcMain.handle('git:commitDetail', async (event, projectPath, hash) => {
 });
 
 ipcMain.handle('git:diffCommit', async (event, projectPath, hash, filePath) => {
+  if (!isSafeGitHash(hash)) return '';
   try {
     const args = filePath
       ? ['show', '--pretty=format:', '-p', hash, '--', filePath]
-      : ['show', '--pretty=format:', '-p', hash];
+      : ['show', '--pretty=format:', '-p', hash, '--'];
     const output = await runGit(projectPath, args, 10000);
     return output.replace(/^\n+/, '');
   } catch {
@@ -2716,10 +2748,48 @@ ipcMain.handle('claude:getConfigPath', () => {
 
 function startHookServer() {
   hookServer = http.createServer((req, res) => {
+    // DNS-rebinding mitigation: only accept Host headers that name the loopback
+    // address with the right port. A browser tab that has a DNS name resolving
+    // to 127.0.0.1 would otherwise be able to POST here from a different origin.
+    const host = (req.headers.host || '').toLowerCase();
+    const expectedA = '127.0.0.1:' + hookServerListenPort;
+    const expectedB = 'localhost:' + hookServerListenPort;
+    if (host !== expectedA && host !== expectedB) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
     if (req.method === 'POST' && req.url === '/hook') {
+      // Reject unauthenticated callers. The curl command we write into
+      // settings.json carries the token; anything else POST'ing here is hostile.
+      const token = req.headers['x-auth-token'];
+      let tokenOk = false;
+      if (typeof token === 'string' && token.length === HOOK_AUTH_TOKEN.length) {
+        try {
+          tokenOk = crypto.timingSafeEqual(Buffer.from(token), Buffer.from(HOOK_AUTH_TOKEN));
+        } catch { tokenOk = false; }
+      }
+      if (!tokenOk) {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
       let body = '';
-      req.on('data', chunk => { body += chunk; });
+      let aborted = false;
+      // Bound the body — a hook event payload is normally a few KB; cap at 1 MB
+      // so a malicious local process can't pin memory by streaming forever.
+      req.on('data', chunk => {
+        if (aborted) return;
+        body += chunk;
+        if (body.length > 1024 * 1024) {
+          aborted = true;
+          res.writeHead(413);
+          res.end();
+          req.destroy();
+        }
+      });
       req.on('end', () => {
+        if (aborted) return;
         try {
           const event = JSON.parse(body);
           mainWindow?.webContents.send('hook:event', event);
@@ -2790,8 +2860,11 @@ const CLAUDES_HOOK_SENTINEL = '__claudes_inspector__';
 function buildHookCommand(port) {
   // Cross-platform curl invocation. curl ships with Windows 10+, macOS, and
   // every Linux distro this app runs on. -d @- reads stdin. The double-quoted
-  // header value is parsed identically by cmd.exe and POSIX shells.
-  return 'curl -s -X POST http://127.0.0.1:' + port + '/hook -d @- -H "Content-Type: application/json"';
+  // header values are parsed identically by cmd.exe and POSIX shells. The
+  // auth-token header gates the local /hook endpoint — see HOOK_AUTH_TOKEN.
+  return 'curl -s -X POST http://127.0.0.1:' + port + '/hook -d @-' +
+    ' -H "Content-Type: application/json"' +
+    ' -H "X-Auth-Token: ' + HOOK_AUTH_TOKEN + '"';
 }
 
 function readClaudeSettings() {
@@ -2914,7 +2987,13 @@ ipcMain.handle('shell:openExternal', (event, url) => {
 });
 
 ipcMain.handle('shell:showItemInFolder', (event, fullPath) => {
-  shell.showItemInFolder(fullPath);
+  // Same containment rule as shell:openPath — reveal-in-folder is a low-impact
+  // API but a compromised renderer should not get to navigate Explorer to
+  // arbitrary paths on disk.
+  try {
+    const safe = assertInsideAllowedRoots(fullPath);
+    shell.showItemInFolder(safe);
+  } catch { /* refused */ }
 });
 
 // Refuse the OS handler-launch surface for executable file types and UNC
