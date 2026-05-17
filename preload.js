@@ -102,6 +102,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setTerminalSettings: (settings) => ipcRenderer.invoke('config:setTerminalSettings', settings),
   readMcp: (projectPath) => ipcRenderer.invoke('mcp:read', projectPath),
   writeMcp: (projectPath, mcpServers) => ipcRenderer.invoke('mcp:write', projectPath, mcpServers),
+  listExtensions: (projectPath) => ipcRenderer.invoke('extensions:list', projectPath),
+  createExtension: (projectPath, category, name, scope) => ipcRenderer.invoke('extensions:create', projectPath, category, name, scope),
+  deleteExtension: (targetPath) => ipcRenderer.invoke('extensions:delete', targetPath),
+  listLayouts: (projectPath) => ipcRenderer.invoke('layouts:list', projectPath),
+  saveLayout: (projectPath, name, layout) => ipcRenderer.invoke('layouts:save', projectPath, name, layout),
+  deleteLayout: (projectPath, name) => ipcRenderer.invoke('layouts:delete', projectPath, name),
 
   // Automations
   getAutomations: () => ipcRenderer.invoke('automations:getAll'),

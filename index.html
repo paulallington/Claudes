@@ -906,6 +906,42 @@
   </div>
 
   <!-- Session Search Modal -->
+  <!-- Claude Code extensions manager (skills / agents / commands) -->
+  <div id="ext-modal" class="modal-overlay hidden">
+    <div class="modal-dialog endpoints-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Claude Code extensions</span>
+        <span class="modal-subtitle" id="ext-project-path"></span>
+        <span id="ext-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div class="ext-categories">
+          <div class="ext-cat" data-cat="agents">
+            <div class="ext-cat-header">
+              <span>Sub-agents <span class="ext-cat-hint">(.claude/agents/)</span></span>
+              <button class="settings-browse-btn ext-new" data-cat="agents" style="padding:2px 8px;">+ New</button>
+            </div>
+            <div class="ext-list" data-cat-list="agents"></div>
+          </div>
+          <div class="ext-cat" data-cat="skills">
+            <div class="ext-cat-header">
+              <span>Skills <span class="ext-cat-hint">(.claude/skills/&lt;name&gt;/SKILL.md)</span></span>
+              <button class="settings-browse-btn ext-new" data-cat="skills" style="padding:2px 8px;">+ New</button>
+            </div>
+            <div class="ext-list" data-cat-list="skills"></div>
+          </div>
+          <div class="ext-cat" data-cat="commands">
+            <div class="ext-cat-header">
+              <span>Slash commands <span class="ext-cat-hint">(.claude/commands/)</span></span>
+              <button class="settings-browse-btn ext-new" data-cat="commands" style="padding:2px 8px;">+ New</button>
+            </div>
+            <div class="ext-list" data-cat-list="commands"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- MCP server manager -->
   <div id="mcp-modal" class="modal-overlay hidden">
     <div class="modal-dialog endpoints-dialog">

@@ -890,6 +890,107 @@ function getActiveState() {
   return projectStates.get(activeProjectKey) || null;
 }
 
+// ============================================================
+// Named layouts (save / restore)
+// ============================================================
+
+// Snapshot the project's current row/column shape into a serialisable layout
+// payload. Sessions deliberately aren't captured — restoring spawns fresh
+// columns; the user can then use the recent-sessions picker per column to
+// reattach if desired.
+function snapshotProjectLayout(projectPath) {
+  var state = projectStates.get(projectPath);
+  if (!state) return { rows: [] };
+  return {
+    rows: state.rows.map(function (row) {
+      return {
+        columns: row.columnIds.map(function (id) {
+          var c = state.columns.get(id);
+          if (!c) return null;
+          return {
+            cmd: c.cmd || null,
+            cmdArgs: Array.isArray(c.cmdArgs) ? c.cmdArgs.filter(function (a) {
+              // Drop any resume arg pair — we want a fresh spawn.
+              return a !== '--resume' && (typeof a !== 'string' || !/^[0-9a-f-]{32,}$/i.test(a));
+            }) : [],
+            env: c.env || null,
+            endpointId: c.endpointId || null,
+            title: c.customTitle || null
+          };
+        }).filter(Boolean)
+      };
+    })
+  };
+}
+
+function saveCurrentLayout(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.saveLayout) return;
+  var name = prompt('Layout name:');
+  if (!name) return;
+  var snap = snapshotProjectLayout(projectPath);
+  if (snap.rows.length === 0) { alert('No columns to save.'); return; }
+  window.electronAPI.saveLayout(projectPath, name.trim(), snap).then(function (r) {
+    if (!r || !r.ok) alert('Save failed: ' + (r && r.error || 'unknown'));
+  });
+}
+
+function chooseLayoutToRestore(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.listLayouts) return;
+  window.electronAPI.listLayouts(projectPath).then(function (layouts) {
+    if (!layouts || layouts.length === 0) { alert('No saved layouts yet.'); return; }
+    // Quick chooser via prompt — keeps the implementation small. A proper
+    // modal would be nicer but the user can also right-click and pick the
+    // exact name; for power users this is unobtrusive.
+    var labels = layouts.map(function (l, i) { return (i + 1) + '. ' + l.name; }).join('\n');
+    var pick = prompt('Restore which layout?\n\n' + labels + '\n\nEnter number, or layout name to delete with prefix !del ');
+    if (!pick) return;
+    pick = pick.trim();
+    if (pick.startsWith('!del ')) {
+      var target = pick.slice(5).trim();
+      if (!confirm('Delete layout "' + target + '"?')) return;
+      window.electronAPI.deleteLayout(projectPath, target);
+      return;
+    }
+    var idx = parseInt(pick, 10) - 1;
+    var sel = !isNaN(idx) && layouts[idx] ? layouts[idx] : layouts.find(function (l) { return l.name === pick; });
+    if (!sel) { alert('No layout matched.'); return; }
+    restoreLayout(projectPath, sel.layout);
+  });
+}
+
+function restoreLayout(projectPath, layout) {
+  if (!layout || !Array.isArray(layout.rows)) return;
+  // Make sure we're operating on the target project's state.
+  var idx = -1;
+  for (var i = 0; i < config.projects.length; i++) {
+    if (config.projects[i].path === projectPath) { idx = i; break; }
+  }
+  if (idx < 0) return;
+  if (config.activeProjectIndex !== idx) {
+    setActiveProject(idx, false, true);
+  }
+  var state = getOrCreateProjectState(projectPath);
+  // Kill existing columns first so the restore yields exactly the saved shape.
+  var existingIds = [];
+  state.rows.forEach(function (r) { r.columnIds.forEach(function (cid) { existingIds.push(cid); }); });
+  existingIds.forEach(function (cid) { try { removeColumn(cid); } catch (e) { /* */ } });
+  // Spawn rows + columns. addColumn(args, row, opts) — with row=null it goes
+  // into the current row; with addRow() we create a new one.
+  layout.rows.forEach(function (rowSpec, rIdx) {
+    var row = rIdx === 0 ? null : addRow();
+    rowSpec.columns.forEach(function (colSpec) {
+      var opts = {
+        title: colSpec.title || null,
+        cmd: colSpec.cmd || null,
+        env: colSpec.env || null,
+        endpointId: colSpec.endpointId || null
+      };
+      var argList = colSpec.cmd ? (colSpec.cmdArgs || []) : null;
+      addColumn(argList, row, opts);
+    });
+  });
+}
+
 function refocusActiveTerminal() {
   var state = getActiveState();
   if (state && state.focusedColumnId !== null) {
@@ -1630,6 +1731,9 @@ function buildProjectItem(project, index) {
     }
     addMenuItem('Open in external editor', 'open-in-editor');
     addMenuItem('Manage MCP servers…', 'manage-mcp');
+    addMenuItem('Skills / agents / commands…', 'manage-ext');
+    addMenuItem('Save current layout…', 'layout-save');
+    addMenuItem('Restore layout…', 'layout-restore');
 
     // Sync entries — populated async so the labels reflect the current state.
     var syncDivider = document.createElement('div');
@@ -1705,6 +1809,12 @@ function buildProjectItem(project, index) {
         }
       } else if (action === 'manage-mcp') {
         openMcpModal(config.projects[projIndex].path);
+      } else if (action === 'manage-ext') {
+        openExtensionsModal(config.projects[projIndex].path);
+      } else if (action === 'layout-save') {
+        saveCurrentLayout(config.projects[projIndex].path);
+      } else if (action === 'layout-restore') {
+        chooseLayoutToRestore(config.projects[projIndex].path);
       }
       menu.style.display = 'none';
     };
@@ -13533,6 +13643,93 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
 
   // Pre-warm the cache so trigger expansion works immediately on app start
   refresh();
+})();
+
+(function setupExtensionsManager() {
+  var modal = document.getElementById('ext-modal');
+  if (!modal) return;
+  var closeBtn = document.getElementById('ext-close');
+  var pathLabel = document.getElementById('ext-project-path');
+  var currentProject = null;
+
+  function refresh() {
+    if (!currentProject || !window.electronAPI || !window.electronAPI.listExtensions) return;
+    window.electronAPI.listExtensions(currentProject).then(function (data) {
+      ['agents', 'skills', 'commands'].forEach(function (cat) {
+        var list = modal.querySelector('[data-cat-list="' + cat + '"]');
+        if (!list) return;
+        list.innerHTML = '';
+        var items = data[cat] || [];
+        if (items.length === 0) {
+          var none = document.createElement('div');
+          none.className = 'settings-hint';
+          none.style.padding = '8px';
+          none.textContent = 'None yet.';
+          list.appendChild(none);
+          return;
+        }
+        items.forEach(function (it) {
+          var row = document.createElement('div');
+          row.className = 'ext-row';
+          var label = document.createElement('span');
+          label.textContent = it.name;
+          var scope = document.createElement('span');
+          scope.className = 'ext-scope ext-scope-' + it.scope;
+          scope.textContent = it.scope;
+          var openBtn = document.createElement('button');
+          openBtn.className = 'settings-browse-btn';
+          openBtn.style.padding = '2px 8px';
+          openBtn.textContent = 'Edit';
+          openBtn.addEventListener('click', function () {
+            modal.classList.add('hidden');
+            openFileEditor(it.path);
+          });
+          var delBtn = document.createElement('button');
+          delBtn.className = 'settings-browse-btn';
+          delBtn.style.padding = '2px 8px';
+          delBtn.style.color = '#f87171';
+          delBtn.textContent = '×';
+          delBtn.addEventListener('click', function () {
+            if (!confirm('Delete ' + it.name + ' (' + it.scope + ')?')) return;
+            window.electronAPI.deleteExtension(it.path).then(function (r) {
+              if (!r || !r.ok) alert('Delete failed: ' + (r && r.error || 'unknown'));
+              refresh();
+            });
+          });
+          row.appendChild(label);
+          row.appendChild(scope);
+          row.appendChild(openBtn);
+          row.appendChild(delBtn);
+          list.appendChild(row);
+        });
+      });
+    });
+  }
+
+  modal.querySelectorAll('.ext-new').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var cat = btn.dataset.cat;
+      var scope = confirm('Create in PROJECT scope (.claude/' + cat + '/)?\n\nOK = project, Cancel = global (~/.claude/' + cat + '/)') ? 'project' : 'global';
+      var name = prompt('Name for new ' + cat.slice(0, -1) + ' (alphanumeric, _ . - allowed):');
+      if (!name) return;
+      window.electronAPI.createExtension(currentProject, cat, name.trim(), scope).then(function (r) {
+        if (!r || !r.ok) { alert('Create failed: ' + (r && r.error || 'unknown')); return; }
+        refresh();
+        modal.classList.add('hidden');
+        openFileEditor(r.path);
+      });
+    });
+  });
+
+  if (closeBtn) closeBtn.addEventListener('click', function () { modal.classList.add('hidden'); });
+  modal.addEventListener('click', function (e) { if (e.target === modal) modal.classList.add('hidden'); });
+
+  window.openExtensionsModal = function (projPath) {
+    currentProject = projPath || null;
+    pathLabel.textContent = projPath ? (projPath + ' + ~/.claude/') : '~/.claude/';
+    modal.classList.remove('hidden');
+    refresh();
+  };
 })();
 
 (function setupMcpManager() {

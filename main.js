@@ -1417,6 +1417,42 @@ ipcMain.handle('sessions:load', (event, projectPath) => {
   }
 });
 
+// --- Named layouts (per project, persisted in projects.json) ---
+//
+// A layout snapshot is the user's chosen arrangement of rows / columns for a
+// project: how many columns, what each spawns (claude vs custom cmd), the env
+// it carries (endpoint preset, model), and any column title. Restoring a
+// layout re-spawns those columns in the same shape — useful for "investigate
+// bug X" vs "review PRs" workflows.
+
+function listLayouts(projectPath) {
+  const cfg = readConfig();
+  const proj = (cfg.projects || []).find(p => p && p.path === projectPath);
+  return (proj && Array.isArray(proj.layouts)) ? proj.layouts : [];
+}
+function saveLayouts(projectPath, layouts) {
+  const cfg = readConfig();
+  const proj = (cfg.projects || []).find(p => p && p.path === projectPath);
+  if (!proj) return false;
+  proj.layouts = Array.isArray(layouts) ? layouts : [];
+  writeConfig(cfg);
+  return true;
+}
+
+ipcMain.handle('layouts:list', (event, projectPath) => listLayouts(projectPath));
+ipcMain.handle('layouts:save', (event, projectPath, name, layout) => {
+  if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'name required' };
+  if (!layout || typeof layout !== 'object') return { ok: false, error: 'layout required' };
+  const existing = listLayouts(projectPath);
+  const next = existing.filter(l => l.name !== name);
+  next.push({ name: name.trim(), savedAt: Date.now(), layout });
+  return { ok: saveLayouts(projectPath, next) };
+});
+ipcMain.handle('layouts:delete', (event, projectPath, name) => {
+  const existing = listLayouts(projectPath);
+  return { ok: saveLayouts(projectPath, existing.filter(l => l.name !== name)) };
+});
+
 // --- MCP server config (.mcp.json) ---
 //
 // .mcp.json lives at the project root and follows the Claude Code schema:
@@ -1452,6 +1488,111 @@ ipcMain.handle('mcp:write', (event, projectPath, mcpServers) => {
   } catch (err) {
     return { ok: false, error: err && err.message };
   }
+});
+
+// --- Claude Code extensions discovery ---
+// Lists files under .claude/{agents,skills,commands} both project-local and
+// global (~/.claude). The renderer uses this to surface a unified manager UI
+// without each request scanning each scope separately.
+ipcMain.handle('extensions:list', (event, projectPath) => {
+  const out = { agents: [], skills: [], commands: [] };
+
+  function scanScope(baseDir, scope) {
+    function scanCategory(category) {
+      const dir = path.join(baseDir, category);
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch { return; }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          // skills/<name>/SKILL.md style
+          const skillFile = path.join(full, 'SKILL.md');
+          if (fs.existsSync(skillFile)) {
+            out[category].push({ name: e.name, path: skillFile, scope });
+            continue;
+          }
+          // commands can also be nested directories (subdirs of namespaced commands)
+          try {
+            const inner = fs.readdirSync(full, { withFileTypes: true });
+            for (const i of inner) {
+              if (i.isFile() && (i.name.endsWith('.md') || i.name.endsWith('.json'))) {
+                out[category].push({ name: e.name + '/' + i.name.replace(/\.(md|json)$/, ''), path: path.join(full, i.name), scope });
+              }
+            }
+          } catch { /* unreadable */ }
+        } else if (e.isFile() && (e.name.endsWith('.md') || e.name.endsWith('.json'))) {
+          out[category].push({ name: e.name.replace(/\.(md|json)$/, ''), path: full, scope });
+        }
+      }
+    }
+    scanCategory('agents');
+    scanCategory('skills');
+    scanCategory('commands');
+  }
+
+  // Global first so project entries shadow global ones with the same name in
+  // the renderer's grouping. .claude is always an allowed root.
+  scanScope(path.join(os.homedir(), '.claude'), 'global');
+  try {
+    if (projectPath) {
+      const safe = assertInsideAllowedRoots(projectPath);
+      scanScope(path.join(safe, '.claude'), 'project');
+    }
+  } catch { /* project scope unavailable */ }
+  return out;
+});
+
+// Create a new extension file from a tiny template so the manager UI can
+// produce something the user can immediately edit.
+ipcMain.handle('extensions:create', (event, projectPath, category, name, scope) => {
+  if (!['agents', 'skills', 'commands'].includes(category)) return { ok: false, error: 'bad category' };
+  if (typeof name !== 'string' || !/^[A-Za-z0-9_.\-]+$/.test(name)) {
+    return { ok: false, error: 'invalid name' };
+  }
+  let baseDir;
+  if (scope === 'global') baseDir = path.join(os.homedir(), '.claude');
+  else {
+    try { baseDir = path.join(assertInsideAllowedRoots(projectPath), '.claude'); }
+    catch { return { ok: false, error: 'project path not allowed' }; }
+  }
+  const dir = path.join(baseDir, category);
+  let filePath;
+  let content;
+  if (category === 'skills') {
+    filePath = path.join(dir, name, 'SKILL.md');
+    content = '---\nname: ' + name + '\ndescription: A short summary of when to use this skill.\n---\n\n# ' + name + '\n\nReplace this with the skill body.\n';
+    try { fs.mkdirSync(path.dirname(filePath), { recursive: true }); }
+    catch { /* exists */ }
+  } else {
+    filePath = path.join(dir, name + '.md');
+    content = category === 'agents'
+      ? '---\nname: ' + name + '\ndescription: Triggered when the user wants…\nmodel: sonnet\n---\n\nYou are a focused sub-agent that…\n'
+      : '# /' + name + '\n\nReplace this with the slash-command body. The user invokes it as `/' + name + '` from the chat.\n';
+    try { fs.mkdirSync(dir, { recursive: true }); }
+    catch { /* exists */ }
+  }
+  if (fs.existsSync(filePath)) return { ok: false, error: 'already exists', path: filePath };
+  try { fs.writeFileSync(filePath, content, 'utf8'); }
+  catch (err) { return { ok: false, error: err && err.message }; }
+  return { ok: true, path: filePath };
+});
+
+ipcMain.handle('extensions:delete', (event, targetPath) => {
+  let safe;
+  try { safe = assertInsideAllowedRoots(targetPath); }
+  catch { return { ok: false, error: 'forbidden' }; }
+  // Only allow under a .claude/ directory — extra guard so a compromised
+  // renderer can't ask us to delete arbitrary files via this IPC.
+  if (!/[\\/]\.claude[\\/]/.test(safe)) return { ok: false, error: 'not inside .claude' };
+  try {
+    const st = fs.statSync(safe);
+    if (st.isDirectory()) fs.rmSync(safe, { recursive: true, force: true });
+    else fs.unlinkSync(safe);
+  } catch (err) {
+    return { ok: false, error: err && err.message };
+  }
+  return { ok: true };
 });
 
 // --- CLAUDE.md Management ---
