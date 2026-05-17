@@ -7056,3 +7056,57 @@ body.mode-popout #btn-add-project {
   margin: 0 0 12px 0;
   line-height: 1.4;
 }
+
+/* In-terminal find overlay (Ctrl/Cmd+F). Floats top-right of the terminal
+   wrapper so it never obscures the cursor area, semi-transparent so the
+   matched line behind it remains visible. */
+.terminal-wrapper { position: relative; }
+.term-search-overlay {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(20, 22, 36, 0.95);
+  border: 1px solid #3a3a52;
+  border-radius: 6px;
+  padding: 4px 6px;
+  z-index: 20;
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.term-search-overlay.hidden { display: none; }
+.term-search-input {
+  background: #0f0f1f;
+  border: 1px solid #2a2a3c;
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 3px 8px;
+  width: 180px;
+  font-size: 12px;
+  outline: none;
+}
+.term-search-input:focus { border-color: #6366f1; }
+.term-search-count { color: #6b7280; padding: 0 4px; font-size: 11px; min-width: 48px; text-align: center; }
+.term-search-btn {
+  background: transparent;
+  border: none;
+  color: #cbd5e1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.term-search-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
+
+/* Header clear-terminal button — same shape as the restart pill. */
+.col-clear {
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+  user-select: none;
+}
+.col-clear:hover { background: rgba(255,255,255,0.06); color: #e5e7eb; }

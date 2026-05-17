@@ -2441,6 +2441,19 @@ function createColumnHeader(id, customTitle, opts) {
     restartBtn.title = 'Restart';
     restartBtn.textContent = '↻';
     actions.appendChild(restartBtn);
+
+    // Clear scrollback — saves typing `clear` when triaging long sessions.
+    var clearBtn = document.createElement('span');
+    clearBtn.className = 'col-clear';
+    clearBtn.dataset.id = String(id);
+    clearBtn.title = 'Clear terminal';
+    clearBtn.textContent = '⌫';
+    clearBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var c = allColumns.get(id);
+      if (c && c.terminal) c.terminal.clear();
+    });
+    actions.appendChild(clearBtn);
   }
 
   var maximizeBtn = document.createElement('span');
@@ -2650,6 +2663,18 @@ function addColumn(args, targetRow, opts) {
     }
   });
 
+  // In-terminal find overlay (Ctrl/Cmd+F). Built once per column; hidden by
+  // default. Wired below once SearchAddon is loaded.
+  var searchOverlay = document.createElement('div');
+  searchOverlay.className = 'term-search-overlay hidden';
+  searchOverlay.innerHTML =
+    '<input type="text" class="term-search-input" placeholder="Find..." autocomplete="off" spellcheck="false">' +
+    '<span class="term-search-count">0/0</span>' +
+    '<button type="button" class="term-search-btn term-search-prev" title="Previous (Shift+Enter)">↑</button>' +
+    '<button type="button" class="term-search-btn term-search-next" title="Next (Enter)">↓</button>' +
+    '<button type="button" class="term-search-btn term-search-close" title="Close (Esc)">✕</button>';
+  termWrapper.appendChild(searchOverlay);
+
   col.appendChild(header);
   if (endpointBanner) col.appendChild(endpointBanner);
   col.appendChild(termWrapper);
@@ -2683,8 +2708,60 @@ function addColumn(args, targetRow, opts) {
 
   var fitAddon = new FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
+  var searchAddon = null;
+  try {
+    if (typeof SearchAddon !== 'undefined' && SearchAddon.SearchAddon) {
+      searchAddon = new SearchAddon.SearchAddon();
+      terminal.loadAddon(searchAddon);
+    }
+  } catch (e) { /* addon optional */ }
+  try {
+    if (typeof WebLinksAddon !== 'undefined' && WebLinksAddon.WebLinksAddon) {
+      terminal.loadAddon(new WebLinksAddon.WebLinksAddon(function (event, uri) {
+        if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal(uri);
+      }));
+    }
+  } catch (e) { /* addon optional */ }
   terminal.open(termWrapper);
   try { terminal.loadAddon(new WebglAddon.WebglAddon()); } catch (e) { console.warn('WebGL addon failed, using canvas renderer:', e); }
+
+  // File:line link provider — clicking e.g. `src/foo.js:42` (or an absolute
+  // path) opens the file in the inline editor, focused on that line. Skipped
+  // when the terminal is hosting a custom command (cmd) since the matched
+  // text may not refer to a local file.
+  if (terminal.registerLinkProvider) {
+    try {
+      var fileLineRe = /(?:^|[\s"'`(\[<])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[\\/])?[\w.\-+]+(?:[\\/][\w.\-+]+)*)\s*:(\d+)(?::(\d+))?/g;
+      terminal.registerLinkProvider({
+        provideLinks: function (lineNo, callback) {
+          var line = terminal.buffer.active.getLine(lineNo - 1);
+          if (!line) return callback(undefined);
+          var text = line.translateToString(true);
+          var links = [];
+          var m;
+          fileLineRe.lastIndex = 0;
+          while ((m = fileLineRe.exec(text)) !== null) {
+            // Skip matches that look like ratios (e.g. "1:1000" inside word context)
+            var p = m[1]; var ln = m[2];
+            if (!p || p.length > 260) continue;
+            var startCol = m.index + (m[0].length - p.length - (':' + ln + (m[3] ? ':' + m[3] : '')).length) + 1;
+            var range = {
+              start: { x: startCol, y: lineNo },
+              end:   { x: startCol + p.length + (':' + ln).length + (m[3] ? ':' + m[3] : '').length - 1, y: lineNo }
+            };
+            links.push({
+              range: range,
+              text: p + ':' + ln + (m[3] ? ':' + m[3] : ''),
+              activate: (function (relPath, lineN) {
+                return function () { openFileAtLine(relPath, parseInt(lineN, 10)); };
+              })(p, ln)
+            });
+          }
+          callback(links.length ? links : undefined);
+        }
+      });
+    } catch (e) { /* link provider optional */ }
+  }
 
   // Show/hide scroll-to-bottom button based on scroll position
   terminal.onScroll(function () {
@@ -2878,6 +2955,8 @@ function addColumn(args, targetRow, opts) {
     element: col,
     terminal: terminal,
     fitAddon: fitAddon,
+    searchAddon: searchAddon,
+    searchOverlay: searchOverlay,
     headerEl: header,
     cwd: cwd,
     projectKey: activeProjectKey,
@@ -2918,6 +2997,7 @@ function addColumn(args, targetRow, opts) {
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
+  attachTerminalSearchOverlay(colData);
   colData.deltaSessionEl = header.querySelector('[data-col-delta]');
   colData.ctxMeterEl = header.querySelector('[data-col-ctx]');
   colData.ctxFillEl = colData.ctxMeterEl ? colData.ctxMeterEl.querySelector('.col-ctx-fill') : null;
@@ -3888,6 +3968,66 @@ function toggleMaximizeColumn(id) {
 }
 
 // ============================================================
+// Per-terminal Ctrl/Cmd+F find overlay
+// ============================================================
+
+function attachTerminalSearchOverlay(col) {
+  if (!col || !col.searchOverlay || !col.terminal) return;
+  var overlay = col.searchOverlay;
+  var input = overlay.querySelector('.term-search-input');
+  var countEl = overlay.querySelector('.term-search-count');
+  var prevBtn = overlay.querySelector('.term-search-prev');
+  var nextBtn = overlay.querySelector('.term-search-next');
+  var closeBtn = overlay.querySelector('.term-search-close');
+  var addon = col.searchAddon;
+
+  function show() {
+    overlay.classList.remove('hidden');
+    input.focus();
+    input.select();
+  }
+  function hide() {
+    overlay.classList.add('hidden');
+    if (addon && addon.clearDecorations) addon.clearDecorations();
+    try { col.terminal.focus(); } catch (e) { /* */ }
+  }
+  function search(dir) {
+    var q = input.value;
+    if (!q) { countEl.textContent = '0/0'; if (addon && addon.clearDecorations) addon.clearDecorations(); return; }
+    if (!addon) return;
+    var opts = {
+      decorations: {
+        matchBackground: '#3b82f680',
+        matchBorder: '#60a5fa',
+        matchOverviewRuler: '#60a5fa',
+        activeMatchBackground: '#f59e0b80',
+        activeMatchBorder: '#fbbf24',
+        activeMatchColorOverviewRuler: '#fbbf24'
+      },
+      regex: false,
+      wholeWord: false,
+      caseSensitive: false
+    };
+    var found = dir === -1
+      ? (addon.findPrevious ? addon.findPrevious(q, opts) : false)
+      : (addon.findNext ? addon.findNext(q, opts) : false);
+    countEl.textContent = found ? 'match' : 'no match';
+  }
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { e.preventDefault(); hide(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); search(e.shiftKey ? -1 : 1); return; }
+  });
+  input.addEventListener('input', function () { search(1); });
+  prevBtn.addEventListener('click', function () { search(-1); });
+  nextBtn.addEventListener('click', function () { search(1); });
+  closeBtn.addEventListener('click', hide);
+
+  col._showSearch = show;
+  col._hideSearch = hide;
+}
+
+// ============================================================
 // Resize Handles (columns)
 // ============================================================
 
@@ -4283,6 +4423,20 @@ document.addEventListener('keydown', function (e) {
     e.preventDefault();
     resetFontSize();
     return;
+  }
+  // Cmd/Ctrl+F: open in-terminal find. Falls through if any modal-bound
+  // editor handler already consumed it (those run on the textarea, not
+  // document, and stopPropagation in their listeners prevents re-entry here).
+  if (mod && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+    var st = getActiveState();
+    if (st && st.focusedColumnId !== null) {
+      var c = allColumns.get(st.focusedColumnId);
+      if (c && typeof c._showSearch === 'function') {
+        e.preventDefault();
+        c._showSearch();
+        return;
+      }
+    }
   }
 });
 
@@ -7633,7 +7787,7 @@ var fileEditorStatus = document.getElementById('fileeditor-status');
 var fileEditorCurrentPath = null;
 var fileEditorOriginal = '';
 
-function openFileEditor(filePath) {
+function openFileEditor(filePath, jumpToLine) {
   if (!window.electronAPI) return;
 
   var name = filePath.replace(/\\/g, '/').split('/').pop();
@@ -7660,8 +7814,49 @@ function openFileEditor(filePath) {
       updateCursorPos();
       fileEditorEditor.scrollTop = 0;
       syncGutterScroll();
+      if (jumpToLine && jumpToLine > 1) jumpEditorToLine(jumpToLine);
     }
   });
+}
+
+// Place the textarea cursor at the start of the requested 1-based line and
+// scroll the line into view. Used by terminal link clicks like `foo.js:42`.
+function jumpEditorToLine(line) {
+  var text = fileEditorEditor.value;
+  var idx = 0;
+  var current = 1;
+  while (current < line) {
+    var nl = text.indexOf('\n', idx);
+    if (nl === -1) break;
+    idx = nl + 1;
+    current++;
+  }
+  fileEditorEditor.focus();
+  fileEditorEditor.setSelectionRange(idx, idx);
+  // Approximate scroll: textarea rows aren't directly addressable, but
+  // setSelectionRange + a small scroll bump pulls the cursor into view.
+  var lineHeight = parseInt(getComputedStyle(fileEditorEditor).lineHeight, 10) || 18;
+  fileEditorEditor.scrollTop = Math.max(0, (line - 3) * lineHeight);
+  if (typeof syncGutterScroll === 'function') syncGutterScroll();
+}
+
+// Resolve a terminal-emitted file:line click against the column's cwd, then
+// open the inline editor focused on that line. Skips absolute paths that
+// fall outside the project (main rejects them anyway).
+function openFileAtLine(relPath, line) {
+  if (!relPath) return;
+  // Find the focused column's cwd to resolve relative paths.
+  var cwd = null;
+  try {
+    var st = getActiveState();
+    if (st && st.focusedColumnId !== null) {
+      var c = allColumns.get(st.focusedColumnId);
+      if (c) cwd = c.cwd || null;
+    }
+  } catch (e) { /* no focused column */ }
+  var isAbsolute = /^([A-Za-z]:[\\/]|[\\/])/.test(relPath);
+  var full = isAbsolute ? relPath : (cwd ? (cwd.replace(/[\\/]$/, '') + '/' + relPath) : relPath);
+  openFileEditor(full, line);
 }
 
 function closeFileEditor() {
