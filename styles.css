@@ -187,10 +187,12 @@ html, body {
 }
 
 /* macOS traffic-light buttons sit at the window's top-left under
-   titleBarStyle:'hidden' — push the sidebar header down so they don't
-   overlap the "PROJECTS" row or the resort toggle. */
+   titleBarStyle:'hidden' (top:~13px, ~70px wide). Reserve enough top
+   space that the "PROJECTS" label clears them both vertically and that
+   the resort toggle on the right has breathing room. */
 html[data-platform="darwin"] .sidebar-header {
-  margin-top: 24px;
+  margin-top: 32px;
+  padding-top: 4px;
 }
 
 .sidebar-header-actions {
