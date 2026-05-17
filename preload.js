@@ -202,5 +202,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Manual update check (toolbar menu → "Check for updates")
   checkForUpdates: () => ipcRenderer.invoke('update:checkNow'),
-  onUpdateNone: (callback) => ipcRenderer.on('update:none', (_, info) => callback(info))
+  onUpdateNone: (callback) => ipcRenderer.on('update:none', (_, info) => callback(info)),
+
+  // Clawd widget — per-column JSONL tail driving the animation
+  clawdStartTail: (columnId, projectPath, sessionId) => ipcRenderer.invoke('clawd:startTail', { columnId, projectPath, sessionId }),
+  clawdStopTail: (columnId) => ipcRenderer.invoke('clawd:stopTail', { columnId }),
+  onClawdEvent: (callback) => ipcRenderer.on('clawd:event', (_, data) => callback(data))
 });

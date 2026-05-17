@@ -224,11 +224,6 @@
               <button class="toolbar-menu-item" id="btn-settings">Settings</button>
               <button class="toolbar-menu-item" id="btn-check-updates">Check for updates</button>
               <div class="spawn-divider"></div>
-              <label class="toolbar-menu-item toolbar-menu-row clawd-toggle-row" for="clawd-toggle">
-                <span>Clawd <small class="clawd-toggle-tag">experimental</small></span>
-                <input type="checkbox" id="clawd-toggle">
-              </label>
-              <div class="spawn-divider"></div>
               <div class="toolbar-menu-item toolbar-menu-row">
                 <span>Theme</span>
                 <select id="theme-select" class="theme-select" title="Theme">
@@ -386,6 +381,7 @@
           <button class="settings-tab" data-settings-tab="sync" role="tab">Sync</button>
           <button class="settings-tab" data-settings-tab="terminal" role="tab">Terminal</button>
           <button class="settings-tab" data-settings-tab="tools" role="tab">Tools</button>
+          <button class="settings-tab" data-settings-tab="clawd" role="tab">Clawd</button>
         </div>
         <div class="settings-panes">
           <div class="settings-pane active" data-settings-pane="general">
@@ -499,6 +495,62 @@
                 <span>Auto-run <code>claude update</code> on launch</span>
               </label>
               <span class="settings-hint">Off by default — only enable if you trust your PATH (the first <code>claude</code> on PATH will be invoked unprompted at every app launch).</span>
+            </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="clawd">
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-clawd-enabled">
+              <span>Show Clawd</span>
+            </label>
+            <span class="settings-hint">A friendly animated crab that lives in the corner. Each column has its own animation, driven by Claude's actual activity in that session; the widget cross-fades when you switch focus. Left-click the crab to see what state it's in. Drag to reposition.</span>
+            <div class="settings-field">
+              <label for="setting-clawd-size">Size</label>
+              <div class="clawd-size-row">
+                <input type="range" id="setting-clawd-size" min="80" max="400" step="10" value="180">
+                <span id="setting-clawd-size-val" class="settings-hint" style="min-width:48px; text-align:right;">180px</span>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label>What the animations mean</label>
+              <div class="clawd-legend">
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-idle-living.svg" alt="">
+                  <div><strong>Idle</strong><span>Claude is waiting for your next prompt</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-thinking.svg" alt="">
+                  <div><strong>Thinking</strong><span>Claude is processing your prompt</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-typing.svg" alt="">
+                  <div><strong>Typing</strong><span>Editing files &mdash; Edit, Write, MultiEdit, NotebookEdit</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-debugger.svg" alt="">
+                  <div><strong>Debugger</strong><span>Reading and searching &mdash; Read, Grep, Glob</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-building.svg" alt="">
+                  <div><strong>Building</strong><span>Running shell commands &mdash; Bash, BashOutput</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-wizard.svg" alt="">
+                  <div><strong>Wizard</strong><span>Browsing the web &mdash; WebSearch, WebFetch</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-conducting.svg" alt="">
+                  <div><strong>Conducting</strong><span>Orchestrating subagents &mdash; Agent, Task</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-beacon.svg" alt="">
+                  <div><strong>Beacon</strong><span>Talking to MCP servers or LSP</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-disconnected.svg" alt="">
+                  <div><strong>Disconnected</strong><span>The column's terminal process has exited</span></div>
+                </div>
+              </div>
+              <span class="settings-hint">Animations are from <a href="https://github.com/marciogranzotto/clawd-tank" id="clawd-upstream-link">clawd-tank</a> by Marcio Granzotto (MIT). Synced from upstream commit <code>6f0093b</code>.</span>
             </div>
           </div>
           <div class="settings-pane" data-settings-pane="sync">
