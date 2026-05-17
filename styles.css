@@ -7341,3 +7341,64 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
   font-size: 12px;
   resize: vertical;
 }
+
+/* ---------- Clawd widget (experimental) ---------- */
+.clawd-widget {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 120px;
+  height: 120px;
+  z-index: 9000;
+  pointer-events: auto;
+  user-select: none;
+  cursor: grab;
+  filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.5));
+  transition: opacity 200ms ease-in-out;
+}
+.clawd-widget.hidden { display: none; }
+.clawd-widget.dragging { cursor: grabbing; transition: none; }
+.clawd-widget-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  -webkit-user-drag: none;
+  transition: opacity 250ms ease-in-out;
+}
+.clawd-widget-img.fading { opacity: 0; }
+.clawd-widget-bubble {
+  position: absolute;
+  bottom: 100%;
+  right: 8px;
+  margin-bottom: 6px;
+  background: #2a2a3e;
+  color: #e0e0f0;
+  border: 1px solid #3a3a5e;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 150ms, transform 150ms;
+}
+.clawd-widget-bubble:not(.hidden) {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+body.light-theme .clawd-widget-bubble {
+  background: #ffffff;
+  color: #1a1a2e;
+  border-color: #d0d0e0;
+}
+
+.clawd-toggle-row { cursor: pointer; }
+.clawd-toggle-row input[type="checkbox"] { cursor: pointer; }
+.clawd-toggle-tag {
+  opacity: 0.55;
+  font-size: 0.78em;
+  margin-left: 4px;
+  font-style: italic;
+}

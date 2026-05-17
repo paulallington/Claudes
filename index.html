@@ -224,6 +224,11 @@
               <button class="toolbar-menu-item" id="btn-settings">Settings</button>
               <button class="toolbar-menu-item" id="btn-check-updates">Check for updates</button>
               <div class="spawn-divider"></div>
+              <label class="toolbar-menu-item toolbar-menu-row clawd-toggle-row" for="clawd-toggle">
+                <span>Clawd <small class="clawd-toggle-tag">experimental</small></span>
+                <input type="checkbox" id="clawd-toggle">
+              </label>
+              <div class="spawn-divider"></div>
               <div class="toolbar-menu-item toolbar-menu-row">
                 <span>Theme</span>
                 <select id="theme-select" class="theme-select" title="Theme">
@@ -1226,6 +1231,11 @@
   <script src="./node_modules/prismjs/components/prism-go.min.js"></script>
   <script src="./node_modules/prismjs/components/prism-css.min.js"></script>
   <script src="./node_modules/prismjs/components/prism-markdown.min.js"></script>
+  <div id="clawd-widget" class="clawd-widget hidden" aria-hidden="true">
+    <img id="clawd-widget-img" class="clawd-widget-img" alt="" draggable="false">
+    <div id="clawd-widget-bubble" class="clawd-widget-bubble hidden"></div>
+  </div>
+  <script src="./lib/clawd-widget.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>
