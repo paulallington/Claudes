@@ -7376,6 +7376,16 @@ if (window.electronAPI && window.electronAPI.onFsChanged) {
 // second per column and a curl-spawn-driven feedback loop on busy turns.
 var clawdHookSeenBySession = Object.create(null);
 
+// Pending PostToolUse → thinking transitions. Without this, a tool chain
+// (Edit, Read, Edit) would flash 'thinking' between each tool. Any later
+// hook event for the same column cancels the pending commit so the chain
+// stays visually on a work animation.
+var clawdPostToolPending = new Map(); // colId -> { timer }
+function clearClawdPostTool(colId) {
+  var p = clawdPostToolPending.get(colId);
+  if (p) { clearTimeout(p.timer); clawdPostToolPending.delete(colId); }
+}
+
 // Resolve which column a hook event belongs to. Two cases:
 //
 //  1. sessionId match — the column owns this exact session. Normal path.
@@ -7447,9 +7457,28 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
     if (event.matcher === 'idle_prompt' || event.matcher === 'permission_prompt') {
       setActivity(colId, 'waiting');
     }
+    // Any incoming event for this column supersedes a pending post-tool
+    // transition — keeps tool chains from flashing 'thinking' between tools.
+    clearClawdPostTool(colId);
     var animId = null;
     if (evtName === 'UserPromptSubmit') animId = 'thinking';
     else if (evtName === 'PreToolUse') animId = clawdAnimationForTool(event.tool_name);
+    else if (evtName === 'PostToolUse') {
+      // Deferred commit: if no other event arrives within 250ms, leave the
+      // tool animation and park on 'thinking' (Claude is processing the
+      // result). This is also the safety net for dropped Stop hooks — we
+      // never get stuck on a work animation after a tool actually finished.
+      var pendingTimer = setTimeout(function () {
+        clawdPostToolPending.delete(colId);
+        if (window.Clawd && window.Clawd.setColumnAnimation) {
+          window.Clawd.setColumnAnimation(colId, 'thinking');
+        }
+        if (window.Clawd && window.Clawd.logHookEvent) {
+          window.Clawd.logHookEvent({ col: colId, event: 'PostToolUse(commit)', tool: event.tool_name || '', matcher: '', anim: 'thinking' });
+        }
+      }, 250);
+      clawdPostToolPending.set(colId, { timer: pendingTimer });
+    }
     else if (evtName === 'Stop' || evtName === 'SubagentStop') {
       // Only the primary-session Stop ends a turn for the widget. A
       // subagent's SubagentStop firing while the parent is still working
@@ -7483,6 +7512,32 @@ if (window.electronAPI && window.electronAPI.getHookServerPort) {
     if (port) console.log('[hooks] Hook server at http://127.0.0.1:' + port + '/hook');
   });
 }
+
+// Manual recovery for the case where a hook gets dropped (e.g. PostToolUse
+// never arrives) and Clawd is parked on a stale tool animation. Resets every
+// column to idle as a safe baseline and re-arms the JSONL tail so the
+// fallback resumes — the next real activity will set the correct state.
+function clawdForceRefresh() {
+  if (typeof allColumns === 'undefined' || !allColumns || !allColumns.forEach) return;
+  var resetCount = 0;
+  allColumns.forEach(function (col, id) {
+    if (col && col.sessionId) clawdHookSeenBySession[col.sessionId] = false;
+    if (col) col.clawdTailSessionId = null;
+    if (window.Clawd && window.Clawd.setColumnAnimation) {
+      window.Clawd.setColumnAnimation(id, 'idle');
+    }
+    if (typeof ensureClawdTail === 'function') ensureClawdTail(id);
+    resetCount++;
+  });
+  if (window.Clawd && window.Clawd.logHookEvent) {
+    window.Clawd.logHookEvent({ col: null, event: 'manual-refresh', tool: '', matcher: '', anim: 'idle (x' + resetCount + ')' });
+  }
+}
+
+(function () {
+  var btn = document.getElementById('clawd-debug-refresh');
+  if (btn) btn.addEventListener('click', clawdForceRefresh);
+})();
 
 // ============================================================
 // Init
@@ -9857,10 +9912,31 @@ startPlanLimitsPolling();
   if (mini) mini.addEventListener('click', openUsageModal);
 })();
 
-// Live-update the hover popover's content whenever new plan-limits data
-// arrives. Popover is a child of #plan-limits-mini and is shown via CSS
-// :hover — no JS event listener required, which sidesteps any pointer-event
-// or stacking-context issue blocking mouseenter on the parent.
+// JS-managed open/close for the plan-limits popover. CSS :hover used to do
+// this, but the bar and the popover are separated by the sidebar resize
+// handle (a sibling div), so any cursor traversal across it broke :hover.
+// A small grace timer here keeps the popover open while the cursor is on
+// either the bar OR the popover, regardless of what sits between them.
+var planLimitsHoverHide = null;
+function wirePlanLimitsPopoverHover(miniEl, popEl) {
+  function show() {
+    if (planLimitsHoverHide) { clearTimeout(planLimitsHoverHide); planLimitsHoverHide = null; }
+    popEl.classList.add('show');
+  }
+  function hideSoon() {
+    if (planLimitsHoverHide) clearTimeout(planLimitsHoverHide);
+    planLimitsHoverHide = setTimeout(function () {
+      popEl.classList.remove('show');
+      planLimitsHoverHide = null;
+    }, 180);
+  }
+  miniEl.addEventListener('mouseenter', show);
+  miniEl.addEventListener('mouseleave', hideSoon);
+  popEl.addEventListener('mouseenter', show);
+  popEl.addEventListener('mouseleave', hideSoon);
+}
+
+// Live-update the popover's content whenever new plan-limits data arrives.
 function updatePlanLimitsPopover() {
   var mini = document.getElementById('plan-limits-mini');
   if (!mini) return;
@@ -9869,6 +9945,7 @@ function updatePlanLimitsPopover() {
     pop = document.createElement('div');
     pop.className = 'plan-limits-mini-popover';
     mini.appendChild(pop);
+    wirePlanLimitsPopoverHover(mini, pop);
   }
   function fmtSlot(label, slot) {
     if (!slot) return '';
@@ -9889,12 +9966,13 @@ function updatePlanLimitsPopover() {
     return html;
   }
   var d = lastGoodPlanLimitsData;
-  var inner = '';
+  var slots = '';
   if (d) {
-    inner += fmtSlot('Session', d.five_hour);
-    inner += fmtSlot('Week', d.seven_day);
+    slots += fmtSlot('Session', d.five_hour);
+    slots += fmtSlot('Week', d.seven_day);
   }
-  if (!inner) inner = '<div class="plan-limits-popover-sub">Loading usage…</div>';
+  if (!slots) slots = '<div class="plan-limits-popover-sub">Loading usage…</div>';
+  var inner = slots;
   // Surface why the bar might look frozen — rate-limited polls keep the
   // last-good values on screen with a `.stale` class on the mini bar.
   var lr = lastPlanLimitsResult;
@@ -9904,8 +9982,32 @@ function updatePlanLimitsPopover() {
     inner += '<div class="plan-limits-popover-sub">Rate-limited' +
       (ageLabel ? ' — last good ' + ageLabel : '') + '</div>';
   }
-  inner += '<div class="plan-limits-popover-hint">Click for full usage</div>';
+  // Footer row: full-usage hint on the left, refresh button on the right.
+  // Placing it at the bottom of the popover keeps the button close to the
+  // mini bar so the cursor doesn't have to traverse the whole popover and
+  // risk dismissing the :hover before it lands on the button.
+  inner += '<div class="plan-limits-popover-footer">' +
+    '<span class="plan-limits-popover-hint">Click for full usage</span>' +
+    '<button type="button" class="plan-limits-popover-refresh" ' +
+    'data-role="plan-limits-refresh" title="Force refresh">↻</button>' +
+    '</div>';
   pop.innerHTML = inner;
+  if (!pop.dataset.refreshWired) {
+    pop.dataset.refreshWired = '1';
+    pop.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t || !t.dataset || t.dataset.role !== 'plan-limits-refresh') return;
+      e.stopPropagation();
+      e.preventDefault();
+      t.disabled = true;
+      t.classList.add('spinning');
+      Promise.resolve(loadPlanLimits(true)).finally(function () {
+        // Re-rendered popover may have replaced the button; if still present, restore.
+        var btn = pop.querySelector('[data-role="plan-limits-refresh"]');
+        if (btn) { btn.disabled = false; btn.classList.remove('spinning'); }
+      });
+    });
+  }
 }
 
 function openUsageModal() {
