@@ -890,6 +890,157 @@ function getActiveState() {
   return projectStates.get(activeProjectKey) || null;
 }
 
+// ============================================================
+// Named layouts (save / restore)
+// ============================================================
+
+// Snapshot the project's current row/column shape into a serialisable layout
+// payload. Sessions deliberately aren't captured — restoring spawns fresh
+// columns; the user can then use the recent-sessions picker per column to
+// reattach if desired.
+function snapshotProjectLayout(projectPath) {
+  var state = projectStates.get(projectPath);
+  if (!state) return { rows: [] };
+  return {
+    rows: state.rows.map(function (row) {
+      return {
+        columns: row.columnIds.map(function (id) {
+          var c = state.columns.get(id);
+          if (!c) return null;
+          return {
+            cmd: c.cmd || null,
+            cmdArgs: Array.isArray(c.cmdArgs) ? c.cmdArgs.filter(function (a) {
+              // Drop any resume arg pair — we want a fresh spawn.
+              return a !== '--resume' && (typeof a !== 'string' || !/^[0-9a-f-]{32,}$/i.test(a));
+            }) : [],
+            env: c.env || null,
+            endpointId: c.endpointId || null,
+            title: c.customTitle || null
+          };
+        }).filter(Boolean)
+      };
+    })
+  };
+}
+
+function saveCurrentLayout(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.saveLayout) return;
+  var snap = snapshotProjectLayout(projectPath);
+  if (snap.rows.length === 0) { showToast('No columns to save', { kind: 'warn' }); return; }
+  // window.prompt() is disabled in Electron, use the inline modal that
+  // promptForValue() implements. Returns null on cancel.
+  promptForValue('Save current layout as:').then(function (name) {
+    if (!name) return;
+    name = name.trim();
+    if (!name) return;
+    window.electronAPI.saveLayout(projectPath, name, snap).then(function (r) {
+      if (!r || !r.ok) showToast('Save failed: ' + (r && r.error || 'unknown'), { kind: 'error' });
+      else showToast('Saved layout "' + name + '"', { kind: 'success' });
+    });
+  });
+}
+
+function chooseLayoutToRestore(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.listLayouts) return;
+  window.electronAPI.listLayouts(projectPath).then(function (layouts) {
+    if (!layouts || layouts.length === 0) {
+      showToast('No saved layouts yet — use "Save current layout…" first.', { kind: 'warn', duration: 5000 });
+      return;
+    }
+    showLayoutPickerModal(projectPath, layouts);
+  });
+}
+
+// Lightweight picker for saved layouts. List of names with Restore + Delete
+// buttons per row; Esc / click-outside closes.
+function showLayoutPickerModal(projectPath, layouts) {
+  var existing = document.querySelector('.layout-picker-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay layout-picker-overlay';
+  overlay.innerHTML = '<div class="modal-dialog" style="max-width:480px;"><div class="modal-header"><span class="modal-title">Restore layout</span><span class="modal-close">&times;</span></div><div class="modal-body" id="layout-picker-body" style="padding:8px 0 16px;"></div></div>';
+  document.body.appendChild(overlay);
+  var body = overlay.querySelector('#layout-picker-body');
+  layouts.forEach(function (l) {
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid var(--border-primary);';
+    var label = document.createElement('div');
+    label.style.flex = '1';
+    label.innerHTML = '<div style="font-size:13px;">' + escapeHtml(l.name) + '</div>' +
+      '<div style="font-size:11px;color:#6b7280;">' + escapeHtml(new Date(l.savedAt).toLocaleString()) + ' · ' + (l.layout && l.layout.rows ? l.layout.rows.reduce(function (acc, r) { return acc + r.columns.length; }, 0) : 0) + ' column(s)</div>';
+    var restoreBtn = document.createElement('button');
+    restoreBtn.className = 'settings-browse-btn';
+    restoreBtn.style.padding = '4px 12px';
+    restoreBtn.textContent = 'Restore';
+    restoreBtn.addEventListener('click', function () {
+      close();
+      restoreLayout(projectPath, l.layout);
+      showToast('Restoring "' + l.name + '"…', { kind: 'info', duration: 2000 });
+    });
+    var delBtn = document.createElement('button');
+    delBtn.className = 'settings-browse-btn';
+    delBtn.style.padding = '4px 10px';
+    delBtn.style.color = '#f87171';
+    delBtn.textContent = '✕';
+    delBtn.title = 'Delete this layout';
+    delBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      confirmDialog('Delete layout "' + l.name + '"?', { okLabel: 'Delete', dangerous: true }).then(function (ok) {
+        if (!ok) return;
+        window.electronAPI.deleteLayout(projectPath, l.name).then(function () {
+          row.remove();
+          showToast('Deleted layout "' + l.name + '"', { kind: 'success' });
+          if (!body.querySelector('div[style*="border-bottom"]')) close();
+        });
+      });
+    });
+    row.appendChild(label);
+    row.appendChild(restoreBtn);
+    row.appendChild(delBtn);
+    body.appendChild(row);
+  });
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', function onKey(e) {
+    if (!overlay.parentNode) { document.removeEventListener('keydown', onKey); return; }
+    if (e.key === 'Escape') { e.preventDefault(); close(); document.removeEventListener('keydown', onKey); }
+  });
+}
+
+function restoreLayout(projectPath, layout) {
+  if (!layout || !Array.isArray(layout.rows)) return;
+  // Make sure we're operating on the target project's state.
+  var idx = -1;
+  for (var i = 0; i < config.projects.length; i++) {
+    if (config.projects[i].path === projectPath) { idx = i; break; }
+  }
+  if (idx < 0) return;
+  if (config.activeProjectIndex !== idx) {
+    setActiveProject(idx, false, true);
+  }
+  var state = getOrCreateProjectState(projectPath);
+  // Kill existing columns first so the restore yields exactly the saved shape.
+  var existingIds = [];
+  state.rows.forEach(function (r) { r.columnIds.forEach(function (cid) { existingIds.push(cid); }); });
+  existingIds.forEach(function (cid) { try { removeColumn(cid); } catch (e) { /* */ } });
+  // Spawn rows + columns. addColumn(args, row, opts) — with row=null it goes
+  // into the current row; with addRow() we create a new one.
+  layout.rows.forEach(function (rowSpec, rIdx) {
+    var row = rIdx === 0 ? null : addRow();
+    rowSpec.columns.forEach(function (colSpec) {
+      var opts = {
+        title: colSpec.title || null,
+        cmd: colSpec.cmd || null,
+        env: colSpec.env || null,
+        endpointId: colSpec.endpointId || null
+      };
+      var argList = colSpec.cmd ? (colSpec.cmdArgs || []) : null;
+      addColumn(argList, row, opts);
+    });
+  });
+}
+
 function refocusActiveTerminal() {
   var state = getActiveState();
   if (state && state.focusedColumnId !== null) {
@@ -1026,6 +1177,74 @@ function promptForValue(message) {
       if (e.target === overlay) done(null);
     });
   });
+}
+
+// Inline async confirm: returns Promise<boolean>. Non-blocking replacement
+// for window.confirm() which is fine but the OS-level dialog blocks the
+// entire renderer thread (and looks out of place on macOS where it pulls
+// system focus).
+function confirmDialog(message, opts) {
+  opts = opts || {};
+  return new Promise(function (resolve) {
+    var overlay = document.createElement('div');
+    overlay.className = 'snippet-prompt-overlay';
+    var dialog = document.createElement('div');
+    dialog.className = 'snippet-prompt-dialog';
+    var label = document.createElement('div');
+    label.className = 'snippet-prompt-label';
+    label.textContent = message;
+    var actions = document.createElement('div');
+    actions.className = 'snippet-prompt-actions';
+    var cancel = document.createElement('button');
+    cancel.className = 'snippet-prompt-cancel';
+    cancel.textContent = opts.cancelLabel || 'Cancel';
+    var ok = document.createElement('button');
+    ok.className = 'snippet-prompt-ok';
+    ok.textContent = opts.okLabel || 'OK';
+    if (opts.dangerous) ok.style.background = '#dc2626';
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    dialog.appendChild(label);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    setTimeout(function () { ok.focus(); }, 0);
+    function done(v) {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      resolve(v);
+    }
+    ok.addEventListener('click', function () { done(true); });
+    cancel.addEventListener('click', function () { done(false); });
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) done(false); });
+    document.addEventListener('keydown', function onKey(e) {
+      if (!overlay.parentNode) { document.removeEventListener('keydown', onKey); return; }
+      if (e.key === 'Escape') { e.preventDefault(); done(false); document.removeEventListener('keydown', onKey); }
+      else if (e.key === 'Enter') { e.preventDefault(); done(true); document.removeEventListener('keydown', onKey); }
+    });
+  });
+}
+
+// Lightweight toast. Stacks at top-right; auto-dismisses unless duration: 0.
+function showToast(message, opts) {
+  opts = opts || {};
+  var container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+  var toast = document.createElement('div');
+  toast.className = 'toast toast-' + (opts.kind || 'info');
+  toast.textContent = message;
+  container.appendChild(toast);
+  if (opts.duration !== 0) {
+    setTimeout(function () {
+      toast.classList.add('toast-out');
+      setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 200);
+    }, opts.duration || 3500);
+  }
+  return toast;
 }
 
 function saveColumnCounts() {
@@ -1628,6 +1847,13 @@ function buildProjectItem(project, index) {
     } else {
       addMenuItem('Open in new window', 'pop-out');
     }
+    // "Open in external editor" lives on the per-file context menu in the
+    // Explorer tree — at project level it's just a folder-open, which the
+    // user can also reach via "Reveal in Explorer" and the file-tree menu.
+    addMenuItem('Manage MCP servers…', 'manage-mcp');
+    addMenuItem('Skills / agents / commands…', 'manage-ext');
+    addMenuItem('Save current layout…', 'layout-save');
+    addMenuItem('Restore layout…', 'layout-restore');
 
     // Sync entries — populated async so the labels reflect the current state.
     var syncDivider = document.createElement('div');
@@ -1693,6 +1919,14 @@ function buildProjectItem(project, index) {
         handleSyncImports(config.projects[projIndex].path);
       } else if (action === 'sync-force') {
         handleSyncForce(config.projects[projIndex].path);
+      } else if (action === 'manage-mcp') {
+        openMcpModal(config.projects[projIndex].path);
+      } else if (action === 'manage-ext') {
+        openExtensionsModal(config.projects[projIndex].path);
+      } else if (action === 'layout-save') {
+        saveCurrentLayout(config.projects[projIndex].path);
+      } else if (action === 'layout-restore') {
+        chooseLayoutToRestore(config.projects[projIndex].path);
       }
       menu.style.display = 'none';
     };
@@ -1870,11 +2104,19 @@ function setActiveProject(index, isStartup, skipDefaultSpawn) {
     if (prevState) prevState.containerEl.style.display = 'none';
     var commitInput = document.getElementById('git-commit-msg');
     if (commitInput) commitInput.value = '';
+    if (window.electronAPI && window.electronAPI.stopFsWatch) {
+      window.electronAPI.stopFsWatch(prevKey).catch(function () {});
+    }
   }
 
   config.activeProjectIndex = index;
   activeProjectKey = newKey;
   activeProjectNameEl.textContent = project.name;
+  // Start watching the new project root so the Explorer can refresh on disk
+  // changes (file creation/deletion/rename from other tools).
+  if (window.electronAPI && window.electronAPI.startFsWatch) {
+    window.electronAPI.startFsWatch(newKey).catch(function () {});
+  }
   if (typeof window.__rerenderHookList === 'function') window.__rerenderHookList();
 
   // Show branch in toolbar
@@ -2350,13 +2592,35 @@ function showEmptyState() {
   });
   var empty = document.createElement('div');
   empty.className = 'empty-state';
-  var msg = document.createElement('div');
-  msg.textContent = 'No project selected';
-  var hint = document.createElement('div');
-  hint.className = 'hint';
-  hint.textContent = 'Add a project from the sidebar to get started';
-  empty.appendChild(msg);
-  empty.appendChild(hint);
+  var hasProjects = config && Array.isArray(config.projects) && config.projects.length > 0;
+  if (hasProjects) {
+    var msg = document.createElement('div');
+    msg.textContent = 'No project selected';
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = 'Click a project on the left to start';
+    empty.appendChild(msg);
+    empty.appendChild(hint);
+  } else {
+    // First-run state — give a clear, prominent CTA so the user doesn't stare
+    // at empty space wondering what to do.
+    var hero = document.createElement('div');
+    hero.className = 'empty-state-hero';
+    hero.innerHTML =
+      '<div class="empty-state-icon" aria-hidden="true">⌨</div>' +
+      '<div class="empty-state-title">Welcome to Claudes</div>' +
+      '<div class="empty-state-subtitle">Multi-pane terminal for running Claude Code side-by-side.</div>' +
+      '<button class="empty-state-cta" id="empty-state-add-project">+ Add your first project</button>' +
+      '<div class="empty-state-shortcuts">Tip: press <kbd>?</kbd> any time to see shortcuts.</div>';
+    empty.appendChild(hero);
+    setTimeout(function () {
+      var btn = document.getElementById('empty-state-add-project');
+      if (btn) btn.addEventListener('click', function () {
+        var addBtn = document.getElementById('btn-add-project');
+        if (addBtn) addBtn.click();
+      });
+    }, 0);
+  }
   columnsContainer.appendChild(empty);
 }
 
@@ -2441,6 +2705,33 @@ function createColumnHeader(id, customTitle, opts) {
     restartBtn.title = 'Restart';
     restartBtn.textContent = '↻';
     actions.appendChild(restartBtn);
+
+    // Clear scrollback — saves typing `clear` when triaging long sessions.
+    var clearBtn = document.createElement('span');
+    clearBtn.className = 'col-clear';
+    clearBtn.dataset.id = String(id);
+    clearBtn.title = 'Clear terminal';
+    clearBtn.textContent = '⌫';
+    clearBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var c = allColumns.get(id);
+      if (c && c.terminal) c.terminal.clear();
+    });
+    actions.appendChild(clearBtn);
+
+    // Recent sessions picker — opens a small floating menu of the project's
+    // most-recent sessions; clicking one swaps this column to that session
+    // via restartColumn().
+    var sessionsBtn = document.createElement('span');
+    sessionsBtn.className = 'col-sessions';
+    sessionsBtn.dataset.id = String(id);
+    sessionsBtn.title = 'Switch to a recent session';
+    sessionsBtn.textContent = '⏳';
+    sessionsBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      showColumnSessionPicker(id, e.clientX, e.clientY);
+    });
+    actions.appendChild(sessionsBtn);
   }
 
   var maximizeBtn = document.createElement('span');
@@ -2637,6 +2928,27 @@ function addColumn(args, targetRow, opts) {
   var termWrapper = document.createElement('div');
   termWrapper.className = 'terminal-wrapper';
 
+  // Accept drops from the Explorer file tree. The dragstart handler stores the
+  // path in application/x-claudes-file; we write the path (quoted if it
+  // contains whitespace) into the pty. No effect for general HTML drag types,
+  // so DOM drag-and-drop elsewhere keeps working.
+  termWrapper.addEventListener('dragover', function (e) {
+    if (!e.dataTransfer) return;
+    var types = e.dataTransfer.types;
+    if (types && Array.prototype.indexOf.call(types, 'application/x-claudes-file') >= 0) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  });
+  termWrapper.addEventListener('drop', function (e) {
+    if (!e.dataTransfer) return;
+    var raw = e.dataTransfer.getData('application/x-claudes-file');
+    if (!raw) return;
+    e.preventDefault();
+    var quoted = /\s/.test(raw) ? '"' + raw + '"' : raw;
+    wsSend({ type: 'write', id: id, data: quoted });
+  });
+
   // Scroll-to-bottom button
   var scrollBtn = document.createElement('button');
   scrollBtn.className = 'scroll-to-bottom hidden';
@@ -2649,6 +2961,18 @@ function addColumn(args, targetRow, opts) {
       scrollBtn.classList.add('hidden');
     }
   });
+
+  // In-terminal find overlay (Ctrl/Cmd+F). Built once per column; hidden by
+  // default. Wired below once SearchAddon is loaded.
+  var searchOverlay = document.createElement('div');
+  searchOverlay.className = 'term-search-overlay hidden';
+  searchOverlay.innerHTML =
+    '<input type="text" class="term-search-input" placeholder="Find..." autocomplete="off" spellcheck="false">' +
+    '<span class="term-search-count">0/0</span>' +
+    '<button type="button" class="term-search-btn term-search-prev" title="Previous (Shift+Enter)">↑</button>' +
+    '<button type="button" class="term-search-btn term-search-next" title="Next (Enter)">↓</button>' +
+    '<button type="button" class="term-search-btn term-search-close" title="Close (Esc)">✕</button>';
+  termWrapper.appendChild(searchOverlay);
 
   col.appendChild(header);
   if (endpointBanner) col.appendChild(endpointBanner);
@@ -2670,18 +2994,84 @@ function addColumn(args, targetRow, opts) {
   setupColumnDropTarget(col);
   row.el.appendChild(col);
 
+  // Layer user-chosen colours (if non-default) on top of the active theme so
+  // theme switching still works for any prop the user didn't override.
+  var themeForThisCol = termTheme;
+  var overrides = {};
+  if (termSettings && termSettings.background && termSettings.background !== '#1a1a2e') overrides.background = termSettings.background;
+  if (termSettings && termSettings.foreground && termSettings.foreground !== '#e0e0e0') overrides.foreground = termSettings.foreground;
+  if (Object.keys(overrides).length) themeForThisCol = Object.assign({}, termTheme, overrides);
   var terminal = new Terminal({
-    theme: termTheme,
-    fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
+    theme: themeForThisCol,
+    // Per-platform font fallback: Cascadia/Consolas exist on Windows; JetBrains
+    // Mono / Menlo on macOS; DejaVu Sans Mono / Liberation Mono on most Linux
+    // distros. The closing 'monospace' is a guaranteed final fallback. A user
+    // setting takes precedence when set.
+    fontFamily: (termSettings && termSettings.fontFamily) ||
+      "'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New', monospace",
     fontSize: fontSize,
+    scrollback: (termSettings && termSettings.scrollback) || 5000,
+    cursorStyle: (termSettings && termSettings.cursorStyle) || 'block',
     cursorBlink: true,
     allowProposedApi: true
   });
 
   var fitAddon = new FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
+  var searchAddon = null;
+  try {
+    if (typeof SearchAddon !== 'undefined' && SearchAddon.SearchAddon) {
+      searchAddon = new SearchAddon.SearchAddon();
+      terminal.loadAddon(searchAddon);
+    }
+  } catch (e) { /* addon optional */ }
+  try {
+    if (typeof WebLinksAddon !== 'undefined' && WebLinksAddon.WebLinksAddon) {
+      terminal.loadAddon(new WebLinksAddon.WebLinksAddon(function (event, uri) {
+        if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal(uri);
+      }));
+    }
+  } catch (e) { /* addon optional */ }
   terminal.open(termWrapper);
   try { terminal.loadAddon(new WebglAddon.WebglAddon()); } catch (e) { console.warn('WebGL addon failed, using canvas renderer:', e); }
+
+  // File:line link provider — clicking e.g. `src/foo.js:42` (or an absolute
+  // path) opens the file in the inline editor, focused on that line. Skipped
+  // when the terminal is hosting a custom command (cmd) since the matched
+  // text may not refer to a local file.
+  if (terminal.registerLinkProvider) {
+    try {
+      var fileLineRe = /(?:^|[\s"'`(\[<])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[\\/])?[\w.\-+]+(?:[\\/][\w.\-+]+)*)\s*:(\d+)(?::(\d+))?/g;
+      terminal.registerLinkProvider({
+        provideLinks: function (lineNo, callback) {
+          var line = terminal.buffer.active.getLine(lineNo - 1);
+          if (!line) return callback(undefined);
+          var text = line.translateToString(true);
+          var links = [];
+          var m;
+          fileLineRe.lastIndex = 0;
+          while ((m = fileLineRe.exec(text)) !== null) {
+            // Skip matches that look like ratios (e.g. "1:1000" inside word context)
+            var p = m[1]; var ln = m[2];
+            if (!p || p.length > 260) continue;
+            var startCol = m.index + (m[0].length - p.length - (':' + ln + (m[3] ? ':' + m[3] : '')).length) + 1;
+            var range = {
+              start: { x: startCol, y: lineNo },
+              end:   { x: startCol + p.length + (':' + ln).length + (m[3] ? ':' + m[3] : '').length - 1, y: lineNo }
+            };
+            links.push({
+              range: range,
+              text: p + ':' + ln + (m[3] ? ':' + m[3] : ''),
+              activate: (function (relPath, lineN) {
+                return function () { openFileAtLine(relPath, parseInt(lineN, 10)); };
+              })(p, ln)
+            });
+          }
+          callback(links.length ? links : undefined);
+        }
+      });
+    } catch (e) { /* link provider optional */ }
+  }
 
   // Show/hide scroll-to-bottom button based on scroll position
   terminal.onScroll(function () {
@@ -2694,10 +3084,19 @@ function addColumn(args, targetRow, opts) {
     }
   });
 
-  // Handle Ctrl+V paste and Shift+Enter newline
+  // Handle Cmd/Ctrl+V paste and Shift+Enter newline
   terminal.attachCustomKeyEventHandler(function (e) {
-    // Ctrl+V: paste from clipboard
-    if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key === 'v') {
+    // Cmd/Ctrl+F: open the column's in-terminal find overlay. We intercept it
+    // here (rather than relying on the document-level keydown) because xterm
+    // consumes the keystroke before the bubble-phase listener sees it.
+    if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      var c = allColumns.get(id);
+      if (c && typeof c._showSearch === 'function') c._showSearch();
+      return false;
+    }
+    // Cmd/Ctrl+V: paste from clipboard
+    if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && e.key === 'v') {
       e.preventDefault();
       window.electronAPI.clipboardReadText().then(function (text) {
         if (text) {
@@ -2706,8 +3105,8 @@ function addColumn(args, targetRow, opts) {
       });
       return false;
     }
-    // Ctrl+Shift+V: also paste
-    if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
+    // Cmd/Ctrl+Shift+V: also paste
+    if (e.type === 'keydown' && cmdOrCtrl(e) && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
       e.preventDefault();
       window.electronAPI.clipboardReadText().then(function (text) {
         if (text) {
@@ -2716,19 +3115,23 @@ function addColumn(args, targetRow, opts) {
       });
       return false;
     }
-    // Ctrl+C: copy selection if there is one, otherwise send SIGINT
-    if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key === 'c') {
+    // Copy: Cmd+C on darwin always (no SIGINT semantics for Cmd+C), Ctrl+C
+    // on others — copy when there's a selection, otherwise pass through so
+    // xterm forwards the SIGINT.
+    if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && e.key === 'c') {
       var sel = terminal.getSelection();
       if (sel) {
         window.electronAPI.clipboardWriteText(sel);
         terminal.clearSelection();
         return false;
       }
-      // No selection — let xterm send SIGINT as normal
-      return true;
+      // No selection — on darwin swallow (Cmd+C with no selection is a no-op,
+      // we don't want to insert a literal 'c'). On other platforms, let xterm
+      // send SIGINT as normal.
+      return !IS_DARWIN;
     }
     // Shift+Enter: send CSI u sequence so Claude CLI sees it as newline
-    if (e.type === 'keydown' && e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'Enter') {
+    if (e.type === 'keydown' && e.shiftKey && !cmdOrCtrl(e) && !e.altKey && e.key === 'Enter') {
       e.preventDefault();
       // CSI u encoding: ESC [ 13 ; 2 u  (keycode 13, modifier 2=Shift)
       wsSend({ type: 'write', id: id, data: '\x1b[13;2u' });
@@ -2871,6 +3274,8 @@ function addColumn(args, targetRow, opts) {
     element: col,
     terminal: terminal,
     fitAddon: fitAddon,
+    searchAddon: searchAddon,
+    searchOverlay: searchOverlay,
     headerEl: header,
     cwd: cwd,
     projectKey: activeProjectKey,
@@ -2911,6 +3316,7 @@ function addColumn(args, targetRow, opts) {
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
+  attachTerminalSearchOverlay(colData);
   colData.deltaSessionEl = header.querySelector('[data-col-delta]');
   colData.ctxMeterEl = header.querySelector('[data-col-ctx]');
   colData.ctxFillEl = colData.ctxMeterEl ? colData.ctxMeterEl.querySelector('.col-ctx-fill') : null;
@@ -3881,6 +4287,130 @@ function toggleMaximizeColumn(id) {
 }
 
 // ============================================================
+// Recent sessions picker (per-column header)
+// ============================================================
+
+function showColumnSessionPicker(colId, clientX, clientY) {
+  var col = allColumns.get(colId);
+  if (!col || !window.electronAPI || !window.electronAPI.getRecentSessions) return;
+  // Close any prior picker.
+  var prior = document.querySelector('.col-session-picker');
+  if (prior) prior.remove();
+
+  var menu = document.createElement('div');
+  menu.className = 'col-session-picker project-context-menu';
+  menu.style.left = clientX + 'px';
+  menu.style.top = clientY + 'px';
+  var loading = document.createElement('div');
+  loading.className = 'project-context-item';
+  loading.style.opacity = '0.6';
+  loading.textContent = 'Loading recent sessions…';
+  menu.appendChild(loading);
+  document.body.appendChild(menu);
+
+  function close() { menu.remove(); document.removeEventListener('mousedown', outside, true); }
+  function outside(ev) { if (!menu.contains(ev.target)) close(); }
+  setTimeout(function () { document.addEventListener('mousedown', outside, true); }, 0);
+
+  // Resolve the column's project path from activeProjectKey on the colData.
+  var projectPath = col.projectKey || activeProjectKey;
+  if (!projectPath) { loading.textContent = 'No project for this column.'; return; }
+
+  window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+    while (menu.firstChild) menu.removeChild(menu.firstChild);
+    var others = (sessions || []).filter(function (s) { return s.sessionId !== col.sessionId; });
+    if (others.length === 0) {
+      var none = document.createElement('div');
+      none.className = 'project-context-item';
+      none.style.opacity = '0.6';
+      none.textContent = 'No other recent sessions.';
+      menu.appendChild(none);
+      return;
+    }
+    others.slice(0, 12).forEach(function (s) {
+      var item = document.createElement('div');
+      item.className = 'project-context-item';
+      var when = new Date(s.modified);
+      item.textContent = s.sessionId.slice(0, 8) + '  ·  ' + when.toLocaleString();
+      item.addEventListener('click', function () {
+        // Swap to the chosen session and restart in place.
+        col.sessionId = s.sessionId;
+        restartColumn(colId);
+        close();
+      });
+      menu.appendChild(item);
+      // Title fetch is best-effort — the short id + date is informative enough
+      // on first paint; refine asynchronously when available.
+      window.electronAPI.getSessionTitle(projectPath, s.sessionId).then(function (title) {
+        if (title) item.textContent = (title.length > 60 ? title.slice(0, 60) + '…' : title) + '  ·  ' + when.toLocaleString();
+      }).catch(function () { /* keep id-based label */ });
+    });
+  }).catch(function () {
+    loading.textContent = 'Failed to load sessions.';
+  });
+}
+
+// ============================================================
+// Per-terminal Ctrl/Cmd+F find overlay
+// ============================================================
+
+function attachTerminalSearchOverlay(col) {
+  if (!col || !col.searchOverlay || !col.terminal) return;
+  var overlay = col.searchOverlay;
+  var input = overlay.querySelector('.term-search-input');
+  var countEl = overlay.querySelector('.term-search-count');
+  var prevBtn = overlay.querySelector('.term-search-prev');
+  var nextBtn = overlay.querySelector('.term-search-next');
+  var closeBtn = overlay.querySelector('.term-search-close');
+  var addon = col.searchAddon;
+
+  function show() {
+    overlay.classList.remove('hidden');
+    input.focus();
+    input.select();
+  }
+  function hide() {
+    overlay.classList.add('hidden');
+    if (addon && addon.clearDecorations) addon.clearDecorations();
+    try { col.terminal.focus(); } catch (e) { /* */ }
+  }
+  function search(dir) {
+    var q = input.value;
+    if (!q) { countEl.textContent = '0/0'; if (addon && addon.clearDecorations) addon.clearDecorations(); return; }
+    if (!addon) return;
+    var opts = {
+      decorations: {
+        matchBackground: '#3b82f680',
+        matchBorder: '#60a5fa',
+        matchOverviewRuler: '#60a5fa',
+        activeMatchBackground: '#f59e0b80',
+        activeMatchBorder: '#fbbf24',
+        activeMatchColorOverviewRuler: '#fbbf24'
+      },
+      regex: false,
+      wholeWord: false,
+      caseSensitive: false
+    };
+    var found = dir === -1
+      ? (addon.findPrevious ? addon.findPrevious(q, opts) : false)
+      : (addon.findNext ? addon.findNext(q, opts) : false);
+    countEl.textContent = found ? 'match' : 'no match';
+  }
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { e.preventDefault(); hide(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); search(e.shiftKey ? -1 : 1); return; }
+  });
+  input.addEventListener('input', function () { search(1); });
+  prevBtn.addEventListener('click', function () { search(-1); });
+  nextBtn.addEventListener('click', function () { search(1); });
+  closeBtn.addEventListener('click', hide);
+
+  col._showSearch = show;
+  col._hideSearch = hide;
+}
+
+// ============================================================
 // Resize Handles (columns)
 // ============================================================
 
@@ -4190,53 +4720,54 @@ window.addEventListener('focus', function () {
 // ============================================================
 
 document.addEventListener('keydown', function (e) {
-  if (e.ctrlKey && e.shiftKey && e.key === 'T') {
+  var mod = cmdOrCtrl(e);
+  if (mod && e.shiftKey && (e.key === 'T' || e.key === 't')) {
     e.preventDefault();
     addColumn(null, null, spawnOpts());
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'R') {
+  if (mod && e.shiftKey && (e.key === 'R' || e.key === 'r')) {
     e.preventDefault();
     addRow();
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'W') {
+  if (mod && e.shiftKey && (e.key === 'W' || e.key === 'w')) {
     e.preventDefault();
     var state = getActiveState();
     if (state && state.focusedColumnId !== null) removeColumn(state.focusedColumnId);
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowLeft') {
+  if (mod && !e.shiftKey && e.key === 'ArrowLeft') {
     e.preventDefault();
     navigateColumn('left');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowRight') {
+  if (mod && !e.shiftKey && e.key === 'ArrowRight') {
     e.preventDefault();
     navigateColumn('right');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowUp') {
+  if (mod && !e.shiftKey && e.key === 'ArrowUp') {
     e.preventDefault();
     navigateColumn('up');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowDown') {
+  if (mod && !e.shiftKey && e.key === 'ArrowDown') {
     e.preventDefault();
     navigateColumn('down');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'b') {
+  if (mod && !e.shiftKey && e.key === 'b') {
     e.preventDefault();
     toggleSidebar();
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'E') {
+  if (mod && e.shiftKey && (e.key === 'E' || e.key === 'e')) {
     e.preventDefault();
     toggleExplorer();
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'M') {
+  if (mod && e.shiftKey && (e.key === 'M' || e.key === 'm')) {
     e.preventDefault();
     var state = getActiveState();
     if (state && state.focusedColumnId !== null) {
@@ -4244,7 +4775,7 @@ document.addEventListener('keydown', function (e) {
     }
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key >= '1' && e.key <= '9') {
+  if (mod && !e.shiftKey && e.key >= '1' && e.key <= '9') {
     var num = parseInt(e.key);
     var state = getActiveState();
     if (state) {
@@ -4261,20 +4792,34 @@ document.addEventListener('keydown', function (e) {
     }
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && (e.key === '=' || e.key === '+')) {
+  if (mod && !e.shiftKey && (e.key === '=' || e.key === '+')) {
     e.preventDefault();
     changeFontSize(1);
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === '-') {
+  if (mod && !e.shiftKey && e.key === '-') {
     e.preventDefault();
     changeFontSize(-1);
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === '0') {
+  if (mod && !e.shiftKey && e.key === '0') {
     e.preventDefault();
     resetFontSize();
     return;
+  }
+  // Cmd/Ctrl+F: open in-terminal find. Falls through if any modal-bound
+  // editor handler already consumed it (those run on the textarea, not
+  // document, and stopPropagation in their listeners prevents re-entry here).
+  if (mod && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+    var st = getActiveState();
+    if (st && st.focusedColumnId !== null) {
+      var c = allColumns.get(st.focusedColumnId);
+      if (c && typeof c._showSearch === 'function') {
+        e.preventDefault();
+        c._showSearch();
+        return;
+      }
+    }
   }
 });
 
@@ -4444,6 +4989,22 @@ function showFileTreeContextMenu(e, entry) {
   });
   menu.appendChild(showInExplorer);
 
+  if (window.electronAPI && window.electronAPI.openInExternalEditor) {
+    var openExt = document.createElement('div');
+    openExt.className = 'file-tree-context-item';
+    openExt.textContent = 'Open in external editor';
+    openExt.addEventListener('click', function () {
+      // Pass [project, file] so e.g. VS Code opens the project as a workspace
+      // AND focuses the chosen file, instead of opening the file standalone.
+      var args = entry.isDirectory ? [entry.path] : [activeProjectKey, entry.path];
+      window.electronAPI.openInExternalEditor(args).then(function (r) {
+        if (r && !r.ok && r.error) console.warn('[editor:openExternal]', r.error);
+      });
+      menu.remove();
+    });
+    menu.appendChild(openExt);
+  }
+
   document.body.appendChild(menu);
 
   function closeMenu(ev) {
@@ -4568,6 +5129,20 @@ function createTreeItem(entry, level) {
     showFileTreeContextMenu(e, entry);
   });
 
+  // Drag from Explorer into a terminal — drop pastes the file path. Picks up
+  // a quoted form when the path contains spaces. Disabled for directories
+  // since the common use case is `cmd /path/to/file`.
+  if (!entry.isDirectory) {
+    row.setAttribute('draggable', 'true');
+    row.addEventListener('dragstart', function (e) {
+      e.dataTransfer.effectAllowed = 'copy';
+      var p = entry.path;
+      var quoted = /\s/.test(p) ? '"' + p + '"' : p;
+      e.dataTransfer.setData('text/plain', quoted);
+      e.dataTransfer.setData('application/x-claudes-file', p);
+    });
+  }
+
   if (entry.isDirectory) {
     var children = document.createElement('div');
     children.className = 'tree-children';
@@ -4651,6 +5226,188 @@ function refreshGitStatus(force) {
   }).then(done, done);
 }
 
+function showGitFileContextMenu(e, filePath) {
+  var existing = document.querySelector('.git-file-ctx-menu');
+  if (existing) existing.remove();
+  var menu = document.createElement('div');
+  menu.className = 'project-context-menu git-file-ctx-menu';
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  function add(label, fn) {
+    var it = document.createElement('div');
+    it.className = 'project-context-item';
+    it.textContent = label;
+    it.addEventListener('click', function () { menu.remove(); fn(); });
+    menu.appendChild(it);
+  }
+  // filePath here is repo-relative — resolve against the active project root
+  // for editor / shell IPCs that expect absolute paths.
+  function absolutePath() {
+    if (!activeProjectKey) return null;
+    return activeProjectKey.replace(/[\\/]$/, '') + '/' + filePath;
+  }
+  add('Open in external editor', function () {
+    var abs = absolutePath();
+    if (!abs || !window.electronAPI || !window.electronAPI.openInExternalEditor) return;
+    window.electronAPI.openInExternalEditor([activeProjectKey, abs]).then(function (r) {
+      if (r && !r.ok && r.error) showToast('Open in editor failed: ' + r.error, { kind: 'error' });
+    });
+  });
+  add('File history…', function () { showFileHistory(filePath); });
+  add('Blame…', function () { showFileBlame(filePath); });
+  document.body.appendChild(menu);
+  setTimeout(function () {
+    function out(ev) {
+      if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', out, true); }
+    }
+    document.addEventListener('mousedown', out, true);
+  }, 0);
+}
+
+// Lightweight modal-less floating panels for blame / file history. They reuse
+// the existing modal-overlay styling so layout is consistent with the rest
+// of the app.
+function showFileHistory(filePath) {
+  var existing = document.querySelector('.git-history-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay git-history-overlay';
+  overlay.innerHTML = '<div class="modal-dialog"><div class="modal-header"><span class="modal-title">File history</span><span class="modal-subtitle">' + escapeHtml(filePath) + '</span><span class="modal-close">&times;</span></div><div class="modal-body"><div class="git-history-list" style="max-height:60vh;overflow:auto;"></div></div></div>';
+  document.body.appendChild(overlay);
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  var listEl = overlay.querySelector('.git-history-list');
+  listEl.textContent = 'Loading…';
+  window.electronAPI.gitFileHistory(activeProjectKey, filePath, 100).then(function (rows) {
+    listEl.innerHTML = '';
+    if (!rows.length) { listEl.textContent = 'No history.'; return; }
+    rows.forEach(function (r) {
+      var item = document.createElement('div');
+      item.className = 'git-history-item';
+      item.style.cssText = 'padding:6px 8px;border-bottom:1px solid var(--border-primary);cursor:pointer;';
+      item.innerHTML = '<div style="font-family:monospace;font-size:11px;color:#9ca3af;">' + escapeHtml(r.hash) + '  •  ' + escapeHtml(r.author) + '  •  ' + escapeHtml(new Date(r.date).toLocaleString()) + '</div>' +
+        '<div style="font-size:13px;margin-top:2px;">' + escapeHtml(r.message) + '</div>' +
+        '<div class="git-history-cp" style="margin-top:4px;"><button class="git-op-mini-btn">Cherry-pick onto current</button></div>';
+      var cpBtn = item.querySelector('.git-op-mini-btn');
+      cpBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (!confirm('Cherry-pick ' + r.hash + ' onto current branch?')) return;
+        window.electronAPI.gitCherryPick(activeProjectKey, r.hash).then(function (rr) {
+          if (!rr.success) alert('Cherry-pick failed: ' + rr.error);
+          refreshGitStatus(true);
+        });
+      });
+      listEl.appendChild(item);
+    });
+  });
+}
+
+function showFileBlame(filePath) {
+  var existing = document.querySelector('.git-blame-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay git-blame-overlay';
+  overlay.innerHTML = '<div class="modal-dialog" style="max-width:90vw;width:90vw;"><div class="modal-header"><span class="modal-title">Blame</span><span class="modal-subtitle">' + escapeHtml(filePath) + '</span><span class="modal-close">&times;</span></div><div class="modal-body"><pre class="git-blame-pre" style="max-height:70vh;overflow:auto;font-size:12px;line-height:1.4;margin:0;"></pre></div></div>';
+  document.body.appendChild(overlay);
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  var pre = overlay.querySelector('.git-blame-pre');
+  pre.textContent = 'Loading blame…';
+  window.electronAPI.gitBlame(activeProjectKey, filePath).then(function (rows) {
+    if (!rows.length) { pre.textContent = 'No blame data.'; return; }
+    pre.innerHTML = '';
+    rows.forEach(function (r, i) {
+      var line = document.createElement('div');
+      var meta = '<span style="color:#9ca3af;display:inline-block;width:80px;">' + escapeHtml(r.hash) + '</span>' +
+                 '<span style="color:#6b7280;display:inline-block;width:120px;">' + escapeHtml((r.author || '').slice(0, 16)) + '</span>' +
+                 '<span style="color:#52525b;display:inline-block;width:50px;">' + (i + 1) + '</span>';
+      line.innerHTML = meta + '<span style="white-space:pre;">' + escapeHtml(r.content || '') + '</span>';
+      pre.appendChild(line);
+    });
+  });
+}
+
+function renderGitOpBanner() {
+  if (!window.electronAPI || !window.electronAPI.gitOpState) return;
+  window.electronAPI.gitOpState(activeProjectKey).then(function (s) {
+    if (!s || (!s.merging && !s.rebasing && !s.cherryPicking)) return;
+    var op = s.merging ? 'merge' : s.rebasing ? 'rebase' : 'cherry-pick';
+    var banner = document.createElement('div');
+    banner.className = 'git-op-banner';
+    var hdr = document.createElement('div');
+    hdr.className = 'git-op-banner-header';
+    hdr.textContent = 'In progress: ' + op + (s.conflictFiles.length ? '  •  ' + s.conflictFiles.length + ' conflict(s)' : '');
+    banner.appendChild(hdr);
+    s.conflictFiles.forEach(function (f) {
+      var row = document.createElement('div');
+      row.className = 'git-op-conflict-row';
+      var name = document.createElement('span');
+      name.textContent = f;
+      name.style.flex = '1';
+      var ours = document.createElement('button');
+      ours.className = 'git-op-mini-btn';
+      ours.textContent = 'use ours';
+      ours.addEventListener('click', function () {
+        window.electronAPI.gitResolveOurs(activeProjectKey, f).then(function (r) {
+          if (!r.success) alert('Resolve failed: ' + r.error);
+          refreshGitStatus(true);
+        });
+      });
+      var theirs = document.createElement('button');
+      theirs.className = 'git-op-mini-btn';
+      theirs.textContent = 'use theirs';
+      theirs.addEventListener('click', function () {
+        window.electronAPI.gitResolveTheirs(activeProjectKey, f).then(function (r) {
+          if (!r.success) alert('Resolve failed: ' + r.error);
+          refreshGitStatus(true);
+        });
+      });
+      var openIt = document.createElement('button');
+      openIt.className = 'git-op-mini-btn';
+      openIt.textContent = 'open';
+      openIt.addEventListener('click', function () {
+        var full = activeProjectKey.replace(/[\\/]$/, '') + '/' + f;
+        openFileEditor(full);
+      });
+      row.appendChild(name); row.appendChild(ours); row.appendChild(theirs); row.appendChild(openIt);
+      banner.appendChild(row);
+    });
+    var actions = document.createElement('div');
+    actions.className = 'git-op-banner-actions';
+    var continueBtn = document.createElement('button');
+    continueBtn.className = 'git-op-mini-btn primary';
+    continueBtn.textContent = s.conflictFiles.length === 0 ? 'Continue' : 'Continue (when staged)';
+    continueBtn.addEventListener('click', function () {
+      var p = s.rebasing
+        ? window.electronAPI.gitRebaseContinue(activeProjectKey)
+        : window.electronAPI.gitMergeContinue(activeProjectKey);
+      p.then(function (r) {
+        if (!r.success) alert('Continue failed: ' + r.error);
+        refreshGitStatus(true);
+      });
+    });
+    var abortBtn = document.createElement('button');
+    abortBtn.className = 'git-op-mini-btn';
+    abortBtn.textContent = 'Abort';
+    abortBtn.addEventListener('click', function () {
+      if (!confirm('Abort the in-progress ' + op + '?')) return;
+      var p = s.rebasing
+        ? window.electronAPI.gitRebaseAbort(activeProjectKey)
+        : window.electronAPI.gitMergeAbort(activeProjectKey);
+      p.then(function (r) {
+        if (!r.success) alert('Abort failed: ' + r.error);
+        refreshGitStatus(true);
+      });
+    });
+    actions.appendChild(continueBtn);
+    actions.appendChild(abortBtn);
+    banner.appendChild(actions);
+    gitChangesEl.insertBefore(banner, gitChangesEl.firstChild);
+  });
+}
+
 function updateActiveProjectBranchLabels(branch) {
   if (!activeProjectKey) return;
   var project = config.projects.find(function (p) { return p.path === activeProjectKey; });
@@ -4675,6 +5432,9 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
   updateActiveProjectBranchLabels(branch);
   while (gitHeaderEl.firstChild) gitHeaderEl.removeChild(gitHeaderEl.firstChild);
   while (gitChangesEl.firstChild) gitChangesEl.removeChild(gitChangesEl.firstChild);
+  // Conflict / mid-operation banner. Fired async; the banner is inserted at
+  // the top of gitChangesEl when state shows merging/rebasing/cherry-picking.
+  renderGitOpBanner();
 
   // Branch row (clickable branch switcher + pull/push/stash buttons)
   var row = document.createElement('div');
@@ -4813,13 +5573,50 @@ function toggleBranchDropdown(parentRow, currentBranch) {
       (function (b) {
         var item = document.createElement('div');
         item.className = 'git-branch-dropdown-item' + (b.isCurrent ? ' current' : '');
-        item.textContent = (b.isCurrent ? '\u2713 ' : '  ') + b.name;
+        item.style.display = 'flex';
+        item.style.alignItems = 'center';
+        item.style.gap = '4px';
+        var label = document.createElement('span');
+        label.style.flex = '1';
+        label.textContent = (b.isCurrent ? '\u2713 ' : '  ') + b.name;
+        item.appendChild(label);
         if (!b.isCurrent) {
-          item.addEventListener('click', function (e) {
+          label.style.cursor = 'pointer';
+          label.addEventListener('click', function (e) {
             e.stopPropagation();
             dropdown.remove();
             gitCheckout(b.name);
           });
+          // Quick merge / rebase actions per branch \u2014 operate on the current
+          // branch, integrating the row's branch.
+          var mergeBtn = document.createElement('button');
+          mergeBtn.className = 'git-branch-mini-action';
+          mergeBtn.textContent = 'merge';
+          mergeBtn.title = 'Merge ' + b.name + ' into current branch';
+          mergeBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            dropdown.remove();
+            if (!confirm('Merge "' + b.name + '" into current branch?')) return;
+            window.electronAPI.gitMerge(activeProjectKey, b.name).then(function (r) {
+              if (!r.success) alert('Merge failed: ' + r.error);
+              refreshGit();
+            });
+          });
+          var rebaseBtn = document.createElement('button');
+          rebaseBtn.className = 'git-branch-mini-action';
+          rebaseBtn.textContent = 'rebase';
+          rebaseBtn.title = 'Rebase current branch onto ' + b.name;
+          rebaseBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            dropdown.remove();
+            if (!confirm('Rebase current branch onto "' + b.name + '"?')) return;
+            window.electronAPI.gitRebase(activeProjectKey, b.name).then(function (r) {
+              if (!r.success) alert('Rebase failed: ' + r.error);
+              refreshGit();
+            });
+          });
+          item.appendChild(mergeBtn);
+          item.appendChild(rebaseBtn);
         }
         dropdown.appendChild(item);
       })(branches[i]);
@@ -5243,6 +6040,14 @@ function createGitFileRow(file, isStaged, statsMap, depth) {
       staged: isStaged,
       status: file.status
     }, { title: parts[parts.length - 1] + ' (' + file.status + ')' });
+  });
+  // Right-click on the row (not just the filename span) gives Open in editor /
+  // File History / Blame access — easier to hit, especially over the stat /
+  // action columns where users instinctively right-click.
+  row.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    showGitFileContextMenu(e, file.file);
   });
 
   var statEl = document.createElement('span');
@@ -6330,7 +7135,7 @@ document.getElementById('btn-run-delete').addEventListener('click', function () 
 });
 document.getElementById('btn-git-commit').addEventListener('click', gitCommit);
 gitCommitMsg.addEventListener('keydown', function (e) {
-  if (e.ctrlKey && e.key === 'Enter') {
+  if (cmdOrCtrl(e) && e.key === 'Enter') {
     e.preventDefault();
     gitCommit();
   }
@@ -6411,6 +7216,19 @@ if (window.electronAPI && window.electronAPI.onOsThemeChanged) {
   window.electronAPI.onOsThemeChanged(function (isDark) {
     if (themePreference === 'auto') {
       applyVisualTheme(isDark ? 'dark' : 'light');
+    }
+  });
+}
+
+// Auto-refresh the Explorer tree when files change on disk. Debounced in main;
+// here we only refresh if the file tab is open and the change is for the
+// active project.
+if (window.electronAPI && window.electronAPI.onFsChanged) {
+  window.electronAPI.onFsChanged(function (root) {
+    if (!activeProjectKey || root !== activeProjectKey) return;
+    var activeTab = document.querySelector('.explorer-tab.active');
+    if (activeTab && activeTab.dataset.tab === 'files') {
+      try { refreshFileTree(); } catch (e) { /* */ }
     }
   });
 }
@@ -7117,6 +7935,11 @@ function startNewEndpoint() {
 
 function openEndpointsModal() {
   closeSpawnDropdown();
+  // One-time-per-session check: on Linux without a keyring (or in headless
+  // WSL), Electron's safeStorage falls back to plaintext for endpoint tokens.
+  // The user should know so they can install a keyring or avoid storing
+  // tokens here.
+  maybeShowSafeStorageWarning();
   loadEndpointPresets().then(function () {
     endpointsModal.classList.remove('hidden');
     // Auto-select something so the user isn't staring at an empty form:
@@ -7139,6 +7962,22 @@ function openEndpointsModal() {
 function closeEndpointsModal() {
   endpointsModal.classList.add('hidden');
   editingPresetId = null;
+}
+
+var safeStorageWarningShown = false;
+function maybeShowSafeStorageWarning() {
+  if (safeStorageWarningShown) return;
+  if (!window.electronAPI || !window.electronAPI.isTokenStorageEncrypted) return;
+  window.electronAPI.isTokenStorageEncrypted().then(function (ok) {
+    if (ok) return;
+    safeStorageWarningShown = true;
+    var body = endpointsModal.querySelector('.modal-body') || endpointsModal;
+    if (body.querySelector('.endpoints-safestorage-warning')) return;
+    var warn = document.createElement('div');
+    warn.className = 'endpoints-safestorage-warning';
+    warn.textContent = '⚠  OS keyring unavailable — endpoint auth tokens will be saved in plaintext under ~/.claudes/. Install gnome-keyring / libsecret (Linux) for encrypted storage.';
+    body.insertBefore(warn, body.firstChild);
+  }).catch(function () { /* IPC missing in dev — ignore */ });
 }
 
 function collectFormPayload() {
@@ -7373,15 +8212,29 @@ document.addEventListener('click', function (e) {
 // CLAUDE.md Modal
 // ============================================================
 
-function openClaudeMdModal() {
-  if (!activeProjectKey || !window.electronAPI) return;
+// Tracks whether the CLAUDE.md modal is showing the project-scoped file or
+// the global ~/.claude/CLAUDE.md. The same modal is reused for both — only the
+// root path the read/save IPCs are asked to operate on differs.
+var claudeMdEditingGlobal = false;
+var GLOBAL_CLAUDE_DIR_KEY = '__GLOBAL__';
 
-  claudeMdPath.textContent = activeProjectKey + '/CLAUDE.md';
+function openClaudeMdModal(opts) {
+  if (!window.electronAPI) return;
+  var global = !!(opts && opts.global);
+  // Project-scoped variant still requires an active project (current behaviour).
+  if (!global && !activeProjectKey) return;
+  claudeMdEditingGlobal = global;
+  var root = global
+    ? (window.__claudesHome || '~/.claude')   // resolved in main; this is a label only
+    : activeProjectKey;
+  claudeMdPath.textContent = root + '/CLAUDE.md';
   claudeMdStatus.textContent = 'Loading...';
   claudeMdEditor.value = '';
   claudeMdModal.classList.remove('hidden');
-
-  window.electronAPI.readClaudeMd(activeProjectKey).then(function (result) {
+  // The IPC expects a real path; for global we pass a sentinel that main
+  // resolves to os.homedir()/.claude.
+  var rootArg = global ? GLOBAL_CLAUDE_DIR_KEY : activeProjectKey;
+  window.electronAPI.readClaudeMd(rootArg).then(function (result) {
     claudeMdEditor.value = result.content;
     claudeMdStatus.textContent = result.exists ? '' : 'File does not exist yet — will be created on save';
   });
@@ -7392,10 +8245,12 @@ function closeClaudeMdModal() {
 }
 
 function saveClaudeMd() {
-  if (!activeProjectKey || !window.electronAPI) return;
+  if (!window.electronAPI) return;
+  if (!claudeMdEditingGlobal && !activeProjectKey) return;
 
   claudeMdStatus.textContent = 'Saving...';
-  window.electronAPI.saveClaudeMd(activeProjectKey, claudeMdEditor.value).then(function (result) {
+  var rootArg = claudeMdEditingGlobal ? GLOBAL_CLAUDE_DIR_KEY : activeProjectKey;
+  window.electronAPI.saveClaudeMd(rootArg, claudeMdEditor.value).then(function (result) {
     if (result.success) {
       claudeMdStatus.textContent = 'Saved';
       setTimeout(function () {
@@ -7521,6 +8376,92 @@ document.getElementById('setting-agent-repos-dir').addEventListener('keydown', f
   e.stopPropagation();
 });
 
+// --- Tools tab wiring ---
+(function wireToolsTab() {
+  var editorInput = document.getElementById('setting-external-editor');
+  var editorBtn = document.getElementById('btn-edit-global-claudemd');
+  var autoUpdEl = document.getElementById('setting-auto-update-claude');
+  if (!editorInput) return;
+  if (window.electronAPI && window.electronAPI.getExternalEditorCommand) {
+    window.electronAPI.getExternalEditorCommand().then(function (cmd) {
+      editorInput.value = cmd || '';
+    });
+  }
+  if (window.electronAPI && window.electronAPI.getAutoUpdateClaude && autoUpdEl) {
+    window.electronAPI.getAutoUpdateClaude().then(function (v) { autoUpdEl.checked = !!v; });
+  }
+  editorInput.addEventListener('change', function () {
+    if (window.electronAPI && window.electronAPI.setExternalEditorCommand) {
+      window.electronAPI.setExternalEditorCommand(editorInput.value.trim());
+    }
+  });
+  editorInput.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  if (autoUpdEl) {
+    autoUpdEl.addEventListener('change', function () {
+      if (window.electronAPI && window.electronAPI.setAutoUpdateClaude) {
+        window.electronAPI.setAutoUpdateClaude(autoUpdEl.checked);
+      }
+    });
+  }
+  if (editorBtn) {
+    editorBtn.addEventListener('click', function () {
+      settingsModal.classList.add('hidden');
+      openClaudeMdModal({ global: true });
+    });
+  }
+})();
+
+// --- Terminal tab wiring ---
+var TERM_DEFAULTS = { fontFamily: '', scrollback: 5000, cursorStyle: 'block', background: '#1a1a2e', foreground: '#e0e0e0' };
+var termSettings = Object.assign({}, TERM_DEFAULTS);
+(function wireTerminalTab() {
+  var fontEl = document.getElementById('setting-term-font');
+  var sbEl = document.getElementById('setting-term-scrollback');
+  var cursorEl = document.getElementById('setting-term-cursor');
+  var bgEl = document.getElementById('setting-term-bg');
+  var fgEl = document.getElementById('setting-term-fg');
+  var resetBtn = document.getElementById('setting-term-reset');
+  if (!fontEl) return;
+  function applyToUi() {
+    fontEl.value = termSettings.fontFamily || '';
+    sbEl.value = String(termSettings.scrollback || 5000);
+    cursorEl.value = termSettings.cursorStyle || 'block';
+    bgEl.value = termSettings.background || TERM_DEFAULTS.background;
+    if (fgEl) fgEl.value = termSettings.foreground || TERM_DEFAULTS.foreground;
+  }
+  if (window.electronAPI && window.electronAPI.getTerminalSettings) {
+    window.electronAPI.getTerminalSettings().then(function (s) {
+      termSettings = Object.assign({}, TERM_DEFAULTS, s || {});
+      applyToUi();
+    });
+  }
+  function save(partial) {
+    termSettings = Object.assign(termSettings, partial);
+    if (window.electronAPI && window.electronAPI.setTerminalSettings) {
+      window.electronAPI.setTerminalSettings(termSettings);
+    }
+  }
+  fontEl.addEventListener('change', function () { save({ fontFamily: fontEl.value }); });
+  sbEl.addEventListener('change', function () { save({ scrollback: parseInt(sbEl.value, 10) || 5000 }); });
+  cursorEl.addEventListener('change', function () { save({ cursorStyle: cursorEl.value }); });
+  bgEl.addEventListener('change', function () { save({ background: bgEl.value }); });
+  if (fgEl) fgEl.addEventListener('change', function () { save({ foreground: fgEl.value }); });
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      termSettings = Object.assign({}, TERM_DEFAULTS);
+      applyToUi();
+      if (window.electronAPI && window.electronAPI.setTerminalSettings) {
+        window.electronAPI.setTerminalSettings(termSettings);
+      }
+      if (typeof showToast === 'function') showToast('Terminal settings reset to defaults', { kind: 'success' });
+    });
+  }
+  [fontEl, sbEl, cursorEl, bgEl, fgEl].forEach(function (el) {
+    if (!el) return;
+    el.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  });
+})();
+
 btnClaudeMd.addEventListener('click', openClaudeMdModal);
 
 document.getElementById('btn-claude-config').addEventListener('click', function () {
@@ -7576,8 +8517,8 @@ claudeMdModal.addEventListener('click', function (e) {
 });
 
 claudeMdEditor.addEventListener('keydown', function (e) {
-  // Ctrl+S to save
-  if (e.ctrlKey && e.key === 's') {
+  // Cmd/Ctrl+S to save
+  if (cmdOrCtrl(e) && e.key === 's') {
     e.preventDefault();
     saveClaudeMd();
   }
@@ -7604,7 +8545,37 @@ var fileEditorStatus = document.getElementById('fileeditor-status');
 var fileEditorCurrentPath = null;
 var fileEditorOriginal = '';
 
-function openFileEditor(filePath) {
+// Map file extensions to Prism language identifiers. Anything not mapped
+// falls back to no highlight (the preview just shows uncolored monospace).
+var PRISM_LANG_BY_EXT = {
+  '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
+  '.jsx': 'jsx', '.ts': 'typescript', '.tsx': 'tsx',
+  '.json': 'json', '.html': 'markup', '.xml': 'markup', '.svg': 'markup',
+  '.css': 'css', '.scss': 'css', '.less': 'css',
+  '.py': 'python', '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
+  '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'toml',
+  '.rs': 'rust', '.go': 'go',
+  '.md': 'markdown', '.markdown': 'markdown'
+};
+function prismLanguageFor(filePath) {
+  var i = (filePath || '').lastIndexOf('.');
+  if (i < 0) return null;
+  return PRISM_LANG_BY_EXT[filePath.slice(i).toLowerCase()] || null;
+}
+function syncFileEditorPreview() {
+  var pre = document.getElementById('fileeditor-preview');
+  if (!pre) return;
+  var code = pre.querySelector('code');
+  code.className = '';
+  var lang = prismLanguageFor(fileEditorCurrentPath || '');
+  if (lang) code.className = 'language-' + lang;
+  code.textContent = fileEditorEditor.value;
+  if (typeof Prism !== 'undefined' && lang && Prism.languages && Prism.languages[lang]) {
+    try { Prism.highlightElement(code); } catch (e) { /* */ }
+  }
+}
+
+function openFileEditor(filePath, jumpToLine) {
   if (!window.electronAPI) return;
 
   var name = filePath.replace(/\\/g, '/').split('/').pop();
@@ -7631,8 +8602,49 @@ function openFileEditor(filePath) {
       updateCursorPos();
       fileEditorEditor.scrollTop = 0;
       syncGutterScroll();
+      if (jumpToLine && jumpToLine > 1) jumpEditorToLine(jumpToLine);
     }
   });
+}
+
+// Place the textarea cursor at the start of the requested 1-based line and
+// scroll the line into view. Used by terminal link clicks like `foo.js:42`.
+function jumpEditorToLine(line) {
+  var text = fileEditorEditor.value;
+  var idx = 0;
+  var current = 1;
+  while (current < line) {
+    var nl = text.indexOf('\n', idx);
+    if (nl === -1) break;
+    idx = nl + 1;
+    current++;
+  }
+  fileEditorEditor.focus();
+  fileEditorEditor.setSelectionRange(idx, idx);
+  // Approximate scroll: textarea rows aren't directly addressable, but
+  // setSelectionRange + a small scroll bump pulls the cursor into view.
+  var lineHeight = parseInt(getComputedStyle(fileEditorEditor).lineHeight, 10) || 18;
+  fileEditorEditor.scrollTop = Math.max(0, (line - 3) * lineHeight);
+  if (typeof syncGutterScroll === 'function') syncGutterScroll();
+}
+
+// Resolve a terminal-emitted file:line click against the column's cwd, then
+// open the inline editor focused on that line. Skips absolute paths that
+// fall outside the project (main rejects them anyway).
+function openFileAtLine(relPath, line) {
+  if (!relPath) return;
+  // Find the focused column's cwd to resolve relative paths.
+  var cwd = null;
+  try {
+    var st = getActiveState();
+    if (st && st.focusedColumnId !== null) {
+      var c = allColumns.get(st.focusedColumnId);
+      if (c) cwd = c.cwd || null;
+    }
+  } catch (e) { /* no focused column */ }
+  var isAbsolute = /^([A-Za-z]:[\\/]|[\\/])/.test(relPath);
+  var full = isAbsolute ? relPath : (cwd ? (cwd.replace(/[\\/]$/, '') + '/' + relPath) : relPath);
+  openFileEditor(full, line);
 }
 
 function closeFileEditor() {
@@ -7643,6 +8655,12 @@ function closeFileEditor() {
   fileEditorCurrentPath = null;
   fileEditorOriginal = '';
   if (typeof findBar !== 'undefined' && findBar) findBar.classList.add('hidden');
+  // Reset preview state so the next file opens in edit mode.
+  var pre = document.getElementById('fileeditor-preview');
+  if (pre) pre.classList.add('hidden');
+  fileEditorEditor.style.display = '';
+  var pbtn = document.getElementById('fileeditor-preview-btn');
+  if (pbtn) pbtn.textContent = 'Preview';
 }
 
 function saveFileEditor() {
@@ -7662,6 +8680,26 @@ function saveFileEditor() {
   });
 }
 
+// Preview toggle — swap the textarea for a syntax-highlighted readonly view.
+var fileEditorPreviewBtn = document.getElementById('fileeditor-preview-btn');
+if (fileEditorPreviewBtn) {
+  fileEditorPreviewBtn.addEventListener('click', function () {
+    var pre = document.getElementById('fileeditor-preview');
+    if (!pre) return;
+    var isPreviewing = !pre.classList.contains('hidden');
+    if (isPreviewing) {
+      pre.classList.add('hidden');
+      fileEditorEditor.style.display = '';
+      fileEditorPreviewBtn.textContent = 'Preview';
+    } else {
+      syncFileEditorPreview();
+      pre.classList.remove('hidden');
+      fileEditorEditor.style.display = 'none';
+      fileEditorPreviewBtn.textContent = 'Edit';
+    }
+  });
+}
+
 fileEditorClose.addEventListener('click', closeFileEditor);
 fileEditorSave.addEventListener('click', saveFileEditor);
 
@@ -7670,18 +8708,19 @@ fileEditorModal.addEventListener('click', function (e) {
 });
 
 fileEditorEditor.addEventListener('keydown', function (e) {
-  // Ctrl+S to save
-  if (e.ctrlKey && e.key === 's') {
+  var mod = cmdOrCtrl(e);
+  // Cmd/Ctrl+S to save
+  if (mod && e.key === 's') {
     e.preventDefault();
     saveFileEditor();
   }
-  // Ctrl+F to open find bar
-  if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) {
+  // Cmd/Ctrl+F to open find bar
+  if (mod && (e.key === 'f' || e.key === 'F')) {
     e.preventDefault();
     openFindBar(false);
   }
-  // Ctrl+H to open find+replace
-  if (e.ctrlKey && (e.key === 'h' || e.key === 'H')) {
+  // Cmd/Ctrl+H to open find+replace
+  if (mod && (e.key === 'h' || e.key === 'H')) {
     e.preventDefault();
     openFindBar(true);
   }
@@ -8379,19 +9418,20 @@ function updateColumnDeltaPills(_data) { /* no-op */ }
 
 function promptPauseAutomations(c) {
   if (!window.electronAPI || !window.electronAPI.getAutomationSettings || !window.electronAPI.toggleAutomationsGlobal) return;
-  // window.confirm blocks the renderer thread. TODO: replace with a
-  // dialog.showMessageBox-backed IPC if blocking becomes a problem.
-  var ok = window.confirm(
+  // Non-blocking inline confirm (replaces the renderer-blocking window.confirm).
+  confirmDialog(
     'You\'ve crossed 90% of your weekly limit (' + Math.round(c.value) + '%).\n\n' +
-    'Pause all your automations? You can re-enable them any time from the Automations panel.'
-  );
-  if (!ok) return;
-  // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
-  window.electronAPI.getAutomationSettings().then(function (settings) {
-    if (settings && settings.globalEnabled) {
-      window.electronAPI.toggleAutomationsGlobal();
-    }
-  }).catch(function () { /* ignore — silent failure is acceptable here */ });
+    'Pause all your automations? You can re-enable them any time from the Automations panel.',
+    { okLabel: 'Pause all', cancelLabel: 'Not now' }
+  ).then(function (ok) {
+    if (!ok) return;
+    // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
+    window.electronAPI.getAutomationSettings().then(function (settings) {
+      if (settings && settings.globalEnabled) {
+        window.electronAPI.toggleAutomationsGlobal();
+      }
+    }).catch(function () { /* ignore — silent failure is acceptable here */ });
+  });
 }
 
 function showThresholdNotification(c) {
@@ -9414,7 +10454,52 @@ window.electronAPI.getVersion().then(function(v) {
       window.electronAPI.openExternal('https://github.com/paulallington/Claudes/releases');
     }
   });
+
+  // First-launch-after-update walkthrough. We only show it when the previous
+  // app version (cached in localStorage) is older than the current. Pickers
+  // for highlight text live in WHATS_NEW_BY_VERSION below — only versions
+  // listed there ever trigger an overlay.
+  try {
+    var seenKey = 'claudes.lastSeenAppVersion';
+    var prev = window.localStorage && window.localStorage.getItem(seenKey);
+    if (prev !== v) {
+      window.localStorage && window.localStorage.setItem(seenKey, v);
+      if (prev) showWhatsNewOverlay(prev, v);
+    }
+  } catch { /* localStorage unavailable in private modes — skip */ }
 });
+
+// A tiny catalogue of "things worth pointing at" per release. Keep entries
+// short — the overlay should be a glance, not a wall of text. If a version
+// isn't listed here we just silently mark the user as up-to-date.
+var WHATS_NEW_BY_VERSION = {
+  '1.7.47': [
+    'Cmd/Ctrl+F finds inside the focused terminal.',
+    'File paths like src/foo.js:42 are now clickable links.',
+    'Cmd/Ctrl+P quick-open and Cmd/Ctrl+Shift+G project content grep.',
+    'Settings → Terminal: font, scrollback, cursor style, background.',
+    'Git tab: merge / rebase / conflict resolution + file history + blame.',
+    'Project context menu: Manage MCP servers, Skills/agents/commands, Layouts.'
+  ]
+};
+function showWhatsNewOverlay(prev, current) {
+  var highlights = WHATS_NEW_BY_VERSION[current];
+  if (!highlights || highlights.length === 0) return;
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = '<div class="modal-dialog" style="max-width:560px;"><div class="modal-header"><span class="modal-title">What\'s new in ' + escapeHtml(current) + '</span><span class="modal-subtitle">Upgrading from ' + escapeHtml(prev) + '</span><span class="modal-close">&times;</span></div><div class="modal-body" style="padding:16px 24px 24px;"><ul class="shortcuts-features" id="wn-list" style="margin:0;padding-left:20px;"></ul><div style="margin-top:16px;text-align:right;"><button class="modal-btn-save" id="wn-ok">Got it</button></div></div></div>';
+  document.body.appendChild(overlay);
+  var list = overlay.querySelector('#wn-list');
+  highlights.forEach(function (h) {
+    var li = document.createElement('li');
+    li.textContent = h;
+    list.appendChild(li);
+  });
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.querySelector('#wn-ok').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+}
 
 // ============================================================
 // Utility: escapeHtml
@@ -9429,6 +10514,24 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// Defence-in-depth for numeric fields that come from disk-loaded JSON
+// (automations.json, imports). Forces anything non-numeric to 0 so a crafted
+// payload like `{ count: '"><img src=x onerror=...>' }` can't break out of
+// surrounding HTML when interpolated.
+function safeNum(n) {
+  var v = Number(n);
+  return Number.isFinite(v) ? v : 0;
+}
+
+// Cmd on darwin, Ctrl elsewhere. Every shortcut in the app should route through
+// here so the binding works the way users expect on their platform — without
+// this, macOS users have no way to trigger Ctrl-only shortcuts (Cmd is the
+// natural modifier, Ctrl is rarely typed and clashes with system bindings).
+var IS_DARWIN = (typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || ''));
+function cmdOrCtrl(e) {
+  return IS_DARWIN ? !!e.metaKey : !!e.ctrlKey;
 }
 
 function runWindowBadgeHtml(auto) {
@@ -11276,11 +12379,11 @@ function showImportPreview(preview) {
   var headerHtml = '<div class="import-progress-header">' +
     '<strong>Import Preview</strong>' +
     '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' +
-    preview.automationCount + ' automations, ' + preview.totalAgents + ' agents';
-  if (preview.totalManagers > 0) headerHtml += ', ' + preview.totalManagers + ' managers';
+    safeNum(preview.automationCount) + ' automations, ' + safeNum(preview.totalAgents) + ' agents';
+  if (safeNum(preview.totalManagers) > 0) headerHtml += ', ' + safeNum(preview.totalManagers) + ' managers';
   headerHtml += '</div>';
-  if (preview.totalIsolated > 0) {
-    headerHtml += '<div style="font-size:11px;color:#f59e0b;margin-top:2px;">' + preview.totalIsolated + ' repo clone(s) will be set up after import</div>';
+  if (safeNum(preview.totalIsolated) > 0) {
+    headerHtml += '<div style="font-size:11px;color:#f59e0b;margin-top:2px;">' + safeNum(preview.totalIsolated) + ' repo clone(s) will be set up after import</div>';
   }
   headerHtml += '</div>';
 
@@ -11290,12 +12393,12 @@ function showImportPreview(preview) {
     var badges = '';
     if (a.hasManager) badges += '<span class="agent-badge agent-badge-chained" style="margin-left:6px;">Manager</span>';
     if (a.hasChaining) badges += '<span class="agent-badge agent-badge-isolated" style="margin-left:4px;">Chained</span>';
-    if (a.isolatedCount > 0) badges += '<span class="agent-badge" style="margin-left:4px;background:rgba(59,130,246,0.15);color:#60a5fa;">' + a.isolatedCount + ' clone(s)</span>';
+    if (safeNum(a.isolatedCount) > 0) badges += '<span class="agent-badge" style="margin-left:4px;background:rgba(59,130,246,0.15);color:#60a5fa;">' + safeNum(a.isolatedCount) + ' clone(s)</span>';
 
     listHtml += '<div class="import-progress-row">' +
       '<span class="import-progress-icon">&#9711;</span>' +
       '<span class="import-progress-name">' + escapeHtml(a.name) + '</span>' +
-      '<span style="font-size:11px;opacity:0.5;">' + a.agentCount + ' agent' + (a.agentCount > 1 ? 's' : '') + '</span>' +
+      '<span style="font-size:11px;opacity:0.5;">' + safeNum(a.agentCount) + ' agent' + (safeNum(a.agentCount) > 1 ? 's' : '') + '</span>' +
       badges +
       '</div>';
   });
@@ -11337,7 +12440,7 @@ function showImportPreview(preview) {
       } else {
         // No clones needed — show done
         panel.querySelector('.import-progress-header').innerHTML = '<strong>Import Complete</strong>' +
-          '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' + result.count + ' automations imported (paused)</div>';
+          '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' + safeNum(result.count) + ' automations imported (paused)</div>';
         // Mark all rows as ready
         panel.querySelectorAll('.import-progress-icon').forEach(function (icon) {
           icon.innerHTML = '&#10003;';
@@ -11359,8 +12462,8 @@ function showImportProgress(importResult, needsClone) {
   var panel = document.createElement('div');
   panel.className = 'import-progress-panel';
   panel.innerHTML = '<div class="import-progress-header">' +
-    '<strong>Imported ' + importResult.count + ' automations (paused)</strong>' +
-    '<div class="import-progress-subtitle">Setting up ' + needsClone.length + ' repo clone(s)...</div>' +
+    '<strong>Imported ' + safeNum(importResult.count) + ' automations (paused)</strong>' +
+    '<div class="import-progress-subtitle">Setting up ' + safeNum(needsClone.length) + ' repo clone(s)...</div>' +
     '</div>' +
     '<div class="import-progress-list"></div>' +
     '<pre class="import-progress-log"></pre>' +
@@ -12240,7 +13343,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   closeBtn.addEventListener('click', close);
   modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
   document.addEventListener('keydown', function (e) {
-    if (e.ctrlKey && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); open(); }
+    if (cmdOrCtrl(e) && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); open(); }
     if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
   });
 
@@ -12498,9 +13601,9 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     try { cmd.run(); } catch (e) { console.error('palette command failed', e); }
   }
 
-  // Register Ctrl+K in capture phase so xterm can't swallow it.
+  // Register Cmd/Ctrl+K in capture phase so xterm can't swallow it.
   document.addEventListener('keydown', function (e) {
-    if (e.ctrlKey && (e.key === 'k' || e.key === 'K') && !e.shiftKey && !e.altKey) {
+    if (cmdOrCtrl(e) && (e.key === 'k' || e.key === 'K') && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       e.stopPropagation();
       open();
@@ -12983,6 +14086,425 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
 
   // Pre-warm the cache so trigger expansion works immediately on app start
   refresh();
+})();
+
+(function setupExtensionsManager() {
+  var modal = document.getElementById('ext-modal');
+  if (!modal) return;
+  var closeBtn = document.getElementById('ext-close');
+  var pathLabel = document.getElementById('ext-project-path');
+  var currentProject = null;
+
+  function refresh() {
+    if (!currentProject || !window.electronAPI || !window.electronAPI.listExtensions) return;
+    window.electronAPI.listExtensions(currentProject).then(function (data) {
+      ['agents', 'skills', 'commands'].forEach(function (cat) {
+        var list = modal.querySelector('[data-cat-list="' + cat + '"]');
+        if (!list) return;
+        list.innerHTML = '';
+        var items = data[cat] || [];
+        if (items.length === 0) {
+          var none = document.createElement('div');
+          none.className = 'settings-hint';
+          none.style.padding = '8px';
+          none.textContent = 'None yet.';
+          list.appendChild(none);
+          return;
+        }
+        items.forEach(function (it) {
+          var row = document.createElement('div');
+          row.className = 'ext-row';
+          var label = document.createElement('span');
+          label.textContent = it.name;
+          var scope = document.createElement('span');
+          scope.className = 'ext-scope ext-scope-' + it.scope;
+          scope.textContent = it.scope;
+          var openBtn = document.createElement('button');
+          openBtn.className = 'settings-browse-btn';
+          openBtn.style.padding = '2px 8px';
+          openBtn.textContent = 'Edit';
+          openBtn.addEventListener('click', function () {
+            modal.classList.add('hidden');
+            openFileEditor(it.path);
+          });
+          var delBtn = document.createElement('button');
+          delBtn.className = 'settings-browse-btn';
+          delBtn.style.padding = '2px 8px';
+          delBtn.style.color = '#f87171';
+          delBtn.textContent = '×';
+          delBtn.addEventListener('click', function () {
+            if (!confirm('Delete ' + it.name + ' (' + it.scope + ')?')) return;
+            window.electronAPI.deleteExtension(it.path).then(function (r) {
+              if (!r || !r.ok) alert('Delete failed: ' + (r && r.error || 'unknown'));
+              refresh();
+            });
+          });
+          row.appendChild(label);
+          row.appendChild(scope);
+          row.appendChild(openBtn);
+          row.appendChild(delBtn);
+          list.appendChild(row);
+        });
+      });
+    });
+  }
+
+  modal.querySelectorAll('.ext-new').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var cat = btn.dataset.cat;
+      // Scope picker via inline confirmDialog (Cancel = global, OK = project).
+      confirmDialog(
+        'Create in PROJECT scope?\n\n' +
+        'OK = .claude/' + cat + '/  (this project only)\n' +
+        'Cancel = ~/.claude/' + cat + '/  (global, all projects)',
+        { okLabel: 'Project', cancelLabel: 'Global' }
+      ).then(function (isProject) {
+        var scope = isProject ? 'project' : 'global';
+        promptForValue('Name for new ' + cat.slice(0, -1) + ' (alphanumeric, _ . - allowed):').then(function (name) {
+          if (!name) return;
+          window.electronAPI.createExtension(currentProject, cat, name.trim(), scope).then(function (r) {
+            if (!r || !r.ok) { showToast('Create failed: ' + (r && r.error || 'unknown'), { kind: 'error' }); return; }
+            refresh();
+            modal.classList.add('hidden');
+            openFileEditor(r.path);
+            showToast('Created ' + cat.slice(0, -1) + ' "' + name + '" (' + scope + ')', { kind: 'success' });
+          });
+        });
+      });
+    });
+  });
+
+  if (closeBtn) closeBtn.addEventListener('click', function () { modal.classList.add('hidden'); });
+  modal.addEventListener('click', function (e) { if (e.target === modal) modal.classList.add('hidden'); });
+
+  window.openExtensionsModal = function (projPath) {
+    currentProject = projPath || null;
+    pathLabel.textContent = projPath ? (projPath + ' + ~/.claude/') : '~/.claude/';
+    modal.classList.remove('hidden');
+    refresh();
+  };
+})();
+
+(function setupMcpManager() {
+  var modal = document.getElementById('mcp-modal');
+  if (!modal) return;
+  var listEl = document.getElementById('mcp-list');
+  var emptyEl = document.getElementById('mcp-empty');
+  var formEl = document.getElementById('mcp-form');
+  var nameEl = document.getElementById('mcp-name');
+  var cmdEl = document.getElementById('mcp-command');
+  var argsEl = document.getElementById('mcp-args');
+  var envEl = document.getElementById('mcp-env');
+  var transportEl = document.getElementById('mcp-transport');
+  var statusEl = document.getElementById('mcp-status');
+  var closeBtn = document.getElementById('mcp-close');
+  var newBtn = document.getElementById('mcp-new');
+  var saveBtn = document.getElementById('mcp-save');
+  var delBtn = document.getElementById('mcp-delete');
+  var pathLabel = document.getElementById('mcp-project-path');
+  var projectPath = null;
+  var servers = {}; // name -> config
+  var editingName = null;
+  var isNew = false;
+
+  function showForm(show) {
+    // Use inline style instead of .hidden class — the app doesn't have a
+    // global '.hidden { display: none }' rule, only element-scoped ones, so
+    // toggling .hidden on these divs is a no-op.
+    emptyEl.style.display = show ? 'none' : '';
+    formEl.style.display = show ? '' : 'none';
+  }
+  function renderList() {
+    listEl.innerHTML = '';
+    var names = Object.keys(servers).sort();
+    if (names.length === 0) {
+      var none = document.createElement('div');
+      none.className = 'settings-hint';
+      none.style.padding = '12px';
+      none.textContent = 'No servers yet — click + to add one.';
+      listEl.appendChild(none);
+      return;
+    }
+    names.forEach(function (n) {
+      var row = document.createElement('div');
+      row.className = 'endpoints-list-item' + (n === editingName ? ' active' : '');
+      row.textContent = n;
+      row.addEventListener('click', function () { selectServer(n); });
+      listEl.appendChild(row);
+    });
+  }
+  function loadIntoForm(name) {
+    var s = servers[name] || {};
+    nameEl.value = name || '';
+    cmdEl.value = s.command || '';
+    argsEl.value = Array.isArray(s.args) ? s.args.join('\n') : '';
+    envEl.value = s.env ? Object.keys(s.env).map(function (k) { return k + '=' + s.env[k]; }).join('\n') : '';
+    transportEl.value = s.transport || '';
+    statusEl.textContent = '';
+  }
+  function selectServer(n) {
+    editingName = n;
+    isNew = false;
+    showForm(true);
+    loadIntoForm(n);
+    renderList();
+    delBtn.style.display = '';
+  }
+  function startNew() {
+    editingName = null;
+    isNew = true;
+    showForm(true);
+    nameEl.value = '';
+    cmdEl.value = '';
+    argsEl.value = '';
+    envEl.value = '';
+    transportEl.value = '';
+    statusEl.textContent = '';
+    delBtn.style.display = 'none';
+    nameEl.focus();
+  }
+  function parseEnv(text) {
+    var out = {};
+    String(text || '').split(/\r?\n/).forEach(function (line) {
+      line = line.trim();
+      if (!line || line.startsWith('#')) return;
+      var i = line.indexOf('=');
+      if (i < 0) return;
+      var k = line.slice(0, i).trim();
+      var v = line.slice(i + 1);
+      if (k) out[k] = v;
+    });
+    return out;
+  }
+  function save() {
+    var newName = nameEl.value.trim();
+    if (!/^[A-Za-z0-9_.\-]+$/.test(newName)) {
+      statusEl.textContent = 'Name must be alphanumeric (or _ . -).';
+      return;
+    }
+    var cfg = {
+      command: cmdEl.value.trim() || undefined,
+      args: argsEl.value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean),
+      env: parseEnv(envEl.value),
+      transport: transportEl.value || undefined
+    };
+    if (!cfg.command) { statusEl.textContent = 'Command is required.'; return; }
+    if (cfg.args.length === 0) delete cfg.args;
+    if (Object.keys(cfg.env).length === 0) delete cfg.env;
+    if (!cfg.transport) delete cfg.transport;
+    // Rename: drop the old key.
+    if (!isNew && editingName && editingName !== newName) delete servers[editingName];
+    servers[newName] = cfg;
+    persist();
+  }
+  function del() {
+    if (!editingName) return;
+    if (!confirm('Delete MCP server "' + editingName + '"?')) return;
+    delete servers[editingName];
+    editingName = null;
+    persist();
+    showForm(false);
+  }
+  function persist() {
+    if (!projectPath || !window.electronAPI || !window.electronAPI.writeMcp) return;
+    statusEl.textContent = 'Saving…';
+    window.electronAPI.writeMcp(projectPath, servers).then(function (r) {
+      if (r && r.ok) {
+        statusEl.textContent = 'Saved';
+        setTimeout(function () { if (statusEl.textContent === 'Saved') statusEl.textContent = ''; }, 1500);
+      } else {
+        statusEl.textContent = 'Error: ' + (r && r.error || 'unknown');
+      }
+      renderList();
+    });
+  }
+
+  if (newBtn) newBtn.addEventListener('click', startNew);
+  if (saveBtn) saveBtn.addEventListener('click', save);
+  if (delBtn) delBtn.addEventListener('click', del);
+  if (closeBtn) closeBtn.addEventListener('click', function () { modal.classList.add('hidden'); });
+  modal.addEventListener('click', function (e) { if (e.target === modal) modal.classList.add('hidden'); });
+  ['mcp-name', 'mcp-command', 'mcp-args', 'mcp-env'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  });
+
+  window.openMcpModal = function (projPath) {
+    if (!projPath || !window.electronAPI || !window.electronAPI.readMcp) return;
+    projectPath = projPath;
+    pathLabel.textContent = projPath + '/.mcp.json';
+    modal.classList.remove('hidden');
+    showForm(false);
+    statusEl.textContent = '';
+    window.electronAPI.readMcp(projPath).then(function (r) {
+      servers = (r && r.mcpServers) || {};
+      editingName = null;
+      renderList();
+    });
+  };
+})();
+
+(function setupQuickOpen() {
+  var modal = document.getElementById('quick-open-modal');
+  var input = document.getElementById('quick-open-input');
+  var resultsEl = document.getElementById('quick-open-results');
+  var closeBtn = document.getElementById('quick-open-close');
+  if (!modal || !input || !resultsEl) return;
+
+  var lastHits = [];
+  var sel = 0;
+
+  function open() {
+    if (!activeProjectKey) return;
+    modal.classList.remove('hidden');
+    input.value = '';
+    lastHits = [];
+    resultsEl.innerHTML = '';
+    setTimeout(function () { input.focus(); }, 0);
+  }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+  function render() {
+    resultsEl.innerHTML = '';
+    lastHits.slice(0, 40).forEach(function (h, i) {
+      var row = document.createElement('div');
+      row.className = 'session-search-hit' + (i === sel ? ' active' : '');
+      var meta = document.createElement('div');
+      meta.className = 'session-search-hit-meta';
+      meta.textContent = h.relativePath || h.name;
+      row.appendChild(meta);
+      row.addEventListener('click', function () { openFileEditor(h.path); close(); });
+      resultsEl.appendChild(row);
+    });
+  }
+
+  var t = null;
+  input.addEventListener('input', function () {
+    clearTimeout(t);
+    var q = input.value.trim();
+    if (!q) { lastHits = []; resultsEl.innerHTML = ''; return; }
+    t = setTimeout(function () {
+      var proj = config && config.projects && config.projects.find(function (p) {
+        return p && projectPathToKey(p.path) === activeProjectKey;
+      });
+      if (!proj || !window.electronAPI || !window.electronAPI.searchFiles) return;
+      window.electronAPI.searchFiles(proj.path, q).then(function (hits) {
+        // Files only — quick-open doesn't open directories.
+        lastHits = (hits || []).filter(function (h) { return !h.isDirectory; });
+        sel = 0;
+        render();
+      });
+    }, 120);
+  });
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(lastHits.length - 1, sel + 1); render(); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(0, sel - 1); render(); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var h = lastHits[sel];
+      if (h) { openFileEditor(h.path); close(); }
+    }
+  });
+
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (cmdOrCtrl(e) && !e.shiftKey && !e.altKey && (e.key === 'p' || e.key === 'P')) {
+      // Exclude the textarea inside our own modal so typing 'p' inside the
+      // input doesn't loop.
+      if (e.target && (e.target.id === 'quick-open-input')) return;
+      e.preventDefault();
+      open();
+    }
+  }, true);
+})();
+
+(function setupContentSearch() {
+  var modal = document.getElementById('content-search-modal');
+  var input = document.getElementById('content-search-input');
+  var resultsEl = document.getElementById('content-search-results');
+  var statusEl = document.getElementById('content-search-status');
+  var closeBtn = document.getElementById('content-search-close');
+  if (!modal || !input || !resultsEl) return;
+
+  function open() {
+    if (!activeProjectKey) { return; }
+    modal.classList.remove('hidden');
+    input.focus();
+    input.select();
+  }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+  function escapeHtmlLocal(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+    });
+  }
+  function highlight(text, q) {
+    var safe = escapeHtmlLocal(text);
+    var idx = safe.toLowerCase().indexOf(q.toLowerCase());
+    if (idx === -1) return safe;
+    return safe.slice(0, idx) + '<mark>' + safe.slice(idx, idx + q.length) + '</mark>' + safe.slice(idx + q.length);
+  }
+
+  var t = null;
+  input.addEventListener('input', function () {
+    clearTimeout(t);
+    var q = input.value.trim();
+    if (q.length < 2) { resultsEl.innerHTML = ''; statusEl.textContent = ''; return; }
+    statusEl.textContent = 'Searching…';
+    t = setTimeout(function () {
+      if (!window.electronAPI || !window.electronAPI.searchProjectContent) {
+        statusEl.textContent = 'Search API not available.';
+        return;
+      }
+      // Use the project path, not its key — main resolves via assertInsideAllowedRoots.
+      var proj = config && config.projects && config.projects.find(function (p) {
+        return p && projectPathToKey(p.path) === activeProjectKey;
+      });
+      if (!proj) { statusEl.textContent = 'No active project.'; return; }
+      window.electronAPI.searchProjectContent(proj.path, q).then(function (hits) {
+        resultsEl.innerHTML = '';
+        if (!hits || !hits.length) { statusEl.textContent = 'No matches.'; return; }
+        statusEl.textContent = hits.length + ' match' + (hits.length === 1 ? '' : 'es') + (hits.length >= 300 ? ' (capped)' : '');
+        hits.forEach(function (h) {
+          var row = document.createElement('div');
+          row.className = 'session-search-hit';
+          var meta = document.createElement('div');
+          meta.className = 'session-search-hit-meta';
+          meta.textContent = h.relativePath + '  •  line ' + h.line;
+          var snip = document.createElement('div');
+          snip.className = 'session-search-hit-snippet';
+          snip.innerHTML = highlight(h.snippet || '', q);
+          row.appendChild(meta);
+          row.appendChild(snip);
+          row.addEventListener('click', function () {
+            openFileEditor(h.path, h.line);
+            close();
+          });
+          resultsEl.appendChild(row);
+        });
+      }).catch(function (e) {
+        statusEl.textContent = 'Search failed: ' + (e && e.message || e);
+      });
+    }, 200);
+  });
+
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (cmdOrCtrl(e) && e.shiftKey && (e.key === 'G' || e.key === 'g')) {
+      e.preventDefault();
+      open();
+    }
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
 })();
 
 (function setupShortcutsModal() {

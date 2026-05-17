@@ -42,6 +42,15 @@ if (process.platform !== 'win32') {
 // connect to 127.0.0.1:<ptyPort> and spawn arbitrary commands as the user.
 const PTY_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
 
+// Per-launch token gating the local hook HTTP server (POST /hook). Without this,
+// any local process — including a JS payload running in any browser tab — could
+// fabricate a hook event that gets forwarded into the renderer over IPC, which
+// is exactly the cross-process attack surface Electron CSP doesn't cover.
+// Token is included in the curl command we write into the user's settings.json,
+// re-synced on every launch (same flow as the port). Re-syncs cost one file
+// write at startup, which is negligible.
+const HOOK_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
+
 // Set appUserModelId early so Windows uses a consistent taskbar icon across restarts
 app.setAppUserModelId('com.thecodeguy.claudes');
 
@@ -192,6 +201,15 @@ function encryptToken(plain) {
   }
   return { plain };
 }
+
+// Exposed to the renderer so the endpoint-presets UI can warn the user when
+// tokens will be stored plaintext (typical on Linux without a keyring, or in
+// headless WSL). Backed by Electron's safeStorage — DPAPI on win32, Keychain
+// on darwin, libsecret on Linux when present.
+ipcMain.handle('security:isTokenStorageEncrypted', () => {
+  try { return safeStorage.isEncryptionAvailable(); }
+  catch { return false; }
+});
 
 function decryptToken(stored) {
   if (!stored) return '';
@@ -540,9 +558,13 @@ function startPtyServer() {
     const serverScript = getPtyServerScript();
     let resolved = false;
 
+    // Opt-in: pty-server runs `claude update` on every startup if this env
+    // is '1'. Off by default to avoid running whichever `claude` binary is
+    // first on PATH unprompted. See Settings → Updates.
+    const autoUpdateClaude = readConfig().autoUpdateClaude === true ? '1' : '0';
     ptyServerProcess = spawn(nodePath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN }
+      env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN, CLAUDES_AUTO_UPDATE_CLAUDE: autoUpdateClaude }
     });
 
     ptyServerProcess.on('error', (err) => {
@@ -654,7 +676,15 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Defence-in-depth: run the renderer in the OS sandbox. The preload only
+      // talks to main via contextBridge + ipcRenderer.invoke, both of which are
+      // sandbox-compatible, so this is a free upgrade.
+      sandbox: true,
+      // Off: we don't need Google's spell-check service phoning home, and
+      // we don't use <webview> at all.
+      spellcheck: false,
+      webviewTag: false
     }
   });
 
@@ -733,7 +763,15 @@ function createProjectWindow(projectKey) {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Defence-in-depth: run the renderer in the OS sandbox. The preload only
+      // talks to main via contextBridge + ipcRenderer.invoke, both of which are
+      // sandbox-compatible, so this is a free upgrade.
+      sandbox: true,
+      // Off: we don't need Google's spell-check service phoning home, and
+      // we don't use <webview> at all.
+      spellcheck: false,
+      webviewTag: false
     }
   });
 
@@ -1379,11 +1417,201 @@ ipcMain.handle('sessions:load', (event, projectPath) => {
   }
 });
 
+// --- Named layouts (per project, persisted in projects.json) ---
+//
+// A layout snapshot is the user's chosen arrangement of rows / columns for a
+// project: how many columns, what each spawns (claude vs custom cmd), the env
+// it carries (endpoint preset, model), and any column title. Restoring a
+// layout re-spawns those columns in the same shape — useful for "investigate
+// bug X" vs "review PRs" workflows.
+
+function listLayouts(projectPath) {
+  const cfg = readConfig();
+  const proj = (cfg.projects || []).find(p => p && p.path === projectPath);
+  return (proj && Array.isArray(proj.layouts)) ? proj.layouts : [];
+}
+function saveLayouts(projectPath, layouts) {
+  const cfg = readConfig();
+  const proj = (cfg.projects || []).find(p => p && p.path === projectPath);
+  if (!proj) return false;
+  proj.layouts = Array.isArray(layouts) ? layouts : [];
+  writeConfig(cfg);
+  return true;
+}
+
+ipcMain.handle('layouts:list', (event, projectPath) => listLayouts(projectPath));
+ipcMain.handle('layouts:save', (event, projectPath, name, layout) => {
+  if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'name required' };
+  if (!layout || typeof layout !== 'object') return { ok: false, error: 'layout required' };
+  const existing = listLayouts(projectPath);
+  const next = existing.filter(l => l.name !== name);
+  next.push({ name: name.trim(), savedAt: Date.now(), layout });
+  return { ok: saveLayouts(projectPath, next) };
+});
+ipcMain.handle('layouts:delete', (event, projectPath, name) => {
+  const existing = listLayouts(projectPath);
+  return { ok: saveLayouts(projectPath, existing.filter(l => l.name !== name)) };
+});
+
+// --- MCP server config (.mcp.json) ---
+//
+// .mcp.json lives at the project root and follows the Claude Code schema:
+//   { "mcpServers": { "name": { "command", "args", "env", "transport" } } }
+// We expose read/write IPCs so the renderer can offer a CRUD UI without
+// users editing JSON by hand.
+ipcMain.handle('mcp:read', (event, projectPath) => {
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const filePath = path.join(safeBase, '.mcp.json');
+    if (!fs.existsSync(filePath)) return { exists: false, mcpServers: {} };
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const data = JSON.parse(raw);
+    return { exists: true, mcpServers: (data && data.mcpServers) || {} };
+  } catch (err) {
+    return { exists: false, mcpServers: {}, error: err && err.message };
+  }
+});
+
+ipcMain.handle('mcp:write', (event, projectPath, mcpServers) => {
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    if (!mcpServers || typeof mcpServers !== 'object') return { ok: false, error: 'mcpServers must be an object' };
+    // Re-read existing file to preserve top-level keys we don't manage (e.g. some
+    // forks store additional settings here). Fall back to a fresh object when absent.
+    const filePath = path.join(safeBase, '.mcp.json');
+    let existing = {};
+    try { existing = JSON.parse(fs.readFileSync(filePath, 'utf8')); }
+    catch { /* missing or malformed — overwrite from scratch */ }
+    const out = Object.assign({}, existing, { mcpServers });
+    fs.writeFileSync(filePath, JSON.stringify(out, null, 2), 'utf8');
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err && err.message };
+  }
+});
+
+// --- Claude Code extensions discovery ---
+// Lists files under .claude/{agents,skills,commands} both project-local and
+// global (~/.claude). The renderer uses this to surface a unified manager UI
+// without each request scanning each scope separately.
+ipcMain.handle('extensions:list', (event, projectPath) => {
+  const out = { agents: [], skills: [], commands: [] };
+
+  function scanScope(baseDir, scope) {
+    function scanCategory(category) {
+      const dir = path.join(baseDir, category);
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch { return; }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          // skills/<name>/SKILL.md style
+          const skillFile = path.join(full, 'SKILL.md');
+          if (fs.existsSync(skillFile)) {
+            out[category].push({ name: e.name, path: skillFile, scope });
+            continue;
+          }
+          // commands can also be nested directories (subdirs of namespaced commands)
+          try {
+            const inner = fs.readdirSync(full, { withFileTypes: true });
+            for (const i of inner) {
+              if (i.isFile() && (i.name.endsWith('.md') || i.name.endsWith('.json'))) {
+                out[category].push({ name: e.name + '/' + i.name.replace(/\.(md|json)$/, ''), path: path.join(full, i.name), scope });
+              }
+            }
+          } catch { /* unreadable */ }
+        } else if (e.isFile() && (e.name.endsWith('.md') || e.name.endsWith('.json'))) {
+          out[category].push({ name: e.name.replace(/\.(md|json)$/, ''), path: full, scope });
+        }
+      }
+    }
+    scanCategory('agents');
+    scanCategory('skills');
+    scanCategory('commands');
+  }
+
+  // Global first so project entries shadow global ones with the same name in
+  // the renderer's grouping. .claude is always an allowed root.
+  scanScope(path.join(os.homedir(), '.claude'), 'global');
+  try {
+    if (projectPath) {
+      const safe = assertInsideAllowedRoots(projectPath);
+      scanScope(path.join(safe, '.claude'), 'project');
+    }
+  } catch { /* project scope unavailable */ }
+  return out;
+});
+
+// Create a new extension file from a tiny template so the manager UI can
+// produce something the user can immediately edit.
+ipcMain.handle('extensions:create', (event, projectPath, category, name, scope) => {
+  if (!['agents', 'skills', 'commands'].includes(category)) return { ok: false, error: 'bad category' };
+  if (typeof name !== 'string' || !/^[A-Za-z0-9_.\-]+$/.test(name)) {
+    return { ok: false, error: 'invalid name' };
+  }
+  let baseDir;
+  if (scope === 'global') baseDir = path.join(os.homedir(), '.claude');
+  else {
+    try { baseDir = path.join(assertInsideAllowedRoots(projectPath), '.claude'); }
+    catch { return { ok: false, error: 'project path not allowed' }; }
+  }
+  const dir = path.join(baseDir, category);
+  let filePath;
+  let content;
+  if (category === 'skills') {
+    filePath = path.join(dir, name, 'SKILL.md');
+    content = '---\nname: ' + name + '\ndescription: A short summary of when to use this skill.\n---\n\n# ' + name + '\n\nReplace this with the skill body.\n';
+    try { fs.mkdirSync(path.dirname(filePath), { recursive: true }); }
+    catch { /* exists */ }
+  } else {
+    filePath = path.join(dir, name + '.md');
+    content = category === 'agents'
+      ? '---\nname: ' + name + '\ndescription: Triggered when the user wants…\nmodel: sonnet\n---\n\nYou are a focused sub-agent that…\n'
+      : '# /' + name + '\n\nReplace this with the slash-command body. The user invokes it as `/' + name + '` from the chat.\n';
+    try { fs.mkdirSync(dir, { recursive: true }); }
+    catch { /* exists */ }
+  }
+  if (fs.existsSync(filePath)) return { ok: false, error: 'already exists', path: filePath };
+  try { fs.writeFileSync(filePath, content, 'utf8'); }
+  catch (err) { return { ok: false, error: err && err.message }; }
+  return { ok: true, path: filePath };
+});
+
+ipcMain.handle('extensions:delete', (event, targetPath) => {
+  let safe;
+  try { safe = assertInsideAllowedRoots(targetPath); }
+  catch { return { ok: false, error: 'forbidden' }; }
+  // Only allow under a .claude/ directory — extra guard so a compromised
+  // renderer can't ask us to delete arbitrary files via this IPC.
+  if (!/[\\/]\.claude[\\/]/.test(safe)) return { ok: false, error: 'not inside .claude' };
+  try {
+    const st = fs.statSync(safe);
+    if (st.isDirectory()) fs.rmSync(safe, { recursive: true, force: true });
+    else fs.unlinkSync(safe);
+  } catch (err) {
+    return { ok: false, error: err && err.message };
+  }
+  return { ok: true };
+});
+
 // --- CLAUDE.md Management ---
+
+// Sentinel passed by the renderer when it wants to edit the global
+// ~/.claude/CLAUDE.md (a Claude CLI feature: instructions that apply to every
+// project). Resolved here so we never expose the home path directly to the
+// renderer and so assertInsideAllowedRoots still gates writes.
+const GLOBAL_CLAUDEMD_SENTINEL = '__GLOBAL__';
+function resolveClaudeMdRoot(arg) {
+  if (arg === GLOBAL_CLAUDEMD_SENTINEL) {
+    return path.join(os.homedir(), '.claude');
+  }
+  return arg;
+}
 
 ipcMain.handle('claudemd:read', (event, projectPath) => {
   try {
-    const safeBase = assertInsideAllowedRoots(projectPath);
+    const safeBase = assertInsideAllowedRoots(resolveClaudeMdRoot(projectPath));
     const filePath = path.join(safeBase, 'CLAUDE.md');
     if (!fs.existsSync(filePath)) return { exists: false, content: '' };
     return { exists: true, content: fs.readFileSync(filePath, 'utf8') };
@@ -1394,7 +1622,7 @@ ipcMain.handle('claudemd:read', (event, projectPath) => {
 
 ipcMain.handle('claudemd:save', (event, projectPath, content) => {
   try {
-    const safeBase = assertInsideAllowedRoots(projectPath);
+    const safeBase = assertInsideAllowedRoots(resolveClaudeMdRoot(projectPath));
     const filePath = path.join(safeBase, 'CLAUDE.md');
     if (typeof content !== 'string') return { success: false, error: 'content must be a string' };
     if (Buffer.byteLength(content, 'utf8') > FS_WRITE_MAX_BYTES) {
@@ -1444,13 +1672,99 @@ ipcMain.handle('fs:writeFile', (event, filePath, content) => {
   }
 });
 
+// Minimal .gitignore matcher. Implements the common subset:
+//   - blank / # comments skipped
+//   - trailing /  : matches directories only
+//   - leading /   : anchored to the gitignore root
+//   - bare name   : matches by basename anywhere in the tree
+//   - patterns with / (not leading): anchored relative to gitignore root
+//   - * wildcards inside a segment (no cross-segment ** support here)
+//   - ! negation is honoured (later rule wins)
+// Always implicitly ignores .git and node_modules so even repos without a
+// .gitignore don't flood the explorer.
+const GITIGNORE_CACHE = new Map(); // rootDir -> { mtime, rules }
+const ALWAYS_IGNORED_DIRS = new Set(['.git', 'node_modules', '__pycache__', '.next', '.nuxt', 'dist', '.cache', 'coverage', '.venv', 'venv', 'target']);
+
+function compileGitignorePattern(line) {
+  let neg = false;
+  if (line.startsWith('!')) { neg = true; line = line.slice(1); }
+  let dirOnly = false;
+  if (line.endsWith('/')) { dirOnly = true; line = line.slice(0, -1); }
+  let anchored = false;
+  if (line.startsWith('/')) { anchored = true; line = line.slice(1); }
+  // If the pattern contains a slash (and isn't bare), it's anchored from root.
+  if (!anchored && line.includes('/')) anchored = true;
+  // Escape regex metachars except `*` and `?`, then translate globs.
+  const re = line.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]');
+  let pattern;
+  if (anchored) {
+    // Match against the relative path from gitignore root.
+    pattern = '^' + re + '(/.*)?$';
+  } else {
+    // Match against any path segment by basename, OR by trailing path component.
+    pattern = '(^|/)' + re + '(/.*)?$';
+  }
+  return { neg, dirOnly, re: new RegExp(pattern) };
+}
+
+function loadGitignoreRules(root) {
+  const file = path.join(root, '.gitignore');
+  let stat;
+  try { stat = fs.statSync(file); }
+  catch { GITIGNORE_CACHE.set(root, { mtime: 0, rules: [] }); return []; }
+  const cached = GITIGNORE_CACHE.get(root);
+  if (cached && cached.mtime === stat.mtimeMs) return cached.rules;
+  let raw = '';
+  try { raw = fs.readFileSync(file, 'utf8'); } catch { /* race condition — proceed empty */ }
+  const rules = raw.split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('#'))
+    .map(l => {
+      try { return compileGitignorePattern(l); }
+      catch { return null; }
+    })
+    .filter(Boolean);
+  GITIGNORE_CACHE.set(root, { mtime: stat.mtimeMs, rules });
+  return rules;
+}
+
+function isIgnoredByGitignore(rules, relPath, isDir) {
+  // Normalise to forward slashes (gitignore patterns use /).
+  const p = relPath.split(path.sep).join('/');
+  let ignored = false;
+  for (const r of rules) {
+    if (r.dirOnly && !isDir) continue;
+    if (r.re.test(p)) ignored = !r.neg;
+  }
+  return ignored;
+}
+
 ipcMain.handle('fs:readDir', (event, dirPath) => {
   try {
     const safe = assertInsideAllowedRoots(dirPath);
     const entries = fs.readdirSync(safe, { withFileTypes: true });
-    const excluded = new Set(['node_modules', '.git', '__pycache__', '.next', '.nuxt']);
+    // Walk up to find a gitignore root: the nearest configured project that
+    // contains `safe`. Falls back to `safe` itself if it's a project root.
+    let gitRoot = safe;
+    try {
+      const cfg = readConfig();
+      if (Array.isArray(cfg.projects)) {
+        for (const p of cfg.projects) {
+          if (p && typeof p.path === 'string' && isInsideRoot(safe, path.resolve(p.path))) {
+            gitRoot = path.resolve(p.path);
+            break;
+          }
+        }
+      }
+    } catch { /* fall through */ }
+    const rules = loadGitignoreRules(gitRoot);
     return entries
-      .filter(e => !excluded.has(e.name))
+      .filter(e => !ALWAYS_IGNORED_DIRS.has(e.name))
+      .filter(e => {
+        const full = path.join(safe, e.name);
+        const rel = path.relative(gitRoot, full);
+        return !isIgnoredByGitignore(rules, rel, e.isDirectory());
+      })
       .map(e => ({
         name: e.name,
         path: path.join(safe, e.name),
@@ -1468,7 +1782,7 @@ ipcMain.handle('fs:readDir', (event, dirPath) => {
 ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
   let safeRoot;
   try { safeRoot = assertInsideAllowedRoots(rootDir); } catch { return []; }
-  const excluded = new Set(['node_modules', '.git', '__pycache__', '.next', '.nuxt', 'dist', '.cache', 'coverage']);
+  const rules = loadGitignoreRules(safeRoot);
   const results = [];
   const lowerQuery = String(query || '').toLowerCase();
   const MAX_RESULTS = 100;
@@ -1479,9 +1793,10 @@ ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const e of entries) {
         if (results.length >= MAX_RESULTS) return;
-        if (excluded.has(e.name)) continue;
+        if (ALWAYS_IGNORED_DIRS.has(e.name)) continue;
         const fullPath = path.join(dir, e.name);
         const relativePath = path.relative(safeRoot, fullPath);
+        if (isIgnoredByGitignore(rules, relativePath, e.isDirectory())) continue;
         if (e.name.toLowerCase().includes(lowerQuery)) {
           results.push({ name: e.name, path: fullPath, relativePath, isDirectory: e.isDirectory() });
         }
@@ -1494,11 +1809,147 @@ ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
   return results;
 });
 
+// fs.watch wiring for the active project root so the Explorer can refresh
+// itself when files appear, disappear, or get renamed. One watcher per
+// project root; events are coalesced to avoid spamming the renderer.
+const FS_WATCHERS = new Map(); // root -> { watcher, timer }
+const FS_WATCH_DEBOUNCE_MS = 250;
+
+function emitFsChanged(root) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send('fs:changed', root); } catch { /* window closing */ }
+}
+
+ipcMain.handle('fs:startWatch', (event, projectPath) => {
+  let safe;
+  try { safe = assertInsideAllowedRoots(projectPath); } catch { return { ok: false, error: 'forbidden' }; }
+  if (FS_WATCHERS.has(safe)) return { ok: true, alreadyWatching: true };
+  try {
+    // recursive: true is the only sensible mode here. Supported on darwin/win32
+    // natively, and on Linux since Node 20. Fall back to a non-recursive watcher
+    // if the platform refuses recursive.
+    let watcher;
+    try { watcher = fs.watch(safe, { recursive: true }, scheduleEmit); }
+    catch { watcher = fs.watch(safe, { recursive: false }, scheduleEmit); }
+    let timer = null;
+    function scheduleEmit() {
+      if (timer) return;
+      timer = setTimeout(() => { timer = null; emitFsChanged(safe); }, FS_WATCH_DEBOUNCE_MS);
+    }
+    watcher.on('error', (err) => {
+      console.warn('[fs:watch] error on', safe, '-', err && err.message);
+    });
+    FS_WATCHERS.set(safe, { watcher, timer: null });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err && err.message };
+  }
+});
+
+ipcMain.handle('fs:stopWatch', (event, projectPath) => {
+  let safe;
+  try { safe = assertInsideAllowedRoots(projectPath); } catch { return { ok: false }; }
+  const entry = FS_WATCHERS.get(safe);
+  if (!entry) return { ok: true };
+  try { entry.watcher.close(); } catch { /* ignore */ }
+  FS_WATCHERS.delete(safe);
+  return { ok: true };
+});
+
+app.on('before-quit', () => {
+  // Make sure native watcher handles are released even if the renderer hasn't
+  // explicitly unwatched.
+  for (const [root, entry] of FS_WATCHERS) {
+    try { entry.watcher.close(); } catch { /* */ }
+  }
+  FS_WATCHERS.clear();
+});
+
+// Project-wide content grep. Plain substring (case-insensitive) match across
+// files under projectRoot, respecting .gitignore. Cheap enough for ~50k files
+// without a worker on modern SSDs; capped at 300 hits + 5 MB per file to keep
+// the renderer responsive on huge repos.
+ipcMain.handle('fs:searchContent', (event, projectRoot, query) => {
+  let safeRoot;
+  try { safeRoot = assertInsideAllowedRoots(projectRoot); } catch { return []; }
+  const q = String(query || '');
+  if (q.length < 2) return [];
+  const needle = q.toLowerCase();
+  const rules = loadGitignoreRules(safeRoot);
+  const hits = [];
+  const MAX_HITS = 300;
+  const MAX_FILE_BYTES = 5 * 1024 * 1024;
+  // Skip binary-looking extensions outright; reading their content is wasteful.
+  const BINARY_EXTS = new Set(['.png','.jpg','.jpeg','.gif','.webp','.bmp','.ico','.tif','.tiff','.psd','.svg','.mp3','.mp4','.mov','.avi','.webm','.wav','.flac','.ogg','.zip','.gz','.tar','.7z','.rar','.pdf','.doc','.docx','.xls','.xlsx','.ppt','.pptx','.bin','.dat','.dll','.so','.dylib','.exe','.class','.jar','.wasm','.lock','.svg']);
+
+  function scanFile(filePath) {
+    if (hits.length >= MAX_HITS) return;
+    const ext = path.extname(filePath).toLowerCase();
+    if (BINARY_EXTS.has(ext)) return;
+    let st;
+    try { st = fs.statSync(filePath); } catch { return; }
+    if (st.size > MAX_FILE_BYTES) return;
+    let content;
+    try { content = fs.readFileSync(filePath, 'utf8'); } catch { return; }
+    // Quick reject — most files don't contain the needle.
+    const lower = content.toLowerCase();
+    let idx = lower.indexOf(needle);
+    if (idx === -1) return;
+    // Compute line/snippet for the first 3 matches in this file.
+    let matchCount = 0;
+    while (idx !== -1 && matchCount < 3 && hits.length < MAX_HITS) {
+      const lineStart = content.lastIndexOf('\n', idx - 1) + 1;
+      const lineEnd = (content.indexOf('\n', idx) === -1) ? content.length : content.indexOf('\n', idx);
+      const line = content.slice(lineStart, lineEnd);
+      // 1-based line number (count newlines before idx).
+      let lineNo = 1;
+      for (let i = 0; i < lineStart; i++) if (content.charCodeAt(i) === 10) lineNo++;
+      hits.push({
+        path: filePath,
+        relativePath: path.relative(safeRoot, filePath),
+        line: lineNo,
+        snippet: line.length > 240 ? line.slice(0, 240) + '…' : line
+      });
+      matchCount++;
+      idx = lower.indexOf(needle, idx + needle.length);
+    }
+  }
+
+  function walk(dir) {
+    if (hits.length >= MAX_HITS) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (hits.length >= MAX_HITS) return;
+      if (ALWAYS_IGNORED_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      const rel = path.relative(safeRoot, full);
+      if (isIgnoredByGitignore(rules, rel, e.isDirectory())) continue;
+      if (e.isDirectory()) walk(full);
+      else scanFile(full);
+    }
+  }
+  walk(safeRoot);
+  return hits;
+});
+
 // Async git runner — never block the Electron main thread.
 // execFile() preserves stderr/stdout on error like execFileSync does.
+//
+// cwd is constrained to the configured allowed roots so a compromised renderer
+// can't aim destructive git ops (checkout/discardFile/pull/push/stashPop) at an
+// arbitrary directory on disk. Read-only ops are also restricted so we don't
+// leak the contents of arbitrary repos.
 function runGit(cwd, args, timeout) {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, encoding: 'utf8', timeout: timeout || 5000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    let safeCwd;
+    try { safeCwd = assertInsideAllowedRoots(cwd); }
+    catch (e) {
+      const err = new Error('refused: cwd outside allowed roots');
+      err.stderr = e && e.message ? e.message : 'forbidden';
+      return reject(err);
+    }
+    execFile('git', args, { cwd: safeCwd, encoding: 'utf8', timeout: timeout || 5000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         err.stderr = err.stderr || stderr;
         err.stdout = err.stdout || stdout;
@@ -1507,6 +1958,13 @@ function runGit(cwd, args, timeout) {
       resolve(stdout);
     });
   });
+}
+
+// Accepts a 4-64 hex commit hash and rejects anything that could be parsed by
+// git as an option (leading `-`) or that contains shell-ish chars. Used by the
+// commit/diff handlers that take an arbitrary ref from the renderer.
+function isSafeGitHash(hash) {
+  return typeof hash === 'string' && /^[0-9a-fA-F]{4,64}$/.test(hash);
 }
 
 ipcMain.handle('git:status', async (event, projectPath) => {
@@ -1730,10 +2188,13 @@ ipcMain.handle('git:stashPop', async (event, projectPath) => {
 });
 
 ipcMain.handle('git:commitDetail', async (event, projectPath, hash) => {
+  if (!isSafeGitHash(hash)) {
+    return { hash: '', message: '', author: '', date: '', files: [], error: 'refused: invalid commit hash' };
+  }
   try {
     const [metaOutput, statOutput] = await Promise.all([
-      runGit(projectPath, ['show', '--format=%H|%s|%an|%aI', '-s', hash, '--no-color'], 10000),
-      runGit(projectPath, ['show', '--numstat', '--format=', hash, '--no-color'], 10000)
+      runGit(projectPath, ['show', '--format=%H|%s|%an|%aI', '-s', hash, '--no-color', '--'], 10000),
+      runGit(projectPath, ['show', '--numstat', '--format=', hash, '--no-color', '--'], 10000)
     ]);
     const meta = metaOutput.trim().split('|');
     const files = [];
@@ -1755,10 +2216,11 @@ ipcMain.handle('git:commitDetail', async (event, projectPath, hash) => {
 });
 
 ipcMain.handle('git:diffCommit', async (event, projectPath, hash, filePath) => {
+  if (!isSafeGitHash(hash)) return '';
   try {
     const args = filePath
       ? ['show', '--pretty=format:', '-p', hash, '--', filePath]
-      : ['show', '--pretty=format:', '-p', hash];
+      : ['show', '--pretty=format:', '-p', hash, '--'];
     const output = await runGit(projectPath, args, 10000);
     return output.replace(/^\n+/, '');
   } catch {
@@ -1781,6 +2243,167 @@ ipcMain.handle('git:diffStat', async (event, projectPath, staged) => {
   } catch {
     return [];
   }
+});
+
+// --- Git: merge / rebase / conflict / tag / cherry-pick / file history ---
+
+ipcMain.handle('git:merge', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) return { success: false, error: 'refused: invalid branch name' };
+  try {
+    await runGit(projectPath, ['merge', branchName, '--no-edit'], 30000);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: (err.stderr || err.message).toString().trim() };
+  }
+});
+
+ipcMain.handle('git:rebase', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) return { success: false, error: 'refused: invalid branch name' };
+  try {
+    await runGit(projectPath, ['rebase', branchName], 30000);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: (err.stderr || err.message).toString().trim() };
+  }
+});
+
+ipcMain.handle('git:mergeAbort', async (event, projectPath) => {
+  try { await runGit(projectPath, ['merge', '--abort'], 5000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:rebaseAbort', async (event, projectPath) => {
+  try { await runGit(projectPath, ['rebase', '--abort'], 5000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:rebaseContinue', async (event, projectPath) => {
+  try { await runGit(projectPath, ['rebase', '--continue'], 10000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:mergeContinue', async (event, projectPath) => {
+  // Modern git: `git merge --continue` finalises a conflicted merge once
+  // everything is staged.
+  try { await runGit(projectPath, ['commit', '--no-edit'], 10000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// Conflict resolution helpers. After checkout --ours / --theirs the file must
+// still be staged via git add to mark the conflict resolved.
+ipcMain.handle('git:resolveOurs', async (event, projectPath, filePath) => {
+  try {
+    await runGit(projectPath, ['checkout', '--ours', '--', filePath], 5000);
+    await runGit(projectPath, ['add', '--', filePath], 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:resolveTheirs', async (event, projectPath, filePath) => {
+  try {
+    await runGit(projectPath, ['checkout', '--theirs', '--', filePath], 5000);
+    await runGit(projectPath, ['add', '--', filePath], 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// Reports the current "operation" state so the renderer can show a banner.
+// Walks the .git directory for MERGE_HEAD / REBASE_HEAD / CHERRY_PICK_HEAD
+// markers — cheaper and more reliable than parsing `git status --porcelain`
+// for the same info.
+ipcMain.handle('git:opState', async (event, projectPath) => {
+  try {
+    const gitDir = (await runGit(projectPath, ['rev-parse', '--git-dir'], 5000)).trim();
+    const gd = path.isAbsolute(gitDir) ? gitDir : path.join(projectPath, gitDir);
+    const state = { merging: false, rebasing: false, cherryPicking: false, conflictFiles: [] };
+    if (fs.existsSync(path.join(gd, 'MERGE_HEAD'))) state.merging = true;
+    if (fs.existsSync(path.join(gd, 'rebase-merge')) || fs.existsSync(path.join(gd, 'rebase-apply'))) state.rebasing = true;
+    if (fs.existsSync(path.join(gd, 'CHERRY_PICK_HEAD'))) state.cherryPicking = true;
+    // Conflict file list from porcelain — entries with U / DD / AA / etc.
+    if (state.merging || state.rebasing || state.cherryPicking) {
+      try {
+        const out = await runGit(projectPath, ['status', '--porcelain'], 5000);
+        out.split('\n').forEach(line => {
+          if (!line) return;
+          const code = line.substring(0, 2);
+          if (code.includes('U') || code === 'DD' || code === 'AA') {
+            state.conflictFiles.push(line.substring(3));
+          }
+        });
+      } catch { /* swallow */ }
+    }
+    return state;
+  } catch {
+    return { merging: false, rebasing: false, cherryPicking: false, conflictFiles: [] };
+  }
+});
+
+// Tag list / create / delete.
+ipcMain.handle('git:tags', async (event, projectPath) => {
+  try {
+    const out = await runGit(projectPath, ['for-each-ref', '--format=%(refname:short)|%(objectname:short)|%(subject)', 'refs/tags', '--sort=-creatordate'], 10000);
+    return out.split('\n').filter(Boolean).map(line => {
+      const parts = line.split('|');
+      return { name: parts[0], hash: parts[1], subject: parts.slice(2).join('|') };
+    });
+  } catch { return []; }
+});
+ipcMain.handle('git:tagCreate', async (event, projectPath, tagName, hash) => {
+  if (!isSafeGitRefName(tagName)) return { success: false, error: 'refused: invalid tag name' };
+  if (hash && !isSafeGitHash(hash)) return { success: false, error: 'refused: invalid hash' };
+  try {
+    const args = hash ? ['tag', tagName, hash] : ['tag', tagName];
+    await runGit(projectPath, args, 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:tagDelete', async (event, projectPath, tagName) => {
+  if (!isSafeGitRefName(tagName)) return { success: false, error: 'refused: invalid tag name' };
+  try {
+    await runGit(projectPath, ['tag', '-d', tagName], 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// Cherry-pick onto current branch.
+ipcMain.handle('git:cherryPick', async (event, projectPath, hash) => {
+  if (!isSafeGitHash(hash)) return { success: false, error: 'refused: invalid hash' };
+  try { await runGit(projectPath, ['cherry-pick', hash], 30000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// File history: git log for a single path. Returns up to `limit` commits with
+// hash / subject / author / date.
+ipcMain.handle('git:fileHistory', async (event, projectPath, filePath, limit) => {
+  try {
+    const n = Math.max(1, Math.min(500, parseInt(limit) || 50));
+    const out = await runGit(projectPath, ['log', '-n', String(n), '--format=%h|%s|%an|%aI', '--no-color', '--', filePath], 15000);
+    return out.split('\n').filter(Boolean).map(line => {
+      const parts = line.split('|');
+      return { hash: parts[0], message: parts[1], author: parts[2], date: parts[3] };
+    });
+  } catch { return []; }
+});
+
+// Blame for a single file: line -> { hash, author, time, content }
+ipcMain.handle('git:blame', async (event, projectPath, filePath) => {
+  try {
+    const out = await runGit(projectPath, ['blame', '--line-porcelain', '--', filePath], 15000);
+    const lines = out.split('\n');
+    const result = [];
+    let current = null;
+    for (const line of lines) {
+      if (/^[0-9a-f]{40,}\s/.test(line)) {
+        if (current) result.push(current);
+        const parts = line.split(' ');
+        current = { hash: parts[0].slice(0, 8), author: '', time: 0, content: '' };
+      } else if (line.startsWith('author ')) {
+        if (current) current.author = line.slice(7);
+      } else if (line.startsWith('author-time ')) {
+        if (current) current.time = parseInt(line.slice(12)) * 1000;
+      } else if (line.startsWith('\t')) {
+        if (current) { current.content = line.slice(1); result.push(current); current = null; }
+      }
+    }
+    if (current) result.push(current);
+    return result;
+  } catch { return []; }
 });
 
 function stripJsoncComments(text) {
@@ -1848,6 +2471,85 @@ function findLaunchSettingsConfigs(projectPath) {
   return configs;
 }
 
+function detectNpmScripts(projectPath) {
+  const out = [];
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(projectPath, 'package.json'), 'utf8'));
+    if (data && data.scripts && typeof data.scripts === 'object') {
+      for (const [name, body] of Object.entries(data.scripts)) {
+        out.push({
+          name: 'npm: ' + name,
+          type: 'custom',
+          command: 'npm',
+          args: ['run', name],
+          cwd: projectPath,
+          _source: 'package.json',
+          _readonly: true,
+          _hint: typeof body === 'string' ? body : ''
+        });
+      }
+    }
+  } catch { /* no package.json or invalid */ }
+  return out;
+}
+
+function detectMakefileTargets(projectPath) {
+  const out = [];
+  try {
+    const content = fs.readFileSync(path.join(projectPath, 'Makefile'), 'utf8');
+    // Lines like "target: deps" — ignore special targets and pattern rules.
+    const seen = new Set();
+    const re = /^([A-Za-z0-9_.\-\/]+)\s*:\s*(?!=)/gm;
+    let m;
+    while ((m = re.exec(content)) !== null) {
+      const t = m[1];
+      if (t.startsWith('.') || t.includes('%')) continue;
+      if (seen.has(t)) continue;
+      seen.add(t);
+      out.push({ name: 'make: ' + t, type: 'custom', command: 'make', args: [t], cwd: projectPath, _source: 'Makefile', _readonly: true });
+      if (out.length >= 40) break;
+    }
+  } catch { /* no Makefile */ }
+  return out;
+}
+
+function detectCargoBinaries(projectPath) {
+  const out = [];
+  try {
+    const txt = fs.readFileSync(path.join(projectPath, 'Cargo.toml'), 'utf8');
+    // Crude TOML parse — we don't depend on a TOML lib in main. Pull the
+    // package name and any [[bin]] entries; covers the common case.
+    const pkgNameMatch = /\[package\][\s\S]*?name\s*=\s*"([^"]+)"/.exec(txt);
+    if (pkgNameMatch) {
+      out.push({ name: 'cargo run', type: 'custom', command: 'cargo', args: ['run'], cwd: projectPath, _source: 'Cargo.toml', _readonly: true });
+      out.push({ name: 'cargo test', type: 'custom', command: 'cargo', args: ['test'], cwd: projectPath, _source: 'Cargo.toml', _readonly: true });
+    }
+    const binRe = /\[\[bin\]\][\s\S]*?name\s*=\s*"([^"]+)"/g;
+    let m;
+    while ((m = binRe.exec(txt)) !== null) {
+      out.push({ name: 'cargo run --bin ' + m[1], type: 'custom', command: 'cargo', args: ['run', '--bin', m[1]], cwd: projectPath, _source: 'Cargo.toml', _readonly: true });
+    }
+  } catch { /* no Cargo.toml */ }
+  return out;
+}
+
+function detectPyProjectScripts(projectPath) {
+  const out = [];
+  try {
+    const txt = fs.readFileSync(path.join(projectPath, 'pyproject.toml'), 'utf8');
+    // Same caveat as Cargo — minimal TOML parser. Pull [project.scripts] entries.
+    const block = /\[project\.scripts\]([\s\S]*?)(?:\n\[|$)/.exec(txt);
+    if (block) {
+      const lineRe = /^([A-Za-z0-9_.\-]+)\s*=\s*"([^"]+)"/gm;
+      let m;
+      while ((m = lineRe.exec(block[1])) !== null) {
+        out.push({ name: 'pip: ' + m[1], type: 'custom', command: m[1], args: [], cwd: projectPath, _source: 'pyproject.toml', _readonly: true });
+      }
+    }
+  } catch { /* no pyproject.toml */ }
+  return out;
+}
+
 ipcMain.handle('launch:getConfigs', (event, projectPath) => {
   let configs = [];
   // VS Code launch.json
@@ -1859,6 +2561,11 @@ ipcMain.handle('launch:getConfigs', (event, projectPath) => {
   } catch { /* no launch.json or parse error */ }
   // .NET launchSettings.json
   configs = configs.concat(findLaunchSettingsConfigs(projectPath));
+  // Auto-detected from common build/runner manifests
+  configs = configs.concat(detectNpmScripts(projectPath));
+  configs = configs.concat(detectMakefileTargets(projectPath));
+  configs = configs.concat(detectCargoBinaries(projectPath));
+  configs = configs.concat(detectPyProjectScripts(projectPath));
   // Custom configs from .claudes/launch.json
   const customPath = path.join(projectPath, '.claudes', 'launch.json');
   try {
@@ -2716,10 +3423,48 @@ ipcMain.handle('claude:getConfigPath', () => {
 
 function startHookServer() {
   hookServer = http.createServer((req, res) => {
+    // DNS-rebinding mitigation: only accept Host headers that name the loopback
+    // address with the right port. A browser tab that has a DNS name resolving
+    // to 127.0.0.1 would otherwise be able to POST here from a different origin.
+    const host = (req.headers.host || '').toLowerCase();
+    const expectedA = '127.0.0.1:' + hookServerListenPort;
+    const expectedB = 'localhost:' + hookServerListenPort;
+    if (host !== expectedA && host !== expectedB) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
     if (req.method === 'POST' && req.url === '/hook') {
+      // Reject unauthenticated callers. The curl command we write into
+      // settings.json carries the token; anything else POST'ing here is hostile.
+      const token = req.headers['x-auth-token'];
+      let tokenOk = false;
+      if (typeof token === 'string' && token.length === HOOK_AUTH_TOKEN.length) {
+        try {
+          tokenOk = crypto.timingSafeEqual(Buffer.from(token), Buffer.from(HOOK_AUTH_TOKEN));
+        } catch { tokenOk = false; }
+      }
+      if (!tokenOk) {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
       let body = '';
-      req.on('data', chunk => { body += chunk; });
+      let aborted = false;
+      // Bound the body — a hook event payload is normally a few KB; cap at 1 MB
+      // so a malicious local process can't pin memory by streaming forever.
+      req.on('data', chunk => {
+        if (aborted) return;
+        body += chunk;
+        if (body.length > 1024 * 1024) {
+          aborted = true;
+          res.writeHead(413);
+          res.end();
+          req.destroy();
+        }
+      });
       req.on('end', () => {
+        if (aborted) return;
         try {
           const event = JSON.parse(body);
           mainWindow?.webContents.send('hook:event', event);
@@ -2790,8 +3535,11 @@ const CLAUDES_HOOK_SENTINEL = '__claudes_inspector__';
 function buildHookCommand(port) {
   // Cross-platform curl invocation. curl ships with Windows 10+, macOS, and
   // every Linux distro this app runs on. -d @- reads stdin. The double-quoted
-  // header value is parsed identically by cmd.exe and POSIX shells.
-  return 'curl -s -X POST http://127.0.0.1:' + port + '/hook -d @- -H "Content-Type: application/json"';
+  // header values are parsed identically by cmd.exe and POSIX shells. The
+  // auth-token header gates the local /hook endpoint — see HOOK_AUTH_TOKEN.
+  return 'curl -s -X POST http://127.0.0.1:' + port + '/hook -d @-' +
+    ' -H "Content-Type: application/json"' +
+    ' -H "X-Auth-Token: ' + HOOK_AUTH_TOKEN + '"';
 }
 
 function readClaudeSettings() {
@@ -2914,7 +3662,13 @@ ipcMain.handle('shell:openExternal', (event, url) => {
 });
 
 ipcMain.handle('shell:showItemInFolder', (event, fullPath) => {
-  shell.showItemInFolder(fullPath);
+  // Same containment rule as shell:openPath — reveal-in-folder is a low-impact
+  // API but a compromised renderer should not get to navigate Explorer to
+  // arbitrary paths on disk.
+  try {
+    const safe = assertInsideAllowedRoots(fullPath);
+    shell.showItemInFolder(safe);
+  } catch { /* refused */ }
 });
 
 // Refuse the OS handler-launch surface for executable file types and UNC
@@ -2940,6 +3694,111 @@ ipcMain.handle('shell:openPath', (event, fullPath) => {
     return Promise.resolve('refused: executable extension');
   }
   return shell.openPath(p);
+});
+
+// Launch the user's configured external editor (default: `code` on PATH).
+// Accepts either a single path (string) or [projectPath, filePath]. For the
+// two-arg form we invoke `<editor> <folder> -g <file>` so VS Code opens the
+// folder as a workspace AND focuses the file. Paths with spaces are quoted
+// explicitly because shell:true on Windows lets cmd.exe re-tokenize the line
+// and silently splits "D:\Git Repos\Foo" into two arguments.
+// Falls back to shell.openPath when the command isn't found.
+ipcMain.handle('editor:openExternal', async (event, targetPath) => {
+  const rawArgs = Array.isArray(targetPath) ? targetPath : [targetPath];
+  const safeArgs = [];
+  for (const p of rawArgs) {
+    if (!p || typeof p !== 'string') continue;
+    try { safeArgs.push(assertInsideAllowedRoots(p)); }
+    catch { return { ok: false, error: 'refused: path outside allowed roots' }; }
+  }
+  if (safeArgs.length === 0) return { ok: false, error: 'no target path' };
+  const cfg = readConfig();
+  const cmd = (cfg && typeof cfg.externalEditorCommand === 'string' && cfg.externalEditorCommand.trim())
+    || (process.platform === 'win32' ? 'code.cmd' : 'code');
+
+  // For the two-arg [folder, file] form, use `code <folder> -g <file>` so the
+  // workspace is opened and the file is focused. Single-arg form passes
+  // through unchanged (folder OR file).
+  let invocationArgs;
+  if (safeArgs.length >= 2) {
+    invocationArgs = [safeArgs[0], '-g', safeArgs[1]];
+  } else {
+    invocationArgs = safeArgs;
+  }
+
+  function quoteForWin(s) {
+    // cmd.exe doesn't honour backslash-escape; wrap any arg with whitespace,
+    // & ; | < > ^ in double quotes. Embedded double quotes are doubled.
+    if (!/[\s&;|<>^"]/.test(s)) return s;
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+
+  return new Promise((resolve) => {
+    let child;
+    if (process.platform === 'win32') {
+      // Run through cmd.exe so the .cmd shim resolves, but we build the
+      // command line ourselves (with explicit quoting) instead of letting
+      // shell:true do it — Node's auto-quoting doesn't cover arg arrays
+      // when shell is on, and spaces get split.
+      const cmdLine = quoteForWin(cmd) + ' ' + invocationArgs.map(quoteForWin).join(' ');
+      child = spawn(cmdLine, [], { detached: true, stdio: 'ignore', shell: true });
+    } else {
+      child = spawn(cmd, invocationArgs, { detached: true, stdio: 'ignore' });
+    }
+
+    let settled = false;
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      // Fall back to OS handler on the last arg (file > folder), better than
+      // silently doing nothing.
+      shell.openPath(safeArgs[safeArgs.length - 1]).then((msg) => {
+        resolve({ ok: !msg, error: err && err.message, fallback: 'openPath', openPathMessage: msg });
+      });
+    });
+    child.on('spawn', () => {
+      if (settled) return;
+      settled = true;
+      try { child.unref(); } catch {}
+      resolve({ ok: true });
+    });
+  });
+});
+
+ipcMain.handle('editor:getExternalCommand', () => {
+  const cfg = readConfig();
+  return (cfg && typeof cfg.externalEditorCommand === 'string') ? cfg.externalEditorCommand : '';
+});
+
+ipcMain.handle('editor:setExternalCommand', (event, cmd) => {
+  const cfg = readConfig();
+  cfg.externalEditorCommand = typeof cmd === 'string' ? cmd.trim() : '';
+  writeConfig(cfg);
+  return { ok: true };
+});
+
+ipcMain.handle('config:getAutoUpdateClaude', () => {
+  return readConfig().autoUpdateClaude === true;
+});
+ipcMain.handle('config:setAutoUpdateClaude', (event, enabled) => {
+  const cfg = readConfig();
+  cfg.autoUpdateClaude = !!enabled;
+  writeConfig(cfg);
+  return { ok: true };
+});
+
+// Persisted terminal settings (font / scrollback / cursor / background colour).
+// Read by the renderer when constructing each Terminal so user prefs apply
+// to every spawn.
+ipcMain.handle('config:getTerminalSettings', () => {
+  const cfg = readConfig();
+  return cfg.terminal || {};
+});
+ipcMain.handle('config:setTerminalSettings', (event, settings) => {
+  const cfg = readConfig();
+  cfg.terminal = Object.assign({}, cfg.terminal || {}, settings && typeof settings === 'object' ? settings : {});
+  writeConfig(cfg);
+  return { ok: true, settings: cfg.terminal };
 });
 
 // --- Automations IPC Handlers ---
@@ -5290,7 +6149,13 @@ function createTray() {
     ? path.join(process.resourcesPath, 'app.asar.unpacked', iconFile)
     : path.join(__dirname, iconFile);
   const trayIcon = nativeImage.createFromPath(iconPath);
-  tray = new Tray(process.platform === 'darwin' ? trayIcon.resize({ width: 18, height: 18 }) : trayIcon);
+  // Per-platform sizing: macOS menu bar wants 18x18 templates; KDE / GNOME
+  // legacy tray prefers 22x22; Windows scales the .ico automatically. Picking
+  // a sane Linux default avoids a giant icon on KDE Plasma.
+  let sized = trayIcon;
+  if (process.platform === 'darwin') sized = trayIcon.resize({ width: 18, height: 18 });
+  else if (process.platform === 'linux') sized = trayIcon.resize({ width: 22, height: 22 });
+  tray = new Tray(sized);
   tray.setToolTip('Claudes');
 
   const contextMenu = Menu.buildFromTemplate([

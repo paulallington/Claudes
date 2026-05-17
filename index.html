@@ -2,15 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self' blob:;">
   <title>Claudes</title>
-  <script>
-    // Set data-platform synchronously so CSS rules that reserve space for
-    // the macOS traffic-light buttons (which sit at the window top-left
-    // under titleBarStyle:'hidden') apply on first paint with no flash.
-    document.documentElement.dataset.platform =
-      /Mac/.test(navigator.platform) ? 'darwin' :
-      /Win/.test(navigator.platform) ? 'win32' : 'linux';
-  </script>
+  <script src="./platform-detect.js"></script>
   <link rel="stylesheet" href="./node_modules/@xterm/xterm/css/xterm.css">
   <link rel="stylesheet" href="./styles.css">
 </head>
@@ -77,7 +71,7 @@
               <label class="git-amend-label"><input type="checkbox" id="git-amend-checkbox"> Amend</label>
               <button id="btn-git-commit" class="git-commit-btn" title="Commit staged changes (Ctrl+Enter)">&#10003; Commit</button>
             </div>
-            <div id="git-status-msg" class="git-status-msg"></div>
+            <div id="git-status-msg" class="git-status-msg" role="status" aria-live="polite"></div>
           </div>
           <div id="git-changes"></div>
         </div>
@@ -385,6 +379,8 @@
           <button class="settings-tab" data-settings-tab="notifications" role="tab">Notifications</button>
           <button class="settings-tab" data-settings-tab="automations" role="tab">Automations</button>
           <button class="settings-tab" data-settings-tab="sync" role="tab">Sync</button>
+          <button class="settings-tab" data-settings-tab="terminal" role="tab">Terminal</button>
+          <button class="settings-tab" data-settings-tab="tools" role="tab">Tools</button>
         </div>
         <div class="settings-panes">
           <div class="settings-pane active" data-settings-pane="general">
@@ -438,6 +434,68 @@
               <span class="settings-hint">Base directory for isolated agent repository clones</span>
             </div>
           </div>
+          <div class="settings-pane" data-settings-pane="terminal">
+            <div class="settings-field">
+              <label for="setting-term-font">Font family</label>
+              <select id="setting-term-font" class="settings-input">
+                <option value="">Auto (Cascadia / JetBrains Mono / Menlo / DejaVu)</option>
+                <option value="'Cascadia Code', monospace">Cascadia Code</option>
+                <option value="'JetBrains Mono', monospace">JetBrains Mono</option>
+                <option value="'Menlo', monospace">Menlo</option>
+                <option value="'Consolas', monospace">Consolas</option>
+                <option value="'DejaVu Sans Mono', monospace">DejaVu Sans Mono</option>
+                <option value="monospace">System monospace</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-scrollback">Scrollback (lines)</label>
+              <select id="setting-term-scrollback" class="settings-input">
+                <option value="1000">1,000</option>
+                <option value="5000" selected>5,000</option>
+                <option value="10000">10,000</option>
+                <option value="50000">50,000</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-cursor">Cursor style</label>
+              <select id="setting-term-cursor" class="settings-input">
+                <option value="block" selected>Block</option>
+                <option value="bar">Bar</option>
+                <option value="underline">Underline</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-bg">Terminal background</label>
+              <input type="color" id="setting-term-bg" class="settings-input" value="#1a1a2e">
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-fg">Terminal text colour</label>
+              <input type="color" id="setting-term-fg" class="settings-input" value="#e0e0e0">
+              <span class="settings-hint">Applied to new columns. Existing columns pick up the change on the next reflow.</span>
+            </div>
+            <div class="settings-field">
+              <button id="setting-term-reset" class="settings-browse-btn" style="padding:6px 14px;">Reset to defaults</button>
+              <span class="settings-hint">Restores font / scrollback / cursor / colours to the app defaults.</span>
+            </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="tools">
+            <div class="settings-field">
+              <label for="setting-external-editor">External editor command</label>
+              <input type="text" id="setting-external-editor" class="settings-input" placeholder="code" spellcheck="false">
+              <span class="settings-hint">Used by "Open in external editor" in project / file context menus. Default: <code>code</code> (VS Code) / <code>code.cmd</code> on Windows. Set to anything else on PATH (e.g. <code>cursor</code>, <code>subl</code>).</span>
+            </div>
+            <div class="settings-field">
+              <button id="btn-edit-global-claudemd" class="settings-browse-btn" style="padding:6px 14px;">Edit global ~/.claude/CLAUDE.md</button>
+              <span class="settings-hint">Instructions that apply to every Claude Code session, regardless of project.</span>
+            </div>
+            <div class="settings-field">
+              <label class="settings-toggle">
+                <input type="checkbox" id="setting-auto-update-claude">
+                <span>Auto-run <code>claude update</code> on launch</span>
+              </label>
+              <span class="settings-hint">Off by default — only enable if you trust your PATH (the first <code>claude</code> on PATH will be invoked unprompted at every app launch).</span>
+            </div>
+          </div>
           <div class="settings-pane" data-settings-pane="sync">
             <div class="settings-field">
               <label for="setting-sync-device-name">Device name</label>
@@ -488,7 +546,13 @@
         <span id="usage-close" class="modal-close">&times;</span>
       </div>
       <div class="modal-body usage-body">
-        <div id="usage-loading" class="usage-loading">Loading usage data...</div>
+        <div id="usage-loading" class="usage-loading">
+          <div class="skel skel-row" style="width:55%"></div>
+          <div class="skel skel-row" style="width:80%"></div>
+          <div class="skel skel-row" style="width:40%"></div>
+          <div class="skel skel-row" style="width:60%"></div>
+          <div class="skel skel-row" style="width:35%"></div>
+        </div>
         <div id="usage-content" class="usage-content hidden">
           <div class="usage-tabs">
             <button class="usage-tab active" data-usage-tab="summary">Summary</button>
@@ -578,7 +642,7 @@
         <textarea id="claudemd-editor" spellcheck="false" placeholder="# Project instructions for Claude&#10;&#10;Add conventions, architecture notes, and preferences here..."></textarea>
       </div>
       <div class="modal-footer">
-        <span id="claudemd-status" class="modal-status"></span>
+        <span id="claudemd-status" class="modal-status" role="status" aria-live="polite"></span>
         <button id="claudemd-save" class="modal-btn-save">Save</button>
       </div>
     </div>
@@ -613,11 +677,13 @@
         <div class="fileeditor-edit-area">
           <div id="fileeditor-gutter" class="fileeditor-gutter" aria-hidden="true">1</div>
           <textarea id="fileeditor-editor" spellcheck="false"></textarea>
+          <pre id="fileeditor-preview" class="fileeditor-preview hidden" aria-hidden="true"><code></code></pre>
         </div>
       </div>
       <div class="modal-footer">
-        <span id="fileeditor-status" class="modal-status"></span>
+        <span id="fileeditor-status" class="modal-status" role="status" aria-live="polite"></span>
         <span id="fileeditor-cursor-pos" class="fileeditor-cursor-pos">Ln 1, Col 1</span>
+        <button id="fileeditor-preview-btn" class="modal-btn-save" type="button" style="background:transparent;border:1px solid var(--border-primary);color:var(--text-secondary);">Preview</button>
         <button id="fileeditor-save" class="modal-btn-save">Save</button>
       </div>
     </div>
@@ -681,7 +747,7 @@
                 <option value="">(none)</option>
               </select>
             </label>
-            <div class="endpoints-form-status" id="ep-status"></div>
+            <div class="endpoints-form-status" id="ep-status" role="status" aria-live="polite"></div>
             <div class="endpoints-form-actions">
               <button type="button" id="ep-test" class="endpoints-secondary-btn">Test connection</button>
               <button type="button" id="ep-delete" class="endpoints-danger-btn">Delete</button>
@@ -854,6 +920,125 @@
   </div>
 
   <!-- Session Search Modal -->
+  <!-- Claude Code extensions manager (skills / agents / commands) -->
+  <div id="ext-modal" class="modal-overlay hidden">
+    <div class="modal-dialog endpoints-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Claude Code extensions</span>
+        <span class="modal-subtitle" id="ext-project-path"></span>
+        <span id="ext-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div class="ext-categories">
+          <div class="ext-cat" data-cat="agents">
+            <div class="ext-cat-header">
+              <span>Sub-agents <span class="ext-cat-hint">(.claude/agents/)</span></span>
+              <button class="settings-browse-btn ext-new" data-cat="agents" style="padding:2px 8px;">+ New</button>
+            </div>
+            <div class="ext-list" data-cat-list="agents"></div>
+          </div>
+          <div class="ext-cat" data-cat="skills">
+            <div class="ext-cat-header">
+              <span>Skills <span class="ext-cat-hint">(.claude/skills/&lt;name&gt;/SKILL.md)</span></span>
+              <button class="settings-browse-btn ext-new" data-cat="skills" style="padding:2px 8px;">+ New</button>
+            </div>
+            <div class="ext-list" data-cat-list="skills"></div>
+          </div>
+          <div class="ext-cat" data-cat="commands">
+            <div class="ext-cat-header">
+              <span>Slash commands <span class="ext-cat-hint">(.claude/commands/)</span></span>
+              <button class="settings-browse-btn ext-new" data-cat="commands" style="padding:2px 8px;">+ New</button>
+            </div>
+            <div class="ext-list" data-cat-list="commands"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MCP server manager -->
+  <div id="mcp-modal" class="modal-overlay hidden">
+    <div class="modal-dialog endpoints-dialog">
+      <div class="modal-header">
+        <span class="modal-title">MCP servers</span>
+        <span class="modal-subtitle" id="mcp-project-path"></span>
+        <span id="mcp-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body endpoints-body">
+        <div class="endpoints-sidebar">
+          <div class="endpoints-list-header">
+            <span>Servers</span>
+            <button id="mcp-new" class="settings-browse-btn" style="padding:2px 8px;">+</button>
+          </div>
+          <div id="mcp-list" class="endpoints-list"></div>
+        </div>
+        <div class="endpoints-edit-pane mcp-edit-pane">
+          <div id="mcp-empty" class="settings-hint" style="padding:24px;">Select a server on the left, or click + to add a new one.</div>
+          <div id="mcp-form" style="display:none;">
+            <div class="settings-field">
+              <label>Name</label>
+              <input type="text" id="mcp-name" class="settings-input" spellcheck="false" placeholder="e.g. github" autocomplete="off">
+            </div>
+            <div class="settings-field">
+              <label>Command</label>
+              <input type="text" id="mcp-command" class="settings-input" spellcheck="false" placeholder="e.g. npx" autocomplete="off">
+            </div>
+            <div class="settings-field">
+              <label>Args (one per line)</label>
+              <textarea id="mcp-args" class="settings-input" rows="3" spellcheck="false" placeholder="-y&#10;@modelcontextprotocol/server-github"></textarea>
+            </div>
+            <div class="settings-field">
+              <label>Env (KEY=value, one per line)</label>
+              <textarea id="mcp-env" class="settings-input" rows="3" spellcheck="false" placeholder="GITHUB_TOKEN=ghp_…"></textarea>
+            </div>
+            <div class="settings-field">
+              <label>Transport (optional)</label>
+              <select id="mcp-transport" class="settings-input">
+                <option value="">stdio (default)</option>
+                <option value="sse">sse</option>
+                <option value="http">http</option>
+              </select>
+            </div>
+            <div class="settings-field" style="display:flex; gap:8px;">
+              <button id="mcp-save" class="modal-btn-save">Save</button>
+              <button id="mcp-delete" class="modal-btn-save" style="background:transparent;border:1px solid #444;color:#f87171;">Delete</button>
+              <span id="mcp-status" class="modal-status"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick-open file palette (Cmd/Ctrl+P) -->
+  <div id="quick-open-modal" class="modal-overlay hidden">
+    <div class="modal-dialog session-search-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Quick open</span>
+        <span id="quick-open-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <input type="search" id="quick-open-input" placeholder="Type a filename to fuzzy-open in the active project…" autocomplete="off">
+        <div id="quick-open-results" class="session-search-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project-wide content grep (Cmd/Ctrl+Shift+G) -->
+  <div id="content-search-modal" class="modal-overlay hidden">
+    <div class="modal-dialog session-search-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Search project contents</span>
+        <span id="content-search-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <input type="search" id="content-search-input" placeholder="Search file contents in the active project…" autocomplete="off">
+        <div id="content-search-status" class="session-search-results" style="padding:4px 0;font-size:11px;opacity:0.6;"></div>
+        <div id="content-search-results" class="session-search-results"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="session-search-modal" class="modal-overlay hidden">
     <div class="modal-dialog session-search-dialog">
       <div class="modal-header">
@@ -919,15 +1104,23 @@
       <div class="modal-body shortcuts-body">
         <section class="shortcuts-section">
           <h3>Keyboard shortcuts</h3>
+          <p class="shortcuts-platform-note">macOS users: <kbd>⌘</kbd> works wherever <kbd>Ctrl</kbd> is shown below.</p>
           <table class="shortcuts-table">
             <tbody>
               <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Command palette — fuzzy-search projects, slash commands, app actions</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Quick-open file — fuzzy search files in the active project, opens in inline editor</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Find in terminal (when a column is focused) — Enter / Shift+Enter cycles matches</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td><td>Search sessions — toggle between transcripts and your prompt history</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd></td><td>Search file contents project-wide (respects .gitignore)</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd></td><td>Spawn a new column in the active project</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></td><td>Add a new row to the layout</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></td><td>Kill the focused column</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></td><td>Toggle Explorer panel</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd></td><td>Maximize / restore the focused column</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd></td><td>Navigate between columns</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd></td><td>Jump to column N</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>B</kbd></td><td>Toggle the Projects sidebar</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> / <kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Change terminal font size</td></tr>
               <tr><td><kbd>?</kbd></td><td>Open this shortcuts reference</td></tr>
               <tr><td><kbd>Esc</kbd></td><td>Close the active modal / popover</td></tr>
             </tbody>
@@ -953,6 +1146,36 @@
             <li><strong>Session full-text search</strong> (&#128270; / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>) — grep across every session JSONL on disk. Click a hit to switch project and resume that session.</li>
             <li><strong>My prompts search</strong> — same modal, "My prompts" radio mode. Searches <code>~/.claude/history.jsonl</code>. Click a hit to copy the prompt to your clipboard.</li>
             <li><strong>Cmd-K command palette</strong> — fuzzy search across projects (switch / spawn), slash commands (sent to focused column), and app actions (open Usage, kill column, respawn, etc.).</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Editor &amp; explorer</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Clickable file paths in terminal</strong> — patterns like <code>src/foo.js:42</code> become clickable in any column. Clicks open the inline editor focused on that line. URLs also auto-link.</li>
+            <li><strong>Drag-into-terminal</strong> — drag a file from the Explorer tree onto a terminal; the path (quoted if it has spaces) is written to the pty.</li>
+            <li><strong>Syntax preview</strong> — inline file editor → <em>Preview</em> button switches to a Prism-highlighted read view; toggle back to edit.</li>
+            <li><strong>Open in external editor</strong> — project context menu / Explorer right-click sends the path to your <code>code</code> command (configurable in Settings &rarr; Tools).</li>
+            <li><strong>Quick open</strong> (<kbd>Ctrl</kbd>+<kbd>P</kbd>) — fuzzy file pickers across the active project; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd> for content grep.</li>
+            <li><strong>Auto-refresh</strong> — Explorer watches the project root and updates when files change on disk.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Git tab</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Merge / rebase</strong> — branch dropdown shows per-branch <em>merge</em> and <em>rebase</em> buttons. Conflict banner above the changes list lets you resolve files (<em>use ours</em> / <em>use theirs</em> / <em>open</em>) and continue / abort the operation.</li>
+            <li><strong>File history &amp; blame</strong> — right-click any file in the changes list. History panel includes one-click <em>Cherry-pick onto current</em>.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Project extensions</h3>
+          <ul class="shortcuts-features">
+            <li><strong>MCP servers</strong> — project context menu &rarr; <em>Manage MCP servers&hellip;</em> for a CRUD UI over <code>.mcp.json</code>.</li>
+            <li><strong>Sub-agents / skills / commands</strong> — manage <code>.claude/agents/</code>, <code>.claude/skills/</code>, <code>.claude/commands/</code> in both project and global scope from one modal.</li>
+            <li><strong>Named layouts</strong> — save and restore row/column shapes per project from the context menu.</li>
+            <li><strong>Auto-detected run configs</strong> — Run tab picks up <code>package.json</code> scripts, Makefile targets, Cargo bins, and <code>pyproject.toml</code> scripts.</li>
           </ul>
         </section>
 
@@ -987,6 +1210,22 @@
   <script src="./node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="./node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="./node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
+  <script src="./node_modules/@xterm/addon-search/lib/addon-search.js"></script>
+  <script src="./node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <link rel="stylesheet" href="./node_modules/prismjs/themes/prism-tomorrow.css">
+  <script src="./node_modules/prismjs/prism.js"></script>
+  <script src="./node_modules/prismjs/components/prism-typescript.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-jsx.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-tsx.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-bash.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-python.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-json.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-yaml.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-toml.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-rust.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-go.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-css.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-markdown.min.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

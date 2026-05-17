@@ -2413,12 +2413,16 @@ html[data-platform="darwin"] #toolbar {
 .file-tree-context-menu {
   position: fixed;
   z-index: 10000;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  /* --bg-secondary didn't exist in the theme — using --bg-panel (real var)
+     means the menu has an actual opaque background on both themes. Without
+     this, the previous rule silently fell through to 'transparent' and the
+     file rows behind bled through. */
+  background: var(--bg-panel);
+  border: 1px solid var(--border-primary, #3a3a52);
   border-radius: 4px;
   padding: 4px 0;
-  min-width: 160px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  min-width: 200px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 
 .file-tree-context-item {
@@ -2426,10 +2430,13 @@ html[data-platform="darwin"] #toolbar {
   font-size: 12px;
   color: var(--text-primary);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .file-tree-context-item:hover {
-  background: var(--accent-color);
+  /* --accent-color didn't exist either; fall back to --accent (the real one). */
+  background: var(--accent);
+  color: #ffffff;
 }
 
 /* Git Changes */
@@ -3818,7 +3825,7 @@ html[data-platform="darwin"] #toolbar {
 
 /* Settings Modal */
 .settings-dialog {
-  width: 520px;
+  width: 680px;       /* widened so the new Terminal / Tools tabs aren't clipped */
   max-width: 90vw;
 }
 
@@ -3834,7 +3841,15 @@ html[data-platform="darwin"] #toolbar {
   padding: 0 12px;
   gap: 2px;
   flex-shrink: 0;
+  /* Tab strip scrolls horizontally if the dialog gets squeezed below the
+     full set of tabs (e.g. on small viewports). The settings-dialog width
+     accommodates all current tabs without scroll, but this keeps the UI
+     usable when extra tabs are added in future. */
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
+.settings-tabs::-webkit-scrollbar { height: 4px; }
+.settings-tabs::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
 
 .settings-tab {
   background: transparent;
@@ -3848,6 +3863,8 @@ html[data-platform="darwin"] #toolbar {
   letter-spacing: 0.4px;
   padding: 10px 14px;
   margin-bottom: -1px;
+  white-space: nowrap;
+  flex-shrink: 0;     /* don't compress tab labels */
 }
 
 .settings-tab:hover { color: var(--text-secondary); }
@@ -5934,25 +5951,26 @@ html[data-platform="darwin"] #toolbar {
 
 .settings-input {
   flex: 1;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid #444;
-  color: #ccc;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 12px;
 }
+.settings-input:focus { outline: none; border-color: var(--accent); }
 
 .settings-browse-btn {
-  background: rgba(255,255,255,0.06);
-  border: 1px solid #444;
-  color: #ccc;
+  background: var(--bg-button);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
   padding: 4px 8px;
   border-radius: 4px;
   cursor: pointer;
 }
 
 .settings-browse-btn:hover {
-  border-color: #6366f1;
+  border-color: var(--accent);
 }
 
 .settings-hint {
@@ -6605,10 +6623,12 @@ body.mode-popout #btn-add-project {
   padding: 12px;
   gap: 8px;
 }
-#session-search-input {
+#session-search-input,
+#quick-open-input,
+#content-search-input {
   width: 100%;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid var(--border-subtle);
+  background: var(--bg-deep);
+  border: 1px solid var(--border-primary);
   color: var(--text-primary);
   padding: 8px 10px;
   border-radius: 4px;
@@ -6616,6 +6636,9 @@ body.mode-popout #btn-add-project {
   margin-bottom: 8px;
   box-sizing: border-box;
 }
+#session-search-input:focus,
+#quick-open-input:focus,
+#content-search-input:focus { outline: none; border-color: var(--accent); }
 .session-search-results {
   max-height: 60vh;
   overflow-y: auto;
@@ -7041,4 +7064,278 @@ body.mode-popout #btn-add-project {
 }
 .shortcuts-features strong {
   color: var(--text-primary);
+}
+
+/* One-time inline warning in the Endpoints modal when Electron's safeStorage
+   is unavailable (Linux without keyring, headless WSL) — tokens will be
+   written plaintext under ~/.claudes/. Sized to be noticed without dominating. */
+.endpoints-safestorage-warning {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  margin: 0 0 12px 0;
+  line-height: 1.4;
+}
+
+/* In-terminal find overlay (Ctrl/Cmd+F). Floats top-right of the terminal
+   wrapper so it never obscures the cursor area, semi-transparent so the
+   matched line behind it remains visible. */
+.terminal-wrapper { position: relative; }
+/* Terminal find overlay — flips with the app theme since the terminal does
+   too (light bg in light mode). Defaults are the dark-theme values. */
+.term-search-overlay {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(20, 22, 36, 0.95);
+  border: 1px solid #3a3a52;
+  border-radius: 6px;
+  padding: 4px 6px;
+  z-index: 20;
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.term-search-overlay.hidden { display: none; }
+.term-search-input {
+  background: #0f0f1f;
+  border: 1px solid #2a2a3c;
+  color: #f1f5f9;
+  border-radius: 4px;
+  padding: 3px 8px;
+  width: 180px;
+  font-size: 12px;
+  outline: none;
+}
+.term-search-input::placeholder { color: #6b7280; }
+.term-search-input:focus { border-color: #6366f1; }
+.term-search-count { color: #9ca3af; padding: 0 4px; font-size: 11px; min-width: 48px; text-align: center; }
+.term-search-btn {
+  background: transparent;
+  border: none;
+  color: #cbd5e1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.term-search-btn:hover { background: rgba(255,255,255,0.08); color: #fff; }
+
+/* Light-theme overrides. Mirrors the terminal's own light palette so the
+   overlay isn't a dark blob hovering over a white terminal. */
+html[data-theme="light"] .term-search-overlay {
+  background: rgba(255, 255, 255, 0.97);
+  border-color: #d0d7de;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+html[data-theme="light"] .term-search-input {
+  background: #ffffff;
+  border-color: #d0d7de;
+  color: #1f2328;
+}
+html[data-theme="light"] .term-search-input::placeholder { color: #8c959f; }
+html[data-theme="light"] .term-search-input:focus { border-color: #0969da; }
+html[data-theme="light"] .term-search-count { color: #57606a; }
+html[data-theme="light"] .term-search-btn { color: #1f2328; }
+html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); color: #000; }
+
+/* Header clear-terminal button — same shape as the restart pill. */
+.col-clear {
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+  user-select: none;
+}
+.col-clear:hover { background: rgba(255,255,255,0.06); color: #e5e7eb; }
+
+/* Syntax-highlighted preview overlay for the inline file editor. Shown when
+   the user clicks 'Preview' in the editor footer; the textarea is hidden
+   beneath. Inherits Prism's tomorrow theme colours but keeps the editor's
+   sizing so toggling doesn't shift layout. */
+.fileeditor-preview {
+  flex: 1;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  background: #1e1e2e;
+  color: #e6e6e6;
+  font-family: 'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', 'DejaVu Sans Mono', monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 2;
+  border: none;
+  border-radius: 0;
+}
+.fileeditor-preview.hidden { display: none; }
+.fileeditor-preview code { background: transparent; padding: 0; }
+
+/* Column header sessions/clear pills — same shape as col-restart. */
+.col-sessions {
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+  user-select: none;
+}
+.col-sessions:hover { background: rgba(255,255,255,0.06); color: #e5e7eb; }
+.col-session-picker { min-width: 280px; max-height: 360px; overflow: auto; }
+
+/* Extensions manager modal — wider dialog so list rows can breathe, body
+   scrolls when categories run long, categories + rows span full width. */
+#ext-modal .modal-dialog {
+  width: 820px;
+  max-width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+#ext-modal .modal-body { overflow-y: auto; max-height: calc(85vh - 56px); width: 100%; }
+.ext-categories { display: flex; flex-direction: column; gap: 16px; width: 100%; }
+.ext-cat { border: 1px solid var(--border-primary); border-radius: 6px; padding: 8px 12px; width: 100%; box-sizing: border-box; }
+.ext-cat-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.ext-cat-hint { color: var(--text-dim); font-size: 11px; margin-left: 6px; }
+.ext-list { display: flex; flex-direction: column; gap: 4px; }
+.ext-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; align-items: center; padding: 4px 6px; border-radius: 4px; }
+.ext-row:hover { background: rgba(255,255,255,0.04); }
+.ext-scope { font-size: 10px; padding: 2px 6px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em; }
+.ext-scope-project { background: rgba(59,130,246,0.15); color: #60a5fa; }
+.ext-scope-global { background: rgba(168,85,247,0.15); color: #c084fc; }
+
+/* Branch dropdown mini-actions (merge / rebase). Tucked at the right of each
+   branch row so the row stays clickable for checkout. */
+.git-branch-mini-action {
+  background: transparent;
+  border: 1px solid #444;
+  color: #cbd5e1;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.git-branch-mini-action:hover { background: rgba(255,255,255,0.06); color: #fff; }
+
+/* Conflict banner shown above the changes list when a merge / rebase /
+   cherry-pick is in progress. */
+.git-op-banner {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 6px 8px;
+  font-size: 12px;
+}
+.git-op-banner-header { font-weight: 600; color: #fbbf24; margin-bottom: 6px; }
+.git-op-conflict-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-family: monospace; }
+.git-op-banner-actions { display: flex; gap: 6px; margin-top: 8px; }
+.git-op-mini-btn {
+  background: transparent;
+  border: 1px solid #555;
+  color: #cbd5e1;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.git-op-mini-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
+.git-op-mini-btn.primary { background: rgba(96, 165, 250, 0.18); border-color: #3b82f6; color: #93c5fd; }
+
+/* Toast container — stacked top-right notifications. */
+.toast-container {
+  position: fixed;
+  top: 56px;
+  right: 16px;
+  z-index: 5000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  background: #232336;
+  color: #e6e6e6;
+  border: 1px solid #3a3a52;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 13px;
+  min-width: 240px;
+  max-width: 420px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.toast-out { opacity: 0; transform: translateX(20px); }
+.toast-success { border-color: #22c55e; }
+.toast-error { border-color: #ef4444; }
+.toast-warn { border-color: #f59e0b; }
+
+/* Loading skeletons + first-run hero. */
+.skel {
+  display: block;
+  background: linear-gradient(90deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.12) 50%, rgba(255,255,255,0.05) 100%);
+  background-size: 200% 100%;
+  animation: skel-pulse 1.4s ease-in-out infinite;
+  border-radius: 4px;
+}
+.skel-row { height: 12px; margin: 10px 0; }
+@keyframes skel-pulse {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.empty-state-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 24px;
+  text-align: center;
+}
+.empty-state-icon { font-size: 48px; opacity: 0.5; }
+.empty-state-title { font-size: 22px; font-weight: 600; }
+.empty-state-subtitle { font-size: 13px; opacity: 0.7; max-width: 360px; line-height: 1.5; }
+.empty-state-cta {
+  margin-top: 8px;
+  background: #6366f1;
+  border: none;
+  color: #fff;
+  font-size: 14px;
+  padding: 10px 22px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.empty-state-cta:hover { background: #4f46e5; }
+.empty-state-shortcuts { font-size: 11px; opacity: 0.55; margin-top: 12px; }
+.empty-state-shortcuts kbd { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; }
+
+.shortcuts-platform-note { font-size: 11px; color: #9ca3af; margin: 0 0 8px; }
+
+/* MCP modal — right edit pane fills remaining width, inputs/textareas span
+   the pane so we don't get a thin left-aligned strip of fields. Mirrors the
+   layout of the endpoints modal proper but with explicit form-box flex. */
+.mcp-edit-pane {
+  flex: 1;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+.mcp-edit-pane .settings-field { display: block; }
+.mcp-edit-pane .settings-input,
+.mcp-edit-pane textarea.settings-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.mcp-edit-pane textarea.settings-input {
+  font-family: 'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', monospace;
+  font-size: 12px;
+  resize: vertical;
 }
