@@ -85,6 +85,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   configureHooks: () => ipcRenderer.invoke('hooks:configure'),
   disconnectHooks: () => ipcRenderer.invoke('hooks:disconnect'),
   isHooksConfigured: () => ipcRenderer.invoke('hooks:isConfigured'),
+  getHooksStatus: () => ipcRenderer.invoke('hooks:status'),
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   showItemInFolder: (fullPath) => ipcRenderer.invoke('shell:showItemInFolder', fullPath),
   openPath: (fullPath) => ipcRenderer.invoke('shell:openPath', fullPath),

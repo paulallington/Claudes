@@ -498,11 +498,24 @@
             </div>
           </div>
           <div class="settings-pane" data-settings-pane="clawd">
+            <div class="settings-field" id="clawd-hooks-row">
+              <div class="clawd-hooks-status">
+                <span id="clawd-hooks-indicator" class="clawd-hooks-indicator">…</span>
+                <span id="clawd-hooks-label" class="clawd-hooks-label">Checking hook status…</span>
+                <button id="btn-clawd-hooks-connect" class="hooks-btn hooks-connect-btn hidden">Connect hooks</button>
+              </div>
+              <span class="settings-hint">Hooks let Clawd react to Claude in real time (instant idle when a turn ends, accurate tool icons). Without them, the widget falls back to tailing the session JSONL and can lag or get stuck on a stale state.</span>
+            </div>
             <label class="settings-toggle">
               <input type="checkbox" id="setting-clawd-enabled">
               <span>Show Clawd</span>
             </label>
             <span class="settings-hint">A friendly animated crab that lives in the corner. Each column has its own animation, driven by Claude's actual activity in that session; the widget cross-fades when you switch focus. Left-click the crab to see what state it's in. Drag to reposition.</span>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-clawd-debug">
+              <span>Show debug overlay</span>
+            </label>
+            <span class="settings-hint">Floats a panel next to the crab listing every hook event and JSONL transition Clawd receives, plus the resolved animation. Use it to see why the widget picked the state it did.</span>
             <div class="settings-field">
               <label for="setting-clawd-size">Size</label>
               <div class="clawd-size-row">
@@ -544,6 +557,22 @@
                 <div class="clawd-legend-item">
                   <img src="./assets/clawd/clawd-working-beacon.svg" alt="">
                   <div><strong>Beacon</strong><span>Talking to MCP servers or LSP</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-juggling.svg" alt="">
+                  <div><strong>Juggling</strong><span>Running a skill or slash-command</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-pushing.svg" alt="">
+                  <div><strong>Pushing</strong><span>Tearing things down &mdash; KillShell, KillBash</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-wake.svg" alt="">
+                  <div><strong>Wake</strong><span>Exiting plan mode &mdash; about to act</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-sweeping.svg" alt="">
+                  <div><strong>Sweeping</strong><span>Compacting or running notebook cells</span></div>
                 </div>
                 <div class="clawd-legend-item">
                   <img src="./assets/clawd/clawd-disconnected.svg" alt="">
@@ -1286,6 +1315,15 @@
   <div id="clawd-widget" class="clawd-widget hidden" aria-hidden="true">
     <img id="clawd-widget-img" class="clawd-widget-img" alt="" draggable="false">
     <div id="clawd-widget-bubble" class="clawd-widget-bubble hidden"></div>
+  </div>
+  <div id="clawd-debug" class="clawd-debug hidden" aria-hidden="true">
+    <div class="clawd-debug-header">
+      <span class="clawd-debug-title">Clawd debug</span>
+      <button id="clawd-debug-clear" class="clawd-debug-btn" type="button">clear</button>
+      <button id="clawd-debug-close" class="clawd-debug-btn" type="button">×</button>
+    </div>
+    <div id="clawd-debug-now" class="clawd-debug-now">—</div>
+    <div id="clawd-debug-log" class="clawd-debug-log"></div>
   </div>
   <script src="./lib/clawd-widget.js"></script>
   <script src="./renderer.js"></script>

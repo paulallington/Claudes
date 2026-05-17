@@ -3829,12 +3829,18 @@ html[data-platform="darwin"] #toolbar {
 .settings-dialog {
   width: 680px;       /* widened so the new Terminal / Tools tabs aren't clipped */
   max-width: 90vw;
+  max-height: 85vh;   /* cap so tall panes (Clawd legend, etc) scroll instead of running off-screen */
+  display: flex;
+  flex-direction: column;
 }
 
 .settings-body {
   padding: 0;
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;      /* let the inner scroll area shrink below content height */
+  overflow: hidden;
 }
 
 .settings-tabs {
@@ -3879,6 +3885,8 @@ html[data-platform="darwin"] #toolbar {
 .settings-panes {
   padding: 14px 20px 18px;
   min-height: 200px;
+  overflow-y: auto;   /* scroll long panes (Clawd legend) instead of clipping */
+  flex: 1;
 }
 
 .settings-pane { display: none; }
@@ -6942,6 +6950,18 @@ body.mode-popout #btn-add-project {
 .hooks-config-status.error { color: #e05050; }
 .hooks-btn.hidden { display: none; }
 
+/* Hook status row inside the Clawd settings pane. Mirrors hooks pane styling. */
+.clawd-hooks-status { display: flex; align-items: center; gap: 8px; }
+.clawd-hooks-indicator {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  font-size: 11px; font-weight: 700; line-height: 1;
+  background: var(--bg-secondary); color: var(--text-dim);
+}
+.clawd-hooks-indicator.connected { background: #22c55e; color: #0a0a14; }
+.clawd-hooks-indicator.disconnected { background: #e0a040; color: #0a0a14; }
+.clawd-hooks-label { font-size: 12px; color: var(--text-primary); flex: 1; }
+
 /* Inline async prompt for snippet variable input (replacement for window.prompt). */
 
 .snippet-prompt-overlay {
@@ -7394,6 +7414,75 @@ body.light-theme .clawd-widget-bubble {
   color: #1a1a2e;
   border-color: #d0d0e0;
 }
+
+.clawd-debug {
+  position: fixed;
+  right: 20px;
+  bottom: 220px;
+  width: 360px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(20, 22, 32, 0.95);
+  color: #e6e6f0;
+  border: 1px solid #3a3a52;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  z-index: 9998;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+}
+.clawd-debug.hidden { display: none; }
+.clawd-debug-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #2a2a40;
+  background: rgba(0, 0, 0, 0.25);
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+}
+.clawd-debug-title { flex: 1; font-weight: 600; color: #cfd0e0; }
+.clawd-debug-btn {
+  background: transparent;
+  border: 1px solid #3a3a52;
+  color: #aaaabb;
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  cursor: pointer;
+}
+.clawd-debug-btn:hover { color: #fff; border-color: #5a5a7a; }
+.clawd-debug-now {
+  padding: 6px 8px;
+  border-bottom: 1px solid #2a2a40;
+  color: #b8d4ff;
+  white-space: pre-wrap;
+}
+.clawd-debug-log {
+  overflow-y: auto;
+  flex: 1;
+  padding: 4px 8px;
+  line-height: 1.4;
+}
+.clawd-debug-log .row { display: flex; gap: 6px; white-space: nowrap; }
+.clawd-debug-log .ts { color: #6e7090; flex-shrink: 0; }
+.clawd-debug-log .src-hook { color: #7fdbff; }
+.clawd-debug-log .src-jsonl { color: #ffb86c; }
+.clawd-debug-log .src-set { color: #b388ff; }
+.clawd-debug-log .anim { color: #7be883; }
+.clawd-debug-log .skip { color: #888; }
+body.light-theme .clawd-debug {
+  background: rgba(252, 252, 255, 0.97);
+  color: #1a1a2e;
+  border-color: #c5c5d8;
+}
+body.light-theme .clawd-debug-header { background: rgba(0, 0, 0, 0.04); border-color: #d8d8e8; }
+body.light-theme .clawd-debug-title { color: #20223a; }
+body.light-theme .clawd-debug-btn { border-color: #c5c5d8; color: #4a4a66; }
+body.light-theme .clawd-debug-now { color: #2055a8; border-color: #d8d8e8; }
+body.light-theme .clawd-debug-log .ts { color: #8a8aa0; }
 
 .clawd-size-row {
   display: flex;

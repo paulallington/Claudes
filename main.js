@@ -34,6 +34,71 @@ if (process.platform !== 'win32') {
   }
 }
 
+// Cross-platform persistent diagnostic logger. Writes lifecycle/quit/crash
+// events to a per-OS app-log path so we can investigate intermittent freezes
+// (the user can force-quit and the trail still survives).
+//
+//   macOS:   ~/Library/Logs/Claudes/claudes.log
+//   Windows: %LOCALAPPDATA%\Claudes\Logs\claudes.log
+//   Linux:   ~/.local/state/Claudes/logs/claudes.log
+//
+// app.getPath('logs') would resolve these for us but isn't safe to call before
+// 'ready'; we want logging during early startup, so we hand-roll the path.
+function diagLogDir() {
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Logs', 'Claudes');
+  }
+  if (process.platform === 'win32') {
+    // %LOCALAPPDATA% is set on every supported Windows; fall back to the
+    // standard path if it isn't, so packaged installs without that env still
+    // get a usable directory.
+    const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(base, 'Claudes', 'Logs');
+  }
+  // Linux / others: XDG state dir, with a sensible fallback.
+  const xdgState = process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state');
+  return path.join(xdgState, 'Claudes', 'logs');
+}
+let diagLogStream = null;
+let diagLogFilePath = null;
+function diagLogInit() {
+  try {
+    const dir = diagLogDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'claudes.log');
+    // Roll if >5MB so the file doesn't grow forever.
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 5 * 1024 * 1024) {
+        try { fs.unlinkSync(file + '.old'); } catch {}
+        fs.renameSync(file, file + '.old');
+      }
+    } catch {}
+    diagLogStream = fs.createWriteStream(file, { flags: 'a' });
+    diagLogFilePath = file;
+    diagLogStream.write(`\n=== ${new Date().toISOString()} Claudes launch pid=${process.pid} platform=${process.platform} ===\n`);
+  } catch (e) {
+    // Logging is best-effort — never let it break startup.
+    console.error('[diagLog] init failed:', e && e.message);
+  }
+}
+function diagLog(...args) {
+  const line = args.map((a) => (typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })())).join(' ');
+  console.log(line);
+  if (diagLogStream) {
+    try { diagLogStream.write(new Date().toISOString() + ' ' + line + '\n'); } catch {}
+  }
+}
+diagLogInit();
+
+// Surface uncaught failures so silent crashes leave a trail on disk.
+process.on('uncaughtException', (err) => {
+  diagLog('[crash] uncaughtException:', err && (err.stack || err.message || String(err)));
+});
+process.on('unhandledRejection', (reason) => {
+  diagLog('[crash] unhandledRejection:', reason && (reason.stack || reason.message || String(reason)));
+});
+
 // Per-launch auth token for the local pty-server WebSocket. Generated fresh
 // each time Electron starts, passed to pty-server via env, and handed to the
 // renderer via IPC. The renderer presents it as a Sec-WebSocket-Protocol on
@@ -585,11 +650,13 @@ function startPtyServer() {
     });
 
     ptyServerProcess.stderr.on('data', (data) => {
-      console.error('[pty-server]', data.toString());
+      const s = data.toString();
+      console.error('[pty-server]', s);
+      if (diagLogStream) { try { diagLogStream.write(new Date().toISOString() + ' [pty-server:stderr] ' + s.trimEnd() + '\n'); } catch {} }
     });
 
-    ptyServerProcess.on('exit', (code) => {
-      console.log('[pty-server] exited with code', code);
+    ptyServerProcess.on('exit', (code, signal) => {
+      diagLog('[pty-server] exited with code', code, 'signal', signal || '(none)');
     });
 
     ptyServerProcess.stdout.on('data', (data) => {
@@ -2987,28 +3054,6 @@ function clawdPollTail(columnId) {
   _clawdEmitIfChanged(columnId, t, false);
 }
 
-// Stream the JSONL once at attach time and resolve the column's true current
-// state — replays every line through the state machine. Brand-new sessions
-// resolve to 'idle' (file missing), resumed sessions snap to whatever the
-// last meaningful turn was.
-function clawdScanInitialState(filePath) {
-  return new Promise((resolve) => {
-    let stream;
-    try { stream = fs.createReadStream(filePath, { encoding: 'utf8' }); }
-    catch { resolve({ kind: 'idle' }); return; }
-    stream.on('error', () => resolve({ kind: 'idle' }));
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-    let state = { kind: 'idle' };
-    rl.on('line', (line) => {
-      if (!line) return;
-      const next = _clawdLineToTransition(line);
-      if (next) state = next;
-    });
-    rl.on('close', () => resolve(state));
-    rl.on('error', () => resolve(state));
-  });
-}
-
 function clawdStartTail(columnId, projectPath, sessionId, sender) {
   clawdStopTail(columnId);
   if (!projectPath || !sessionId) return;
@@ -3023,13 +3068,10 @@ function clawdStartTail(columnId, projectPath, sessionId, sender) {
   };
   t.timer = setInterval(() => clawdPollTail(columnId), 150);
   clawdTails.set(columnId, t);
-
-  clawdScanInitialState(filePath).then((initial) => {
-    const cur = clawdTails.get(columnId);
-    if (!cur || cur.sessionId !== sessionId) return;
-    cur.state = initial || { kind: 'idle' };
-    _clawdEmitIfChanged(columnId, cur, true);
-  });
+  // Deliberately no initial emit. Resurrecting the last turn's state from
+  // the JSONL was misleading (a brand-new column would inherit yesterday's
+  // tool_use as its "current" state). The widget defaults to idle and the
+  // first real transition — from a hook or a fresh JSONL line — drives it.
 }
 
 function clawdStopTail(columnId) {
@@ -3649,7 +3691,7 @@ function startHookServer() {
   });
   hookServer.listen(hookServerListenPort, '127.0.0.1', () => {
     hookServerPort = hookServerListenPort;
-    console.log('[hook-server] listening on port', hookServerPort);
+    diagLog('[hook-server] listening on port', hookServerPort);
     // Self-heal: if the user's settings.json already has our sentinel entries
     // pointing at a different port (e.g. dev↔packaged switch), rewrite them to
     // the current port so they don't have to disconnect+reconnect every launch.
@@ -3668,11 +3710,30 @@ function syncHookPortInSettings(port) {
   if (!data || !data.hooks) return;
   const wanted = buildHookCommand(port);
   let changed = 0;
+  let migrated = 0;
+  let removedLegacy = 0;
+  // Strip Claudes-owned groups from events we no longer subscribe to (e.g.
+  // PostToolUse — saves a curl fork per tool call).
+  for (const ev of REMOVED_HOOK_EVENTS) {
+    const groups = data.hooks[ev];
+    if (!Array.isArray(groups)) continue;
+    const kept = groups.filter((g) => {
+      if (isClaudesHookGroup(g)) { removedLegacy++; return false; }
+      return true;
+    });
+    if (kept.length) data.hooks[ev] = kept; else delete data.hooks[ev];
+  }
   for (const ev of Object.keys(data.hooks)) {
     const groups = data.hooks[ev];
     if (!Array.isArray(groups)) continue;
     for (const g of groups) {
-      if (!g || g.matcher !== CLAUDES_HOOK_SENTINEL) continue;
+      if (!isClaudesHookGroup(g)) continue;
+      // Heal legacy entries where the sentinel was stuffed into `matcher` for
+      // tool-use events (which prevented the hook from ever firing).
+      if (g.matcher === CLAUDES_HOOK_SENTINEL && TOOL_NAME_MATCHER_EVENTS.has(ev)) {
+        delete g.matcher;
+        migrated++;
+      }
       if (!Array.isArray(g.hooks)) continue;
       for (const h of g.hooks) {
         if (h && h.type === 'command' && typeof h.command === 'string' && h.command !== wanted) {
@@ -3682,22 +3743,52 @@ function syncHookPortInSettings(port) {
       }
     }
   }
-  if (changed > 0) {
+  if (changed > 0 || migrated > 0 || removedLegacy > 0) {
     fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
-    console.log('[hook-server] re-pointed', changed, 'sentinel hook(s) to port', port);
+    diagLog('[hook-server] sync: re-pointed', changed, 'hook(s); migrated', migrated, 'legacy matchers; removed', removedLegacy, 'unused-event hook(s); port', port);
   }
 }
 
 ipcMain.handle('hooks:getPort', () => hookServerPort);
 
+// Events we actively listen to. PostToolUse was previously included but its
+// curl-per-call cost was significant on busy turns (every tool call = 1 fork)
+// and the Clawd state machine doesn't use it for anything — PreToolUse +
+// Stop are enough. Listed here as REMOVED_HOOK_EVENTS so existing installs
+// get cleaned up on next configure/sync.
 const HOOK_EVENTS = [
-  'PreToolUse', 'PostToolUse', 'UserPromptSubmit',
+  'PreToolUse', 'UserPromptSubmit',
   'Stop', 'SubagentStop', 'Notification',
   'SessionStart', 'SessionEnd', 'PreCompact'
 ];
+const REMOVED_HOOK_EVENTS = ['PostToolUse'];
 
-// Sentinel matcher we use to identify our hook entries on subsequent calls.
+// Legacy sentinel matcher we *used* to write into `matcher` to identify our
+// own hook entries. Problem: Claude Code treats `matcher` as a tool-name
+// regex for PreToolUse/PostToolUse, so the sentinel value never matched any
+// real tool and our hooks never fired. New entries omit `matcher` (or set it
+// to a permissive wildcard for tool-use events). The sentinel is still
+// recognised for back-compat detection and migration.
 const CLAUDES_HOOK_SENTINEL = '__claudes_inspector__';
+
+// Events whose `matcher` field is a regex matched against the tool name.
+// Empty/wildcard means "fire for every tool". For these we want no matcher.
+const TOOL_NAME_MATCHER_EVENTS = new Set(['PreToolUse', 'PostToolUse']);
+
+// Does this hook group belong to Claudes? Identifies via command URL pattern
+// (resilient to matcher changes and per-launch token rotation) or the legacy
+// sentinel matcher.
+function isClaudesHookGroup(g) {
+  if (!g) return false;
+  if (g.matcher === CLAUDES_HOOK_SENTINEL) return true;
+  if (!Array.isArray(g.hooks)) return false;
+  return g.hooks.some((h) =>
+    h && h.type === 'command' &&
+    typeof h.command === 'string' &&
+    /127\.0\.0\.1:\d+\/hook/.test(h.command) &&
+    /X-Auth-Token:/i.test(h.command)
+  );
+}
 
 function buildHookCommand(port) {
   // Cross-platform curl invocation. curl ships with Windows 10+, macOS, and
@@ -3724,20 +3815,41 @@ function writeClaudeSettings(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
 }
 
+// "Configured" means EVERY event in HOOK_EVENTS has the Claudes sentinel.
+// Previously this returned true on first match, which meant a partial install
+// (e.g. only PostToolUse — common after older versions of this code) hid the
+// Connect button and stranded the user without a way to top up the missing
+// events. Now Connect stays visible until coverage is complete; configure() is
+// idempotent so clicking it on a partial install just fills in the gaps.
 ipcMain.handle('hooks:isConfigured', () => {
   try {
     const { data } = readClaudeSettings();
     if (!data || !data.hooks) return false;
-    // Detect any of our entries by matcher sentinel.
     for (const ev of HOOK_EVENTS) {
       const groups = data.hooks[ev];
-      if (!Array.isArray(groups)) continue;
-      for (const g of groups) {
-        if (g && g.matcher === CLAUDES_HOOK_SENTINEL) return true;
-      }
+      if (!Array.isArray(groups)) return false;
+      if (!groups.some(isClaudesHookGroup)) return false;
     }
-    return false;
+    return true;
   } catch { return false; }
+});
+
+// Per-event hook coverage report — used by the Clawd settings pane so the
+// user can see exactly which events are wired up vs missing.
+ipcMain.handle('hooks:status', () => {
+  try {
+    const { data } = readClaudeSettings();
+    const hooks = (data && data.hooks) || {};
+    const wired = [];
+    const missing = [];
+    for (const ev of HOOK_EVENTS) {
+      const groups = Array.isArray(hooks[ev]) ? hooks[ev] : [];
+      (groups.some(isClaudesHookGroup) ? wired : missing).push(ev);
+    }
+    return { wired, missing, total: HOOK_EVENTS.length };
+  } catch (e) {
+    return { wired: [], missing: HOOK_EVENTS.slice(), total: HOOK_EVENTS.length, error: String(e && e.message || e) };
+  }
 });
 
 ipcMain.handle('hooks:configure', () => {
@@ -3753,19 +3865,43 @@ ipcMain.handle('hooks:configure', () => {
     if (!data.hooks) data.hooks = {};
     const command = buildHookCommand(hookServerListenPort);
     let added = 0;
+    let migrated = 0;
+    let removed = 0;
+    // Strip any Claudes-owned groups for events we no longer subscribe to.
+    // Saves a curl fork per matching tool call on busy turns.
+    for (const ev of REMOVED_HOOK_EVENTS) {
+      const groups = data.hooks[ev];
+      if (!Array.isArray(groups)) continue;
+      const kept = groups.filter((g) => {
+        if (isClaudesHookGroup(g)) { removed++; return false; }
+        return true;
+      });
+      if (kept.length) data.hooks[ev] = kept; else delete data.hooks[ev];
+    }
     for (const ev of HOOK_EVENTS) {
       if (!Array.isArray(data.hooks[ev])) data.hooks[ev] = [];
-      // Skip if our sentinel entry already exists for this event.
-      const already = data.hooks[ev].some((g) => g && g.matcher === CLAUDES_HOOK_SENTINEL);
-      if (already) continue;
-      data.hooks[ev].push({
-        matcher: CLAUDES_HOOK_SENTINEL,
-        hooks: [{ type: 'command', command }]
-      });
+      // Migrate any legacy Claudes groups: for tool-use events, the sentinel
+      // value sat in `matcher` and prevented the hook from firing (matcher is
+      // a tool-name regex there). Strip it; leave label-style sentinels alone
+      // for events where matcher is informational.
+      for (const g of data.hooks[ev]) {
+        if (g && g.matcher === CLAUDES_HOOK_SENTINEL && TOOL_NAME_MATCHER_EVENTS.has(ev)) {
+          delete g.matcher;
+          migrated++;
+        }
+      }
+      if (data.hooks[ev].some(isClaudesHookGroup)) continue;
+      const group = { hooks: [{ type: 'command', command }] };
+      // For non-tool-use events Claude Code uses `matcher` as a label or
+      // event-subtype filter; including a recognisable string is harmless and
+      // helps users grep settings.json. Skip it for tool-use events so we
+      // actually match every tool.
+      if (!TOOL_NAME_MATCHER_EVENTS.has(ev)) group.matcher = CLAUDES_HOOK_SENTINEL;
+      data.hooks[ev].push(group);
       added++;
     }
     writeClaudeSettings(file, data);
-    return { ok: true, added, port: hookServerListenPort };
+    return { ok: true, added, migrated, removed, port: hookServerListenPort };
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
   }
@@ -3780,7 +3916,7 @@ ipcMain.handle('hooks:disconnect', () => {
       const groups = data.hooks[ev];
       if (!Array.isArray(groups)) continue;
       const filtered = groups.filter((g) => {
-        if (g && g.matcher === CLAUDES_HOOK_SENTINEL) { removed++; return false; }
+        if (isClaudesHookGroup(g)) { removed++; return false; }
         return true;
       });
       data.hooks[ev] = filtered;
@@ -6418,9 +6554,16 @@ if (!gotLock) {
 function killPtyServer() {
   if (!ptyServerProcess || ptyServerProcess.killed) return;
   const child = ptyServerProcess;
-  try { child.kill('SIGTERM'); } catch { /* already gone */ }
+  const pid = child.pid;
+  diagLog('[quit] killPtyServer: SIGTERM ->', pid);
+  try { child.kill('SIGTERM'); } catch (e) { diagLog('[quit] SIGTERM threw:', e && e.message); }
   setTimeout(() => {
-    try { if (!child.killed) child.kill('SIGKILL'); } catch { /* */ }
+    if (child.killed) {
+      diagLog('[quit] pty-server', pid, 'already gone, SIGKILL not needed');
+      return;
+    }
+    diagLog('[quit] pty-server', pid, 'still alive after 2s — SIGKILL');
+    try { child.kill('SIGKILL'); } catch (e) { diagLog('[quit] SIGKILL threw:', e && e.message); }
   }, 2000).unref();
 }
 
@@ -6434,19 +6577,60 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  const t0 = Date.now();
+  const step = (label) => diagLog('[quit] +' + (Date.now() - t0) + 'ms ' + label);
+  step('before-quit: start');
   isQuitting = true;
+  step('popouts close: ' + popoutWindows.size);
   for (const win of popoutWindows.values()) {
     if (!win.isDestroyed()) {
       try { win.close(); } catch {}
     }
   }
+  step('flushPendingConfig');
   flushPendingConfig();
+  step('stopAutomationScheduler');
   stopAutomationScheduler();
+  step('clawdTails clear: ' + clawdTails.size);
+  for (const [colId, t] of clawdTails) {
+    try { clearInterval(t.timer); } catch {}
+  }
+  clawdTails.clear();
+  step('killPtyServer');
   killPtyServer();
   // The hook server's listening socket keeps the event loop alive; close it
   // so Electron can actually exit instead of hanging in 'will-quit'.
   if (hookServer) {
-    try { hookServer.close(); } catch { /* */ }
+    step('hookServer.closeAllConnections + close');
+    try { if (typeof hookServer.closeAllConnections === 'function') hookServer.closeAllConnections(); } catch (e) { diagLog('[quit] closeAllConnections threw:', e && e.message); }
+    try { hookServer.close(() => step('hookServer: close callback')); } catch (e) { diagLog('[quit] hookServer.close threw:', e && e.message); }
     hookServer = null;
   }
+  step('FS_WATCHERS close: ' + FS_WATCHERS.size);
+  step('before-quit: done');
+});
+
+app.on('will-quit', () => { diagLog('[quit] will-quit fired'); });
+app.on('quit', () => { diagLog('[quit] quit fired'); });
+
+// Renderer/child-process death and blocked-unload capture — classic culprits
+// behind "Cmd+Q (or Alt+F4) hangs and I have to Force Quit". Cross-platform.
+app.on('render-process-gone', (_event, _wc, details) => {
+  diagLog('[crash] render-process-gone:', JSON.stringify(details));
+});
+app.on('child-process-gone', (_event, details) => {
+  diagLog('[crash] child-process-gone:', JSON.stringify(details));
+});
+app.on('web-contents-created', (_event, wc) => {
+  wc.on('will-prevent-unload', () => {
+    // A beforeunload handler returning falsy will block quit. Log it,
+    // don't override — we want to know if it's happening.
+    diagLog('[quit] will-prevent-unload fired on wc id=' + wc.id + ' url=' + wc.getURL());
+  });
+  wc.on('unresponsive', () => {
+    diagLog('[crash] webContents unresponsive: id=' + wc.id + ' url=' + wc.getURL());
+  });
+  wc.on('responsive', () => {
+    diagLog('[crash] webContents responsive again: id=' + wc.id);
+  });
 });

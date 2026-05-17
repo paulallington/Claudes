@@ -548,18 +548,34 @@ function connectWS() {
       var col = allColumns.get(msg.id);
       if (col) {
         col.terminal.write(msg.data);
-          if (!resizeSuppressed.has(msg.id) && msg.data && col.hasUserInput) {
-          // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
+        if (!resizeSuppressed.has(msg.id) && msg.data) {
           var trimmed = msg.data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
-          // Detect: input prompt (> / ❯), permission prompt (Yes/No), or "Do you want to proceed"
-          var endsWithPrompt = /\n\s*[>❯]\s*$/.test(trimmed) || /^\s*[>❯]\s*$/.test(trimmed) ||
-            /Do you want to proceed/.test(trimmed) || /Esc to cancel/.test(trimmed) ||
-            /\d\.\s*(Yes|No)\s*$/.test(trimmed);
-          if (endsWithPrompt && col.activityState === 'working') {
-            setColumnActivity(msg.id, 'waiting');
-            notifyAttentionNeeded(msg.id);
-          } else if (msg.data.length > 10 && !endsWithPrompt) {
-            setColumnActivity(msg.id, 'working');
+          // "Interrupted" with or without the middle-dot — the chunk can
+          // arrive partial, so match permissively. This must work on a
+          // resumed session that hasn't seen a user keystroke yet, so it
+          // runs OUTSIDE the col.hasUserInput gate below.
+          var wasInterrupted = /Interrupted/.test(trimmed) &&
+            (/What should Claude do/.test(trimmed) || /\bEsc\b/.test(trimmed));
+          if (wasInterrupted && window.Clawd && window.Clawd.setColumnAnimation) {
+            window.Clawd.setColumnAnimation(msg.id, 'idle');
+          }
+          if (col.hasUserInput) {
+            // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
+            var endsWithPrompt = /\n\s*[>❯]\s*$/.test(trimmed) || /^\s*[>❯]\s*$/.test(trimmed) ||
+              /Do you want to proceed/.test(trimmed) || /Esc to cancel/.test(trimmed) ||
+              /\d\.\s*(Yes|No)\s*$/.test(trimmed);
+            if (endsWithPrompt && col.activityState === 'working') {
+              setColumnActivity(msg.id, 'waiting');
+              notifyAttentionNeeded(msg.id);
+            } else if (msg.data.length > 10 && !endsWithPrompt) {
+              setColumnActivity(msg.id, 'working');
+            }
+            // Safety net for Clawd: whenever a prompt is visible, the column
+            // is awaiting input — flip the widget to idle regardless of the
+            // tracked activityState.
+            if (endsWithPrompt && window.Clawd && window.Clawd.setColumnAnimation) {
+              window.Clawd.setColumnAnimation(msg.id, 'idle');
+            }
           }
         }
         // Auto-open browser when server starts listening. Parse the actual
@@ -700,12 +716,20 @@ function setColumnActivity(id, state) {
       }
     }, ACTIVITY_IDLE_MS));
   } else {
-    col.activityState = state; // 'exited'
+    col.activityState = state; // 'exited' | 'waiting' | 'idle' | 'attention'
     activityTimers.delete(id);
     updateActivityIndicator(id);
     updateSidebarActivity();
-    if (state === 'exited' && window.Clawd && window.Clawd.setColumnAnimation) {
-      window.Clawd.setColumnAnimation(id, 'disconnected');
+    if (window.Clawd && window.Clawd.setColumnAnimation) {
+      if (state === 'exited') {
+        window.Clawd.setColumnAnimation(id, 'disconnected');
+      } else if (state === 'waiting' || state === 'idle') {
+        // Prompt detected (could be Claude finished normally or the user
+        // interrupted mid-turn). Claude CLI emits Stop for normal completion
+        // but not for user interrupts, so we use the prompt-detection signal
+        // as a safety net to keep Clawd from stranding on 'thinking'/working.
+        window.Clawd.setColumnAnimation(id, 'idle');
+      }
     }
   }
 }
@@ -1385,9 +1409,9 @@ function loadProjects() {
     if (isValidEffort(config.defaultEffortLocal)) defaultEffortLocal = config.defaultEffortLocal;
     if (optDefaultEffortCloud) optDefaultEffortCloud.value = defaultEffortCloud;
     if (optDefaultEffortLocal) optDefaultEffortLocal.value = defaultEffortLocal;
-    if (config.theme) {
-      setThemePreference(config.theme);
-    }
+    // Default to 'auto' so the app follows the OS theme out of the box.
+    // Legacy/unset configs land here too.
+    setThemePreference(config.theme || 'auto');
     if (config.sidebarWidth) {
       applySidebarWidth(config.sidebarWidth);
     }
@@ -3233,6 +3257,16 @@ function addColumn(args, targetRow, opts) {
         }
         c.hasUserInput = true;
         c.notified = false;
+        // Snap Clawd to thinking immediately on submit. UserPromptSubmit
+        // hooks usually arrive within a few ms, but on freshly-spawned
+        // columns the sessionId mapping may not be resolved yet so the
+        // hook lands in the orphan bucket. This is a direct, race-free
+        // path because we *know* the user just submitted. (Column id is
+        // the closure variable `id`; the column object itself has no
+        // `id` property — Map key only.)
+        if (window.Clawd && window.Clawd.setColumnAnimation) {
+          window.Clawd.setColumnAnimation(id, 'thinking');
+        }
       }
     }
   });
@@ -3851,26 +3885,45 @@ function renderSplitDiff(container, parsed) {
 }
 
 // ---------- Clawd: drive per-column animation from real session activity ----------
-// Tool → animation map. Mirrors clawd-tank/host/clawd_tank_daemon/daemon.py's
-// TOOL_ANIMATION_MAP. We layer a few additional Claude Code tool names on top
-// (BashOutput, MultiEdit, Task, plugin_*) since clawd-tank predates them.
-// Unknown tools fall back to 'typing' to match upstream's default.
+// Tool → animation map. Started from clawd-tank/host/clawd_tank_daemon/daemon.py's
+// TOOL_ANIMATION_MAP and expanded so under-used Claude Code tools land on
+// distinct animations instead of all falling back to 'typing'.
 var CLAWD_TOOL_ANIMATIONS = {
+  // file edits → typing
   'edit': 'typing', 'write': 'typing', 'notebookedit': 'typing', 'multiedit': 'typing',
-  'read': 'debugger', 'grep': 'debugger', 'glob': 'debugger',
-  'bash': 'building', 'bashoutput': 'building', 'killshell': 'building', 'killbash': 'building',
+  'todowrite': 'typing',
+  // file reads / search → debugger
+  'read': 'debugger', 'grep': 'debugger', 'glob': 'debugger', 'ls': 'debugger',
+  // shell execution → building
+  'bash': 'building', 'bashoutput': 'building',
+  // tearing things down → pushing (visually distinct from starting them up)
+  'killshell': 'pushing', 'killbash': 'pushing',
+  // orchestration → conducting
   'agent': 'conducting', 'task': 'conducting',
+  // web access → wizard
   'websearch': 'wizard', 'webfetch': 'wizard',
+  // skill / slash-command invocation → juggling (busy, many-balls feel)
+  'skill': 'juggling', 'slashcommand': 'juggling',
+  // plan mode → wake (Claude "wakes up" out of plan mode into action)
+  'exitplanmode': 'wake',
+  // LSP / language server → beacon
   'lsp': 'beacon',
+  // notebook execution / IDE bridge → sweeping for cleanup-style work
+  'notebookrun': 'sweeping',
 };
 
 function clawdAnimationForTool(toolName) {
   if (!toolName) return 'typing';
   var key = String(toolName).toLowerCase();
   if (CLAWD_TOOL_ANIMATIONS[key]) return CLAWD_TOOL_ANIMATIONS[key];
+  // MCP server calls and IDE/MCP bridges → beacon (off-process comms)
   if (key.indexOf('mcp__') === 0) return 'beacon';
   if (key.indexOf('plugin_') === 0 || key.indexOf('plugin__') === 0) return 'beacon';
-  return 'typing'; // upstream default
+  // Read-shaped tools we don't know yet → default to debugger so they don't
+  // collapse onto 'typing' alongside Edit/Write.
+  if (key.indexOf('search') !== -1 || key.indexOf('find') !== -1 || key.indexOf('list') !== -1) return 'debugger';
+  // Write-shaped tools we don't know yet stay on typing.
+  return 'typing';
 }
 
 // Translate session-state → animation, following clawd-tank's
@@ -3883,6 +3936,9 @@ function applyClawdEvent(columnId, evt) {
   else if (evt.kind === 'confused') animId = 'confused';
   else if (evt.kind === 'error') animId = 'dizzy';
   else if (evt.kind === 'idle') animId = 'idle';
+  if (window.Clawd.logJsonlEvent) {
+    window.Clawd.logJsonlEvent({ col: columnId, kind: evt.kind, tool: evt.tool || '', anim: animId });
+  }
   if (animId) window.Clawd.setColumnAnimation(columnId, animId);
 }
 
@@ -7250,7 +7306,7 @@ function resetFontSize() {
 // Theme
 // ============================================================
 
-var themePreference = 'dark'; // 'dark' | 'light' | 'auto'
+var themePreference = 'auto'; // 'dark' | 'light' | 'auto'
 
 function applyVisualTheme(visual) {
   currentTheme = visual;
@@ -7315,15 +7371,110 @@ if (window.electronAPI && window.electronAPI.onFsChanged) {
 // Hook Server Integration
 // ============================================================
 
+// Per-column flag: once a hook has fired for the column's current session,
+// the JSONL tail is redundant. Stopping it eliminates ~7 fs.statSync per
+// second per column and a curl-spawn-driven feedback loop on busy turns.
+var clawdHookSeenBySession = Object.create(null);
+
+// Resolve which column a hook event belongs to. Two cases:
+//
+//  1. sessionId match — the column owns this exact session. Normal path.
+//  2. cwd fallback   — sessionId doesn't match any column, but the event's
+//     cwd identifies an unambiguous column. Covers two real cases:
+//       (a) the detectSession race on freshly-spawned columns, where the
+//           sessionId mapping isn't resolved yet when the first hooks fire;
+//       (b) subagent (Agent/Task) tool calls, which fire hooks under a
+//           *different* sessionId than the parent column. They still happen
+//           in the parent's cwd, so we route them to that column without
+//           ever overwriting its real sessionId.
+//
+// We deliberately do NOT mutate col.sessionId here. Doing so caused an
+// earlier bug where adopting a subagent's sessionId orphaned every
+// subsequent parent-session hook.
+function clawdResolveHookColumn(event) {
+  var sid = event && event.session_id;
+  var cwd = event && event.cwd;
+  var match = null;
+  if (sid) {
+    allColumns.forEach(function (col, id) {
+      if (col.sessionId === sid) match = id;
+    });
+    if (match != null) return match;
+  }
+  if (cwd) {
+    var found = null;
+    var ambiguous = false;
+    allColumns.forEach(function (col, id) {
+      if (col.projectKey !== cwd) return;
+      if (found != null) ambiguous = true;
+      else found = id;
+    });
+    if (!ambiguous && found != null) return found;
+  }
+  return null;
+}
+
 if (window.electronAPI && window.electronAPI.onHookEvent) {
   window.electronAPI.onHookEvent(function (event) {
-    allColumns.forEach(function (col, id) {
-      if (col.sessionId && event.session_id === col.sessionId) {
-        if (event.matcher === 'idle_prompt' || event.matcher === 'permission_prompt') {
-          setActivity(id, 'waiting');
-        }
+    var sid = event && event.session_id;
+    var evtName = (event && (event.hook_event_name || event.event)) || '';
+    var colId = clawdResolveHookColumn(event);
+    if (colId == null) {
+      // Truly orphan — different project, no claiming column. Log it so it
+      // shows up in the debug overlay but don't act on it.
+      if (window.Clawd && window.Clawd.logHookEvent) {
+        window.Clawd.logHookEvent({
+          col: null,
+          event: evtName,
+          tool: (event && event.tool_name) || '',
+          matcher: (event && event.matcher) || '',
+          anim: null,
+        });
       }
-    });
+      return;
+    }
+    // Route hooks for the resolved column's *primary* session through the
+    // tail-stop path; subagent hooks (different sid, same cwd) skip it
+    // because the primary tail is still useful for the parent.
+    var col = allColumns.get(colId);
+    var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
+    if (sidMatchesColumn && sid && !clawdHookSeenBySession[sid]) {
+      clawdHookSeenBySession[sid] = true;
+      if (window.electronAPI && window.electronAPI.clawdStopTail) {
+        window.electronAPI.clawdStopTail(colId);
+      }
+    }
+    if (event.matcher === 'idle_prompt' || event.matcher === 'permission_prompt') {
+      setActivity(colId, 'waiting');
+    }
+    var animId = null;
+    if (evtName === 'UserPromptSubmit') animId = 'thinking';
+    else if (evtName === 'PreToolUse') animId = clawdAnimationForTool(event.tool_name);
+    else if (evtName === 'Stop' || evtName === 'SubagentStop') {
+      // Only the primary-session Stop ends a turn for the widget. A
+      // subagent's SubagentStop firing while the parent is still working
+      // would otherwise briefly flip Clawd to idle.
+      if (sidMatchesColumn) animId = 'idle';
+    }
+    else if (evtName === 'Notification') {
+      if (event.matcher === 'permission_prompt') animId = 'confused';
+      else if (event.matcher === 'idle_prompt') animId = 'idle';
+    }
+    else if (evtName === 'SessionEnd') {
+      if (sidMatchesColumn) animId = 'disconnected';
+    }
+    if (window.Clawd && window.Clawd.logHookEvent) {
+      window.Clawd.logHookEvent({
+        col: colId,
+        event: evtName + (sidMatchesColumn ? '' : ' (cwd)'),
+        tool: event.tool_name || '',
+        matcher: event.matcher || '',
+        anim: animId,
+      });
+    }
+    if (animId && window.Clawd && window.Clawd.setColumnAnimation) {
+      window.Clawd.setColumnAnimation(colId, animId);
+    }
   });
 }
 
@@ -8406,13 +8557,60 @@ document.getElementById('btn-settings').addEventListener('click', function () {
     var enabledEl = document.getElementById('setting-clawd-enabled');
     var sizeEl = document.getElementById('setting-clawd-size');
     var sizeValEl = document.getElementById('setting-clawd-size-val');
+    var debugEl = document.getElementById('setting-clawd-debug');
     if (!enabledEl || !sizeEl || !window.Clawd) return;
+
+    var hookIndicator = document.getElementById('clawd-hooks-indicator');
+    var hookLabel = document.getElementById('clawd-hooks-label');
+    var hookConnectBtn = document.getElementById('btn-clawd-hooks-connect');
+
+    function setHookStatus(connected, msg) {
+      if (hookIndicator) {
+        hookIndicator.textContent = connected ? '✓' : '!';
+        hookIndicator.classList.toggle('connected', !!connected);
+        hookIndicator.classList.toggle('disconnected', !connected);
+      }
+      if (hookLabel) hookLabel.textContent = msg;
+      if (hookConnectBtn) hookConnectBtn.classList.toggle('hidden', !!connected);
+    }
+
+    function refreshHooks() {
+      var api = window.electronAPI || {};
+      if (api.getHooksStatus) {
+        api.getHooksStatus().then(function (status) {
+          if (!status) {
+            setHookStatus(false, 'Couldn’t read hook status.');
+            return;
+          }
+          var wired = (status.wired && status.wired.length) || 0;
+          var total = status.total || 0;
+          if (wired === total) {
+            setHookStatus(true, 'Hooks connected (' + wired + '/' + total + ') — Clawd reacts in real time.');
+          } else if (wired === 0) {
+            setHookStatus(false, 'Hooks not connected — Clawd may lag or stick on stale states.');
+          } else {
+            setHookStatus(false,
+              'Partial coverage (' + wired + '/' + total + '). Missing: ' +
+              (status.missing || []).join(', ') + '. Click Connect to top up.');
+          }
+        }).catch(function () { setHookStatus(false, 'Couldn’t read hook status.'); });
+      } else if (api.isHooksConfigured) {
+        api.isHooksConfigured().then(function (configured) {
+          if (configured) setHookStatus(true, 'Hooks connected — Clawd reacts in real time.');
+          else setHookStatus(false, 'Hooks not connected — Clawd may lag or stick on stale states.');
+        }).catch(function () { setHookStatus(false, 'Couldn’t read hook status.'); });
+      } else {
+        setHookStatus(false, 'Hooks API unavailable.');
+      }
+    }
 
     function refresh() {
       enabledEl.checked = window.Clawd.isEnabled();
       var size = window.Clawd.getSize();
       sizeEl.value = String(size);
       if (sizeValEl) sizeValEl.textContent = size + 'px';
+      if (debugEl && window.Clawd.isDebugEnabled) debugEl.checked = window.Clawd.isDebugEnabled();
+      refreshHooks();
     }
     refresh();
 
@@ -8426,6 +8624,30 @@ document.getElementById('btn-settings').addEventListener('click', function () {
       window.Clawd.setSize(n);
       if (sizeValEl) sizeValEl.textContent = n + 'px';
     });
+    if (debugEl) {
+      debugEl.addEventListener('change', function () {
+        if (debugEl.checked) window.Clawd.enableDebug();
+        else window.Clawd.disableDebug();
+      });
+    }
+
+    if (hookConnectBtn && window.electronAPI && window.electronAPI.configureHooks) {
+      hookConnectBtn.addEventListener('click', function () {
+        hookConnectBtn.disabled = true;
+        if (hookLabel) hookLabel.textContent = 'Connecting…';
+        window.electronAPI.configureHooks().then(function (result) {
+          hookConnectBtn.disabled = false;
+          if (result && result.ok) {
+            setHookStatus(true, 'Hooks connected. Respawn open Claude columns to start receiving events.');
+          } else {
+            setHookStatus(false, 'Connect failed: ' + ((result && result.error) || 'unknown error'));
+          }
+        }).catch(function (err) {
+          hookConnectBtn.disabled = false;
+          setHookStatus(false, 'Connect failed: ' + (err && err.message || err));
+        });
+      });
+    }
 
     var btn = document.getElementById('btn-settings');
     if (btn) btn.addEventListener('click', refresh);
