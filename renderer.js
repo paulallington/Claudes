@@ -6041,9 +6041,10 @@ function createGitFileRow(file, isStaged, statsMap, depth) {
       status: file.status
     }, { title: parts[parts.length - 1] + ' (' + file.status + ')' });
   });
-  // Right-click on the filename gives File History / Blame access — the
-  // change list is the natural place to launch them from.
-  nameEl.addEventListener('contextmenu', function (e) {
+  // Right-click on the row (not just the filename span) gives Open in editor /
+  // File History / Blame access — easier to hit, especially over the stat /
+  // action columns where users instinctively right-click.
+  row.addEventListener('contextmenu', function (e) {
     e.preventDefault();
     e.stopPropagation();
     showGitFileContextMenu(e, file.file);

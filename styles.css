@@ -7189,13 +7189,20 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
 .col-sessions:hover { background: rgba(255,255,255,0.06); color: #e5e7eb; }
 .col-session-picker { min-width: 280px; max-height: 360px; overflow: auto; }
 
-/* Extensions manager modal layout — body scrolls when categories run long. */
-#ext-modal .modal-dialog { max-height: 85vh; display: flex; flex-direction: column; }
-#ext-modal .modal-body { overflow-y: auto; max-height: calc(85vh - 56px); }
-.ext-categories { display: flex; flex-direction: column; gap: 16px; }
-.ext-cat { border: 1px solid var(--border-primary); border-radius: 6px; padding: 8px 12px; }
+/* Extensions manager modal — wider dialog so list rows can breathe, body
+   scrolls when categories run long, categories + rows span full width. */
+#ext-modal .modal-dialog {
+  width: 820px;
+  max-width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+#ext-modal .modal-body { overflow-y: auto; max-height: calc(85vh - 56px); width: 100%; }
+.ext-categories { display: flex; flex-direction: column; gap: 16px; width: 100%; }
+.ext-cat { border: 1px solid var(--border-primary); border-radius: 6px; padding: 8px 12px; width: 100%; box-sizing: border-box; }
 .ext-cat-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.ext-cat-hint { color: #6b7280; font-size: 11px; margin-left: 6px; }
+.ext-cat-hint { color: var(--text-dim); font-size: 11px; margin-left: 6px; }
 .ext-list { display: flex; flex-direction: column; gap: 4px; }
 .ext-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; align-items: center; padding: 4px 6px; border-radius: 4px; }
 .ext-row:hover { background: rgba(255,255,255,0.04); }
