@@ -1482,13 +1482,99 @@ ipcMain.handle('fs:writeFile', (event, filePath, content) => {
   }
 });
 
+// Minimal .gitignore matcher. Implements the common subset:
+//   - blank / # comments skipped
+//   - trailing /  : matches directories only
+//   - leading /   : anchored to the gitignore root
+//   - bare name   : matches by basename anywhere in the tree
+//   - patterns with / (not leading): anchored relative to gitignore root
+//   - * wildcards inside a segment (no cross-segment ** support here)
+//   - ! negation is honoured (later rule wins)
+// Always implicitly ignores .git and node_modules so even repos without a
+// .gitignore don't flood the explorer.
+const GITIGNORE_CACHE = new Map(); // rootDir -> { mtime, rules }
+const ALWAYS_IGNORED_DIRS = new Set(['.git', 'node_modules', '__pycache__', '.next', '.nuxt', 'dist', '.cache', 'coverage', '.venv', 'venv', 'target']);
+
+function compileGitignorePattern(line) {
+  let neg = false;
+  if (line.startsWith('!')) { neg = true; line = line.slice(1); }
+  let dirOnly = false;
+  if (line.endsWith('/')) { dirOnly = true; line = line.slice(0, -1); }
+  let anchored = false;
+  if (line.startsWith('/')) { anchored = true; line = line.slice(1); }
+  // If the pattern contains a slash (and isn't bare), it's anchored from root.
+  if (!anchored && line.includes('/')) anchored = true;
+  // Escape regex metachars except `*` and `?`, then translate globs.
+  const re = line.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]');
+  let pattern;
+  if (anchored) {
+    // Match against the relative path from gitignore root.
+    pattern = '^' + re + '(/.*)?$';
+  } else {
+    // Match against any path segment by basename, OR by trailing path component.
+    pattern = '(^|/)' + re + '(/.*)?$';
+  }
+  return { neg, dirOnly, re: new RegExp(pattern) };
+}
+
+function loadGitignoreRules(root) {
+  const file = path.join(root, '.gitignore');
+  let stat;
+  try { stat = fs.statSync(file); }
+  catch { GITIGNORE_CACHE.set(root, { mtime: 0, rules: [] }); return []; }
+  const cached = GITIGNORE_CACHE.get(root);
+  if (cached && cached.mtime === stat.mtimeMs) return cached.rules;
+  let raw = '';
+  try { raw = fs.readFileSync(file, 'utf8'); } catch { /* race condition — proceed empty */ }
+  const rules = raw.split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('#'))
+    .map(l => {
+      try { return compileGitignorePattern(l); }
+      catch { return null; }
+    })
+    .filter(Boolean);
+  GITIGNORE_CACHE.set(root, { mtime: stat.mtimeMs, rules });
+  return rules;
+}
+
+function isIgnoredByGitignore(rules, relPath, isDir) {
+  // Normalise to forward slashes (gitignore patterns use /).
+  const p = relPath.split(path.sep).join('/');
+  let ignored = false;
+  for (const r of rules) {
+    if (r.dirOnly && !isDir) continue;
+    if (r.re.test(p)) ignored = !r.neg;
+  }
+  return ignored;
+}
+
 ipcMain.handle('fs:readDir', (event, dirPath) => {
   try {
     const safe = assertInsideAllowedRoots(dirPath);
     const entries = fs.readdirSync(safe, { withFileTypes: true });
-    const excluded = new Set(['node_modules', '.git', '__pycache__', '.next', '.nuxt']);
+    // Walk up to find a gitignore root: the nearest configured project that
+    // contains `safe`. Falls back to `safe` itself if it's a project root.
+    let gitRoot = safe;
+    try {
+      const cfg = readConfig();
+      if (Array.isArray(cfg.projects)) {
+        for (const p of cfg.projects) {
+          if (p && typeof p.path === 'string' && isInsideRoot(safe, path.resolve(p.path))) {
+            gitRoot = path.resolve(p.path);
+            break;
+          }
+        }
+      }
+    } catch { /* fall through */ }
+    const rules = loadGitignoreRules(gitRoot);
     return entries
-      .filter(e => !excluded.has(e.name))
+      .filter(e => !ALWAYS_IGNORED_DIRS.has(e.name))
+      .filter(e => {
+        const full = path.join(safe, e.name);
+        const rel = path.relative(gitRoot, full);
+        return !isIgnoredByGitignore(rules, rel, e.isDirectory());
+      })
       .map(e => ({
         name: e.name,
         path: path.join(safe, e.name),
@@ -1506,7 +1592,7 @@ ipcMain.handle('fs:readDir', (event, dirPath) => {
 ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
   let safeRoot;
   try { safeRoot = assertInsideAllowedRoots(rootDir); } catch { return []; }
-  const excluded = new Set(['node_modules', '.git', '__pycache__', '.next', '.nuxt', 'dist', '.cache', 'coverage']);
+  const rules = loadGitignoreRules(safeRoot);
   const results = [];
   const lowerQuery = String(query || '').toLowerCase();
   const MAX_RESULTS = 100;
@@ -1517,9 +1603,10 @@ ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const e of entries) {
         if (results.length >= MAX_RESULTS) return;
-        if (excluded.has(e.name)) continue;
+        if (ALWAYS_IGNORED_DIRS.has(e.name)) continue;
         const fullPath = path.join(dir, e.name);
         const relativePath = path.relative(safeRoot, fullPath);
+        if (isIgnoredByGitignore(rules, relativePath, e.isDirectory())) continue;
         if (e.name.toLowerCase().includes(lowerQuery)) {
           results.push({ name: e.name, path: fullPath, relativePath, isDirectory: e.isDirectory() });
         }
@@ -1530,6 +1617,74 @@ ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
 
   walk(safeRoot);
   return results;
+});
+
+// Project-wide content grep. Plain substring (case-insensitive) match across
+// files under projectRoot, respecting .gitignore. Cheap enough for ~50k files
+// without a worker on modern SSDs; capped at 300 hits + 5 MB per file to keep
+// the renderer responsive on huge repos.
+ipcMain.handle('fs:searchContent', (event, projectRoot, query) => {
+  let safeRoot;
+  try { safeRoot = assertInsideAllowedRoots(projectRoot); } catch { return []; }
+  const q = String(query || '');
+  if (q.length < 2) return [];
+  const needle = q.toLowerCase();
+  const rules = loadGitignoreRules(safeRoot);
+  const hits = [];
+  const MAX_HITS = 300;
+  const MAX_FILE_BYTES = 5 * 1024 * 1024;
+  // Skip binary-looking extensions outright; reading their content is wasteful.
+  const BINARY_EXTS = new Set(['.png','.jpg','.jpeg','.gif','.webp','.bmp','.ico','.tif','.tiff','.psd','.svg','.mp3','.mp4','.mov','.avi','.webm','.wav','.flac','.ogg','.zip','.gz','.tar','.7z','.rar','.pdf','.doc','.docx','.xls','.xlsx','.ppt','.pptx','.bin','.dat','.dll','.so','.dylib','.exe','.class','.jar','.wasm','.lock','.svg']);
+
+  function scanFile(filePath) {
+    if (hits.length >= MAX_HITS) return;
+    const ext = path.extname(filePath).toLowerCase();
+    if (BINARY_EXTS.has(ext)) return;
+    let st;
+    try { st = fs.statSync(filePath); } catch { return; }
+    if (st.size > MAX_FILE_BYTES) return;
+    let content;
+    try { content = fs.readFileSync(filePath, 'utf8'); } catch { return; }
+    // Quick reject — most files don't contain the needle.
+    const lower = content.toLowerCase();
+    let idx = lower.indexOf(needle);
+    if (idx === -1) return;
+    // Compute line/snippet for the first 3 matches in this file.
+    let matchCount = 0;
+    while (idx !== -1 && matchCount < 3 && hits.length < MAX_HITS) {
+      const lineStart = content.lastIndexOf('\n', idx - 1) + 1;
+      const lineEnd = (content.indexOf('\n', idx) === -1) ? content.length : content.indexOf('\n', idx);
+      const line = content.slice(lineStart, lineEnd);
+      // 1-based line number (count newlines before idx).
+      let lineNo = 1;
+      for (let i = 0; i < lineStart; i++) if (content.charCodeAt(i) === 10) lineNo++;
+      hits.push({
+        path: filePath,
+        relativePath: path.relative(safeRoot, filePath),
+        line: lineNo,
+        snippet: line.length > 240 ? line.slice(0, 240) + '…' : line
+      });
+      matchCount++;
+      idx = lower.indexOf(needle, idx + needle.length);
+    }
+  }
+
+  function walk(dir) {
+    if (hits.length >= MAX_HITS) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (hits.length >= MAX_HITS) return;
+      if (ALWAYS_IGNORED_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      const rel = path.relative(safeRoot, full);
+      if (isIgnoredByGitignore(rules, rel, e.isDirectory())) continue;
+      if (e.isDirectory()) walk(full);
+      else scanFile(full);
+    }
+  }
+  walk(safeRoot);
+  return hits;
 });
 
 // Async git runner — never block the Electron main thread.
@@ -3048,6 +3203,53 @@ ipcMain.handle('shell:openPath', (event, fullPath) => {
     return Promise.resolve('refused: executable extension');
   }
   return shell.openPath(p);
+});
+
+// Launch the user's configured external editor (default: `code` on PATH).
+// Falls back to shell.openPath when the command isn't found so the action
+// degrades gracefully. The target path is constrained to allowed roots
+// (same containment as the rest of the FS IPC surface).
+ipcMain.handle('editor:openExternal', async (event, targetPath) => {
+  let safe;
+  try { safe = assertInsideAllowedRoots(targetPath); }
+  catch { return { ok: false, error: 'refused: path outside allowed roots' }; }
+  const cfg = readConfig();
+  const cmd = (cfg && typeof cfg.externalEditorCommand === 'string' && cfg.externalEditorCommand.trim())
+    || (process.platform === 'win32' ? 'code.cmd' : 'code');
+  return new Promise((resolve) => {
+    const child = spawn(cmd, [safe], {
+      detached: true,
+      stdio: 'ignore',
+      shell: process.platform === 'win32'  // Windows needs shell to resolve .cmd shims
+    });
+    let settled = false;
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      // Fall back to OS handler — better than silently doing nothing.
+      shell.openPath(safe).then((msg) => {
+        resolve({ ok: !msg, error: err && err.message, fallback: 'openPath', openPathMessage: msg });
+      });
+    });
+    child.on('spawn', () => {
+      if (settled) return;
+      settled = true;
+      try { child.unref(); } catch {}
+      resolve({ ok: true });
+    });
+  });
+});
+
+ipcMain.handle('editor:getExternalCommand', () => {
+  const cfg = readConfig();
+  return (cfg && typeof cfg.externalEditorCommand === 'string') ? cfg.externalEditorCommand : '';
+});
+
+ipcMain.handle('editor:setExternalCommand', (event, cmd) => {
+  const cfg = readConfig();
+  cfg.externalEditorCommand = typeof cmd === 'string' ? cmd.trim() : '';
+  writeConfig(cfg);
+  return { ok: true };
 });
 
 // --- Automations IPC Handlers ---

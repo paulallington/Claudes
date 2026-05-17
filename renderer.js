@@ -1628,6 +1628,7 @@ function buildProjectItem(project, index) {
     } else {
       addMenuItem('Open in new window', 'pop-out');
     }
+    addMenuItem('Open in external editor', 'open-in-editor');
 
     // Sync entries — populated async so the labels reflect the current state.
     var syncDivider = document.createElement('div');
@@ -1693,6 +1694,14 @@ function buildProjectItem(project, index) {
         handleSyncImports(config.projects[projIndex].path);
       } else if (action === 'sync-force') {
         handleSyncForce(config.projects[projIndex].path);
+      } else if (action === 'open-in-editor') {
+        if (window.electronAPI && window.electronAPI.openInExternalEditor) {
+          window.electronAPI.openInExternalEditor(config.projects[projIndex].path).then(function (r) {
+            if (r && !r.ok && r.error) {
+              alert('Open in editor failed: ' + r.error + '\n\nSet your editor command in Settings → Tools.');
+            }
+          });
+        }
       }
       menu.style.display = 'none';
     };
@@ -4605,6 +4614,19 @@ function showFileTreeContextMenu(e, entry) {
     menu.remove();
   });
   menu.appendChild(showInExplorer);
+
+  if (window.electronAPI && window.electronAPI.openInExternalEditor) {
+    var openExt = document.createElement('div');
+    openExt.className = 'file-tree-context-item';
+    openExt.textContent = 'Open in external editor';
+    openExt.addEventListener('click', function () {
+      window.electronAPI.openInExternalEditor(entry.path).then(function (r) {
+        if (r && !r.ok && r.error) console.warn('[editor:openExternal]', r.error);
+      });
+      menu.remove();
+    });
+    menu.appendChild(openExt);
+  }
 
   document.body.appendChild(menu);
 
@@ -13226,6 +13248,169 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
 
   // Pre-warm the cache so trigger expansion works immediately on app start
   refresh();
+})();
+
+(function setupQuickOpen() {
+  var modal = document.getElementById('quick-open-modal');
+  var input = document.getElementById('quick-open-input');
+  var resultsEl = document.getElementById('quick-open-results');
+  var closeBtn = document.getElementById('quick-open-close');
+  if (!modal || !input || !resultsEl) return;
+
+  var lastHits = [];
+  var sel = 0;
+
+  function open() {
+    if (!activeProjectKey) return;
+    modal.classList.remove('hidden');
+    input.value = '';
+    lastHits = [];
+    resultsEl.innerHTML = '';
+    setTimeout(function () { input.focus(); }, 0);
+  }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+  function render() {
+    resultsEl.innerHTML = '';
+    lastHits.slice(0, 40).forEach(function (h, i) {
+      var row = document.createElement('div');
+      row.className = 'session-search-hit' + (i === sel ? ' active' : '');
+      var meta = document.createElement('div');
+      meta.className = 'session-search-hit-meta';
+      meta.textContent = h.relativePath || h.name;
+      row.appendChild(meta);
+      row.addEventListener('click', function () { openFileEditor(h.path); close(); });
+      resultsEl.appendChild(row);
+    });
+  }
+
+  var t = null;
+  input.addEventListener('input', function () {
+    clearTimeout(t);
+    var q = input.value.trim();
+    if (!q) { lastHits = []; resultsEl.innerHTML = ''; return; }
+    t = setTimeout(function () {
+      var proj = config && config.projects && config.projects.find(function (p) {
+        return p && projectPathToKey(p.path) === activeProjectKey;
+      });
+      if (!proj || !window.electronAPI || !window.electronAPI.searchFiles) return;
+      window.electronAPI.searchFiles(proj.path, q).then(function (hits) {
+        // Files only — quick-open doesn't open directories.
+        lastHits = (hits || []).filter(function (h) { return !h.isDirectory; });
+        sel = 0;
+        render();
+      });
+    }, 120);
+  });
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(lastHits.length - 1, sel + 1); render(); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(0, sel - 1); render(); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var h = lastHits[sel];
+      if (h) { openFileEditor(h.path); close(); }
+    }
+  });
+
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (cmdOrCtrl(e) && !e.shiftKey && !e.altKey && (e.key === 'p' || e.key === 'P')) {
+      // Exclude the textarea inside our own modal so typing 'p' inside the
+      // input doesn't loop.
+      if (e.target && (e.target.id === 'quick-open-input')) return;
+      e.preventDefault();
+      open();
+    }
+  }, true);
+})();
+
+(function setupContentSearch() {
+  var modal = document.getElementById('content-search-modal');
+  var input = document.getElementById('content-search-input');
+  var resultsEl = document.getElementById('content-search-results');
+  var statusEl = document.getElementById('content-search-status');
+  var closeBtn = document.getElementById('content-search-close');
+  if (!modal || !input || !resultsEl) return;
+
+  function open() {
+    if (!activeProjectKey) { return; }
+    modal.classList.remove('hidden');
+    input.focus();
+    input.select();
+  }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+  function escapeHtmlLocal(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+    });
+  }
+  function highlight(text, q) {
+    var safe = escapeHtmlLocal(text);
+    var idx = safe.toLowerCase().indexOf(q.toLowerCase());
+    if (idx === -1) return safe;
+    return safe.slice(0, idx) + '<mark>' + safe.slice(idx, idx + q.length) + '</mark>' + safe.slice(idx + q.length);
+  }
+
+  var t = null;
+  input.addEventListener('input', function () {
+    clearTimeout(t);
+    var q = input.value.trim();
+    if (q.length < 2) { resultsEl.innerHTML = ''; statusEl.textContent = ''; return; }
+    statusEl.textContent = 'Searching…';
+    t = setTimeout(function () {
+      if (!window.electronAPI || !window.electronAPI.searchProjectContent) {
+        statusEl.textContent = 'Search API not available.';
+        return;
+      }
+      // Use the project path, not its key — main resolves via assertInsideAllowedRoots.
+      var proj = config && config.projects && config.projects.find(function (p) {
+        return p && projectPathToKey(p.path) === activeProjectKey;
+      });
+      if (!proj) { statusEl.textContent = 'No active project.'; return; }
+      window.electronAPI.searchProjectContent(proj.path, q).then(function (hits) {
+        resultsEl.innerHTML = '';
+        if (!hits || !hits.length) { statusEl.textContent = 'No matches.'; return; }
+        statusEl.textContent = hits.length + ' match' + (hits.length === 1 ? '' : 'es') + (hits.length >= 300 ? ' (capped)' : '');
+        hits.forEach(function (h) {
+          var row = document.createElement('div');
+          row.className = 'session-search-hit';
+          var meta = document.createElement('div');
+          meta.className = 'session-search-hit-meta';
+          meta.textContent = h.relativePath + '  •  line ' + h.line;
+          var snip = document.createElement('div');
+          snip.className = 'session-search-hit-snippet';
+          snip.innerHTML = highlight(h.snippet || '', q);
+          row.appendChild(meta);
+          row.appendChild(snip);
+          row.addEventListener('click', function () {
+            openFileEditor(h.path, h.line);
+            close();
+          });
+          resultsEl.appendChild(row);
+        });
+      }).catch(function (e) {
+        statusEl.textContent = 'Search failed: ' + (e && e.message || e);
+      });
+    }, 200);
+  });
+
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (cmdOrCtrl(e) && e.shiftKey && (e.key === 'G' || e.key === 'g')) {
+      e.preventDefault();
+      open();
+    }
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
 })();
 
 (function setupShortcutsModal() {

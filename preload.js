@@ -89,6 +89,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showItemInFolder: (fullPath) => ipcRenderer.invoke('shell:showItemInFolder', fullPath),
   openPath: (fullPath) => ipcRenderer.invoke('shell:openPath', fullPath),
   isTokenStorageEncrypted: () => ipcRenderer.invoke('security:isTokenStorageEncrypted'),
+  openInExternalEditor: (targetPath) => ipcRenderer.invoke('editor:openExternal', targetPath),
+  getExternalEditorCommand: () => ipcRenderer.invoke('editor:getExternalCommand'),
+  setExternalEditorCommand: (cmd) => ipcRenderer.invoke('editor:setExternalCommand', cmd),
+  searchProjectContent: (projectRoot, query) => ipcRenderer.invoke('fs:searchContent', projectRoot, query),
 
   // Automations
   getAutomations: () => ipcRenderer.invoke('automations:getAll'),

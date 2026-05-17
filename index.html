@@ -848,6 +848,35 @@
   </div>
 
   <!-- Session Search Modal -->
+  <!-- Quick-open file palette (Cmd/Ctrl+P) -->
+  <div id="quick-open-modal" class="modal-overlay hidden">
+    <div class="modal-dialog session-search-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Quick open</span>
+        <span id="quick-open-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <input type="search" id="quick-open-input" placeholder="Type a filename to fuzzy-open in the active project…" autocomplete="off">
+        <div id="quick-open-results" class="session-search-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project-wide content grep (Cmd/Ctrl+Shift+G) -->
+  <div id="content-search-modal" class="modal-overlay hidden">
+    <div class="modal-dialog session-search-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Search project contents</span>
+        <span id="content-search-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <input type="search" id="content-search-input" placeholder="Search file contents in the active project…" autocomplete="off">
+        <div id="content-search-status" class="session-search-results" style="padding:4px 0;font-size:11px;opacity:0.6;"></div>
+        <div id="content-search-results" class="session-search-results"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="session-search-modal" class="modal-overlay hidden">
     <div class="modal-dialog session-search-dialog">
       <div class="modal-header">
