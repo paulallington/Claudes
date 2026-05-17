@@ -6245,13 +6245,23 @@ if (!gotLock) {
   });
 }
 
+// SIGTERM → 2s → SIGKILL. node-pty children of the pty-server can occasionally
+// ignore a polite SIGTERM (e.g. a Claude CLI mid-write to a foreign PTY).
+// Without escalation the parent Electron process waits forever on quit.
+function killPtyServer() {
+  if (!ptyServerProcess || ptyServerProcess.killed) return;
+  const child = ptyServerProcess;
+  try { child.kill('SIGTERM'); } catch { /* already gone */ }
+  setTimeout(() => {
+    try { if (!child.killed) child.kill('SIGKILL'); } catch { /* */ }
+  }, 2000).unref();
+}
+
 app.on('window-all-closed', () => {
   // On close-to-tray, windows are hidden not closed, so this only fires on actual quit
   if (process.platform !== 'darwin') {
     stopAutomationScheduler();
-    if (ptyServerProcess) {
-      ptyServerProcess.kill();
-    }
+    killPtyServer();
     app.quit();
   }
 });
@@ -6265,7 +6275,11 @@ app.on('before-quit', () => {
   }
   flushPendingConfig();
   stopAutomationScheduler();
-  if (ptyServerProcess) {
-    ptyServerProcess.kill();
+  killPtyServer();
+  // The hook server's listening socket keeps the event loop alive; close it
+  // so Electron can actually exit instead of hanging in 'will-quit'.
+  if (hookServer) {
+    try { hookServer.close(); } catch { /* */ }
+    hookServer = null;
   }
 });

@@ -48,6 +48,7 @@
       "main.js",
       "preload.js",
       "renderer.js",
+      "platform-detect.js",
       "index.html",
       "styles.css",
       "pty-server.js",
