@@ -3697,12 +3697,12 @@ ipcMain.handle('shell:openPath', (event, fullPath) => {
 });
 
 // Launch the user's configured external editor (default: `code` on PATH).
-// Accepts either a single path (string) or [projectPath, filePath] — the
-// two-arg form gets passed to the editor as workspace + file (e.g.
-// `code <project> <file>` for VS Code), which opens the file inside the
-// project's workspace instead of as a detached single-file window.
-// Falls back to shell.openPath when the command isn't found so the action
-// degrades gracefully. Every path is constrained to allowed roots.
+// Accepts either a single path (string) or [projectPath, filePath]. For the
+// two-arg form we invoke `<editor> <folder> -g <file>` so VS Code opens the
+// folder as a workspace AND focuses the file. Paths with spaces are quoted
+// explicitly because shell:true on Windows lets cmd.exe re-tokenize the line
+// and silently splits "D:\Git Repos\Foo" into two arguments.
+// Falls back to shell.openPath when the command isn't found.
 ipcMain.handle('editor:openExternal', async (event, targetPath) => {
   const rawArgs = Array.isArray(targetPath) ? targetPath : [targetPath];
   const safeArgs = [];
@@ -3715,12 +3715,37 @@ ipcMain.handle('editor:openExternal', async (event, targetPath) => {
   const cfg = readConfig();
   const cmd = (cfg && typeof cfg.externalEditorCommand === 'string' && cfg.externalEditorCommand.trim())
     || (process.platform === 'win32' ? 'code.cmd' : 'code');
+
+  // For the two-arg [folder, file] form, use `code <folder> -g <file>` so the
+  // workspace is opened and the file is focused. Single-arg form passes
+  // through unchanged (folder OR file).
+  let invocationArgs;
+  if (safeArgs.length >= 2) {
+    invocationArgs = [safeArgs[0], '-g', safeArgs[1]];
+  } else {
+    invocationArgs = safeArgs;
+  }
+
+  function quoteForWin(s) {
+    // cmd.exe doesn't honour backslash-escape; wrap any arg with whitespace,
+    // & ; | < > ^ in double quotes. Embedded double quotes are doubled.
+    if (!/[\s&;|<>^"]/.test(s)) return s;
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+
   return new Promise((resolve) => {
-    const child = spawn(cmd, safeArgs, {
-      detached: true,
-      stdio: 'ignore',
-      shell: process.platform === 'win32'  // Windows needs shell to resolve .cmd shims
-    });
+    let child;
+    if (process.platform === 'win32') {
+      // Run through cmd.exe so the .cmd shim resolves, but we build the
+      // command line ourselves (with explicit quoting) instead of letting
+      // shell:true do it — Node's auto-quoting doesn't cover arg arrays
+      // when shell is on, and spaces get split.
+      const cmdLine = quoteForWin(cmd) + ' ' + invocationArgs.map(quoteForWin).join(' ');
+      child = spawn(cmdLine, [], { detached: true, stdio: 'ignore', shell: true });
+    } else {
+      child = spawn(cmd, invocationArgs, { detached: true, stdio: 'ignore' });
+    }
+
     let settled = false;
     child.on('error', (err) => {
       if (settled) return;

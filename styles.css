@@ -2413,13 +2413,16 @@ html[data-platform="darwin"] #toolbar {
 .file-tree-context-menu {
   position: fixed;
   z-index: 10000;
-  background: #232336;       /* solid fallback in case the theme var is rgba-with-alpha */
-  background: var(--bg-secondary);
+  /* --bg-secondary didn't exist in the theme — using --bg-panel (real var)
+     means the menu has an actual opaque background on both themes. Without
+     this, the previous rule silently fell through to 'transparent' and the
+     file rows behind bled through. */
+  background: var(--bg-panel);
   border: 1px solid var(--border-primary, #3a3a52);
   border-radius: 4px;
   padding: 4px 0;
-  min-width: 200px;          /* widened so 'Open in external editor' fits without overflowing */
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  min-width: 200px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 
 .file-tree-context-item {
@@ -2427,11 +2430,13 @@ html[data-platform="darwin"] #toolbar {
   font-size: 12px;
   color: var(--text-primary);
   cursor: pointer;
-  white-space: nowrap;       /* prevent the long label from wrapping past the menu's edge */
+  white-space: nowrap;
 }
 
 .file-tree-context-item:hover {
-  background: var(--accent-color);
+  /* --accent-color didn't exist either; fall back to --accent (the real one). */
+  background: var(--accent);
+  color: #ffffff;
 }
 
 /* Git Changes */
@@ -5946,25 +5951,26 @@ html[data-platform="darwin"] #toolbar {
 
 .settings-input {
   flex: 1;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid #444;
-  color: #ccc;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 12px;
 }
+.settings-input:focus { outline: none; border-color: var(--accent); }
 
 .settings-browse-btn {
-  background: rgba(255,255,255,0.06);
-  border: 1px solid #444;
-  color: #ccc;
+  background: var(--bg-button);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
   padding: 4px 8px;
   border-radius: 4px;
   cursor: pointer;
 }
 
 .settings-browse-btn:hover {
-  border-color: #6366f1;
+  border-color: var(--accent);
 }
 
 .settings-hint {
@@ -6617,10 +6623,12 @@ body.mode-popout #btn-add-project {
   padding: 12px;
   gap: 8px;
 }
-#session-search-input {
+#session-search-input,
+#quick-open-input,
+#content-search-input {
   width: 100%;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid var(--border-subtle);
+  background: var(--bg-deep);
+  border: 1px solid var(--border-primary);
   color: var(--text-primary);
   padding: 8px 10px;
   border-radius: 4px;
@@ -6628,6 +6636,9 @@ body.mode-popout #btn-add-project {
   margin-bottom: 8px;
   box-sizing: border-box;
 }
+#session-search-input:focus,
+#quick-open-input:focus,
+#content-search-input:focus { outline: none; border-color: var(--accent); }
 .session-search-results {
   max-height: 60vh;
   overflow-y: auto;
@@ -7073,6 +7084,10 @@ body.mode-popout #btn-add-project {
    wrapper so it never obscures the cursor area, semi-transparent so the
    matched line behind it remains visible. */
 .terminal-wrapper { position: relative; }
+/* Always-dark in-terminal overlay so it stays readable over both terminal
+   themes (terminal default bg is dark even in light app theme). Fixed light
+   text colours instead of theme vars — those vars flip dark on light theme
+   and the overlay would become unreadable. */
 .term-search-overlay {
   position: absolute;
   top: 8px;
@@ -7092,15 +7107,16 @@ body.mode-popout #btn-add-project {
 .term-search-input {
   background: #0f0f1f;
   border: 1px solid #2a2a3c;
-  color: var(--text-primary);
+  color: #f1f5f9;        /* always-light input text so it's readable on the dark overlay */
   border-radius: 4px;
   padding: 3px 8px;
   width: 180px;
   font-size: 12px;
   outline: none;
 }
+.term-search-input::placeholder { color: #6b7280; }
 .term-search-input:focus { border-color: #6366f1; }
-.term-search-count { color: #6b7280; padding: 0 4px; font-size: 11px; min-width: 48px; text-align: center; }
+.term-search-count { color: #9ca3af; padding: 0 4px; font-size: 11px; min-width: 48px; text-align: center; }
 .term-search-btn {
   background: transparent;
   border: none;
@@ -7110,7 +7126,7 @@ body.mode-popout #btn-add-project {
   border-radius: 4px;
   font-size: 12px;
 }
-.term-search-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
+.term-search-btn:hover { background: rgba(255,255,255,0.08); color: #fff; }
 
 /* Header clear-terminal button — same shape as the restart pill. */
 .col-clear {
@@ -7276,3 +7292,25 @@ body.mode-popout #btn-add-project {
 .empty-state-shortcuts kbd { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; }
 
 .shortcuts-platform-note { font-size: 11px; color: #9ca3af; margin: 0 0 8px; }
+
+/* MCP modal — right edit pane fills remaining width, inputs/textareas span
+   the pane so we don't get a thin left-aligned strip of fields. Mirrors the
+   layout of the endpoints modal proper but with explicit form-box flex. */
+.mcp-edit-pane {
+  flex: 1;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+.mcp-edit-pane .settings-field { display: block; }
+.mcp-edit-pane .settings-input,
+.mcp-edit-pane textarea.settings-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.mcp-edit-pane textarea.settings-input {
+  font-family: 'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', monospace;
+  font-size: 12px;
+  resize: vertical;
+}

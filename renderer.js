@@ -1847,7 +1847,9 @@ function buildProjectItem(project, index) {
     } else {
       addMenuItem('Open in new window', 'pop-out');
     }
-    addMenuItem('Open in external editor', 'open-in-editor');
+    // "Open in external editor" lives on the per-file context menu in the
+    // Explorer tree — at project level it's just a folder-open, which the
+    // user can also reach via "Reveal in Explorer" and the file-tree menu.
     addMenuItem('Manage MCP servers…', 'manage-mcp');
     addMenuItem('Skills / agents / commands…', 'manage-ext');
     addMenuItem('Save current layout…', 'layout-save');
@@ -1917,14 +1919,6 @@ function buildProjectItem(project, index) {
         handleSyncImports(config.projects[projIndex].path);
       } else if (action === 'sync-force') {
         handleSyncForce(config.projects[projIndex].path);
-      } else if (action === 'open-in-editor') {
-        if (window.electronAPI && window.electronAPI.openInExternalEditor) {
-          window.electronAPI.openInExternalEditor(config.projects[projIndex].path).then(function (r) {
-            if (r && !r.ok && r.error) {
-              alert('Open in editor failed: ' + r.error + '\n\nSet your editor command in Settings → Tools.');
-            }
-          });
-        }
       } else if (action === 'manage-mcp') {
         openMcpModal(config.projects[projIndex].path);
       } else if (action === 'manage-ext') {
