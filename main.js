@@ -100,7 +100,11 @@ diagLogInit();
 // at where to look (Browser = Electron main; Renderer = the window's UI).
 const PERF_SAMPLE_MS = 15_000;
 let perfHookCount = 0;
+let perfFsEvents = 0;        // raw fs.watch callbacks
+let perfCtxReads = 0;        // session:contextTokens IPC handler calls (cache + miss)
 function incrPerfHook() { perfHookCount++; }
+function incrPerfFsEvent() { perfFsEvents++; }
+function incrPerfCtxRead() { perfCtxReads++; }
 function perfSample() {
   try {
     const metrics = (typeof app !== 'undefined' && app.getAppMetrics) ? app.getAppMetrics() : [];
@@ -112,11 +116,21 @@ function perfSample() {
       return label + ' cpu=' + cpu + '% mem=' + memMB + 'MB';
     });
     const cols = (typeof clawdTails !== 'undefined' && clawdTails.size) || 0;
-    diagLog('[perf] tails=' + cols + ' hooks=' + perfHookCount + ' | ' + procs.join('; '));
+    const ctxStats = (typeof sampleAndResetReadStats === 'function') ? sampleAndResetReadStats() : { fullReads: 0, bytesRead: 0 };
+    const ctxMB = ctxStats.bytesRead >= 1024 * 1024
+      ? (ctxStats.bytesRead / (1024 * 1024)).toFixed(1) + 'MB'
+      : Math.round(ctxStats.bytesRead / 1024) + 'KB';
+    diagLog('[perf] tails=' + cols
+      + ' hooks=' + perfHookCount
+      + ' fsEvents=' + perfFsEvents
+      + ' ctxReads=' + perfCtxReads + '/' + ctxStats.fullReads + 'full(' + ctxMB + ')'
+      + ' | ' + procs.join('; '));
   } catch (err) {
     diagLog('[perf] sample failed:', err && err.message);
   }
   perfHookCount = 0;
+  perfFsEvents = 0;
+  perfCtxReads = 0;
 }
 // Schedule once app is ready so getAppMetrics has the full process tree.
 if (typeof app !== 'undefined') {
@@ -1932,8 +1946,9 @@ ipcMain.handle('fs:startWatch', (event, projectPath) => {
     // natively, and on Linux since Node 20. Fall back to a non-recursive watcher
     // if the platform refuses recursive.
     let watcher;
-    try { watcher = fs.watch(safe, { recursive: true }, scheduleEmit); }
-    catch { watcher = fs.watch(safe, { recursive: false }, scheduleEmit); }
+    function onFsEvent() { incrPerfFsEvent(); scheduleEmit(); }
+    try { watcher = fs.watch(safe, { recursive: true }, onFsEvent); }
+    catch { watcher = fs.watch(safe, { recursive: false }, onFsEvent); }
     let timer = null;
     function scheduleEmit() {
       if (timer) return;
@@ -2968,7 +2983,7 @@ ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
 const { fuzzyRank } = require('./lib/fuzzy-rank');
 ipcMain.handle('palette:rank', (_event, items, query) => fuzzyRank(items, query, x => x.label));
 
-const { lastAssistantContextTokens, modelContextLimit } = require('./lib/session-context-tokens');
+const { lastAssistantContextTokens, modelContextLimit, sampleAndResetReadStats } = require('./lib/session-context-tokens');
 
 // One-shot read of the live context-token count for a session.
 // Renderer calls this every ~10s while a Claude column is live.
@@ -2979,6 +2994,10 @@ ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId, sinceMs
   // form (e.g. "D--Git-Repos-Claudes"), so we must encode before joining.
   const claudeKey = projectPathToClaudeKey(projectPath);
   const filePath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+  // Perf instrumentation — count every IPC call. Actual fs.readFileSync
+  // invocations and bytes read are tracked inside the lib and sampled by
+  // perfSample below, so we can see cache effectiveness in the perf line.
+  incrPerfCtxRead();
   return lastAssistantContextTokens(filePath, sinceMs);
 });
 
