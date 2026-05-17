@@ -202,6 +202,15 @@ function encryptToken(plain) {
   return { plain };
 }
 
+// Exposed to the renderer so the endpoint-presets UI can warn the user when
+// tokens will be stored plaintext (typical on Linux without a keyring, or in
+// headless WSL). Backed by Electron's safeStorage — DPAPI on win32, Keychain
+// on darwin, libsecret on Linux when present.
+ipcMain.handle('security:isTokenStorageEncrypted', () => {
+  try { return safeStorage.isEncryptionAvailable(); }
+  catch { return false; }
+});
+
 function decryptToken(stored) {
   if (!stored) return '';
   if (typeof stored === 'string') return stored;
@@ -549,9 +558,13 @@ function startPtyServer() {
     const serverScript = getPtyServerScript();
     let resolved = false;
 
+    // Opt-in: pty-server runs `claude update` on every startup if this env
+    // is '1'. Off by default to avoid running whichever `claude` binary is
+    // first on PATH unprompted. See Settings → Updates.
+    const autoUpdateClaude = readConfig().autoUpdateClaude === true ? '1' : '0';
     ptyServerProcess = spawn(nodePath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN }
+      env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN, CLAUDES_AUTO_UPDATE_CLAUDE: autoUpdateClaude }
     });
 
     ptyServerProcess.on('error', (err) => {
@@ -663,7 +676,15 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Defence-in-depth: run the renderer in the OS sandbox. The preload only
+      // talks to main via contextBridge + ipcRenderer.invoke, both of which are
+      // sandbox-compatible, so this is a free upgrade.
+      sandbox: true,
+      // Off: we don't need Google's spell-check service phoning home, and
+      // we don't use <webview> at all.
+      spellcheck: false,
+      webviewTag: false
     }
   });
 
@@ -742,7 +763,15 @@ function createProjectWindow(projectKey) {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Defence-in-depth: run the renderer in the OS sandbox. The preload only
+      // talks to main via contextBridge + ipcRenderer.invoke, both of which are
+      // sandbox-compatible, so this is a free upgrade.
+      sandbox: true,
+      // Off: we don't need Google's spell-check service phoning home, and
+      // we don't use <webview> at all.
+      spellcheck: false,
+      webviewTag: false
     }
   });
 

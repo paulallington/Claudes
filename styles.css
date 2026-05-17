@@ -7042,3 +7042,17 @@ body.mode-popout #btn-add-project {
 .shortcuts-features strong {
   color: var(--text-primary);
 }
+
+/* One-time inline warning in the Endpoints modal when Electron's safeStorage
+   is unavailable (Linux without keyring, headless WSL) — tokens will be
+   written plaintext under ~/.claudes/. Sized to be noticed without dominating. */
+.endpoints-safestorage-warning {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  margin: 0 0 12px 0;
+  line-height: 1.4;
+}

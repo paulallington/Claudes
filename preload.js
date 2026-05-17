@@ -88,6 +88,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   showItemInFolder: (fullPath) => ipcRenderer.invoke('shell:showItemInFolder', fullPath),
   openPath: (fullPath) => ipcRenderer.invoke('shell:openPath', fullPath),
+  isTokenStorageEncrypted: () => ipcRenderer.invoke('security:isTokenStorageEncrypted'),
 
   // Automations
   getAutomations: () => ipcRenderer.invoke('automations:getAll'),

@@ -144,19 +144,24 @@ function findClaude() {
 
 const CLAUDE_PATH = findClaude();
 
-// Run claude update at startup (non-blocking)
-try {
-  const { execFile } = require('child_process');
-  execFile(CLAUDE_PATH, ['update'], { timeout: 30000 }, (err, stdout, stderr) => {
-    if (err) {
-      console.error('claude update failed:', err.message);
-    } else {
-      const output = (stdout || '').trim();
-      if (output) console.log('claude update:', output);
-    }
-  });
-} catch (err) {
-  console.error('claude update failed:', err.message);
+// Run claude update at startup (non-blocking). Off by default — the resolved
+// CLAUDE_PATH is whatever `which`/`where` returns first, so a malicious
+// `claude.cmd` shim earlier on PATH would execute here unprompted. Users can
+// opt in via Settings → Updates ("Auto-run `claude update` on launch").
+if (process.env.CLAUDES_AUTO_UPDATE_CLAUDE === '1') {
+  try {
+    const { execFile } = require('child_process');
+    execFile(CLAUDE_PATH, ['update'], { timeout: 30000 }, (err, stdout, stderr) => {
+      if (err) {
+        console.error('claude update failed:', err.message);
+      } else {
+        const output = (stdout || '').trim();
+        if (output) console.log('claude update:', output);
+      }
+    });
+  } catch (err) {
+    console.error('claude update failed:', err.message);
+  }
 }
 
 const wss = new WebSocketServer({

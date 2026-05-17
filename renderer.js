@@ -7117,6 +7117,11 @@ function startNewEndpoint() {
 
 function openEndpointsModal() {
   closeSpawnDropdown();
+  // One-time-per-session check: on Linux without a keyring (or in headless
+  // WSL), Electron's safeStorage falls back to plaintext for endpoint tokens.
+  // The user should know so they can install a keyring or avoid storing
+  // tokens here.
+  maybeShowSafeStorageWarning();
   loadEndpointPresets().then(function () {
     endpointsModal.classList.remove('hidden');
     // Auto-select something so the user isn't staring at an empty form:
@@ -7139,6 +7144,22 @@ function openEndpointsModal() {
 function closeEndpointsModal() {
   endpointsModal.classList.add('hidden');
   editingPresetId = null;
+}
+
+var safeStorageWarningShown = false;
+function maybeShowSafeStorageWarning() {
+  if (safeStorageWarningShown) return;
+  if (!window.electronAPI || !window.electronAPI.isTokenStorageEncrypted) return;
+  window.electronAPI.isTokenStorageEncrypted().then(function (ok) {
+    if (ok) return;
+    safeStorageWarningShown = true;
+    var body = endpointsModal.querySelector('.modal-body') || endpointsModal;
+    if (body.querySelector('.endpoints-safestorage-warning')) return;
+    var warn = document.createElement('div');
+    warn.className = 'endpoints-safestorage-warning';
+    warn.textContent = '⚠  OS keyring unavailable — endpoint auth tokens will be saved in plaintext under ~/.claudes/. Install gnome-keyring / libsecret (Linux) for encrypted storage.';
+    body.insertBefore(warn, body.firstChild);
+  }).catch(function () { /* IPC missing in dev — ignore */ });
 }
 
 function collectFormPayload() {
