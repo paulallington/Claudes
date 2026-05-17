@@ -91,6 +91,42 @@ function diagLog(...args) {
 }
 diagLogInit();
 
+// Lightweight perf instrumentation. Every PERF_SAMPLE_MS we ask Electron
+// for per-process CPU/memory and log a single line. Hook traffic is
+// counted between samples so we can see throughput.
+//
+// To read each [perf] line: "tails=N hooks=H | Browser cpu=X% mem=YMB;
+// Renderer cpu=X% mem=YMB; …". Sustained high CPU on one process points
+// at where to look (Browser = Electron main; Renderer = the window's UI).
+const PERF_SAMPLE_MS = 15_000;
+let perfHookCount = 0;
+function incrPerfHook() { perfHookCount++; }
+function perfSample() {
+  try {
+    const metrics = (typeof app !== 'undefined' && app.getAppMetrics) ? app.getAppMetrics() : [];
+    const procs = metrics.map((m) => {
+      const cpu = m.cpu && typeof m.cpu.percentCPUUsage === 'number' ? m.cpu.percentCPUUsage.toFixed(1) : '?';
+      const memMB = m.memory && m.memory.workingSetSize ? Math.round(m.memory.workingSetSize / 1024) : '?';
+      // type values: Browser, Renderer, GPU, Utility, Tab, Zygote
+      const label = m.type + (m.name ? ('/' + m.name.replace(/\s+/g, '')) : '');
+      return label + ' cpu=' + cpu + '% mem=' + memMB + 'MB';
+    });
+    const cols = (typeof clawdTails !== 'undefined' && clawdTails.size) || 0;
+    diagLog('[perf] tails=' + cols + ' hooks=' + perfHookCount + ' | ' + procs.join('; '));
+  } catch (err) {
+    diagLog('[perf] sample failed:', err && err.message);
+  }
+  perfHookCount = 0;
+}
+// Schedule once app is ready so getAppMetrics has the full process tree.
+if (typeof app !== 'undefined') {
+  app.whenReady().then(() => {
+    setInterval(perfSample, PERF_SAMPLE_MS).unref();
+    // First sample after 5s — lets startup quiesce before we baseline.
+    setTimeout(perfSample, 5000).unref();
+  });
+}
+
 // Surface uncaught failures so silent crashes leave a trail on disk.
 process.on('uncaughtException', (err) => {
   diagLog('[crash] uncaughtException:', err && (err.stack || err.message || String(err)));
@@ -3676,6 +3712,7 @@ function startHookServer() {
         if (aborted) return;
         try {
           const event = JSON.parse(body);
+          incrPerfHook();
           mainWindow?.webContents.send('hook:event', event);
         } catch {}
         res.writeHead(200, { 'Content-Type': 'text/plain' });
