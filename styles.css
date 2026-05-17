@@ -2413,11 +2413,12 @@ html[data-platform="darwin"] #toolbar {
 .file-tree-context-menu {
   position: fixed;
   z-index: 10000;
+  background: #232336;       /* solid fallback in case the theme var is rgba-with-alpha */
   background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-primary, #3a3a52);
   border-radius: 4px;
   padding: 4px 0;
-  min-width: 160px;
+  min-width: 200px;          /* widened so 'Open in external editor' fits without overflowing */
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
@@ -2426,6 +2427,7 @@ html[data-platform="darwin"] #toolbar {
   font-size: 12px;
   color: var(--text-primary);
   cursor: pointer;
+  white-space: nowrap;       /* prevent the long label from wrapping past the menu's edge */
 }
 
 .file-tree-context-item:hover {
@@ -3818,7 +3820,7 @@ html[data-platform="darwin"] #toolbar {
 
 /* Settings Modal */
 .settings-dialog {
-  width: 520px;
+  width: 680px;       /* widened so the new Terminal / Tools tabs aren't clipped */
   max-width: 90vw;
 }
 
@@ -3834,7 +3836,15 @@ html[data-platform="darwin"] #toolbar {
   padding: 0 12px;
   gap: 2px;
   flex-shrink: 0;
+  /* Tab strip scrolls horizontally if the dialog gets squeezed below the
+     full set of tabs (e.g. on small viewports). The settings-dialog width
+     accommodates all current tabs without scroll, but this keeps the UI
+     usable when extra tabs are added in future. */
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
+.settings-tabs::-webkit-scrollbar { height: 4px; }
+.settings-tabs::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
 
 .settings-tab {
   background: transparent;
@@ -3848,6 +3858,8 @@ html[data-platform="darwin"] #toolbar {
   letter-spacing: 0.4px;
   padding: 10px 14px;
   margin-bottom: -1px;
+  white-space: nowrap;
+  flex-shrink: 0;     /* don't compress tab labels */
 }
 
 .settings-tab:hover { color: var(--text-secondary); }

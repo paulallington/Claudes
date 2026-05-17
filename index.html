@@ -467,7 +467,15 @@
             <div class="settings-field">
               <label for="setting-term-bg">Terminal background</label>
               <input type="color" id="setting-term-bg" class="settings-input" value="#1a1a2e">
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-fg">Terminal text colour</label>
+              <input type="color" id="setting-term-fg" class="settings-input" value="#e0e0e0">
               <span class="settings-hint">Applied to new columns. Existing columns pick up the change on the next reflow.</span>
+            </div>
+            <div class="settings-field">
+              <button id="setting-term-reset" class="settings-browse-btn" style="padding:6px 14px;">Reset to defaults</button>
+              <span class="settings-hint">Restores font / scrollback / cursor / colours to the app defaults.</span>
             </div>
           </div>
           <div class="settings-pane" data-settings-pane="tools">
@@ -966,7 +974,7 @@
         </div>
         <div class="endpoints-edit-pane">
           <div id="mcp-empty" class="settings-hint" style="padding:24px;">Select a server on the left, or click + to add a new one.</div>
-          <div id="mcp-form" class="hidden">
+          <div id="mcp-form" style="display:none;">
             <div class="settings-field">
               <label>Name</label>
               <input type="text" id="mcp-name" class="settings-input" spellcheck="false" placeholder="e.g. github" autocomplete="off">

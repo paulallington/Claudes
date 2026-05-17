@@ -3697,18 +3697,26 @@ ipcMain.handle('shell:openPath', (event, fullPath) => {
 });
 
 // Launch the user's configured external editor (default: `code` on PATH).
+// Accepts either a single path (string) or [projectPath, filePath] — the
+// two-arg form gets passed to the editor as workspace + file (e.g.
+// `code <project> <file>` for VS Code), which opens the file inside the
+// project's workspace instead of as a detached single-file window.
 // Falls back to shell.openPath when the command isn't found so the action
-// degrades gracefully. The target path is constrained to allowed roots
-// (same containment as the rest of the FS IPC surface).
+// degrades gracefully. Every path is constrained to allowed roots.
 ipcMain.handle('editor:openExternal', async (event, targetPath) => {
-  let safe;
-  try { safe = assertInsideAllowedRoots(targetPath); }
-  catch { return { ok: false, error: 'refused: path outside allowed roots' }; }
+  const rawArgs = Array.isArray(targetPath) ? targetPath : [targetPath];
+  const safeArgs = [];
+  for (const p of rawArgs) {
+    if (!p || typeof p !== 'string') continue;
+    try { safeArgs.push(assertInsideAllowedRoots(p)); }
+    catch { return { ok: false, error: 'refused: path outside allowed roots' }; }
+  }
+  if (safeArgs.length === 0) return { ok: false, error: 'no target path' };
   const cfg = readConfig();
   const cmd = (cfg && typeof cfg.externalEditorCommand === 'string' && cfg.externalEditorCommand.trim())
     || (process.platform === 'win32' ? 'code.cmd' : 'code');
   return new Promise((resolve) => {
-    const child = spawn(cmd, [safe], {
+    const child = spawn(cmd, safeArgs, {
       detached: true,
       stdio: 'ignore',
       shell: process.platform === 'win32'  // Windows needs shell to resolve .cmd shims
@@ -3717,8 +3725,9 @@ ipcMain.handle('editor:openExternal', async (event, targetPath) => {
     child.on('error', (err) => {
       if (settled) return;
       settled = true;
-      // Fall back to OS handler — better than silently doing nothing.
-      shell.openPath(safe).then((msg) => {
+      // Fall back to OS handler on the last arg (file > folder), better than
+      // silently doing nothing.
+      shell.openPath(safeArgs[safeArgs.length - 1]).then((msg) => {
         resolve({ ok: !msg, error: err && err.message, fallback: 'openPath', openPathMessage: msg });
       });
     });

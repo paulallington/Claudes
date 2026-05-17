@@ -925,36 +925,86 @@ function snapshotProjectLayout(projectPath) {
 
 function saveCurrentLayout(projectPath) {
   if (!window.electronAPI || !window.electronAPI.saveLayout) return;
-  var name = prompt('Layout name:');
-  if (!name) return;
   var snap = snapshotProjectLayout(projectPath);
-  if (snap.rows.length === 0) { alert('No columns to save.'); return; }
-  window.electronAPI.saveLayout(projectPath, name.trim(), snap).then(function (r) {
-    if (!r || !r.ok) alert('Save failed: ' + (r && r.error || 'unknown'));
+  if (snap.rows.length === 0) { showToast('No columns to save', { kind: 'warn' }); return; }
+  // window.prompt() is disabled in Electron, use the inline modal that
+  // promptForValue() implements. Returns null on cancel.
+  promptForValue('Save current layout as:').then(function (name) {
+    if (!name) return;
+    name = name.trim();
+    if (!name) return;
+    window.electronAPI.saveLayout(projectPath, name, snap).then(function (r) {
+      if (!r || !r.ok) showToast('Save failed: ' + (r && r.error || 'unknown'), { kind: 'error' });
+      else showToast('Saved layout "' + name + '"', { kind: 'success' });
+    });
   });
 }
 
 function chooseLayoutToRestore(projectPath) {
   if (!window.electronAPI || !window.electronAPI.listLayouts) return;
   window.electronAPI.listLayouts(projectPath).then(function (layouts) {
-    if (!layouts || layouts.length === 0) { alert('No saved layouts yet.'); return; }
-    // Quick chooser via prompt — keeps the implementation small. A proper
-    // modal would be nicer but the user can also right-click and pick the
-    // exact name; for power users this is unobtrusive.
-    var labels = layouts.map(function (l, i) { return (i + 1) + '. ' + l.name; }).join('\n');
-    var pick = prompt('Restore which layout?\n\n' + labels + '\n\nEnter number, or layout name to delete with prefix !del ');
-    if (!pick) return;
-    pick = pick.trim();
-    if (pick.startsWith('!del ')) {
-      var target = pick.slice(5).trim();
-      if (!confirm('Delete layout "' + target + '"?')) return;
-      window.electronAPI.deleteLayout(projectPath, target);
+    if (!layouts || layouts.length === 0) {
+      showToast('No saved layouts yet — use "Save current layout…" first.', { kind: 'warn', duration: 5000 });
       return;
     }
-    var idx = parseInt(pick, 10) - 1;
-    var sel = !isNaN(idx) && layouts[idx] ? layouts[idx] : layouts.find(function (l) { return l.name === pick; });
-    if (!sel) { alert('No layout matched.'); return; }
-    restoreLayout(projectPath, sel.layout);
+    showLayoutPickerModal(projectPath, layouts);
+  });
+}
+
+// Lightweight picker for saved layouts. List of names with Restore + Delete
+// buttons per row; Esc / click-outside closes.
+function showLayoutPickerModal(projectPath, layouts) {
+  var existing = document.querySelector('.layout-picker-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay layout-picker-overlay';
+  overlay.innerHTML = '<div class="modal-dialog" style="max-width:480px;"><div class="modal-header"><span class="modal-title">Restore layout</span><span class="modal-close">&times;</span></div><div class="modal-body" id="layout-picker-body" style="padding:8px 0 16px;"></div></div>';
+  document.body.appendChild(overlay);
+  var body = overlay.querySelector('#layout-picker-body');
+  layouts.forEach(function (l) {
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid var(--border-primary);';
+    var label = document.createElement('div');
+    label.style.flex = '1';
+    label.innerHTML = '<div style="font-size:13px;">' + escapeHtml(l.name) + '</div>' +
+      '<div style="font-size:11px;color:#6b7280;">' + escapeHtml(new Date(l.savedAt).toLocaleString()) + ' · ' + (l.layout && l.layout.rows ? l.layout.rows.reduce(function (acc, r) { return acc + r.columns.length; }, 0) : 0) + ' column(s)</div>';
+    var restoreBtn = document.createElement('button');
+    restoreBtn.className = 'settings-browse-btn';
+    restoreBtn.style.padding = '4px 12px';
+    restoreBtn.textContent = 'Restore';
+    restoreBtn.addEventListener('click', function () {
+      close();
+      restoreLayout(projectPath, l.layout);
+      showToast('Restoring "' + l.name + '"…', { kind: 'info', duration: 2000 });
+    });
+    var delBtn = document.createElement('button');
+    delBtn.className = 'settings-browse-btn';
+    delBtn.style.padding = '4px 10px';
+    delBtn.style.color = '#f87171';
+    delBtn.textContent = '✕';
+    delBtn.title = 'Delete this layout';
+    delBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      confirmDialog('Delete layout "' + l.name + '"?', { okLabel: 'Delete', dangerous: true }).then(function (ok) {
+        if (!ok) return;
+        window.electronAPI.deleteLayout(projectPath, l.name).then(function () {
+          row.remove();
+          showToast('Deleted layout "' + l.name + '"', { kind: 'success' });
+          if (!body.querySelector('div[style*="border-bottom"]')) close();
+        });
+      });
+    });
+    row.appendChild(label);
+    row.appendChild(restoreBtn);
+    row.appendChild(delBtn);
+    body.appendChild(row);
+  });
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', function onKey(e) {
+    if (!overlay.parentNode) { document.removeEventListener('keydown', onKey); return; }
+    if (e.key === 'Escape') { e.preventDefault(); close(); document.removeEventListener('keydown', onKey); }
   });
 }
 
@@ -2950,11 +3000,13 @@ function addColumn(args, targetRow, opts) {
   setupColumnDropTarget(col);
   row.el.appendChild(col);
 
-  // Override the default theme background with the user-chosen colour if set.
+  // Layer user-chosen colours (if non-default) on top of the active theme so
+  // theme switching still works for any prop the user didn't override.
   var themeForThisCol = termTheme;
-  if (termSettings && termSettings.background && termSettings.background !== '#1a1a2e') {
-    themeForThisCol = Object.assign({}, termTheme, { background: termSettings.background });
-  }
+  var overrides = {};
+  if (termSettings && termSettings.background && termSettings.background !== '#1a1a2e') overrides.background = termSettings.background;
+  if (termSettings && termSettings.foreground && termSettings.foreground !== '#e0e0e0') overrides.foreground = termSettings.foreground;
+  if (Object.keys(overrides).length) themeForThisCol = Object.assign({}, termTheme, overrides);
   var terminal = new Terminal({
     theme: themeForThisCol,
     // Per-platform font fallback: Cascadia/Consolas exist on Windows; JetBrains
@@ -3040,6 +3092,15 @@ function addColumn(args, targetRow, opts) {
 
   // Handle Cmd/Ctrl+V paste and Shift+Enter newline
   terminal.attachCustomKeyEventHandler(function (e) {
+    // Cmd/Ctrl+F: open the column's in-terminal find overlay. We intercept it
+    // here (rather than relying on the document-level keydown) because xterm
+    // consumes the keystroke before the bubble-phase listener sees it.
+    if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      var c = allColumns.get(id);
+      if (c && typeof c._showSearch === 'function') c._showSearch();
+      return false;
+    }
     // Cmd/Ctrl+V: paste from clipboard
     if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && e.key === 'v') {
       e.preventDefault();
@@ -4939,7 +5000,10 @@ function showFileTreeContextMenu(e, entry) {
     openExt.className = 'file-tree-context-item';
     openExt.textContent = 'Open in external editor';
     openExt.addEventListener('click', function () {
-      window.electronAPI.openInExternalEditor(entry.path).then(function (r) {
+      // Pass [project, file] so e.g. VS Code opens the project as a workspace
+      // AND focuses the chosen file, instead of opening the file standalone.
+      var args = entry.isDirectory ? [entry.path] : [activeProjectKey, entry.path];
+      window.electronAPI.openInExternalEditor(args).then(function (r) {
         if (r && !r.ok && r.error) console.warn('[editor:openExternal]', r.error);
       });
       menu.remove();
@@ -8340,20 +8404,27 @@ document.getElementById('setting-agent-repos-dir').addEventListener('keydown', f
 })();
 
 // --- Terminal tab wiring ---
-var termSettings = { fontFamily: '', scrollback: 5000, cursorStyle: 'block', background: '#1a1a2e' };
+var TERM_DEFAULTS = { fontFamily: '', scrollback: 5000, cursorStyle: 'block', background: '#1a1a2e', foreground: '#e0e0e0' };
+var termSettings = Object.assign({}, TERM_DEFAULTS);
 (function wireTerminalTab() {
   var fontEl = document.getElementById('setting-term-font');
   var sbEl = document.getElementById('setting-term-scrollback');
   var cursorEl = document.getElementById('setting-term-cursor');
   var bgEl = document.getElementById('setting-term-bg');
+  var fgEl = document.getElementById('setting-term-fg');
+  var resetBtn = document.getElementById('setting-term-reset');
   if (!fontEl) return;
+  function applyToUi() {
+    fontEl.value = termSettings.fontFamily || '';
+    sbEl.value = String(termSettings.scrollback || 5000);
+    cursorEl.value = termSettings.cursorStyle || 'block';
+    bgEl.value = termSettings.background || TERM_DEFAULTS.background;
+    if (fgEl) fgEl.value = termSettings.foreground || TERM_DEFAULTS.foreground;
+  }
   if (window.electronAPI && window.electronAPI.getTerminalSettings) {
     window.electronAPI.getTerminalSettings().then(function (s) {
-      termSettings = Object.assign(termSettings, s || {});
-      fontEl.value = termSettings.fontFamily || '';
-      sbEl.value = String(termSettings.scrollback || 5000);
-      cursorEl.value = termSettings.cursorStyle || 'block';
-      bgEl.value = termSettings.background || '#1a1a2e';
+      termSettings = Object.assign({}, TERM_DEFAULTS, s || {});
+      applyToUi();
     });
   }
   function save(partial) {
@@ -8366,7 +8437,19 @@ var termSettings = { fontFamily: '', scrollback: 5000, cursorStyle: 'block', bac
   sbEl.addEventListener('change', function () { save({ scrollback: parseInt(sbEl.value, 10) || 5000 }); });
   cursorEl.addEventListener('change', function () { save({ cursorStyle: cursorEl.value }); });
   bgEl.addEventListener('change', function () { save({ background: bgEl.value }); });
-  [fontEl, sbEl, cursorEl, bgEl].forEach(function (el) {
+  if (fgEl) fgEl.addEventListener('change', function () { save({ foreground: fgEl.value }); });
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      termSettings = Object.assign({}, TERM_DEFAULTS);
+      applyToUi();
+      if (window.electronAPI && window.electronAPI.setTerminalSettings) {
+        window.electronAPI.setTerminalSettings(termSettings);
+      }
+      if (typeof showToast === 'function') showToast('Terminal settings reset to defaults', { kind: 'success' });
+    });
+  }
+  [fontEl, sbEl, cursorEl, bgEl, fgEl].forEach(function (el) {
+    if (!el) return;
     el.addEventListener('keydown', function (e) { e.stopPropagation(); });
   });
 })();
@@ -14061,14 +14144,24 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   modal.querySelectorAll('.ext-new').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var cat = btn.dataset.cat;
-      var scope = confirm('Create in PROJECT scope (.claude/' + cat + '/)?\n\nOK = project, Cancel = global (~/.claude/' + cat + '/)') ? 'project' : 'global';
-      var name = prompt('Name for new ' + cat.slice(0, -1) + ' (alphanumeric, _ . - allowed):');
-      if (!name) return;
-      window.electronAPI.createExtension(currentProject, cat, name.trim(), scope).then(function (r) {
-        if (!r || !r.ok) { alert('Create failed: ' + (r && r.error || 'unknown')); return; }
-        refresh();
-        modal.classList.add('hidden');
-        openFileEditor(r.path);
+      // Scope picker via inline confirmDialog (Cancel = global, OK = project).
+      confirmDialog(
+        'Create in PROJECT scope?\n\n' +
+        'OK = .claude/' + cat + '/  (this project only)\n' +
+        'Cancel = ~/.claude/' + cat + '/  (global, all projects)',
+        { okLabel: 'Project', cancelLabel: 'Global' }
+      ).then(function (isProject) {
+        var scope = isProject ? 'project' : 'global';
+        promptForValue('Name for new ' + cat.slice(0, -1) + ' (alphanumeric, _ . - allowed):').then(function (name) {
+          if (!name) return;
+          window.electronAPI.createExtension(currentProject, cat, name.trim(), scope).then(function (r) {
+            if (!r || !r.ok) { showToast('Create failed: ' + (r && r.error || 'unknown'), { kind: 'error' }); return; }
+            refresh();
+            modal.classList.add('hidden');
+            openFileEditor(r.path);
+            showToast('Created ' + cat.slice(0, -1) + ' "' + name + '" (' + scope + ')', { kind: 'success' });
+          });
+        });
       });
     });
   });
@@ -14107,8 +14200,11 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   var isNew = false;
 
   function showForm(show) {
-    emptyEl.classList.toggle('hidden', show);
-    formEl.classList.toggle('hidden', !show);
+    // Use inline style instead of .hidden class — the app doesn't have a
+    // global '.hidden { display: none }' rule, only element-scoped ones, so
+    // toggling .hidden on these divs is a no-op.
+    emptyEl.style.display = show ? 'none' : '';
+    formEl.style.display = show ? '' : 'none';
   }
   function renderList() {
     listEl.innerHTML = '';
