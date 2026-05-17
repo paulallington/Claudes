@@ -9431,6 +9431,15 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+// Defence-in-depth for numeric fields that come from disk-loaded JSON
+// (automations.json, imports). Forces anything non-numeric to 0 so a crafted
+// payload like `{ count: '"><img src=x onerror=...>' }` can't break out of
+// surrounding HTML when interpolated.
+function safeNum(n) {
+  var v = Number(n);
+  return Number.isFinite(v) ? v : 0;
+}
+
 function runWindowBadgeHtml(auto) {
   if (!auto || !auto.runWindow || !auto.runWindow.enabled) return '';
   var w = auto.runWindow;
@@ -11276,11 +11285,11 @@ function showImportPreview(preview) {
   var headerHtml = '<div class="import-progress-header">' +
     '<strong>Import Preview</strong>' +
     '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' +
-    preview.automationCount + ' automations, ' + preview.totalAgents + ' agents';
-  if (preview.totalManagers > 0) headerHtml += ', ' + preview.totalManagers + ' managers';
+    safeNum(preview.automationCount) + ' automations, ' + safeNum(preview.totalAgents) + ' agents';
+  if (safeNum(preview.totalManagers) > 0) headerHtml += ', ' + safeNum(preview.totalManagers) + ' managers';
   headerHtml += '</div>';
-  if (preview.totalIsolated > 0) {
-    headerHtml += '<div style="font-size:11px;color:#f59e0b;margin-top:2px;">' + preview.totalIsolated + ' repo clone(s) will be set up after import</div>';
+  if (safeNum(preview.totalIsolated) > 0) {
+    headerHtml += '<div style="font-size:11px;color:#f59e0b;margin-top:2px;">' + safeNum(preview.totalIsolated) + ' repo clone(s) will be set up after import</div>';
   }
   headerHtml += '</div>';
 
@@ -11290,12 +11299,12 @@ function showImportPreview(preview) {
     var badges = '';
     if (a.hasManager) badges += '<span class="agent-badge agent-badge-chained" style="margin-left:6px;">Manager</span>';
     if (a.hasChaining) badges += '<span class="agent-badge agent-badge-isolated" style="margin-left:4px;">Chained</span>';
-    if (a.isolatedCount > 0) badges += '<span class="agent-badge" style="margin-left:4px;background:rgba(59,130,246,0.15);color:#60a5fa;">' + a.isolatedCount + ' clone(s)</span>';
+    if (safeNum(a.isolatedCount) > 0) badges += '<span class="agent-badge" style="margin-left:4px;background:rgba(59,130,246,0.15);color:#60a5fa;">' + safeNum(a.isolatedCount) + ' clone(s)</span>';
 
     listHtml += '<div class="import-progress-row">' +
       '<span class="import-progress-icon">&#9711;</span>' +
       '<span class="import-progress-name">' + escapeHtml(a.name) + '</span>' +
-      '<span style="font-size:11px;opacity:0.5;">' + a.agentCount + ' agent' + (a.agentCount > 1 ? 's' : '') + '</span>' +
+      '<span style="font-size:11px;opacity:0.5;">' + safeNum(a.agentCount) + ' agent' + (safeNum(a.agentCount) > 1 ? 's' : '') + '</span>' +
       badges +
       '</div>';
   });
@@ -11337,7 +11346,7 @@ function showImportPreview(preview) {
       } else {
         // No clones needed — show done
         panel.querySelector('.import-progress-header').innerHTML = '<strong>Import Complete</strong>' +
-          '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' + result.count + ' automations imported (paused)</div>';
+          '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' + safeNum(result.count) + ' automations imported (paused)</div>';
         // Mark all rows as ready
         panel.querySelectorAll('.import-progress-icon').forEach(function (icon) {
           icon.innerHTML = '&#10003;';
@@ -11359,8 +11368,8 @@ function showImportProgress(importResult, needsClone) {
   var panel = document.createElement('div');
   panel.className = 'import-progress-panel';
   panel.innerHTML = '<div class="import-progress-header">' +
-    '<strong>Imported ' + importResult.count + ' automations (paused)</strong>' +
-    '<div class="import-progress-subtitle">Setting up ' + needsClone.length + ' repo clone(s)...</div>' +
+    '<strong>Imported ' + safeNum(importResult.count) + ' automations (paused)</strong>' +
+    '<div class="import-progress-subtitle">Setting up ' + safeNum(needsClone.length) + ' repo clone(s)...</div>' +
     '</div>' +
     '<div class="import-progress-list"></div>' +
     '<pre class="import-progress-log"></pre>' +

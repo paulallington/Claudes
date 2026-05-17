@@ -2,15 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self' blob:;">
   <title>Claudes</title>
-  <script>
-    // Set data-platform synchronously so CSS rules that reserve space for
-    // the macOS traffic-light buttons (which sit at the window top-left
-    // under titleBarStyle:'hidden') apply on first paint with no flash.
-    document.documentElement.dataset.platform =
-      /Mac/.test(navigator.platform) ? 'darwin' :
-      /Win/.test(navigator.platform) ? 'win32' : 'linux';
-  </script>
+  <script src="./platform-detect.js"></script>
   <link rel="stylesheet" href="./node_modules/@xterm/xterm/css/xterm.css">
   <link rel="stylesheet" href="./styles.css">
 </head>
