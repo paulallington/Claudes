@@ -71,7 +71,7 @@
               <label class="git-amend-label"><input type="checkbox" id="git-amend-checkbox"> Amend</label>
               <button id="btn-git-commit" class="git-commit-btn" title="Commit staged changes (Ctrl+Enter)">&#10003; Commit</button>
             </div>
-            <div id="git-status-msg" class="git-status-msg"></div>
+            <div id="git-status-msg" class="git-status-msg" role="status" aria-live="polite"></div>
           </div>
           <div id="git-changes"></div>
         </div>
@@ -538,7 +538,13 @@
         <span id="usage-close" class="modal-close">&times;</span>
       </div>
       <div class="modal-body usage-body">
-        <div id="usage-loading" class="usage-loading">Loading usage data...</div>
+        <div id="usage-loading" class="usage-loading">
+          <div class="skel skel-row" style="width:55%"></div>
+          <div class="skel skel-row" style="width:80%"></div>
+          <div class="skel skel-row" style="width:40%"></div>
+          <div class="skel skel-row" style="width:60%"></div>
+          <div class="skel skel-row" style="width:35%"></div>
+        </div>
         <div id="usage-content" class="usage-content hidden">
           <div class="usage-tabs">
             <button class="usage-tab active" data-usage-tab="summary">Summary</button>
@@ -628,7 +634,7 @@
         <textarea id="claudemd-editor" spellcheck="false" placeholder="# Project instructions for Claude&#10;&#10;Add conventions, architecture notes, and preferences here..."></textarea>
       </div>
       <div class="modal-footer">
-        <span id="claudemd-status" class="modal-status"></span>
+        <span id="claudemd-status" class="modal-status" role="status" aria-live="polite"></span>
         <button id="claudemd-save" class="modal-btn-save">Save</button>
       </div>
     </div>
@@ -667,7 +673,7 @@
         </div>
       </div>
       <div class="modal-footer">
-        <span id="fileeditor-status" class="modal-status"></span>
+        <span id="fileeditor-status" class="modal-status" role="status" aria-live="polite"></span>
         <span id="fileeditor-cursor-pos" class="fileeditor-cursor-pos">Ln 1, Col 1</span>
         <button id="fileeditor-preview-btn" class="modal-btn-save" type="button" style="background:transparent;border:1px solid var(--border-primary);color:var(--text-secondary);">Preview</button>
         <button id="fileeditor-save" class="modal-btn-save">Save</button>
@@ -733,7 +739,7 @@
                 <option value="">(none)</option>
               </select>
             </label>
-            <div class="endpoints-form-status" id="ep-status"></div>
+            <div class="endpoints-form-status" id="ep-status" role="status" aria-live="polite"></div>
             <div class="endpoints-form-actions">
               <button type="button" id="ep-test" class="endpoints-secondary-btn">Test connection</button>
               <button type="button" id="ep-delete" class="endpoints-danger-btn">Delete</button>
@@ -1090,15 +1096,23 @@
       <div class="modal-body shortcuts-body">
         <section class="shortcuts-section">
           <h3>Keyboard shortcuts</h3>
+          <p class="shortcuts-platform-note">macOS users: <kbd>⌘</kbd> works wherever <kbd>Ctrl</kbd> is shown below.</p>
           <table class="shortcuts-table">
             <tbody>
               <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Command palette — fuzzy-search projects, slash commands, app actions</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Quick-open file — fuzzy search files in the active project, opens in inline editor</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Find in terminal (when a column is focused) — Enter / Shift+Enter cycles matches</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td><td>Search sessions — toggle between transcripts and your prompt history</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd></td><td>Search file contents project-wide (respects .gitignore)</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd></td><td>Spawn a new column in the active project</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></td><td>Add a new row to the layout</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></td><td>Kill the focused column</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></td><td>Toggle Explorer panel</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd></td><td>Maximize / restore the focused column</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd></td><td>Navigate between columns</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd></td><td>Jump to column N</td></tr>
               <tr><td><kbd>Ctrl</kbd>+<kbd>B</kbd></td><td>Toggle the Projects sidebar</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> / <kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Change terminal font size</td></tr>
               <tr><td><kbd>?</kbd></td><td>Open this shortcuts reference</td></tr>
               <tr><td><kbd>Esc</kbd></td><td>Close the active modal / popover</td></tr>
             </tbody>
@@ -1124,6 +1138,36 @@
             <li><strong>Session full-text search</strong> (&#128270; / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>) — grep across every session JSONL on disk. Click a hit to switch project and resume that session.</li>
             <li><strong>My prompts search</strong> — same modal, "My prompts" radio mode. Searches <code>~/.claude/history.jsonl</code>. Click a hit to copy the prompt to your clipboard.</li>
             <li><strong>Cmd-K command palette</strong> — fuzzy search across projects (switch / spawn), slash commands (sent to focused column), and app actions (open Usage, kill column, respawn, etc.).</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Editor &amp; explorer</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Clickable file paths in terminal</strong> — patterns like <code>src/foo.js:42</code> become clickable in any column. Clicks open the inline editor focused on that line. URLs also auto-link.</li>
+            <li><strong>Drag-into-terminal</strong> — drag a file from the Explorer tree onto a terminal; the path (quoted if it has spaces) is written to the pty.</li>
+            <li><strong>Syntax preview</strong> — inline file editor → <em>Preview</em> button switches to a Prism-highlighted read view; toggle back to edit.</li>
+            <li><strong>Open in external editor</strong> — project context menu / Explorer right-click sends the path to your <code>code</code> command (configurable in Settings &rarr; Tools).</li>
+            <li><strong>Quick open</strong> (<kbd>Ctrl</kbd>+<kbd>P</kbd>) — fuzzy file pickers across the active project; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd> for content grep.</li>
+            <li><strong>Auto-refresh</strong> — Explorer watches the project root and updates when files change on disk.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Git tab</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Merge / rebase</strong> — branch dropdown shows per-branch <em>merge</em> and <em>rebase</em> buttons. Conflict banner above the changes list lets you resolve files (<em>use ours</em> / <em>use theirs</em> / <em>open</em>) and continue / abort the operation.</li>
+            <li><strong>File history &amp; blame</strong> — right-click any file in the changes list. History panel includes one-click <em>Cherry-pick onto current</em>.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Project extensions</h3>
+          <ul class="shortcuts-features">
+            <li><strong>MCP servers</strong> — project context menu &rarr; <em>Manage MCP servers&hellip;</em> for a CRUD UI over <code>.mcp.json</code>.</li>
+            <li><strong>Sub-agents / skills / commands</strong> — manage <code>.claude/agents/</code>, <code>.claude/skills/</code>, <code>.claude/commands/</code> in both project and global scope from one modal.</li>
+            <li><strong>Named layouts</strong> — save and restore row/column shapes per project from the context menu.</li>
+            <li><strong>Auto-detected run configs</strong> — Run tab picks up <code>package.json</code> scripts, Makefile targets, Cargo bins, and <code>pyproject.toml</code> scripts.</li>
           </ul>
         </section>
 

@@ -1129,6 +1129,74 @@ function promptForValue(message) {
   });
 }
 
+// Inline async confirm: returns Promise<boolean>. Non-blocking replacement
+// for window.confirm() which is fine but the OS-level dialog blocks the
+// entire renderer thread (and looks out of place on macOS where it pulls
+// system focus).
+function confirmDialog(message, opts) {
+  opts = opts || {};
+  return new Promise(function (resolve) {
+    var overlay = document.createElement('div');
+    overlay.className = 'snippet-prompt-overlay';
+    var dialog = document.createElement('div');
+    dialog.className = 'snippet-prompt-dialog';
+    var label = document.createElement('div');
+    label.className = 'snippet-prompt-label';
+    label.textContent = message;
+    var actions = document.createElement('div');
+    actions.className = 'snippet-prompt-actions';
+    var cancel = document.createElement('button');
+    cancel.className = 'snippet-prompt-cancel';
+    cancel.textContent = opts.cancelLabel || 'Cancel';
+    var ok = document.createElement('button');
+    ok.className = 'snippet-prompt-ok';
+    ok.textContent = opts.okLabel || 'OK';
+    if (opts.dangerous) ok.style.background = '#dc2626';
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    dialog.appendChild(label);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    setTimeout(function () { ok.focus(); }, 0);
+    function done(v) {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      resolve(v);
+    }
+    ok.addEventListener('click', function () { done(true); });
+    cancel.addEventListener('click', function () { done(false); });
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) done(false); });
+    document.addEventListener('keydown', function onKey(e) {
+      if (!overlay.parentNode) { document.removeEventListener('keydown', onKey); return; }
+      if (e.key === 'Escape') { e.preventDefault(); done(false); document.removeEventListener('keydown', onKey); }
+      else if (e.key === 'Enter') { e.preventDefault(); done(true); document.removeEventListener('keydown', onKey); }
+    });
+  });
+}
+
+// Lightweight toast. Stacks at top-right; auto-dismisses unless duration: 0.
+function showToast(message, opts) {
+  opts = opts || {};
+  var container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+  var toast = document.createElement('div');
+  toast.className = 'toast toast-' + (opts.kind || 'info');
+  toast.textContent = message;
+  container.appendChild(toast);
+  if (opts.duration !== 0) {
+    setTimeout(function () {
+      toast.classList.add('toast-out');
+      setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 200);
+    }, opts.duration || 3500);
+  }
+  return toast;
+}
+
 function saveColumnCounts() {
   for (var i = 0; i < config.projects.length; i++) {
     var key = config.projects[i].path;
@@ -2480,13 +2548,35 @@ function showEmptyState() {
   });
   var empty = document.createElement('div');
   empty.className = 'empty-state';
-  var msg = document.createElement('div');
-  msg.textContent = 'No project selected';
-  var hint = document.createElement('div');
-  hint.className = 'hint';
-  hint.textContent = 'Add a project from the sidebar to get started';
-  empty.appendChild(msg);
-  empty.appendChild(hint);
+  var hasProjects = config && Array.isArray(config.projects) && config.projects.length > 0;
+  if (hasProjects) {
+    var msg = document.createElement('div');
+    msg.textContent = 'No project selected';
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = 'Click a project on the left to start';
+    empty.appendChild(msg);
+    empty.appendChild(hint);
+  } else {
+    // First-run state — give a clear, prominent CTA so the user doesn't stare
+    // at empty space wondering what to do.
+    var hero = document.createElement('div');
+    hero.className = 'empty-state-hero';
+    hero.innerHTML =
+      '<div class="empty-state-icon" aria-hidden="true">⌨</div>' +
+      '<div class="empty-state-title">Welcome to Claudes</div>' +
+      '<div class="empty-state-subtitle">Multi-pane terminal for running Claude Code side-by-side.</div>' +
+      '<button class="empty-state-cta" id="empty-state-add-project">+ Add your first project</button>' +
+      '<div class="empty-state-shortcuts">Tip: press <kbd>?</kbd> any time to see shortcuts.</div>';
+    empty.appendChild(hero);
+    setTimeout(function () {
+      var btn = document.getElementById('empty-state-add-project');
+      if (btn) btn.addEventListener('click', function () {
+        var addBtn = document.getElementById('btn-add-project');
+        if (addBtn) addBtn.click();
+      });
+    }, 0);
+  }
   columnsContainer.appendChild(empty);
 }
 
@@ -9237,19 +9327,20 @@ function updateColumnDeltaPills(_data) { /* no-op */ }
 
 function promptPauseAutomations(c) {
   if (!window.electronAPI || !window.electronAPI.getAutomationSettings || !window.electronAPI.toggleAutomationsGlobal) return;
-  // window.confirm blocks the renderer thread. TODO: replace with a
-  // dialog.showMessageBox-backed IPC if blocking becomes a problem.
-  var ok = window.confirm(
+  // Non-blocking inline confirm (replaces the renderer-blocking window.confirm).
+  confirmDialog(
     'You\'ve crossed 90% of your weekly limit (' + Math.round(c.value) + '%).\n\n' +
-    'Pause all your automations? You can re-enable them any time from the Automations panel.'
-  );
-  if (!ok) return;
-  // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
-  window.electronAPI.getAutomationSettings().then(function (settings) {
-    if (settings && settings.globalEnabled) {
-      window.electronAPI.toggleAutomationsGlobal();
-    }
-  }).catch(function () { /* ignore — silent failure is acceptable here */ });
+    'Pause all your automations? You can re-enable them any time from the Automations panel.',
+    { okLabel: 'Pause all', cancelLabel: 'Not now' }
+  ).then(function (ok) {
+    if (!ok) return;
+    // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
+    window.electronAPI.getAutomationSettings().then(function (settings) {
+      if (settings && settings.globalEnabled) {
+        window.electronAPI.toggleAutomationsGlobal();
+      }
+    }).catch(function () { /* ignore — silent failure is acceptable here */ });
+  });
 }
 
 function showThresholdNotification(c) {
@@ -10272,7 +10363,52 @@ window.electronAPI.getVersion().then(function(v) {
       window.electronAPI.openExternal('https://github.com/paulallington/Claudes/releases');
     }
   });
+
+  // First-launch-after-update walkthrough. We only show it when the previous
+  // app version (cached in localStorage) is older than the current. Pickers
+  // for highlight text live in WHATS_NEW_BY_VERSION below — only versions
+  // listed there ever trigger an overlay.
+  try {
+    var seenKey = 'claudes.lastSeenAppVersion';
+    var prev = window.localStorage && window.localStorage.getItem(seenKey);
+    if (prev !== v) {
+      window.localStorage && window.localStorage.setItem(seenKey, v);
+      if (prev) showWhatsNewOverlay(prev, v);
+    }
+  } catch { /* localStorage unavailable in private modes — skip */ }
 });
+
+// A tiny catalogue of "things worth pointing at" per release. Keep entries
+// short — the overlay should be a glance, not a wall of text. If a version
+// isn't listed here we just silently mark the user as up-to-date.
+var WHATS_NEW_BY_VERSION = {
+  '1.7.47': [
+    'Cmd/Ctrl+F finds inside the focused terminal.',
+    'File paths like src/foo.js:42 are now clickable links.',
+    'Cmd/Ctrl+P quick-open and Cmd/Ctrl+Shift+G project content grep.',
+    'Settings → Terminal: font, scrollback, cursor style, background.',
+    'Git tab: merge / rebase / conflict resolution + file history + blame.',
+    'Project context menu: Manage MCP servers, Skills/agents/commands, Layouts.'
+  ]
+};
+function showWhatsNewOverlay(prev, current) {
+  var highlights = WHATS_NEW_BY_VERSION[current];
+  if (!highlights || highlights.length === 0) return;
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = '<div class="modal-dialog" style="max-width:560px;"><div class="modal-header"><span class="modal-title">What\'s new in ' + escapeHtml(current) + '</span><span class="modal-subtitle">Upgrading from ' + escapeHtml(prev) + '</span><span class="modal-close">&times;</span></div><div class="modal-body" style="padding:16px 24px 24px;"><ul class="shortcuts-features" id="wn-list" style="margin:0;padding-left:20px;"></ul><div style="margin-top:16px;text-align:right;"><button class="modal-btn-save" id="wn-ok">Got it</button></div></div></div>';
+  document.body.appendChild(overlay);
+  var list = overlay.querySelector('#wn-list');
+  highlights.forEach(function (h) {
+    var li = document.createElement('li');
+    li.textContent = h;
+    list.appendChild(li);
+  });
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.querySelector('#wn-ok').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+}
 
 // ============================================================
 // Utility: escapeHtml

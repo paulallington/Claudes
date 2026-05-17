@@ -7194,3 +7194,73 @@ body.mode-popout #btn-add-project {
 }
 .git-op-mini-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
 .git-op-mini-btn.primary { background: rgba(96, 165, 250, 0.18); border-color: #3b82f6; color: #93c5fd; }
+
+/* Toast container — stacked top-right notifications. */
+.toast-container {
+  position: fixed;
+  top: 56px;
+  right: 16px;
+  z-index: 5000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  background: #232336;
+  color: #e6e6e6;
+  border: 1px solid #3a3a52;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 13px;
+  min-width: 240px;
+  max-width: 420px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.toast-out { opacity: 0; transform: translateX(20px); }
+.toast-success { border-color: #22c55e; }
+.toast-error { border-color: #ef4444; }
+.toast-warn { border-color: #f59e0b; }
+
+/* Loading skeletons + first-run hero. */
+.skel {
+  display: block;
+  background: linear-gradient(90deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.12) 50%, rgba(255,255,255,0.05) 100%);
+  background-size: 200% 100%;
+  animation: skel-pulse 1.4s ease-in-out infinite;
+  border-radius: 4px;
+}
+.skel-row { height: 12px; margin: 10px 0; }
+@keyframes skel-pulse {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.empty-state-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 24px;
+  text-align: center;
+}
+.empty-state-icon { font-size: 48px; opacity: 0.5; }
+.empty-state-title { font-size: 22px; font-weight: 600; }
+.empty-state-subtitle { font-size: 13px; opacity: 0.7; max-width: 360px; line-height: 1.5; }
+.empty-state-cta {
+  margin-top: 8px;
+  background: #6366f1;
+  border: none;
+  color: #fff;
+  font-size: 14px;
+  padding: 10px 22px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.empty-state-cta:hover { background: #4f46e5; }
+.empty-state-shortcuts { font-size: 11px; opacity: 0.55; margin-top: 12px; }
+.empty-state-shortcuts kbd { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; }
+
+.shortcuts-platform-note { font-size: 11px; color: #9ca3af; margin: 0 0 8px; }
