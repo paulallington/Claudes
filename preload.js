@@ -93,6 +93,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getExternalEditorCommand: () => ipcRenderer.invoke('editor:getExternalCommand'),
   setExternalEditorCommand: (cmd) => ipcRenderer.invoke('editor:setExternalCommand', cmd),
   searchProjectContent: (projectRoot, query) => ipcRenderer.invoke('fs:searchContent', projectRoot, query),
+  startFsWatch: (projectPath) => ipcRenderer.invoke('fs:startWatch', projectPath),
+  stopFsWatch: (projectPath) => ipcRenderer.invoke('fs:stopWatch', projectPath),
+  onFsChanged: (callback) => ipcRenderer.on('fs:changed', (_, root) => callback(root)),
 
   // Automations
   getAutomations: () => ipcRenderer.invoke('automations:getAll'),

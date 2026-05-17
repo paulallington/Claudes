@@ -7110,3 +7110,25 @@ body.mode-popout #btn-add-project {
   user-select: none;
 }
 .col-clear:hover { background: rgba(255,255,255,0.06); color: #e5e7eb; }
+
+/* Syntax-highlighted preview overlay for the inline file editor. Shown when
+   the user clicks 'Preview' in the editor footer; the textarea is hidden
+   beneath. Inherits Prism's tomorrow theme colours but keeps the editor's
+   sizing so toggling doesn't shift layout. */
+.fileeditor-preview {
+  flex: 1;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  background: #1e1e2e;
+  color: #e6e6e6;
+  font-family: 'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', 'DejaVu Sans Mono', monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 2;
+  border: none;
+  border-radius: 0;
+}
+.fileeditor-preview.hidden { display: none; }
+.fileeditor-preview code { background: transparent; padding: 0; }

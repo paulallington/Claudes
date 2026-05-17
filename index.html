@@ -607,11 +607,13 @@
         <div class="fileeditor-edit-area">
           <div id="fileeditor-gutter" class="fileeditor-gutter" aria-hidden="true">1</div>
           <textarea id="fileeditor-editor" spellcheck="false"></textarea>
+          <pre id="fileeditor-preview" class="fileeditor-preview hidden" aria-hidden="true"><code></code></pre>
         </div>
       </div>
       <div class="modal-footer">
         <span id="fileeditor-status" class="modal-status"></span>
         <span id="fileeditor-cursor-pos" class="fileeditor-cursor-pos">Ln 1, Col 1</span>
+        <button id="fileeditor-preview-btn" class="modal-btn-save" type="button" style="background:transparent;border:1px solid var(--border-primary);color:var(--text-secondary);">Preview</button>
         <button id="fileeditor-save" class="modal-btn-save">Save</button>
       </div>
     </div>
@@ -1012,6 +1014,20 @@
   <script src="./node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
   <script src="./node_modules/@xterm/addon-search/lib/addon-search.js"></script>
   <script src="./node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <link rel="stylesheet" href="./node_modules/prismjs/themes/prism-tomorrow.css">
+  <script src="./node_modules/prismjs/prism.js"></script>
+  <script src="./node_modules/prismjs/components/prism-typescript.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-jsx.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-tsx.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-bash.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-python.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-json.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-yaml.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-toml.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-rust.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-go.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-css.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-markdown.min.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

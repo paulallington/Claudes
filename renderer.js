@@ -1879,11 +1879,19 @@ function setActiveProject(index, isStartup, skipDefaultSpawn) {
     if (prevState) prevState.containerEl.style.display = 'none';
     var commitInput = document.getElementById('git-commit-msg');
     if (commitInput) commitInput.value = '';
+    if (window.electronAPI && window.electronAPI.stopFsWatch) {
+      window.electronAPI.stopFsWatch(prevKey).catch(function () {});
+    }
   }
 
   config.activeProjectIndex = index;
   activeProjectKey = newKey;
   activeProjectNameEl.textContent = project.name;
+  // Start watching the new project root so the Explorer can refresh on disk
+  // changes (file creation/deletion/rename from other tools).
+  if (window.electronAPI && window.electronAPI.startFsWatch) {
+    window.electronAPI.startFsWatch(newKey).catch(function () {});
+  }
   if (typeof window.__rerenderHookList === 'function') window.__rerenderHookList();
 
   // Show branch in toolbar
@@ -2658,6 +2666,27 @@ function addColumn(args, targetRow, opts) {
 
   var termWrapper = document.createElement('div');
   termWrapper.className = 'terminal-wrapper';
+
+  // Accept drops from the Explorer file tree. The dragstart handler stores the
+  // path in application/x-claudes-file; we write the path (quoted if it
+  // contains whitespace) into the pty. No effect for general HTML drag types,
+  // so DOM drag-and-drop elsewhere keeps working.
+  termWrapper.addEventListener('dragover', function (e) {
+    if (!e.dataTransfer) return;
+    var types = e.dataTransfer.types;
+    if (types && Array.prototype.indexOf.call(types, 'application/x-claudes-file') >= 0) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  });
+  termWrapper.addEventListener('drop', function (e) {
+    if (!e.dataTransfer) return;
+    var raw = e.dataTransfer.getData('application/x-claudes-file');
+    if (!raw) return;
+    e.preventDefault();
+    var quoted = /\s/.test(raw) ? '"' + raw + '"' : raw;
+    wsSend({ type: 'write', id: id, data: quoted });
+  });
 
   // Scroll-to-bottom button
   var scrollBtn = document.createElement('button');
@@ -4752,6 +4781,20 @@ function createTreeItem(entry, level) {
     showFileTreeContextMenu(e, entry);
   });
 
+  // Drag from Explorer into a terminal — drop pastes the file path. Picks up
+  // a quoted form when the path contains spaces. Disabled for directories
+  // since the common use case is `cmd /path/to/file`.
+  if (!entry.isDirectory) {
+    row.setAttribute('draggable', 'true');
+    row.addEventListener('dragstart', function (e) {
+      e.dataTransfer.effectAllowed = 'copy';
+      var p = entry.path;
+      var quoted = /\s/.test(p) ? '"' + p + '"' : p;
+      e.dataTransfer.setData('text/plain', quoted);
+      e.dataTransfer.setData('application/x-claudes-file', p);
+    });
+  }
+
   if (entry.isDirectory) {
     var children = document.createElement('div');
     children.className = 'tree-children';
@@ -6599,6 +6642,19 @@ if (window.electronAPI && window.electronAPI.onOsThemeChanged) {
   });
 }
 
+// Auto-refresh the Explorer tree when files change on disk. Debounced in main;
+// here we only refresh if the file tab is open and the change is for the
+// active project.
+if (window.electronAPI && window.electronAPI.onFsChanged) {
+  window.electronAPI.onFsChanged(function (root) {
+    if (!activeProjectKey || root !== activeProjectKey) return;
+    var activeTab = document.querySelector('.explorer-tab.active');
+    if (activeTab && activeTab.dataset.tab === 'files') {
+      try { refreshFileTree(); } catch (e) { /* */ }
+    }
+  });
+}
+
 // ============================================================
 // Hook Server Integration
 // ============================================================
@@ -7809,6 +7865,36 @@ var fileEditorStatus = document.getElementById('fileeditor-status');
 var fileEditorCurrentPath = null;
 var fileEditorOriginal = '';
 
+// Map file extensions to Prism language identifiers. Anything not mapped
+// falls back to no highlight (the preview just shows uncolored monospace).
+var PRISM_LANG_BY_EXT = {
+  '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
+  '.jsx': 'jsx', '.ts': 'typescript', '.tsx': 'tsx',
+  '.json': 'json', '.html': 'markup', '.xml': 'markup', '.svg': 'markup',
+  '.css': 'css', '.scss': 'css', '.less': 'css',
+  '.py': 'python', '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
+  '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'toml',
+  '.rs': 'rust', '.go': 'go',
+  '.md': 'markdown', '.markdown': 'markdown'
+};
+function prismLanguageFor(filePath) {
+  var i = (filePath || '').lastIndexOf('.');
+  if (i < 0) return null;
+  return PRISM_LANG_BY_EXT[filePath.slice(i).toLowerCase()] || null;
+}
+function syncFileEditorPreview() {
+  var pre = document.getElementById('fileeditor-preview');
+  if (!pre) return;
+  var code = pre.querySelector('code');
+  code.className = '';
+  var lang = prismLanguageFor(fileEditorCurrentPath || '');
+  if (lang) code.className = 'language-' + lang;
+  code.textContent = fileEditorEditor.value;
+  if (typeof Prism !== 'undefined' && lang && Prism.languages && Prism.languages[lang]) {
+    try { Prism.highlightElement(code); } catch (e) { /* */ }
+  }
+}
+
 function openFileEditor(filePath, jumpToLine) {
   if (!window.electronAPI) return;
 
@@ -7889,6 +7975,12 @@ function closeFileEditor() {
   fileEditorCurrentPath = null;
   fileEditorOriginal = '';
   if (typeof findBar !== 'undefined' && findBar) findBar.classList.add('hidden');
+  // Reset preview state so the next file opens in edit mode.
+  var pre = document.getElementById('fileeditor-preview');
+  if (pre) pre.classList.add('hidden');
+  fileEditorEditor.style.display = '';
+  var pbtn = document.getElementById('fileeditor-preview-btn');
+  if (pbtn) pbtn.textContent = 'Preview';
 }
 
 function saveFileEditor() {
@@ -7904,6 +7996,26 @@ function saveFileEditor() {
       }, 2000);
     } else {
       fileEditorStatus.textContent = 'Error: ' + result.error;
+    }
+  });
+}
+
+// Preview toggle — swap the textarea for a syntax-highlighted readonly view.
+var fileEditorPreviewBtn = document.getElementById('fileeditor-preview-btn');
+if (fileEditorPreviewBtn) {
+  fileEditorPreviewBtn.addEventListener('click', function () {
+    var pre = document.getElementById('fileeditor-preview');
+    if (!pre) return;
+    var isPreviewing = !pre.classList.contains('hidden');
+    if (isPreviewing) {
+      pre.classList.add('hidden');
+      fileEditorEditor.style.display = '';
+      fileEditorPreviewBtn.textContent = 'Preview';
+    } else {
+      syncFileEditorPreview();
+      pre.classList.remove('hidden');
+      fileEditorEditor.style.display = 'none';
+      fileEditorPreviewBtn.textContent = 'Edit';
     }
   });
 }

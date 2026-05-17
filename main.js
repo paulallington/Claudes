@@ -1619,6 +1619,62 @@ ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
   return results;
 });
 
+// fs.watch wiring for the active project root so the Explorer can refresh
+// itself when files appear, disappear, or get renamed. One watcher per
+// project root; events are coalesced to avoid spamming the renderer.
+const FS_WATCHERS = new Map(); // root -> { watcher, timer }
+const FS_WATCH_DEBOUNCE_MS = 250;
+
+function emitFsChanged(root) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send('fs:changed', root); } catch { /* window closing */ }
+}
+
+ipcMain.handle('fs:startWatch', (event, projectPath) => {
+  let safe;
+  try { safe = assertInsideAllowedRoots(projectPath); } catch { return { ok: false, error: 'forbidden' }; }
+  if (FS_WATCHERS.has(safe)) return { ok: true, alreadyWatching: true };
+  try {
+    // recursive: true is the only sensible mode here. Supported on darwin/win32
+    // natively, and on Linux since Node 20. Fall back to a non-recursive watcher
+    // if the platform refuses recursive.
+    let watcher;
+    try { watcher = fs.watch(safe, { recursive: true }, scheduleEmit); }
+    catch { watcher = fs.watch(safe, { recursive: false }, scheduleEmit); }
+    let timer = null;
+    function scheduleEmit() {
+      if (timer) return;
+      timer = setTimeout(() => { timer = null; emitFsChanged(safe); }, FS_WATCH_DEBOUNCE_MS);
+    }
+    watcher.on('error', (err) => {
+      console.warn('[fs:watch] error on', safe, '-', err && err.message);
+    });
+    FS_WATCHERS.set(safe, { watcher, timer: null });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err && err.message };
+  }
+});
+
+ipcMain.handle('fs:stopWatch', (event, projectPath) => {
+  let safe;
+  try { safe = assertInsideAllowedRoots(projectPath); } catch { return { ok: false }; }
+  const entry = FS_WATCHERS.get(safe);
+  if (!entry) return { ok: true };
+  try { entry.watcher.close(); } catch { /* ignore */ }
+  FS_WATCHERS.delete(safe);
+  return { ok: true };
+});
+
+app.on('before-quit', () => {
+  // Make sure native watcher handles are released even if the renderer hasn't
+  // explicitly unwatched.
+  for (const [root, entry] of FS_WATCHERS) {
+    try { entry.watcher.close(); } catch { /* */ }
+  }
+  FS_WATCHERS.clear();
+});
+
 // Project-wide content grep. Plain substring (case-insensitive) match across
 // files under projectRoot, respecting .gitignore. Cheap enough for ~50k files
 // without a worker on modern SSDs; capped at 300 hits + 5 MB per file to keep
