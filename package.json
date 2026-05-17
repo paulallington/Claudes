@@ -59,6 +59,7 @@
       "claude-icon.png",
       "claude-small.png",
       "lib/**/*",
+      "assets/**/*",
       "node_modules/**/*"
     ],
     "win": {

@@ -7364,7 +7364,7 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
   height: 100%;
   object-fit: contain;
   -webkit-user-drag: none;
-  transition: opacity 250ms ease-in-out;
+  transition: opacity 100ms ease-in-out;
 }
 .clawd-widget-img.fading { opacity: 0; }
 .clawd-widget-bubble {

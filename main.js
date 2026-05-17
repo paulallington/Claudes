@@ -3021,7 +3021,7 @@ function clawdStartTail(columnId, projectPath, sessionId, sender) {
     state: { kind: 'idle' },
     lastEmitted: null,
   };
-  t.timer = setInterval(() => clawdPollTail(columnId), 500);
+  t.timer = setInterval(() => clawdPollTail(columnId), 150);
   clawdTails.set(columnId, t);
 
   clawdScanInitialState(filePath).then((initial) => {
