@@ -8068,27 +8068,70 @@ function renderPlanLimits(result) {
 var lastPlanLimitsResult = null;
 var prevPlanLimitsData = null;  // last successful data, used for crossing detection
 // Stickiness: hold on to the last *successful* render so transient API failures
-// during background polls don't make the sidebar bar vanish.
+// during background polls don't make the sidebar bar vanish. Persisted to
+// localStorage so a cold start during a server-issued cooldown still shows
+// data (greyed) instead of an empty sidebar.
 var lastGoodPlanLimitsData = null;
+var lastGoodPlanLimitsAtMs = 0;
+var PLAN_LIMITS_LASTGOOD_KEY = 'claudes.planLimitsLastGood';
+var PLAN_LIMITS_LASTGOOD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+(function restoreLastGoodPlanLimits() {
+  try {
+    var raw = window.localStorage && window.localStorage.getItem(PLAN_LIMITS_LASTGOOD_KEY);
+    if (!raw) return;
+    var saved = JSON.parse(raw);
+    if (!saved || !saved.data || !saved.fetchedAt) return;
+    if (Date.now() - saved.fetchedAt > PLAN_LIMITS_LASTGOOD_MAX_AGE_MS) return;
+    lastGoodPlanLimitsData = saved.data;
+    lastGoodPlanLimitsAtMs = saved.fetchedAt;
+  } catch { /* corrupt entry — ignore */ }
+})();
+
+function persistLastGoodPlanLimits(data, fetchedAt) {
+  try {
+    if (window.localStorage) {
+      window.localStorage.setItem(PLAN_LIMITS_LASTGOOD_KEY, JSON.stringify({ data, fetchedAt }));
+    }
+  } catch { /* quota / privacy mode — ignore */ }
+}
 
 function renderPlanLimitsMini(result) {
   var el = document.getElementById('plan-limits-mini');
   if (!el) return;
   var ok = result && result.ok && result.data;
-  // If this poll failed, do nothing — leave whatever is currently rendered in
-  // place. The bar should never flicker just because a single refresh blipped.
   if (!ok) {
-    if (!lastGoodPlanLimitsData) el.classList.add('hidden');
+    // No live data this poll. If we have a last-good snapshot (in-memory from
+    // a prior poll, or restored from localStorage at startup), keep showing
+    // it — flagged stale when the failure was a server cooldown — instead of
+    // hiding the bar silently.
+    if (lastGoodPlanLimitsData) {
+      var stale = result && result.error === 'rate-limited';
+      renderPlanLimitsMiniFrom(el, lastGoodPlanLimitsData, stale);
+    } else {
+      el.classList.add('hidden');
+    }
     return;
   }
   var d = result.data;
   lastGoodPlanLimitsData = d;
+  lastGoodPlanLimitsAtMs = result.fetchedAt || Date.now();
+  persistLastGoodPlanLimits(d, lastGoodPlanLimitsAtMs);
   // Hide if the API returned nothing useful (e.g. API-key user).
   if (!d.five_hour && !d.seven_day) {
     el.classList.add('hidden');
     return;
   }
+  renderPlanLimitsMiniFrom(el, d, false);
+}
+
+function renderPlanLimitsMiniFrom(el, d, stale) {
+  if (!d.five_hour && !d.seven_day) {
+    el.classList.add('hidden');
+    return;
+  }
   el.classList.remove('hidden');
+  el.classList.toggle('stale', !!stale);
   el.innerHTML = '';
 
   function row(label, slot) {
@@ -8410,6 +8453,14 @@ document.addEventListener('focusin', function (e) {
   });
 });
 
+// Show the restored last-good snapshot (if any) right away so the bar isn't
+// blank during the initial IPC roundtrip — especially important when the
+// endpoint is under a multi-minute server cooldown.
+if (lastGoodPlanLimitsData) {
+  var miniEl0 = document.getElementById('plan-limits-mini');
+  if (miniEl0) renderPlanLimitsMiniFrom(miniEl0, lastGoodPlanLimitsData, true);
+}
+
 // Initial fetch on app start. Previously gated behind document.hasFocus(),
 // which meant a backgrounded launch (auto-start, taskbar click) left the
 // mini-bar empty until focus returned. Just fire the fetch — it's cheap.
@@ -8460,6 +8511,15 @@ function updatePlanLimitsPopover() {
     inner += fmtSlot('Week', d.seven_day);
   }
   if (!inner) inner = '<div class="plan-limits-popover-sub">Loading usage…</div>';
+  // Surface why the bar might look frozen — rate-limited polls keep the
+  // last-good values on screen with a `.stale` class on the mini bar.
+  var lr = lastPlanLimitsResult;
+  if (lr && !lr.ok && lr.error === 'rate-limited' && d) {
+    var ageMin = lastGoodPlanLimitsAtMs ? Math.round((Date.now() - lastGoodPlanLimitsAtMs) / 60000) : null;
+    var ageLabel = ageMin == null ? '' : (ageMin < 1 ? 'just now' : ageMin + ' min ago');
+    inner += '<div class="plan-limits-popover-sub">Rate-limited' +
+      (ageLabel ? ' — last good ' + ageLabel : '') + '</div>';
+  }
   inner += '<div class="plan-limits-popover-hint">Click for full usage</div>';
   pop.innerHTML = inner;
 }

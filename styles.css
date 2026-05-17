@@ -4171,6 +4171,12 @@ html[data-platform="darwin"] #toolbar {
 
 .plan-limits-mini.hidden { display: none; }
 
+/* Stale: showing last-good snapshot while the API is in a rate-limit cooldown.
+   Dimmed so the user can tell at a glance the numbers aren't live; hover the
+   bar for the explanatory popover. */
+.plan-limits-mini.stale { opacity: 0.55; }
+.plan-limits-mini.stale:hover { opacity: 1; }
+
 .plan-limits-mini-row {
   display: grid;
   grid-template-columns: 48px 1fr 32px;

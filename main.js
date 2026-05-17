@@ -2063,11 +2063,27 @@ async function mapLimit(items, limit, fn) {
 // server-side data updates on its own cadence and we don't want to hammer it.
 const PLAN_USAGE_CACHE_MS = 30_000;
 let planUsageCache = { data: null, fetchedAt: 0 };
+// Server-issued cooldown: when the endpoint returns 429 with a Retry-After,
+// honour it. Hammering during cooldown extends the limit further.
+let planUsageRetryAtMs = 0;
 
 ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
   const now = Date.now();
   if (!force && planUsageCache.data && (now - planUsageCache.fetchedAt) < PLAN_USAGE_CACHE_MS) {
     return { ok: true, data: planUsageCache.data, fetchedAt: planUsageCache.fetchedAt, cached: true };
+  }
+
+  // Honour server cooldown regardless of `force` — the user clicking refresh
+  // can't get fresh data when the API has told us to wait, and bypassing this
+  // would just push the unlock further out.
+  if (planUsageRetryAtMs > now) {
+    const remainSec = Math.round((planUsageRetryAtMs - now) / 1000);
+    return {
+      ok: false,
+      error: 'rate-limited',
+      retryAtMs: planUsageRetryAtMs,
+      message: 'Usage endpoint rate-limited — retry in ' + (remainSec >= 60 ? Math.round(remainSec / 60) + ' min' : remainSec + 's') + '.'
+    };
   }
 
   const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
@@ -2110,11 +2126,25 @@ ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
     if (res.status === 401) {
       return { ok: false, error: 'unauthorized', message: 'OAuth token expired. Run any Claude Code command to refresh.' };
     }
+    if (res.status === 429) {
+      // Clamp Retry-After to [60s, 1h] so a server bug can't pin the bar
+      // dead forever, and a missing/zero header still produces a real cooldown.
+      const raw = parseInt(res.headers.get('retry-after') || '', 10);
+      const retryAfterSec = Math.max(60, Math.min(Number.isFinite(raw) && raw > 0 ? raw : 60, 3600));
+      planUsageRetryAtMs = now + retryAfterSec * 1000;
+      return {
+        ok: false,
+        error: 'rate-limited',
+        retryAtMs: planUsageRetryAtMs,
+        message: 'Usage endpoint rate-limited (HTTP 429) — retry in ' + (retryAfterSec >= 60 ? Math.round(retryAfterSec / 60) + ' min' : retryAfterSec + 's') + '.'
+      };
+    }
     if (!res.ok) {
       return { ok: false, error: 'http-' + res.status, message: 'Usage endpoint returned HTTP ' + res.status };
     }
     const data = await res.json();
     planUsageCache = { data, fetchedAt: now };
+    planUsageRetryAtMs = 0;
     return { ok: true, data, fetchedAt: now, cached: false };
   } catch (e) {
     return { ok: false, error: 'fetch-failed', message: e.message };
