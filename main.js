@@ -1417,6 +1417,43 @@ ipcMain.handle('sessions:load', (event, projectPath) => {
   }
 });
 
+// --- MCP server config (.mcp.json) ---
+//
+// .mcp.json lives at the project root and follows the Claude Code schema:
+//   { "mcpServers": { "name": { "command", "args", "env", "transport" } } }
+// We expose read/write IPCs so the renderer can offer a CRUD UI without
+// users editing JSON by hand.
+ipcMain.handle('mcp:read', (event, projectPath) => {
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const filePath = path.join(safeBase, '.mcp.json');
+    if (!fs.existsSync(filePath)) return { exists: false, mcpServers: {} };
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const data = JSON.parse(raw);
+    return { exists: true, mcpServers: (data && data.mcpServers) || {} };
+  } catch (err) {
+    return { exists: false, mcpServers: {}, error: err && err.message };
+  }
+});
+
+ipcMain.handle('mcp:write', (event, projectPath, mcpServers) => {
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    if (!mcpServers || typeof mcpServers !== 'object') return { ok: false, error: 'mcpServers must be an object' };
+    // Re-read existing file to preserve top-level keys we don't manage (e.g. some
+    // forks store additional settings here). Fall back to a fresh object when absent.
+    const filePath = path.join(safeBase, '.mcp.json');
+    let existing = {};
+    try { existing = JSON.parse(fs.readFileSync(filePath, 'utf8')); }
+    catch { /* missing or malformed — overwrite from scratch */ }
+    const out = Object.assign({}, existing, { mcpServers });
+    fs.writeFileSync(filePath, JSON.stringify(out, null, 2), 'utf8');
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err && err.message };
+  }
+});
+
 // --- CLAUDE.md Management ---
 
 // Sentinel passed by the renderer when it wants to edit the global

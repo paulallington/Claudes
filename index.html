@@ -906,6 +906,60 @@
   </div>
 
   <!-- Session Search Modal -->
+  <!-- MCP server manager -->
+  <div id="mcp-modal" class="modal-overlay hidden">
+    <div class="modal-dialog endpoints-dialog">
+      <div class="modal-header">
+        <span class="modal-title">MCP servers</span>
+        <span class="modal-subtitle" id="mcp-project-path"></span>
+        <span id="mcp-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body endpoints-body">
+        <div class="endpoints-sidebar">
+          <div class="endpoints-list-header">
+            <span>Servers</span>
+            <button id="mcp-new" class="settings-browse-btn" style="padding:2px 8px;">+</button>
+          </div>
+          <div id="mcp-list" class="endpoints-list"></div>
+        </div>
+        <div class="endpoints-edit-pane">
+          <div id="mcp-empty" class="settings-hint" style="padding:24px;">Select a server on the left, or click + to add a new one.</div>
+          <div id="mcp-form" class="hidden">
+            <div class="settings-field">
+              <label>Name</label>
+              <input type="text" id="mcp-name" class="settings-input" spellcheck="false" placeholder="e.g. github" autocomplete="off">
+            </div>
+            <div class="settings-field">
+              <label>Command</label>
+              <input type="text" id="mcp-command" class="settings-input" spellcheck="false" placeholder="e.g. npx" autocomplete="off">
+            </div>
+            <div class="settings-field">
+              <label>Args (one per line)</label>
+              <textarea id="mcp-args" class="settings-input" rows="3" spellcheck="false" placeholder="-y&#10;@modelcontextprotocol/server-github"></textarea>
+            </div>
+            <div class="settings-field">
+              <label>Env (KEY=value, one per line)</label>
+              <textarea id="mcp-env" class="settings-input" rows="3" spellcheck="false" placeholder="GITHUB_TOKEN=ghp_…"></textarea>
+            </div>
+            <div class="settings-field">
+              <label>Transport (optional)</label>
+              <select id="mcp-transport" class="settings-input">
+                <option value="">stdio (default)</option>
+                <option value="sse">sse</option>
+                <option value="http">http</option>
+              </select>
+            </div>
+            <div class="settings-field" style="display:flex; gap:8px;">
+              <button id="mcp-save" class="modal-btn-save">Save</button>
+              <button id="mcp-delete" class="modal-btn-save" style="background:transparent;border:1px solid #444;color:#f87171;">Delete</button>
+              <span id="mcp-status" class="modal-status"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Quick-open file palette (Cmd/Ctrl+P) -->
   <div id="quick-open-modal" class="modal-overlay hidden">
     <div class="modal-dialog session-search-dialog">

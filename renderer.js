@@ -1629,6 +1629,7 @@ function buildProjectItem(project, index) {
       addMenuItem('Open in new window', 'pop-out');
     }
     addMenuItem('Open in external editor', 'open-in-editor');
+    addMenuItem('Manage MCP servers…', 'manage-mcp');
 
     // Sync entries — populated async so the labels reflect the current state.
     var syncDivider = document.createElement('div');
@@ -1702,6 +1703,8 @@ function buildProjectItem(project, index) {
             }
           });
         }
+      } else if (action === 'manage-mcp') {
+        openMcpModal(config.projects[projIndex].path);
       }
       menu.style.display = 'none';
     };
@@ -2471,6 +2474,20 @@ function createColumnHeader(id, customTitle, opts) {
       if (c && c.terminal) c.terminal.clear();
     });
     actions.appendChild(clearBtn);
+
+    // Recent sessions picker — opens a small floating menu of the project's
+    // most-recent sessions; clicking one swaps this column to that session
+    // via restartColumn().
+    var sessionsBtn = document.createElement('span');
+    sessionsBtn.className = 'col-sessions';
+    sessionsBtn.dataset.id = String(id);
+    sessionsBtn.title = 'Switch to a recent session';
+    sessionsBtn.textContent = '⏳';
+    sessionsBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      showColumnSessionPicker(id, e.clientX, e.clientY);
+    });
+    actions.appendChild(sessionsBtn);
   }
 
   var maximizeBtn = document.createElement('span');
@@ -4012,6 +4029,70 @@ function toggleMaximizeColumn(id) {
     setFocusedColumn(id);
   }
   refitAll();
+}
+
+// ============================================================
+// Recent sessions picker (per-column header)
+// ============================================================
+
+function showColumnSessionPicker(colId, clientX, clientY) {
+  var col = allColumns.get(colId);
+  if (!col || !window.electronAPI || !window.electronAPI.getRecentSessions) return;
+  // Close any prior picker.
+  var prior = document.querySelector('.col-session-picker');
+  if (prior) prior.remove();
+
+  var menu = document.createElement('div');
+  menu.className = 'col-session-picker project-context-menu';
+  menu.style.left = clientX + 'px';
+  menu.style.top = clientY + 'px';
+  var loading = document.createElement('div');
+  loading.className = 'project-context-item';
+  loading.style.opacity = '0.6';
+  loading.textContent = 'Loading recent sessions…';
+  menu.appendChild(loading);
+  document.body.appendChild(menu);
+
+  function close() { menu.remove(); document.removeEventListener('mousedown', outside, true); }
+  function outside(ev) { if (!menu.contains(ev.target)) close(); }
+  setTimeout(function () { document.addEventListener('mousedown', outside, true); }, 0);
+
+  // Resolve the column's project path from activeProjectKey on the colData.
+  var projectPath = col.projectKey || activeProjectKey;
+  if (!projectPath) { loading.textContent = 'No project for this column.'; return; }
+
+  window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+    while (menu.firstChild) menu.removeChild(menu.firstChild);
+    var others = (sessions || []).filter(function (s) { return s.sessionId !== col.sessionId; });
+    if (others.length === 0) {
+      var none = document.createElement('div');
+      none.className = 'project-context-item';
+      none.style.opacity = '0.6';
+      none.textContent = 'No other recent sessions.';
+      menu.appendChild(none);
+      return;
+    }
+    others.slice(0, 12).forEach(function (s) {
+      var item = document.createElement('div');
+      item.className = 'project-context-item';
+      var when = new Date(s.modified);
+      item.textContent = s.sessionId.slice(0, 8) + '  ·  ' + when.toLocaleString();
+      item.addEventListener('click', function () {
+        // Swap to the chosen session and restart in place.
+        col.sessionId = s.sessionId;
+        restartColumn(colId);
+        close();
+      });
+      menu.appendChild(item);
+      // Title fetch is best-effort — the short id + date is informative enough
+      // on first paint; refine asynchronously when available.
+      window.electronAPI.getSessionTitle(projectPath, s.sessionId).then(function (title) {
+        if (title) item.textContent = (title.length > 60 ? title.slice(0, 60) + '…' : title) + '  ·  ' + when.toLocaleString();
+      }).catch(function () { /* keep id-based label */ });
+    });
+  }).catch(function () {
+    loading.textContent = 'Failed to load sessions.';
+  });
 }
 
 // ============================================================
@@ -13452,6 +13533,162 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
 
   // Pre-warm the cache so trigger expansion works immediately on app start
   refresh();
+})();
+
+(function setupMcpManager() {
+  var modal = document.getElementById('mcp-modal');
+  if (!modal) return;
+  var listEl = document.getElementById('mcp-list');
+  var emptyEl = document.getElementById('mcp-empty');
+  var formEl = document.getElementById('mcp-form');
+  var nameEl = document.getElementById('mcp-name');
+  var cmdEl = document.getElementById('mcp-command');
+  var argsEl = document.getElementById('mcp-args');
+  var envEl = document.getElementById('mcp-env');
+  var transportEl = document.getElementById('mcp-transport');
+  var statusEl = document.getElementById('mcp-status');
+  var closeBtn = document.getElementById('mcp-close');
+  var newBtn = document.getElementById('mcp-new');
+  var saveBtn = document.getElementById('mcp-save');
+  var delBtn = document.getElementById('mcp-delete');
+  var pathLabel = document.getElementById('mcp-project-path');
+  var projectPath = null;
+  var servers = {}; // name -> config
+  var editingName = null;
+  var isNew = false;
+
+  function showForm(show) {
+    emptyEl.classList.toggle('hidden', show);
+    formEl.classList.toggle('hidden', !show);
+  }
+  function renderList() {
+    listEl.innerHTML = '';
+    var names = Object.keys(servers).sort();
+    if (names.length === 0) {
+      var none = document.createElement('div');
+      none.className = 'settings-hint';
+      none.style.padding = '12px';
+      none.textContent = 'No servers yet — click + to add one.';
+      listEl.appendChild(none);
+      return;
+    }
+    names.forEach(function (n) {
+      var row = document.createElement('div');
+      row.className = 'endpoints-list-item' + (n === editingName ? ' active' : '');
+      row.textContent = n;
+      row.addEventListener('click', function () { selectServer(n); });
+      listEl.appendChild(row);
+    });
+  }
+  function loadIntoForm(name) {
+    var s = servers[name] || {};
+    nameEl.value = name || '';
+    cmdEl.value = s.command || '';
+    argsEl.value = Array.isArray(s.args) ? s.args.join('\n') : '';
+    envEl.value = s.env ? Object.keys(s.env).map(function (k) { return k + '=' + s.env[k]; }).join('\n') : '';
+    transportEl.value = s.transport || '';
+    statusEl.textContent = '';
+  }
+  function selectServer(n) {
+    editingName = n;
+    isNew = false;
+    showForm(true);
+    loadIntoForm(n);
+    renderList();
+    delBtn.style.display = '';
+  }
+  function startNew() {
+    editingName = null;
+    isNew = true;
+    showForm(true);
+    nameEl.value = '';
+    cmdEl.value = '';
+    argsEl.value = '';
+    envEl.value = '';
+    transportEl.value = '';
+    statusEl.textContent = '';
+    delBtn.style.display = 'none';
+    nameEl.focus();
+  }
+  function parseEnv(text) {
+    var out = {};
+    String(text || '').split(/\r?\n/).forEach(function (line) {
+      line = line.trim();
+      if (!line || line.startsWith('#')) return;
+      var i = line.indexOf('=');
+      if (i < 0) return;
+      var k = line.slice(0, i).trim();
+      var v = line.slice(i + 1);
+      if (k) out[k] = v;
+    });
+    return out;
+  }
+  function save() {
+    var newName = nameEl.value.trim();
+    if (!/^[A-Za-z0-9_.\-]+$/.test(newName)) {
+      statusEl.textContent = 'Name must be alphanumeric (or _ . -).';
+      return;
+    }
+    var cfg = {
+      command: cmdEl.value.trim() || undefined,
+      args: argsEl.value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean),
+      env: parseEnv(envEl.value),
+      transport: transportEl.value || undefined
+    };
+    if (!cfg.command) { statusEl.textContent = 'Command is required.'; return; }
+    if (cfg.args.length === 0) delete cfg.args;
+    if (Object.keys(cfg.env).length === 0) delete cfg.env;
+    if (!cfg.transport) delete cfg.transport;
+    // Rename: drop the old key.
+    if (!isNew && editingName && editingName !== newName) delete servers[editingName];
+    servers[newName] = cfg;
+    persist();
+  }
+  function del() {
+    if (!editingName) return;
+    if (!confirm('Delete MCP server "' + editingName + '"?')) return;
+    delete servers[editingName];
+    editingName = null;
+    persist();
+    showForm(false);
+  }
+  function persist() {
+    if (!projectPath || !window.electronAPI || !window.electronAPI.writeMcp) return;
+    statusEl.textContent = 'Saving…';
+    window.electronAPI.writeMcp(projectPath, servers).then(function (r) {
+      if (r && r.ok) {
+        statusEl.textContent = 'Saved';
+        setTimeout(function () { if (statusEl.textContent === 'Saved') statusEl.textContent = ''; }, 1500);
+      } else {
+        statusEl.textContent = 'Error: ' + (r && r.error || 'unknown');
+      }
+      renderList();
+    });
+  }
+
+  if (newBtn) newBtn.addEventListener('click', startNew);
+  if (saveBtn) saveBtn.addEventListener('click', save);
+  if (delBtn) delBtn.addEventListener('click', del);
+  if (closeBtn) closeBtn.addEventListener('click', function () { modal.classList.add('hidden'); });
+  modal.addEventListener('click', function (e) { if (e.target === modal) modal.classList.add('hidden'); });
+  ['mcp-name', 'mcp-command', 'mcp-args', 'mcp-env'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  });
+
+  window.openMcpModal = function (projPath) {
+    if (!projPath || !window.electronAPI || !window.electronAPI.readMcp) return;
+    projectPath = projPath;
+    pathLabel.textContent = projPath + '/.mcp.json';
+    modal.classList.remove('hidden');
+    showForm(false);
+    statusEl.textContent = '';
+    window.electronAPI.readMcp(projPath).then(function (r) {
+      servers = (r && r.mcpServers) || {};
+      editingName = null;
+      renderList();
+    });
+  };
 })();
 
 (function setupQuickOpen() {

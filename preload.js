@@ -100,6 +100,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setAutoUpdateClaude: (enabled) => ipcRenderer.invoke('config:setAutoUpdateClaude', enabled),
   getTerminalSettings: () => ipcRenderer.invoke('config:getTerminalSettings'),
   setTerminalSettings: (settings) => ipcRenderer.invoke('config:setTerminalSettings', settings),
+  readMcp: (projectPath) => ipcRenderer.invoke('mcp:read', projectPath),
+  writeMcp: (projectPath, mcpServers) => ipcRenderer.invoke('mcp:write', projectPath, mcpServers),
 
   // Automations
   getAutomations: () => ipcRenderer.invoke('automations:getAll'),
