@@ -5240,6 +5240,19 @@ function showGitFileContextMenu(e, filePath) {
     it.addEventListener('click', function () { menu.remove(); fn(); });
     menu.appendChild(it);
   }
+  // filePath here is repo-relative — resolve against the active project root
+  // for editor / shell IPCs that expect absolute paths.
+  function absolutePath() {
+    if (!activeProjectKey) return null;
+    return activeProjectKey.replace(/[\\/]$/, '') + '/' + filePath;
+  }
+  add('Open in external editor', function () {
+    var abs = absolutePath();
+    if (!abs || !window.electronAPI || !window.electronAPI.openInExternalEditor) return;
+    window.electronAPI.openInExternalEditor([activeProjectKey, abs]).then(function (r) {
+      if (r && !r.ok && r.error) showToast('Open in editor failed: ' + r.error, { kind: 'error' });
+    });
+  });
   add('File history…', function () { showFileHistory(filePath); });
   add('Blame…', function () { showFileBlame(filePath); });
   document.body.appendChild(menu);

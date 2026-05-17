@@ -7084,10 +7084,8 @@ body.mode-popout #btn-add-project {
    wrapper so it never obscures the cursor area, semi-transparent so the
    matched line behind it remains visible. */
 .terminal-wrapper { position: relative; }
-/* Always-dark in-terminal overlay so it stays readable over both terminal
-   themes (terminal default bg is dark even in light app theme). Fixed light
-   text colours instead of theme vars — those vars flip dark on light theme
-   and the overlay would become unreadable. */
+/* Terminal find overlay — flips with the app theme since the terminal does
+   too (light bg in light mode). Defaults are the dark-theme values. */
 .term-search-overlay {
   position: absolute;
   top: 8px;
@@ -7107,7 +7105,7 @@ body.mode-popout #btn-add-project {
 .term-search-input {
   background: #0f0f1f;
   border: 1px solid #2a2a3c;
-  color: #f1f5f9;        /* always-light input text so it's readable on the dark overlay */
+  color: #f1f5f9;
   border-radius: 4px;
   padding: 3px 8px;
   width: 180px;
@@ -7127,6 +7125,24 @@ body.mode-popout #btn-add-project {
   font-size: 12px;
 }
 .term-search-btn:hover { background: rgba(255,255,255,0.08); color: #fff; }
+
+/* Light-theme overrides. Mirrors the terminal's own light palette so the
+   overlay isn't a dark blob hovering over a white terminal. */
+html[data-theme="light"] .term-search-overlay {
+  background: rgba(255, 255, 255, 0.97);
+  border-color: #d0d7de;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+html[data-theme="light"] .term-search-input {
+  background: #ffffff;
+  border-color: #d0d7de;
+  color: #1f2328;
+}
+html[data-theme="light"] .term-search-input::placeholder { color: #8c959f; }
+html[data-theme="light"] .term-search-input:focus { border-color: #0969da; }
+html[data-theme="light"] .term-search-count { color: #57606a; }
+html[data-theme="light"] .term-search-btn { color: #1f2328; }
+html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); color: #000; }
 
 /* Header clear-terminal button — same shape as the restart pill. */
 .col-clear {
@@ -7173,7 +7189,9 @@ body.mode-popout #btn-add-project {
 .col-sessions:hover { background: rgba(255,255,255,0.06); color: #e5e7eb; }
 .col-session-picker { min-width: 280px; max-height: 360px; overflow: auto; }
 
-/* Extensions manager modal layout */
+/* Extensions manager modal layout — body scrolls when categories run long. */
+#ext-modal .modal-dialog { max-height: 85vh; display: flex; flex-direction: column; }
+#ext-modal .modal-body { overflow-y: auto; max-height: calc(85vh - 56px); }
 .ext-categories { display: flex; flex-direction: column; gap: 16px; }
 .ext-cat { border: 1px solid var(--border-primary); border-radius: 6px; padding: 8px 12px; }
 .ext-cat-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
