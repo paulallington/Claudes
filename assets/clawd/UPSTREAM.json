@@ -1,0 +1,10 @@
+{
+  "repo": "marciogranzotto/clawd-tank",
+  "url": "https://github.com/marciogranzotto/clawd-tank",
+  "license": "MIT",
+  "author": "Marcio Granzotto",
+  "synced_at": "2026-05-17",
+  "synced_commit": "6f0093b40e3714db24615409bf31c351f66114f7",
+  "source_path": "assets/svg-animations/",
+  "notes": "SVG animations bundled for the Clawd widget. To pull upstream changes, see docs/CLAWD_UPSTREAM.md."
+}

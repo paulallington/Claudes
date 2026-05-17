@@ -2881,6 +2881,173 @@ ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId, sinceMs
 
 ipcMain.handle('session:modelContextLimit', (_event, model) => modelContextLimit(model));
 
+// ---------- Clawd: per-column session-state machine over JSONL ----------
+// Watches each column's session JSONL and maintains a small per-tail state
+// machine modelled on clawd-tank/host/clawd_tank_daemon/daemon.py:
+//
+//   state: 'idle' | 'working' | 'thinking' | 'sleeping'
+//   tool:  string (only meaningful when state === 'working')
+//
+// Transitions (derived from JSONL line shape, since we don't have direct
+// hook visibility here):
+//
+//   assistant message with tool_use   → state='working', tool=<last tool_use.name>
+//   assistant message with thinking-only (no tool_use, no text) → state='thinking'
+//   assistant message with text-only (no tool_use)              → state='idle'
+//   user message with text (not tool_result)                    → state='thinking'
+//   user message with only tool_result                          → no state change
+//
+// Events are only emitted to the renderer when the *resolved state* changes.
+// That avoids the constant cross-fade flicker when Claude alternates tools
+// (Read → Edit → Read) — the widget only flips when the tool category does.
+const clawdTails = new Map();
+// columnId -> { filePath, offset, buf, timer, sender, sessionId,
+//               state: { kind, tool }, lastEmitted: { kind, tool } }
+
+function _clawdLineToTransition(line) {
+  let entry;
+  try { entry = JSON.parse(line); } catch { return null; }
+  if (!entry || typeof entry !== 'object') return null;
+
+  if (entry.type === 'assistant' && entry.message && Array.isArray(entry.message.content)) {
+    let lastTool = null;
+    let hasThinking = false;
+    let hasText = false;
+    for (const part of entry.message.content) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type === 'tool_use' && typeof part.name === 'string') lastTool = part.name;
+      else if (part.type === 'thinking') hasThinking = true;
+      else if (part.type === 'text') hasText = true;
+    }
+    if (lastTool) return { kind: 'working', tool: lastTool };
+    if (hasText) return { kind: 'idle' };
+    if (hasThinking) return { kind: 'thinking' };
+    return null;
+  }
+
+  if (entry.type === 'user' && entry.message && Array.isArray(entry.message.content)) {
+    // A real user prompt (any non-tool_result content) means Claude is now
+    // processing — mirror clawd-tank's dismiss+UserPromptSubmit → 'thinking'.
+    for (const part of entry.message.content) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type !== 'tool_result') return { kind: 'thinking' };
+    }
+    return null;
+  }
+  return null;
+}
+
+function _clawdStatesEqual(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'working') return (a.tool || '') === (b.tool || '');
+  return true;
+}
+
+function _clawdEmitIfChanged(columnId, t, initial) {
+  if (_clawdStatesEqual(t.state, t.lastEmitted)) return;
+  t.lastEmitted = { kind: t.state.kind, tool: t.state.tool || '' };
+  if (!t.sender || t.sender.isDestroyed()) return;
+  const payload = { columnId, kind: t.state.kind };
+  if (t.state.kind === 'working') payload.tool = t.state.tool || '';
+  if (initial) payload.initial = true;
+  try { t.sender.send('clawd:event', payload); } catch {}
+}
+
+function _clawdReplayBuffer(t, text, opts) {
+  const combined = t.buf + text;
+  const lines = combined.split('\n');
+  t.buf = opts && opts.flush ? '' : (lines.pop() || '');
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const next = _clawdLineToTransition(line);
+    if (!next) continue;
+    t.state = next;
+  }
+}
+
+function clawdPollTail(columnId) {
+  const t = clawdTails.get(columnId);
+  if (!t) return;
+  let stat;
+  try { stat = fs.statSync(t.filePath); } catch { return; }
+  if (stat.size === t.offset) return;
+  if (stat.size < t.offset) { t.offset = 0; t.buf = ''; }
+  let chunk = '';
+  try {
+    const fd = fs.openSync(t.filePath, 'r');
+    const buf = Buffer.alloc(stat.size - t.offset);
+    fs.readSync(fd, buf, 0, buf.length, t.offset);
+    fs.closeSync(fd);
+    chunk = buf.toString('utf8');
+  } catch { return; }
+  t.offset = stat.size;
+  _clawdReplayBuffer(t, chunk, { flush: false });
+  _clawdEmitIfChanged(columnId, t, false);
+}
+
+// Stream the JSONL once at attach time and resolve the column's true current
+// state — replays every line through the state machine. Brand-new sessions
+// resolve to 'idle' (file missing), resumed sessions snap to whatever the
+// last meaningful turn was.
+function clawdScanInitialState(filePath) {
+  return new Promise((resolve) => {
+    let stream;
+    try { stream = fs.createReadStream(filePath, { encoding: 'utf8' }); }
+    catch { resolve({ kind: 'idle' }); return; }
+    stream.on('error', () => resolve({ kind: 'idle' }));
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    let state = { kind: 'idle' };
+    rl.on('line', (line) => {
+      if (!line) return;
+      const next = _clawdLineToTransition(line);
+      if (next) state = next;
+    });
+    rl.on('close', () => resolve(state));
+    rl.on('error', () => resolve(state));
+  });
+}
+
+function clawdStartTail(columnId, projectPath, sessionId, sender) {
+  clawdStopTail(columnId);
+  if (!projectPath || !sessionId) return;
+  const claudeKey = projectPathToClaudeKey(projectPath);
+  const filePath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+  let offset = 0;
+  try { offset = fs.statSync(filePath).size; } catch {}
+  const t = {
+    filePath, offset, buf: '', sender, sessionId,
+    state: { kind: 'idle' },
+    lastEmitted: null,
+  };
+  t.timer = setInterval(() => clawdPollTail(columnId), 500);
+  clawdTails.set(columnId, t);
+
+  clawdScanInitialState(filePath).then((initial) => {
+    const cur = clawdTails.get(columnId);
+    if (!cur || cur.sessionId !== sessionId) return;
+    cur.state = initial || { kind: 'idle' };
+    _clawdEmitIfChanged(columnId, cur, true);
+  });
+}
+
+function clawdStopTail(columnId) {
+  const t = clawdTails.get(columnId);
+  if (!t) return;
+  clearInterval(t.timer);
+  clawdTails.delete(columnId);
+}
+
+ipcMain.handle('clawd:startTail', (event, args) => {
+  if (!args) return;
+  clawdStartTail(args.columnId, args.projectPath, args.sessionId, event.sender);
+});
+ipcMain.handle('clawd:stopTail', (_event, args) => {
+  if (!args) return;
+  clawdStopTail(args.columnId);
+});
+
 ipcMain.handle('notify:show', (_event, opts) => {
   try {
     if (!opts || typeof opts !== 'object') return false;

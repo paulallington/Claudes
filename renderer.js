@@ -704,6 +704,9 @@ function setColumnActivity(id, state) {
     activityTimers.delete(id);
     updateActivityIndicator(id);
     updateSidebarActivity();
+    if (state === 'exited' && window.Clawd && window.Clawd.setColumnAnimation) {
+      window.Clawd.setColumnAnimation(id, 'disconnected');
+    }
   }
 }
 
@@ -1621,6 +1624,12 @@ function disposeColumnLocalOnly(id) {
       }
     }
     if (state.focusedColumnId === id) state.focusedColumnId = null;
+    if (window.Clawd && typeof window.Clawd.forgetColumn === 'function') {
+      window.Clawd.forgetColumn(id);
+    }
+    if (window.electronAPI && window.electronAPI.clawdStopTail) {
+      window.electronAPI.clawdStopTail(id);
+    }
   }
 }
 
@@ -3342,6 +3351,12 @@ function addColumn(args, targetRow, opts) {
     fetchAndSetSessionTitle(id, cwd, resumeSessionId);
   }
 
+  // Start the Clawd JSONL tail for resumed sessions — for fresh spawns this
+  // kicks in once detectSession discovers the new sessionId.
+  if (resumeSessionId && !cmd) {
+    ensureClawdTail(id);
+  }
+
   // Start periodic session sync for Claude columns (not custom commands)
   if (!cmd) {
     startSessionSync(id, cwd);
@@ -3835,6 +3850,63 @@ function renderSplitDiff(container, parsed) {
   rightPanel.addEventListener('scroll', function () { leftPanel.scrollTop = rightPanel.scrollTop; });
 }
 
+// ---------- Clawd: drive per-column animation from real session activity ----------
+// Tool → animation map. Mirrors clawd-tank/host/clawd_tank_daemon/daemon.py's
+// TOOL_ANIMATION_MAP. We layer a few additional Claude Code tool names on top
+// (BashOutput, MultiEdit, Task, plugin_*) since clawd-tank predates them.
+// Unknown tools fall back to 'typing' to match upstream's default.
+var CLAWD_TOOL_ANIMATIONS = {
+  'edit': 'typing', 'write': 'typing', 'notebookedit': 'typing', 'multiedit': 'typing',
+  'read': 'debugger', 'grep': 'debugger', 'glob': 'debugger',
+  'bash': 'building', 'bashoutput': 'building', 'killshell': 'building', 'killbash': 'building',
+  'agent': 'conducting', 'task': 'conducting',
+  'websearch': 'wizard', 'webfetch': 'wizard',
+  'lsp': 'beacon',
+};
+
+function clawdAnimationForTool(toolName) {
+  if (!toolName) return 'typing';
+  var key = String(toolName).toLowerCase();
+  if (CLAWD_TOOL_ANIMATIONS[key]) return CLAWD_TOOL_ANIMATIONS[key];
+  if (key.indexOf('mcp__') === 0) return 'beacon';
+  if (key.indexOf('plugin_') === 0 || key.indexOf('plugin__') === 0) return 'beacon';
+  return 'typing'; // upstream default
+}
+
+// Translate session-state → animation, following clawd-tank's
+// _compute_display_state mapping.
+function applyClawdEvent(columnId, evt) {
+  if (!window.Clawd || !window.Clawd.setColumnAnimation) return;
+  var animId = null;
+  if (evt.kind === 'working') animId = clawdAnimationForTool(evt.tool);
+  else if (evt.kind === 'thinking') animId = 'thinking';
+  else if (evt.kind === 'confused') animId = 'confused';
+  else if (evt.kind === 'error') animId = 'dizzy';
+  else if (evt.kind === 'idle') animId = 'idle';
+  if (animId) window.Clawd.setColumnAnimation(columnId, animId);
+}
+
+if (window.electronAPI && window.electronAPI.onClawdEvent) {
+  window.electronAPI.onClawdEvent(function (data) {
+    if (!data || data.columnId == null) return;
+    var col = allColumns.get(data.columnId);
+    if (!col) return;
+    applyClawdEvent(data.columnId, data);
+  });
+}
+
+// Idempotent: start the tail for a column's current sessionId. If we already
+// had a tail running for an older sessionId, stop it first. Safe to call as
+// often as we like — called on every assignment site.
+function ensureClawdTail(columnId) {
+  if (!window.electronAPI || !window.electronAPI.clawdStartTail) return;
+  var col = allColumns.get(columnId);
+  if (!col || !col.sessionId || !col.projectKey) return;
+  if (col.clawdTailSessionId === col.sessionId) return;
+  col.clawdTailSessionId = col.sessionId;
+  window.electronAPI.clawdStartTail(columnId, col.projectKey, col.sessionId);
+}
+
 function fetchAndSetSessionTitle(columnId, projectPath, sessionId) {
   if (!window.electronAPI || !window.electronAPI.getSessionTitle) return;
   var col = allColumns.get(columnId);
@@ -3881,6 +3953,7 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
             col.sessionMtime = sessions[i].modified || 0;
             persistSessions(col.projectKey);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
+            ensureClawdTail(columnId);
             // Effort is now set at spawn via --effort (the only non-interactive
             // mechanism — /config set effort doesn't exist and /effort opens
             // an interactive picker). Just sync the column header dropdown
@@ -3942,6 +4015,7 @@ function startSessionSync(columnId, projectPath) {
               col2.sessionMtime = s.modified;
               persistSessions(col2.projectKey);
               fetchAndSetSessionTitle(columnId, projectPath, s.sessionId);
+              ensureClawdTail(columnId);
               return;
             }
           }
@@ -3957,6 +4031,7 @@ function startSessionSync(columnId, projectPath) {
             col2.sessionMtime = sessions[k].modified;
             persistSessions(col2.projectKey);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
+            ensureClawdTail(columnId);
             return;
           }
         }
@@ -4167,6 +4242,9 @@ function setFocusedColumn(id) {
   state.focusedColumnId = id;
   col.element.classList.add('focused');
   if (col.terminal) col.terminal.focus();
+  if (window.Clawd && typeof window.Clawd.setFocusedColumn === 'function') {
+    window.Clawd.setFocusedColumn(id);
+  }
 
   // Clear attention flash on this column's header
   if (col.headerEl) col.headerEl.classList.remove('attention-flash');
@@ -8321,6 +8399,50 @@ document.getElementById('btn-settings').addEventListener('click', function () {
       if (status) status.textContent = 'Save failed: ' + (err && err.message || err);
     });
   });
+})();
+
+(function wireClawdSettings() {
+  function attach() {
+    var enabledEl = document.getElementById('setting-clawd-enabled');
+    var sizeEl = document.getElementById('setting-clawd-size');
+    var sizeValEl = document.getElementById('setting-clawd-size-val');
+    if (!enabledEl || !sizeEl || !window.Clawd) return;
+
+    function refresh() {
+      enabledEl.checked = window.Clawd.isEnabled();
+      var size = window.Clawd.getSize();
+      sizeEl.value = String(size);
+      if (sizeValEl) sizeValEl.textContent = size + 'px';
+    }
+    refresh();
+
+    enabledEl.addEventListener('change', function () {
+      if (enabledEl.checked) window.Clawd.enable();
+      else window.Clawd.disable();
+    });
+    sizeEl.addEventListener('input', function () {
+      var n = parseInt(sizeEl.value, 10);
+      if (isNaN(n)) return;
+      window.Clawd.setSize(n);
+      if (sizeValEl) sizeValEl.textContent = n + 'px';
+    });
+
+    var btn = document.getElementById('btn-settings');
+    if (btn) btn.addEventListener('click', refresh);
+
+    var upstreamLink = document.getElementById('clawd-upstream-link');
+    if (upstreamLink && window.electronAPI && window.electronAPI.openExternal) {
+      upstreamLink.addEventListener('click', function (e) {
+        e.preventDefault();
+        window.electronAPI.openExternal(upstreamLink.href);
+      });
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
 })();
 
 (function wireCtxDefaultSetting() {
