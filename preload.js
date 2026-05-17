@@ -96,6 +96,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startFsWatch: (projectPath) => ipcRenderer.invoke('fs:startWatch', projectPath),
   stopFsWatch: (projectPath) => ipcRenderer.invoke('fs:stopWatch', projectPath),
   onFsChanged: (callback) => ipcRenderer.on('fs:changed', (_, root) => callback(root)),
+  getAutoUpdateClaude: () => ipcRenderer.invoke('config:getAutoUpdateClaude'),
+  setAutoUpdateClaude: (enabled) => ipcRenderer.invoke('config:setAutoUpdateClaude', enabled),
+  getTerminalSettings: () => ipcRenderer.invoke('config:getTerminalSettings'),
+  setTerminalSettings: (settings) => ipcRenderer.invoke('config:setTerminalSettings', settings),
 
   // Automations
   getAutomations: () => ipcRenderer.invoke('automations:getAll'),

@@ -1419,9 +1419,21 @@ ipcMain.handle('sessions:load', (event, projectPath) => {
 
 // --- CLAUDE.md Management ---
 
+// Sentinel passed by the renderer when it wants to edit the global
+// ~/.claude/CLAUDE.md (a Claude CLI feature: instructions that apply to every
+// project). Resolved here so we never expose the home path directly to the
+// renderer and so assertInsideAllowedRoots still gates writes.
+const GLOBAL_CLAUDEMD_SENTINEL = '__GLOBAL__';
+function resolveClaudeMdRoot(arg) {
+  if (arg === GLOBAL_CLAUDEMD_SENTINEL) {
+    return path.join(os.homedir(), '.claude');
+  }
+  return arg;
+}
+
 ipcMain.handle('claudemd:read', (event, projectPath) => {
   try {
-    const safeBase = assertInsideAllowedRoots(projectPath);
+    const safeBase = assertInsideAllowedRoots(resolveClaudeMdRoot(projectPath));
     const filePath = path.join(safeBase, 'CLAUDE.md');
     if (!fs.existsSync(filePath)) return { exists: false, content: '' };
     return { exists: true, content: fs.readFileSync(filePath, 'utf8') };
@@ -1432,7 +1444,7 @@ ipcMain.handle('claudemd:read', (event, projectPath) => {
 
 ipcMain.handle('claudemd:save', (event, projectPath, content) => {
   try {
-    const safeBase = assertInsideAllowedRoots(projectPath);
+    const safeBase = assertInsideAllowedRoots(resolveClaudeMdRoot(projectPath));
     const filePath = path.join(safeBase, 'CLAUDE.md');
     if (typeof content !== 'string') return { success: false, error: 'content must be a string' };
     if (Buffer.byteLength(content, 'utf8') > FS_WRITE_MAX_BYTES) {
@@ -2120,6 +2132,85 @@ function findLaunchSettingsConfigs(projectPath) {
   return configs;
 }
 
+function detectNpmScripts(projectPath) {
+  const out = [];
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(projectPath, 'package.json'), 'utf8'));
+    if (data && data.scripts && typeof data.scripts === 'object') {
+      for (const [name, body] of Object.entries(data.scripts)) {
+        out.push({
+          name: 'npm: ' + name,
+          type: 'custom',
+          command: 'npm',
+          args: ['run', name],
+          cwd: projectPath,
+          _source: 'package.json',
+          _readonly: true,
+          _hint: typeof body === 'string' ? body : ''
+        });
+      }
+    }
+  } catch { /* no package.json or invalid */ }
+  return out;
+}
+
+function detectMakefileTargets(projectPath) {
+  const out = [];
+  try {
+    const content = fs.readFileSync(path.join(projectPath, 'Makefile'), 'utf8');
+    // Lines like "target: deps" — ignore special targets and pattern rules.
+    const seen = new Set();
+    const re = /^([A-Za-z0-9_.\-\/]+)\s*:\s*(?!=)/gm;
+    let m;
+    while ((m = re.exec(content)) !== null) {
+      const t = m[1];
+      if (t.startsWith('.') || t.includes('%')) continue;
+      if (seen.has(t)) continue;
+      seen.add(t);
+      out.push({ name: 'make: ' + t, type: 'custom', command: 'make', args: [t], cwd: projectPath, _source: 'Makefile', _readonly: true });
+      if (out.length >= 40) break;
+    }
+  } catch { /* no Makefile */ }
+  return out;
+}
+
+function detectCargoBinaries(projectPath) {
+  const out = [];
+  try {
+    const txt = fs.readFileSync(path.join(projectPath, 'Cargo.toml'), 'utf8');
+    // Crude TOML parse — we don't depend on a TOML lib in main. Pull the
+    // package name and any [[bin]] entries; covers the common case.
+    const pkgNameMatch = /\[package\][\s\S]*?name\s*=\s*"([^"]+)"/.exec(txt);
+    if (pkgNameMatch) {
+      out.push({ name: 'cargo run', type: 'custom', command: 'cargo', args: ['run'], cwd: projectPath, _source: 'Cargo.toml', _readonly: true });
+      out.push({ name: 'cargo test', type: 'custom', command: 'cargo', args: ['test'], cwd: projectPath, _source: 'Cargo.toml', _readonly: true });
+    }
+    const binRe = /\[\[bin\]\][\s\S]*?name\s*=\s*"([^"]+)"/g;
+    let m;
+    while ((m = binRe.exec(txt)) !== null) {
+      out.push({ name: 'cargo run --bin ' + m[1], type: 'custom', command: 'cargo', args: ['run', '--bin', m[1]], cwd: projectPath, _source: 'Cargo.toml', _readonly: true });
+    }
+  } catch { /* no Cargo.toml */ }
+  return out;
+}
+
+function detectPyProjectScripts(projectPath) {
+  const out = [];
+  try {
+    const txt = fs.readFileSync(path.join(projectPath, 'pyproject.toml'), 'utf8');
+    // Same caveat as Cargo — minimal TOML parser. Pull [project.scripts] entries.
+    const block = /\[project\.scripts\]([\s\S]*?)(?:\n\[|$)/.exec(txt);
+    if (block) {
+      const lineRe = /^([A-Za-z0-9_.\-]+)\s*=\s*"([^"]+)"/gm;
+      let m;
+      while ((m = lineRe.exec(block[1])) !== null) {
+        out.push({ name: 'pip: ' + m[1], type: 'custom', command: m[1], args: [], cwd: projectPath, _source: 'pyproject.toml', _readonly: true });
+      }
+    }
+  } catch { /* no pyproject.toml */ }
+  return out;
+}
+
 ipcMain.handle('launch:getConfigs', (event, projectPath) => {
   let configs = [];
   // VS Code launch.json
@@ -2131,6 +2222,11 @@ ipcMain.handle('launch:getConfigs', (event, projectPath) => {
   } catch { /* no launch.json or parse error */ }
   // .NET launchSettings.json
   configs = configs.concat(findLaunchSettingsConfigs(projectPath));
+  // Auto-detected from common build/runner manifests
+  configs = configs.concat(detectNpmScripts(projectPath));
+  configs = configs.concat(detectMakefileTargets(projectPath));
+  configs = configs.concat(detectCargoBinaries(projectPath));
+  configs = configs.concat(detectPyProjectScripts(projectPath));
   // Custom configs from .claudes/launch.json
   const customPath = path.join(projectPath, '.claudes', 'launch.json');
   try {
@@ -3306,6 +3402,30 @@ ipcMain.handle('editor:setExternalCommand', (event, cmd) => {
   cfg.externalEditorCommand = typeof cmd === 'string' ? cmd.trim() : '';
   writeConfig(cfg);
   return { ok: true };
+});
+
+ipcMain.handle('config:getAutoUpdateClaude', () => {
+  return readConfig().autoUpdateClaude === true;
+});
+ipcMain.handle('config:setAutoUpdateClaude', (event, enabled) => {
+  const cfg = readConfig();
+  cfg.autoUpdateClaude = !!enabled;
+  writeConfig(cfg);
+  return { ok: true };
+});
+
+// Persisted terminal settings (font / scrollback / cursor / background colour).
+// Read by the renderer when constructing each Terminal so user prefs apply
+// to every spawn.
+ipcMain.handle('config:getTerminalSettings', () => {
+  const cfg = readConfig();
+  return cfg.terminal || {};
+});
+ipcMain.handle('config:setTerminalSettings', (event, settings) => {
+  const cfg = readConfig();
+  cfg.terminal = Object.assign({}, cfg.terminal || {}, settings && typeof settings === 'object' ? settings : {});
+  writeConfig(cfg);
+  return { ok: true, settings: cfg.terminal };
 });
 
 // --- Automations IPC Handlers ---

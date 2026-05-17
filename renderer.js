@@ -2733,13 +2733,22 @@ function addColumn(args, targetRow, opts) {
   setupColumnDropTarget(col);
   row.el.appendChild(col);
 
+  // Override the default theme background with the user-chosen colour if set.
+  var themeForThisCol = termTheme;
+  if (termSettings && termSettings.background && termSettings.background !== '#1a1a2e') {
+    themeForThisCol = Object.assign({}, termTheme, { background: termSettings.background });
+  }
   var terminal = new Terminal({
-    theme: termTheme,
+    theme: themeForThisCol,
     // Per-platform font fallback: Cascadia/Consolas exist on Windows; JetBrains
     // Mono / Menlo on macOS; DejaVu Sans Mono / Liberation Mono on most Linux
-    // distros. The closing 'monospace' is a guaranteed final fallback.
-    fontFamily: "'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New', monospace",
+    // distros. The closing 'monospace' is a guaranteed final fallback. A user
+    // setting takes precedence when set.
+    fontFamily: (termSettings && termSettings.fontFamily) ||
+      "'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New', monospace",
     fontSize: fontSize,
+    scrollback: (termSettings && termSettings.scrollback) || 5000,
+    cursorStyle: (termSettings && termSettings.cursorStyle) || 'block',
     cursorBlink: true,
     allowProposedApi: true
   });
@@ -7634,15 +7643,29 @@ document.addEventListener('click', function (e) {
 // CLAUDE.md Modal
 // ============================================================
 
-function openClaudeMdModal() {
-  if (!activeProjectKey || !window.electronAPI) return;
+// Tracks whether the CLAUDE.md modal is showing the project-scoped file or
+// the global ~/.claude/CLAUDE.md. The same modal is reused for both — only the
+// root path the read/save IPCs are asked to operate on differs.
+var claudeMdEditingGlobal = false;
+var GLOBAL_CLAUDE_DIR_KEY = '__GLOBAL__';
 
-  claudeMdPath.textContent = activeProjectKey + '/CLAUDE.md';
+function openClaudeMdModal(opts) {
+  if (!window.electronAPI) return;
+  var global = !!(opts && opts.global);
+  // Project-scoped variant still requires an active project (current behaviour).
+  if (!global && !activeProjectKey) return;
+  claudeMdEditingGlobal = global;
+  var root = global
+    ? (window.__claudesHome || '~/.claude')   // resolved in main; this is a label only
+    : activeProjectKey;
+  claudeMdPath.textContent = root + '/CLAUDE.md';
   claudeMdStatus.textContent = 'Loading...';
   claudeMdEditor.value = '';
   claudeMdModal.classList.remove('hidden');
-
-  window.electronAPI.readClaudeMd(activeProjectKey).then(function (result) {
+  // The IPC expects a real path; for global we pass a sentinel that main
+  // resolves to os.homedir()/.claude.
+  var rootArg = global ? GLOBAL_CLAUDE_DIR_KEY : activeProjectKey;
+  window.electronAPI.readClaudeMd(rootArg).then(function (result) {
     claudeMdEditor.value = result.content;
     claudeMdStatus.textContent = result.exists ? '' : 'File does not exist yet — will be created on save';
   });
@@ -7653,10 +7676,12 @@ function closeClaudeMdModal() {
 }
 
 function saveClaudeMd() {
-  if (!activeProjectKey || !window.electronAPI) return;
+  if (!window.electronAPI) return;
+  if (!claudeMdEditingGlobal && !activeProjectKey) return;
 
   claudeMdStatus.textContent = 'Saving...';
-  window.electronAPI.saveClaudeMd(activeProjectKey, claudeMdEditor.value).then(function (result) {
+  var rootArg = claudeMdEditingGlobal ? GLOBAL_CLAUDE_DIR_KEY : activeProjectKey;
+  window.electronAPI.saveClaudeMd(rootArg, claudeMdEditor.value).then(function (result) {
     if (result.success) {
       claudeMdStatus.textContent = 'Saved';
       setTimeout(function () {
@@ -7781,6 +7806,73 @@ document.getElementById('setting-agent-repos-dir').addEventListener('change', fu
 document.getElementById('setting-agent-repos-dir').addEventListener('keydown', function (e) {
   e.stopPropagation();
 });
+
+// --- Tools tab wiring ---
+(function wireToolsTab() {
+  var editorInput = document.getElementById('setting-external-editor');
+  var editorBtn = document.getElementById('btn-edit-global-claudemd');
+  var autoUpdEl = document.getElementById('setting-auto-update-claude');
+  if (!editorInput) return;
+  if (window.electronAPI && window.electronAPI.getExternalEditorCommand) {
+    window.electronAPI.getExternalEditorCommand().then(function (cmd) {
+      editorInput.value = cmd || '';
+    });
+  }
+  if (window.electronAPI && window.electronAPI.getAutoUpdateClaude && autoUpdEl) {
+    window.electronAPI.getAutoUpdateClaude().then(function (v) { autoUpdEl.checked = !!v; });
+  }
+  editorInput.addEventListener('change', function () {
+    if (window.electronAPI && window.electronAPI.setExternalEditorCommand) {
+      window.electronAPI.setExternalEditorCommand(editorInput.value.trim());
+    }
+  });
+  editorInput.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  if (autoUpdEl) {
+    autoUpdEl.addEventListener('change', function () {
+      if (window.electronAPI && window.electronAPI.setAutoUpdateClaude) {
+        window.electronAPI.setAutoUpdateClaude(autoUpdEl.checked);
+      }
+    });
+  }
+  if (editorBtn) {
+    editorBtn.addEventListener('click', function () {
+      settingsModal.classList.add('hidden');
+      openClaudeMdModal({ global: true });
+    });
+  }
+})();
+
+// --- Terminal tab wiring ---
+var termSettings = { fontFamily: '', scrollback: 5000, cursorStyle: 'block', background: '#1a1a2e' };
+(function wireTerminalTab() {
+  var fontEl = document.getElementById('setting-term-font');
+  var sbEl = document.getElementById('setting-term-scrollback');
+  var cursorEl = document.getElementById('setting-term-cursor');
+  var bgEl = document.getElementById('setting-term-bg');
+  if (!fontEl) return;
+  if (window.electronAPI && window.electronAPI.getTerminalSettings) {
+    window.electronAPI.getTerminalSettings().then(function (s) {
+      termSettings = Object.assign(termSettings, s || {});
+      fontEl.value = termSettings.fontFamily || '';
+      sbEl.value = String(termSettings.scrollback || 5000);
+      cursorEl.value = termSettings.cursorStyle || 'block';
+      bgEl.value = termSettings.background || '#1a1a2e';
+    });
+  }
+  function save(partial) {
+    termSettings = Object.assign(termSettings, partial);
+    if (window.electronAPI && window.electronAPI.setTerminalSettings) {
+      window.electronAPI.setTerminalSettings(termSettings);
+    }
+  }
+  fontEl.addEventListener('change', function () { save({ fontFamily: fontEl.value }); });
+  sbEl.addEventListener('change', function () { save({ scrollback: parseInt(sbEl.value, 10) || 5000 }); });
+  cursorEl.addEventListener('change', function () { save({ cursorStyle: cursorEl.value }); });
+  bgEl.addEventListener('change', function () { save({ background: bgEl.value }); });
+  [fontEl, sbEl, cursorEl, bgEl].forEach(function (el) {
+    el.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  });
+})();
 
 btnClaudeMd.addEventListener('click', openClaudeMdModal);
 

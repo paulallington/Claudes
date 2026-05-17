@@ -379,6 +379,8 @@
           <button class="settings-tab" data-settings-tab="notifications" role="tab">Notifications</button>
           <button class="settings-tab" data-settings-tab="automations" role="tab">Automations</button>
           <button class="settings-tab" data-settings-tab="sync" role="tab">Sync</button>
+          <button class="settings-tab" data-settings-tab="terminal" role="tab">Terminal</button>
+          <button class="settings-tab" data-settings-tab="tools" role="tab">Tools</button>
         </div>
         <div class="settings-panes">
           <div class="settings-pane active" data-settings-pane="general">
@@ -430,6 +432,60 @@
                 <button id="btn-browse-agent-repos" class="settings-browse-btn" title="Browse...">...</button>
               </div>
               <span class="settings-hint">Base directory for isolated agent repository clones</span>
+            </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="terminal">
+            <div class="settings-field">
+              <label for="setting-term-font">Font family</label>
+              <select id="setting-term-font" class="settings-input">
+                <option value="">Auto (Cascadia / JetBrains Mono / Menlo / DejaVu)</option>
+                <option value="'Cascadia Code', monospace">Cascadia Code</option>
+                <option value="'JetBrains Mono', monospace">JetBrains Mono</option>
+                <option value="'Menlo', monospace">Menlo</option>
+                <option value="'Consolas', monospace">Consolas</option>
+                <option value="'DejaVu Sans Mono', monospace">DejaVu Sans Mono</option>
+                <option value="monospace">System monospace</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-scrollback">Scrollback (lines)</label>
+              <select id="setting-term-scrollback" class="settings-input">
+                <option value="1000">1,000</option>
+                <option value="5000" selected>5,000</option>
+                <option value="10000">10,000</option>
+                <option value="50000">50,000</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-cursor">Cursor style</label>
+              <select id="setting-term-cursor" class="settings-input">
+                <option value="block" selected>Block</option>
+                <option value="bar">Bar</option>
+                <option value="underline">Underline</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-bg">Terminal background</label>
+              <input type="color" id="setting-term-bg" class="settings-input" value="#1a1a2e">
+              <span class="settings-hint">Applied to new columns. Existing columns pick up the change on the next reflow.</span>
+            </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="tools">
+            <div class="settings-field">
+              <label for="setting-external-editor">External editor command</label>
+              <input type="text" id="setting-external-editor" class="settings-input" placeholder="code" spellcheck="false">
+              <span class="settings-hint">Used by "Open in external editor" in project / file context menus. Default: <code>code</code> (VS Code) / <code>code.cmd</code> on Windows. Set to anything else on PATH (e.g. <code>cursor</code>, <code>subl</code>).</span>
+            </div>
+            <div class="settings-field">
+              <button id="btn-edit-global-claudemd" class="settings-browse-btn" style="padding:6px 14px;">Edit global ~/.claude/CLAUDE.md</button>
+              <span class="settings-hint">Instructions that apply to every Claude Code session, regardless of project.</span>
+            </div>
+            <div class="settings-field">
+              <label class="settings-toggle">
+                <input type="checkbox" id="setting-auto-update-claude">
+                <span>Auto-run <code>claude update</code> on launch</span>
+              </label>
+              <span class="settings-hint">Off by default — only enable if you trust your PATH (the first <code>claude</code> on PATH will be invoked unprompted at every app launch).</span>
             </div>
           </div>
           <div class="settings-pane" data-settings-pane="sync">
