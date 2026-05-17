@@ -2245,6 +2245,167 @@ ipcMain.handle('git:diffStat', async (event, projectPath, staged) => {
   }
 });
 
+// --- Git: merge / rebase / conflict / tag / cherry-pick / file history ---
+
+ipcMain.handle('git:merge', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) return { success: false, error: 'refused: invalid branch name' };
+  try {
+    await runGit(projectPath, ['merge', branchName, '--no-edit'], 30000);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: (err.stderr || err.message).toString().trim() };
+  }
+});
+
+ipcMain.handle('git:rebase', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) return { success: false, error: 'refused: invalid branch name' };
+  try {
+    await runGit(projectPath, ['rebase', branchName], 30000);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: (err.stderr || err.message).toString().trim() };
+  }
+});
+
+ipcMain.handle('git:mergeAbort', async (event, projectPath) => {
+  try { await runGit(projectPath, ['merge', '--abort'], 5000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:rebaseAbort', async (event, projectPath) => {
+  try { await runGit(projectPath, ['rebase', '--abort'], 5000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:rebaseContinue', async (event, projectPath) => {
+  try { await runGit(projectPath, ['rebase', '--continue'], 10000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:mergeContinue', async (event, projectPath) => {
+  // Modern git: `git merge --continue` finalises a conflicted merge once
+  // everything is staged.
+  try { await runGit(projectPath, ['commit', '--no-edit'], 10000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// Conflict resolution helpers. After checkout --ours / --theirs the file must
+// still be staged via git add to mark the conflict resolved.
+ipcMain.handle('git:resolveOurs', async (event, projectPath, filePath) => {
+  try {
+    await runGit(projectPath, ['checkout', '--ours', '--', filePath], 5000);
+    await runGit(projectPath, ['add', '--', filePath], 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:resolveTheirs', async (event, projectPath, filePath) => {
+  try {
+    await runGit(projectPath, ['checkout', '--theirs', '--', filePath], 5000);
+    await runGit(projectPath, ['add', '--', filePath], 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// Reports the current "operation" state so the renderer can show a banner.
+// Walks the .git directory for MERGE_HEAD / REBASE_HEAD / CHERRY_PICK_HEAD
+// markers — cheaper and more reliable than parsing `git status --porcelain`
+// for the same info.
+ipcMain.handle('git:opState', async (event, projectPath) => {
+  try {
+    const gitDir = (await runGit(projectPath, ['rev-parse', '--git-dir'], 5000)).trim();
+    const gd = path.isAbsolute(gitDir) ? gitDir : path.join(projectPath, gitDir);
+    const state = { merging: false, rebasing: false, cherryPicking: false, conflictFiles: [] };
+    if (fs.existsSync(path.join(gd, 'MERGE_HEAD'))) state.merging = true;
+    if (fs.existsSync(path.join(gd, 'rebase-merge')) || fs.existsSync(path.join(gd, 'rebase-apply'))) state.rebasing = true;
+    if (fs.existsSync(path.join(gd, 'CHERRY_PICK_HEAD'))) state.cherryPicking = true;
+    // Conflict file list from porcelain — entries with U / DD / AA / etc.
+    if (state.merging || state.rebasing || state.cherryPicking) {
+      try {
+        const out = await runGit(projectPath, ['status', '--porcelain'], 5000);
+        out.split('\n').forEach(line => {
+          if (!line) return;
+          const code = line.substring(0, 2);
+          if (code.includes('U') || code === 'DD' || code === 'AA') {
+            state.conflictFiles.push(line.substring(3));
+          }
+        });
+      } catch { /* swallow */ }
+    }
+    return state;
+  } catch {
+    return { merging: false, rebasing: false, cherryPicking: false, conflictFiles: [] };
+  }
+});
+
+// Tag list / create / delete.
+ipcMain.handle('git:tags', async (event, projectPath) => {
+  try {
+    const out = await runGit(projectPath, ['for-each-ref', '--format=%(refname:short)|%(objectname:short)|%(subject)', 'refs/tags', '--sort=-creatordate'], 10000);
+    return out.split('\n').filter(Boolean).map(line => {
+      const parts = line.split('|');
+      return { name: parts[0], hash: parts[1], subject: parts.slice(2).join('|') };
+    });
+  } catch { return []; }
+});
+ipcMain.handle('git:tagCreate', async (event, projectPath, tagName, hash) => {
+  if (!isSafeGitRefName(tagName)) return { success: false, error: 'refused: invalid tag name' };
+  if (hash && !isSafeGitHash(hash)) return { success: false, error: 'refused: invalid hash' };
+  try {
+    const args = hash ? ['tag', tagName, hash] : ['tag', tagName];
+    await runGit(projectPath, args, 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:tagDelete', async (event, projectPath, tagName) => {
+  if (!isSafeGitRefName(tagName)) return { success: false, error: 'refused: invalid tag name' };
+  try {
+    await runGit(projectPath, ['tag', '-d', tagName], 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// Cherry-pick onto current branch.
+ipcMain.handle('git:cherryPick', async (event, projectPath, hash) => {
+  if (!isSafeGitHash(hash)) return { success: false, error: 'refused: invalid hash' };
+  try { await runGit(projectPath, ['cherry-pick', hash], 30000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// File history: git log for a single path. Returns up to `limit` commits with
+// hash / subject / author / date.
+ipcMain.handle('git:fileHistory', async (event, projectPath, filePath, limit) => {
+  try {
+    const n = Math.max(1, Math.min(500, parseInt(limit) || 50));
+    const out = await runGit(projectPath, ['log', '-n', String(n), '--format=%h|%s|%an|%aI', '--no-color', '--', filePath], 15000);
+    return out.split('\n').filter(Boolean).map(line => {
+      const parts = line.split('|');
+      return { hash: parts[0], message: parts[1], author: parts[2], date: parts[3] };
+    });
+  } catch { return []; }
+});
+
+// Blame for a single file: line -> { hash, author, time, content }
+ipcMain.handle('git:blame', async (event, projectPath, filePath) => {
+  try {
+    const out = await runGit(projectPath, ['blame', '--line-porcelain', '--', filePath], 15000);
+    const lines = out.split('\n');
+    const result = [];
+    let current = null;
+    for (const line of lines) {
+      if (/^[0-9a-f]{40,}\s/.test(line)) {
+        if (current) result.push(current);
+        const parts = line.split(' ');
+        current = { hash: parts[0].slice(0, 8), author: '', time: 0, content: '' };
+      } else if (line.startsWith('author ')) {
+        if (current) current.author = line.slice(7);
+      } else if (line.startsWith('author-time ')) {
+        if (current) current.time = parseInt(line.slice(12)) * 1000;
+      } else if (line.startsWith('\t')) {
+        if (current) { current.content = line.slice(1); result.push(current); current = null; }
+      }
+    }
+    if (current) result.push(current);
+    return result;
+  } catch { return []; }
+});
+
 function stripJsoncComments(text) {
   // Match strings first (preserve them), then strip // and /* */ comments
   return text.replace(/"(?:[^"\\]|\\.)*"|\/\/.*$|\/\*[\s\S]*?\*\//gm, function (match) {

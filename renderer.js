@@ -5078,6 +5078,175 @@ function refreshGitStatus(force) {
   }).then(done, done);
 }
 
+function showGitFileContextMenu(e, filePath) {
+  var existing = document.querySelector('.git-file-ctx-menu');
+  if (existing) existing.remove();
+  var menu = document.createElement('div');
+  menu.className = 'project-context-menu git-file-ctx-menu';
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  function add(label, fn) {
+    var it = document.createElement('div');
+    it.className = 'project-context-item';
+    it.textContent = label;
+    it.addEventListener('click', function () { menu.remove(); fn(); });
+    menu.appendChild(it);
+  }
+  add('File history…', function () { showFileHistory(filePath); });
+  add('Blame…', function () { showFileBlame(filePath); });
+  document.body.appendChild(menu);
+  setTimeout(function () {
+    function out(ev) {
+      if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', out, true); }
+    }
+    document.addEventListener('mousedown', out, true);
+  }, 0);
+}
+
+// Lightweight modal-less floating panels for blame / file history. They reuse
+// the existing modal-overlay styling so layout is consistent with the rest
+// of the app.
+function showFileHistory(filePath) {
+  var existing = document.querySelector('.git-history-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay git-history-overlay';
+  overlay.innerHTML = '<div class="modal-dialog"><div class="modal-header"><span class="modal-title">File history</span><span class="modal-subtitle">' + escapeHtml(filePath) + '</span><span class="modal-close">&times;</span></div><div class="modal-body"><div class="git-history-list" style="max-height:60vh;overflow:auto;"></div></div></div>';
+  document.body.appendChild(overlay);
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  var listEl = overlay.querySelector('.git-history-list');
+  listEl.textContent = 'Loading…';
+  window.electronAPI.gitFileHistory(activeProjectKey, filePath, 100).then(function (rows) {
+    listEl.innerHTML = '';
+    if (!rows.length) { listEl.textContent = 'No history.'; return; }
+    rows.forEach(function (r) {
+      var item = document.createElement('div');
+      item.className = 'git-history-item';
+      item.style.cssText = 'padding:6px 8px;border-bottom:1px solid var(--border-primary);cursor:pointer;';
+      item.innerHTML = '<div style="font-family:monospace;font-size:11px;color:#9ca3af;">' + escapeHtml(r.hash) + '  •  ' + escapeHtml(r.author) + '  •  ' + escapeHtml(new Date(r.date).toLocaleString()) + '</div>' +
+        '<div style="font-size:13px;margin-top:2px;">' + escapeHtml(r.message) + '</div>' +
+        '<div class="git-history-cp" style="margin-top:4px;"><button class="git-op-mini-btn">Cherry-pick onto current</button></div>';
+      var cpBtn = item.querySelector('.git-op-mini-btn');
+      cpBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (!confirm('Cherry-pick ' + r.hash + ' onto current branch?')) return;
+        window.electronAPI.gitCherryPick(activeProjectKey, r.hash).then(function (rr) {
+          if (!rr.success) alert('Cherry-pick failed: ' + rr.error);
+          refreshGitStatus(true);
+        });
+      });
+      listEl.appendChild(item);
+    });
+  });
+}
+
+function showFileBlame(filePath) {
+  var existing = document.querySelector('.git-blame-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay git-blame-overlay';
+  overlay.innerHTML = '<div class="modal-dialog" style="max-width:90vw;width:90vw;"><div class="modal-header"><span class="modal-title">Blame</span><span class="modal-subtitle">' + escapeHtml(filePath) + '</span><span class="modal-close">&times;</span></div><div class="modal-body"><pre class="git-blame-pre" style="max-height:70vh;overflow:auto;font-size:12px;line-height:1.4;margin:0;"></pre></div></div>';
+  document.body.appendChild(overlay);
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  var pre = overlay.querySelector('.git-blame-pre');
+  pre.textContent = 'Loading blame…';
+  window.electronAPI.gitBlame(activeProjectKey, filePath).then(function (rows) {
+    if (!rows.length) { pre.textContent = 'No blame data.'; return; }
+    pre.innerHTML = '';
+    rows.forEach(function (r, i) {
+      var line = document.createElement('div');
+      var meta = '<span style="color:#9ca3af;display:inline-block;width:80px;">' + escapeHtml(r.hash) + '</span>' +
+                 '<span style="color:#6b7280;display:inline-block;width:120px;">' + escapeHtml((r.author || '').slice(0, 16)) + '</span>' +
+                 '<span style="color:#52525b;display:inline-block;width:50px;">' + (i + 1) + '</span>';
+      line.innerHTML = meta + '<span style="white-space:pre;">' + escapeHtml(r.content || '') + '</span>';
+      pre.appendChild(line);
+    });
+  });
+}
+
+function renderGitOpBanner() {
+  if (!window.electronAPI || !window.electronAPI.gitOpState) return;
+  window.electronAPI.gitOpState(activeProjectKey).then(function (s) {
+    if (!s || (!s.merging && !s.rebasing && !s.cherryPicking)) return;
+    var op = s.merging ? 'merge' : s.rebasing ? 'rebase' : 'cherry-pick';
+    var banner = document.createElement('div');
+    banner.className = 'git-op-banner';
+    var hdr = document.createElement('div');
+    hdr.className = 'git-op-banner-header';
+    hdr.textContent = 'In progress: ' + op + (s.conflictFiles.length ? '  •  ' + s.conflictFiles.length + ' conflict(s)' : '');
+    banner.appendChild(hdr);
+    s.conflictFiles.forEach(function (f) {
+      var row = document.createElement('div');
+      row.className = 'git-op-conflict-row';
+      var name = document.createElement('span');
+      name.textContent = f;
+      name.style.flex = '1';
+      var ours = document.createElement('button');
+      ours.className = 'git-op-mini-btn';
+      ours.textContent = 'use ours';
+      ours.addEventListener('click', function () {
+        window.electronAPI.gitResolveOurs(activeProjectKey, f).then(function (r) {
+          if (!r.success) alert('Resolve failed: ' + r.error);
+          refreshGitStatus(true);
+        });
+      });
+      var theirs = document.createElement('button');
+      theirs.className = 'git-op-mini-btn';
+      theirs.textContent = 'use theirs';
+      theirs.addEventListener('click', function () {
+        window.electronAPI.gitResolveTheirs(activeProjectKey, f).then(function (r) {
+          if (!r.success) alert('Resolve failed: ' + r.error);
+          refreshGitStatus(true);
+        });
+      });
+      var openIt = document.createElement('button');
+      openIt.className = 'git-op-mini-btn';
+      openIt.textContent = 'open';
+      openIt.addEventListener('click', function () {
+        var full = activeProjectKey.replace(/[\\/]$/, '') + '/' + f;
+        openFileEditor(full);
+      });
+      row.appendChild(name); row.appendChild(ours); row.appendChild(theirs); row.appendChild(openIt);
+      banner.appendChild(row);
+    });
+    var actions = document.createElement('div');
+    actions.className = 'git-op-banner-actions';
+    var continueBtn = document.createElement('button');
+    continueBtn.className = 'git-op-mini-btn primary';
+    continueBtn.textContent = s.conflictFiles.length === 0 ? 'Continue' : 'Continue (when staged)';
+    continueBtn.addEventListener('click', function () {
+      var p = s.rebasing
+        ? window.electronAPI.gitRebaseContinue(activeProjectKey)
+        : window.electronAPI.gitMergeContinue(activeProjectKey);
+      p.then(function (r) {
+        if (!r.success) alert('Continue failed: ' + r.error);
+        refreshGitStatus(true);
+      });
+    });
+    var abortBtn = document.createElement('button');
+    abortBtn.className = 'git-op-mini-btn';
+    abortBtn.textContent = 'Abort';
+    abortBtn.addEventListener('click', function () {
+      if (!confirm('Abort the in-progress ' + op + '?')) return;
+      var p = s.rebasing
+        ? window.electronAPI.gitRebaseAbort(activeProjectKey)
+        : window.electronAPI.gitMergeAbort(activeProjectKey);
+      p.then(function (r) {
+        if (!r.success) alert('Abort failed: ' + r.error);
+        refreshGitStatus(true);
+      });
+    });
+    actions.appendChild(continueBtn);
+    actions.appendChild(abortBtn);
+    banner.appendChild(actions);
+    gitChangesEl.insertBefore(banner, gitChangesEl.firstChild);
+  });
+}
+
 function updateActiveProjectBranchLabels(branch) {
   if (!activeProjectKey) return;
   var project = config.projects.find(function (p) { return p.path === activeProjectKey; });
@@ -5102,6 +5271,9 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
   updateActiveProjectBranchLabels(branch);
   while (gitHeaderEl.firstChild) gitHeaderEl.removeChild(gitHeaderEl.firstChild);
   while (gitChangesEl.firstChild) gitChangesEl.removeChild(gitChangesEl.firstChild);
+  // Conflict / mid-operation banner. Fired async; the banner is inserted at
+  // the top of gitChangesEl when state shows merging/rebasing/cherry-picking.
+  renderGitOpBanner();
 
   // Branch row (clickable branch switcher + pull/push/stash buttons)
   var row = document.createElement('div');
@@ -5240,13 +5412,50 @@ function toggleBranchDropdown(parentRow, currentBranch) {
       (function (b) {
         var item = document.createElement('div');
         item.className = 'git-branch-dropdown-item' + (b.isCurrent ? ' current' : '');
-        item.textContent = (b.isCurrent ? '\u2713 ' : '  ') + b.name;
+        item.style.display = 'flex';
+        item.style.alignItems = 'center';
+        item.style.gap = '4px';
+        var label = document.createElement('span');
+        label.style.flex = '1';
+        label.textContent = (b.isCurrent ? '\u2713 ' : '  ') + b.name;
+        item.appendChild(label);
         if (!b.isCurrent) {
-          item.addEventListener('click', function (e) {
+          label.style.cursor = 'pointer';
+          label.addEventListener('click', function (e) {
             e.stopPropagation();
             dropdown.remove();
             gitCheckout(b.name);
           });
+          // Quick merge / rebase actions per branch \u2014 operate on the current
+          // branch, integrating the row's branch.
+          var mergeBtn = document.createElement('button');
+          mergeBtn.className = 'git-branch-mini-action';
+          mergeBtn.textContent = 'merge';
+          mergeBtn.title = 'Merge ' + b.name + ' into current branch';
+          mergeBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            dropdown.remove();
+            if (!confirm('Merge "' + b.name + '" into current branch?')) return;
+            window.electronAPI.gitMerge(activeProjectKey, b.name).then(function (r) {
+              if (!r.success) alert('Merge failed: ' + r.error);
+              refreshGit();
+            });
+          });
+          var rebaseBtn = document.createElement('button');
+          rebaseBtn.className = 'git-branch-mini-action';
+          rebaseBtn.textContent = 'rebase';
+          rebaseBtn.title = 'Rebase current branch onto ' + b.name;
+          rebaseBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            dropdown.remove();
+            if (!confirm('Rebase current branch onto "' + b.name + '"?')) return;
+            window.electronAPI.gitRebase(activeProjectKey, b.name).then(function (r) {
+              if (!r.success) alert('Rebase failed: ' + r.error);
+              refreshGit();
+            });
+          });
+          item.appendChild(mergeBtn);
+          item.appendChild(rebaseBtn);
         }
         dropdown.appendChild(item);
       })(branches[i]);
@@ -5670,6 +5879,13 @@ function createGitFileRow(file, isStaged, statsMap, depth) {
       staged: isStaged,
       status: file.status
     }, { title: parts[parts.length - 1] + ' (' + file.status + ')' });
+  });
+  // Right-click on the filename gives File History / Blame access — the
+  // change list is the natural place to launch them from.
+  nameEl.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    showGitFileContextMenu(e, file.file);
   });
 
   var statEl = document.createElement('span');

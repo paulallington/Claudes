@@ -7156,3 +7156,41 @@ body.mode-popout #btn-add-project {
 .ext-scope { font-size: 10px; padding: 2px 6px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em; }
 .ext-scope-project { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .ext-scope-global { background: rgba(168,85,247,0.15); color: #c084fc; }
+
+/* Branch dropdown mini-actions (merge / rebase). Tucked at the right of each
+   branch row so the row stays clickable for checkout. */
+.git-branch-mini-action {
+  background: transparent;
+  border: 1px solid #444;
+  color: #cbd5e1;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.git-branch-mini-action:hover { background: rgba(255,255,255,0.06); color: #fff; }
+
+/* Conflict banner shown above the changes list when a merge / rebase /
+   cherry-pick is in progress. */
+.git-op-banner {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 6px 8px;
+  font-size: 12px;
+}
+.git-op-banner-header { font-weight: 600; color: #fbbf24; margin-bottom: 6px; }
+.git-op-conflict-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-family: monospace; }
+.git-op-banner-actions { display: flex; gap: 6px; margin-top: 8px; }
+.git-op-mini-btn {
+  background: transparent;
+  border: 1px solid #555;
+  color: #cbd5e1;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.git-op-mini-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
+.git-op-mini-btn.primary { background: rgba(96, 165, 250, 0.18); border-color: #3b82f6; color: #93c5fd; }
