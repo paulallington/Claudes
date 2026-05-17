@@ -2672,7 +2672,10 @@ function addColumn(args, targetRow, opts) {
 
   var terminal = new Terminal({
     theme: termTheme,
-    fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
+    // Per-platform font fallback: Cascadia/Consolas exist on Windows; JetBrains
+    // Mono / Menlo on macOS; DejaVu Sans Mono / Liberation Mono on most Linux
+    // distros. The closing 'monospace' is a guaranteed final fallback.
+    fontFamily: "'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New', monospace",
     fontSize: fontSize,
     cursorBlink: true,
     allowProposedApi: true
@@ -2694,10 +2697,10 @@ function addColumn(args, targetRow, opts) {
     }
   });
 
-  // Handle Ctrl+V paste and Shift+Enter newline
+  // Handle Cmd/Ctrl+V paste and Shift+Enter newline
   terminal.attachCustomKeyEventHandler(function (e) {
-    // Ctrl+V: paste from clipboard
-    if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key === 'v') {
+    // Cmd/Ctrl+V: paste from clipboard
+    if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && e.key === 'v') {
       e.preventDefault();
       window.electronAPI.clipboardReadText().then(function (text) {
         if (text) {
@@ -2706,8 +2709,8 @@ function addColumn(args, targetRow, opts) {
       });
       return false;
     }
-    // Ctrl+Shift+V: also paste
-    if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
+    // Cmd/Ctrl+Shift+V: also paste
+    if (e.type === 'keydown' && cmdOrCtrl(e) && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
       e.preventDefault();
       window.electronAPI.clipboardReadText().then(function (text) {
         if (text) {
@@ -2716,19 +2719,23 @@ function addColumn(args, targetRow, opts) {
       });
       return false;
     }
-    // Ctrl+C: copy selection if there is one, otherwise send SIGINT
-    if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key === 'c') {
+    // Copy: Cmd+C on darwin always (no SIGINT semantics for Cmd+C), Ctrl+C
+    // on others — copy when there's a selection, otherwise pass through so
+    // xterm forwards the SIGINT.
+    if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && e.key === 'c') {
       var sel = terminal.getSelection();
       if (sel) {
         window.electronAPI.clipboardWriteText(sel);
         terminal.clearSelection();
         return false;
       }
-      // No selection — let xterm send SIGINT as normal
-      return true;
+      // No selection — on darwin swallow (Cmd+C with no selection is a no-op,
+      // we don't want to insert a literal 'c'). On other platforms, let xterm
+      // send SIGINT as normal.
+      return !IS_DARWIN;
     }
     // Shift+Enter: send CSI u sequence so Claude CLI sees it as newline
-    if (e.type === 'keydown' && e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'Enter') {
+    if (e.type === 'keydown' && e.shiftKey && !cmdOrCtrl(e) && !e.altKey && e.key === 'Enter') {
       e.preventDefault();
       // CSI u encoding: ESC [ 13 ; 2 u  (keycode 13, modifier 2=Shift)
       wsSend({ type: 'write', id: id, data: '\x1b[13;2u' });
@@ -4190,53 +4197,54 @@ window.addEventListener('focus', function () {
 // ============================================================
 
 document.addEventListener('keydown', function (e) {
-  if (e.ctrlKey && e.shiftKey && e.key === 'T') {
+  var mod = cmdOrCtrl(e);
+  if (mod && e.shiftKey && (e.key === 'T' || e.key === 't')) {
     e.preventDefault();
     addColumn(null, null, spawnOpts());
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'R') {
+  if (mod && e.shiftKey && (e.key === 'R' || e.key === 'r')) {
     e.preventDefault();
     addRow();
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'W') {
+  if (mod && e.shiftKey && (e.key === 'W' || e.key === 'w')) {
     e.preventDefault();
     var state = getActiveState();
     if (state && state.focusedColumnId !== null) removeColumn(state.focusedColumnId);
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowLeft') {
+  if (mod && !e.shiftKey && e.key === 'ArrowLeft') {
     e.preventDefault();
     navigateColumn('left');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowRight') {
+  if (mod && !e.shiftKey && e.key === 'ArrowRight') {
     e.preventDefault();
     navigateColumn('right');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowUp') {
+  if (mod && !e.shiftKey && e.key === 'ArrowUp') {
     e.preventDefault();
     navigateColumn('up');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowDown') {
+  if (mod && !e.shiftKey && e.key === 'ArrowDown') {
     e.preventDefault();
     navigateColumn('down');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'b') {
+  if (mod && !e.shiftKey && e.key === 'b') {
     e.preventDefault();
     toggleSidebar();
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'E') {
+  if (mod && e.shiftKey && (e.key === 'E' || e.key === 'e')) {
     e.preventDefault();
     toggleExplorer();
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'M') {
+  if (mod && e.shiftKey && (e.key === 'M' || e.key === 'm')) {
     e.preventDefault();
     var state = getActiveState();
     if (state && state.focusedColumnId !== null) {
@@ -4244,7 +4252,7 @@ document.addEventListener('keydown', function (e) {
     }
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key >= '1' && e.key <= '9') {
+  if (mod && !e.shiftKey && e.key >= '1' && e.key <= '9') {
     var num = parseInt(e.key);
     var state = getActiveState();
     if (state) {
@@ -4261,17 +4269,17 @@ document.addEventListener('keydown', function (e) {
     }
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && (e.key === '=' || e.key === '+')) {
+  if (mod && !e.shiftKey && (e.key === '=' || e.key === '+')) {
     e.preventDefault();
     changeFontSize(1);
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === '-') {
+  if (mod && !e.shiftKey && e.key === '-') {
     e.preventDefault();
     changeFontSize(-1);
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === '0') {
+  if (mod && !e.shiftKey && e.key === '0') {
     e.preventDefault();
     resetFontSize();
     return;
@@ -6330,7 +6338,7 @@ document.getElementById('btn-run-delete').addEventListener('click', function () 
 });
 document.getElementById('btn-git-commit').addEventListener('click', gitCommit);
 gitCommitMsg.addEventListener('keydown', function (e) {
-  if (e.ctrlKey && e.key === 'Enter') {
+  if (cmdOrCtrl(e) && e.key === 'Enter') {
     e.preventDefault();
     gitCommit();
   }
@@ -7597,8 +7605,8 @@ claudeMdModal.addEventListener('click', function (e) {
 });
 
 claudeMdEditor.addEventListener('keydown', function (e) {
-  // Ctrl+S to save
-  if (e.ctrlKey && e.key === 's') {
+  // Cmd/Ctrl+S to save
+  if (cmdOrCtrl(e) && e.key === 's') {
     e.preventDefault();
     saveClaudeMd();
   }
@@ -7691,18 +7699,19 @@ fileEditorModal.addEventListener('click', function (e) {
 });
 
 fileEditorEditor.addEventListener('keydown', function (e) {
-  // Ctrl+S to save
-  if (e.ctrlKey && e.key === 's') {
+  var mod = cmdOrCtrl(e);
+  // Cmd/Ctrl+S to save
+  if (mod && e.key === 's') {
     e.preventDefault();
     saveFileEditor();
   }
-  // Ctrl+F to open find bar
-  if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) {
+  // Cmd/Ctrl+F to open find bar
+  if (mod && (e.key === 'f' || e.key === 'F')) {
     e.preventDefault();
     openFindBar(false);
   }
-  // Ctrl+H to open find+replace
-  if (e.ctrlKey && (e.key === 'h' || e.key === 'H')) {
+  // Cmd/Ctrl+H to open find+replace
+  if (mod && (e.key === 'h' || e.key === 'H')) {
     e.preventDefault();
     openFindBar(true);
   }
@@ -9459,6 +9468,15 @@ function escapeHtml(str) {
 function safeNum(n) {
   var v = Number(n);
   return Number.isFinite(v) ? v : 0;
+}
+
+// Cmd on darwin, Ctrl elsewhere. Every shortcut in the app should route through
+// here so the binding works the way users expect on their platform — without
+// this, macOS users have no way to trigger Ctrl-only shortcuts (Cmd is the
+// natural modifier, Ctrl is rarely typed and clashes with system bindings).
+var IS_DARWIN = (typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || ''));
+function cmdOrCtrl(e) {
+  return IS_DARWIN ? !!e.metaKey : !!e.ctrlKey;
 }
 
 function runWindowBadgeHtml(auto) {
@@ -12270,7 +12288,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   closeBtn.addEventListener('click', close);
   modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
   document.addEventListener('keydown', function (e) {
-    if (e.ctrlKey && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); open(); }
+    if (cmdOrCtrl(e) && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); open(); }
     if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
   });
 
@@ -12528,9 +12546,9 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     try { cmd.run(); } catch (e) { console.error('palette command failed', e); }
   }
 
-  // Register Ctrl+K in capture phase so xterm can't swallow it.
+  // Register Cmd/Ctrl+K in capture phase so xterm can't swallow it.
   document.addEventListener('keydown', function (e) {
-    if (e.ctrlKey && (e.key === 'k' || e.key === 'K') && !e.shiftKey && !e.altKey) {
+    if (cmdOrCtrl(e) && (e.key === 'k' || e.key === 'K') && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       e.stopPropagation();
       open();

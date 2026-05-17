@@ -5398,7 +5398,13 @@ function createTray() {
     ? path.join(process.resourcesPath, 'app.asar.unpacked', iconFile)
     : path.join(__dirname, iconFile);
   const trayIcon = nativeImage.createFromPath(iconPath);
-  tray = new Tray(process.platform === 'darwin' ? trayIcon.resize({ width: 18, height: 18 }) : trayIcon);
+  // Per-platform sizing: macOS menu bar wants 18x18 templates; KDE / GNOME
+  // legacy tray prefers 22x22; Windows scales the .ico automatically. Picking
+  // a sane Linux default avoids a giant icon on KDE Plasma.
+  let sized = trayIcon;
+  if (process.platform === 'darwin') sized = trayIcon.resize({ width: 18, height: 18 });
+  else if (process.platform === 'linux') sized = trayIcon.resize({ width: 22, height: 22 });
+  tray = new Tray(sized);
   tray.setToolTip('Claudes');
 
   const contextMenu = Menu.buildFromTemplate([
