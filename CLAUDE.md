@@ -79,9 +79,9 @@ Can also be run manually: `./release.sh [major|minor|patch|x.y.z]`
 3. **Plan** — decompose into agent-scoped subtasks
 4. **Sync main and branch** — `git checkout main && git pull --ff-only` (skip pull if no remote; on divergence, escalate — do NOT auto-merge/rebase) then `git checkout -b work/<task-description>`
 5. **Create and enter worktree** — `git worktree add -b worktree-<task-slug> .claude/worktrees/<task-slug>` then `EnterWorktree(path: ".claude/worktrees/<task-slug>")` (use `worktree add` so the branch is based on local HEAD, not origin/<default>)
-6. **Delegate** — Agent() calls WITHOUT `isolation` (agents inherit worktree CWD). Prompts MUST include `## Constitution Rules` and `## Structure Snippet` sections (paste from session-cached docs) so agents can skip their own file reads. Add `## Design Snippet` when delegating to ui-compose/ux-reviewer.
-implementer-electron + tester-node + ux-reviewer can run in parallel. Merge ALL before delegating tester.
-7. **Commit** — after ALL agents return: `git add` + `git commit`
+6. **TDD loop** — for each behavior in step 3's behavior list, delegate ONE Agent() WITHOUT `isolation` with a strict RED→GREEN cycle (one failing test → minimum code to pass → stop). Commit per cycle (test + impl in same commit). For `## Behavior triplet:` blocks (cross-layer, plan-mode only): dispatch FE+BE in parallel, then seam test (broader-harness agent) blocking on both — see `references/tdd/cross-layer-triplets.md`. Non-behavioral tasks (config, dep bumps, copy, pure styling): single delegation, no cycle. Prompts MUST include `## Constitution Rules` + `## Structure Snippet`; add `## Design Snippet` for ui-compose/ux-reviewer. Never write all tests up front — that's horizontal slicing (see references/tdd/SKILL.md).
+implementer-electron + tester-node + ux-reviewer can run TDD cycles in parallel on non-overlapping behaviors.
+7. **Refactor pass** (optional, only when ALL behaviors GREEN) — same implementer agent, refactor prompt, run tests after each step, commit `refactor:` separately. Skip if already clean.
 8. **Quality gate** — `npm test`. ALL must pass (zero errors, including pre-existing). 3 failures → escalate
 9. **Review** — reviewer agent on `git diff main...HEAD`. Review-fix loop: Critical → fix → re-commit → re-gate → re-review (max 2 cycles)
 10. **Exit worktree** — `ExitWorktree(action: "keep")`
@@ -107,7 +107,7 @@ Every source file change — including one-line fixes — goes through an agent 
 Agents are one-shot. Always spawn fresh Agent() for remaining work. No `isolation` param — agents inherit worktree CWD.
 
 ### Task Tracking
-Emit `TaskCreate` at step 3 (Plan), one per phase: Implement (one per parallel agent), Quality gate, Review, Merge. Use `addBlockedBy` for ordering. Update to `in_progress` when entering each step, `completed` on pass. Never `completed` while tests fail or reviewer flagged Critical. Orchestrator owns tasks — agents don't touch them. Skip for orchestrator-direct edits.
+Emit `TaskCreate` at step 3 (Plan), one per phase: Implement (TDD) (one per parallel agent), Refactor (optional), Quality gate, Review, Merge. Use `addBlockedBy` for ordering. Update to `in_progress` when entering each step, `completed` on pass. Never `completed` while tests fail or reviewer flagged Critical. Orchestrator owns tasks — agents don't touch them. Skip for orchestrator-direct edits.
 
 **Before your first task each session**, read `_aidp-orchestrator.md` from project memory — it is the authoritative workflow source and may be more current than these inline rules.
 <!-- aidp-orchestrator-end -->
