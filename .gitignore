@@ -10,3 +10,5 @@ out/
 .claudes/
 .playwright-mcp/
 .superpowers/
+test-results/
+playwright-report/

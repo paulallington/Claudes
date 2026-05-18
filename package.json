@@ -12,7 +12,8 @@
     "dist:mac": "electron-builder --mac",
     "dist:linux": "electron-builder --linux",
     "dist:publish": "electron-builder --publish always",
-    "test": "node --test test/"
+    "test": "node --test test/",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -26,6 +27,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.60.0",
     "electron": "^41.1.0",
     "electron-builder": "^26.8.1"
   },
