@@ -9912,31 +9912,10 @@ startPlanLimitsPolling();
   if (mini) mini.addEventListener('click', openUsageModal);
 })();
 
-// JS-managed open/close for the plan-limits popover. CSS :hover used to do
-// this, but the bar and the popover are separated by the sidebar resize
-// handle (a sibling div), so any cursor traversal across it broke :hover.
-// A small grace timer here keeps the popover open while the cursor is on
-// either the bar OR the popover, regardless of what sits between them.
-var planLimitsHoverHide = null;
-function wirePlanLimitsPopoverHover(miniEl, popEl) {
-  function show() {
-    if (planLimitsHoverHide) { clearTimeout(planLimitsHoverHide); planLimitsHoverHide = null; }
-    popEl.classList.add('show');
-  }
-  function hideSoon() {
-    if (planLimitsHoverHide) clearTimeout(planLimitsHoverHide);
-    planLimitsHoverHide = setTimeout(function () {
-      popEl.classList.remove('show');
-      planLimitsHoverHide = null;
-    }, 180);
-  }
-  miniEl.addEventListener('mouseenter', show);
-  miniEl.addEventListener('mouseleave', hideSoon);
-  popEl.addEventListener('mouseenter', show);
-  popEl.addEventListener('mouseleave', hideSoon);
-}
-
-// Live-update the popover's content whenever new plan-limits data arrives.
+// Live-update the hover popover's content whenever new plan-limits data
+// arrives. Popover is a child of #plan-limits-mini and is shown via CSS
+// :hover. Shows only the usage details (Session/Week + reset times) — no
+// "Click for full usage" hint or refresh button, per UX preference.
 function updatePlanLimitsPopover() {
   var mini = document.getElementById('plan-limits-mini');
   if (!mini) return;

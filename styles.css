@@ -4241,87 +4241,58 @@ html[data-platform="darwin"] #toolbar {
 }
 
 /* Hover popover for the sidebar mini bar — instant, CSS-only :hover trigger.
-   Anchored to the right of the bar (sits in the explorer area) and aligned
-   with the bar's bottom edge. Previously sat above the bar which made it
-   overlap the "+ Add Project" button — placing it to the side keeps the
-   sidebar items unobscured and gives the cursor a flat horizontal travel
-   path with no hover-loss zone. */
+   Sits directly above the bar (left:0/right:0), inheriting the bar's width
+   so it doesn't extend rightward into the explorer area. Long "resets at…"
+   lines wrap inside the popover. */
 .plan-limits-mini-popover {
   position: absolute;
-  left: 100%;
-  bottom: 0;
+  bottom: 100%;
+  left: 0;
+  right: 0;
   z-index: 999999;
-  min-width: 280px;
-  width: max-content;
-  max-width: 380px;
-  padding: 10px 16px 14px;
-  background: #1c1c2c;
-  border: 1px solid var(--border-strong, #2a2a3a);
+  /* Visual gap above the mini bar — bridged below by ::after so the cursor
+     doesn't lose hover to the "+ Add Project" button while crossing it. */
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-primary);
   border-radius: 8px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 12px 32px var(--shadow-heavy);
   font-size: 12px;
-  color: var(--text-primary, #e6e6e6);
-  pointer-events: none;
+  color: var(--text-primary);
+  /* visibility:hidden (not pointer-events:none) removes the popover from
+     hit-testing when invisible, so the Add Project button below stays
+     clickable. When shown, pointer-events:auto is already in place, so the
+     popover can capture its own :hover the moment the cursor enters. */
+  visibility: hidden;
   opacity: 0;
   transform: translateY(2px);
-  transition: opacity 80ms ease, transform 80ms ease;
+  transition: opacity 80ms ease, transform 80ms ease, visibility 0s linear 80ms;
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-/* Footer row: 'Click for full usage' on the left, refresh button on the
-   right. Sits at the bottom of the popover, closest to the mini bar — so
-   the cursor only has to cross the bridge to land on the button. */
-.plan-limits-popover-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-strong, #2a2a3a);
-}
-.plan-limits-popover-footer .plan-limits-popover-hint {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  flex: 1;
+/* Hover bridge: fills the 8px gap between the popover and the mini bar so
+   the cursor stays in the popover's :hover when travelling between them.
+   visibility:hidden on the popover also hides this pseudo, so it doesn't
+   intercept clicks meant for the Add Project button when the popover is
+   closed. */
+.plan-limits-mini-popover::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 8px;
 }
 
-.plan-limits-mini-popover.show {
+.plan-limits-mini:hover .plan-limits-mini-popover,
+.plan-limits-mini-popover:hover {
   opacity: 1;
+  visibility: visible;
   transform: translateY(0);
-  pointer-events: auto;
-}
-
-.plan-limits-popover-refresh {
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--border-strong, #2a2a3a);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-secondary, #aaaabb);
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-}
-.plan-limits-popover-refresh:hover {
-  color: #fff;
-  border-color: #5a5a7a;
-}
-.plan-limits-popover-refresh:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-.plan-limits-popover-refresh.spinning {
-  animation: plan-limits-spin 0.8s linear infinite;
-}
-@keyframes plan-limits-spin {
-  to { transform: rotate(360deg); }
+  transition: opacity 80ms ease, transform 80ms ease, visibility 0s linear 0s;
 }
 
 .plan-limits-popover-slot {
@@ -4340,28 +4311,28 @@ html[data-platform="darwin"] #toolbar {
 .plan-limits-popover-label {
   font-weight: 600;
   font-size: 12.5px;
-  color: var(--text-primary, #e6e6e6);
+  color: var(--text-primary);
   letter-spacing: 0.2px;
 }
 
 .plan-limits-popover-pct {
   font-variant-numeric: tabular-nums;
   font-weight: 500;
-  color: var(--text-primary, #e6e6e6);
+  color: var(--text-primary);
 }
 
 .plan-limits-popover-sub {
   font-size: 11px;
-  color: var(--text-dim, #9098b0);
+  color: var(--text-secondary);
   line-height: 1.45;
 }
 
 .plan-limits-popover-hint {
   margin-top: 2px;
   padding-top: 10px;
-  border-top: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  border-top: 1px solid var(--border-subtle);
   font-size: 10.5px;
-  color: var(--text-dimmer, #6c7388);
+  color: var(--text-muted);
   text-align: center;
   letter-spacing: 0.3px;
 }
@@ -7430,6 +7401,10 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
 }
 .clawd-widget.hidden { display: none; }
 .clawd-widget.dragging { cursor: grabbing; transition: none; }
+/* Stay out of the way when any modal is open — Clawd's z-index (9000) is
+   higher than .modal-overlay (1000), so without this Clawd would float on
+   top of settings/usage/etc. */
+body:has(.modal-overlay:not(.hidden)) .clawd-widget { display: none; }
 .clawd-widget-img {
   width: 100%;
   height: 100%;
@@ -7460,7 +7435,7 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
   transform: translateY(0);
 }
 
-body.light-theme .clawd-widget-bubble {
+[data-theme="light"] .clawd-widget-bubble {
   background: #ffffff;
   color: #1a1a2e;
   border-color: #d0d0e0;
