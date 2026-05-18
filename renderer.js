@@ -9924,7 +9924,6 @@ function updatePlanLimitsPopover() {
     pop = document.createElement('div');
     pop.className = 'plan-limits-mini-popover';
     mini.appendChild(pop);
-    wirePlanLimitsPopoverHover(mini, pop);
   }
   function fmtSlot(label, slot) {
     if (!slot) return '';
@@ -9961,32 +9960,8 @@ function updatePlanLimitsPopover() {
     inner += '<div class="plan-limits-popover-sub">Rate-limited' +
       (ageLabel ? ' — last good ' + ageLabel : '') + '</div>';
   }
-  // Footer row: full-usage hint on the left, refresh button on the right.
-  // Placing it at the bottom of the popover keeps the button close to the
-  // mini bar so the cursor doesn't have to traverse the whole popover and
-  // risk dismissing the :hover before it lands on the button.
-  inner += '<div class="plan-limits-popover-footer">' +
-    '<span class="plan-limits-popover-hint">Click for full usage</span>' +
-    '<button type="button" class="plan-limits-popover-refresh" ' +
-    'data-role="plan-limits-refresh" title="Force refresh">↻</button>' +
-    '</div>';
+  inner += '<div class="plan-limits-popover-hint">Click for full usage</div>';
   pop.innerHTML = inner;
-  if (!pop.dataset.refreshWired) {
-    pop.dataset.refreshWired = '1';
-    pop.addEventListener('click', function (e) {
-      var t = e.target;
-      if (!t || !t.dataset || t.dataset.role !== 'plan-limits-refresh') return;
-      e.stopPropagation();
-      e.preventDefault();
-      t.disabled = true;
-      t.classList.add('spinning');
-      Promise.resolve(loadPlanLimits(true)).finally(function () {
-        // Re-rendered popover may have replaced the button; if still present, restore.
-        var btn = pop.querySelector('[data-role="plan-limits-refresh"]');
-        if (btn) { btn.disabled = false; btn.classList.remove('spinning'); }
-      });
-    });
-  }
 }
 
 function openUsageModal() {
