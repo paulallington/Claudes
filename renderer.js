@@ -12587,7 +12587,7 @@ function saveAutomation() {
       runWindow: automationRunWindow
     };
     window.electronAPI.createAutomation(config).then(function (automation) {
-      if (hasIsolated) {
+      if (needsCloneSetup) {
         automationEditingId = automation.id;
         startCloneSetup(automation.id);
       } else {
