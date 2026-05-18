@@ -55,8 +55,30 @@ jobs:
             dist/Claudes-*.zip.blockmap
             dist/latest-mac.yml
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install
+
+      - name: Build Linux packages
+        run: npx electron-builder --linux --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: |
+            dist/Claudes-*.AppImage
+            dist/Claudes-*.deb
+            dist/latest-linux.yml
+
   release:
-    needs: [build-windows, build-macos]
+    needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

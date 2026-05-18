@@ -1,7 +1,9 @@
-const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray, Menu, nativeImage, Notification, powerMonitor } = require('electron');
-// Auto-updater disabled on personal/main — fork is private, no baked GH token.
+const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray, Menu, nativeImage, Notification, powerMonitor, safeStorage } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-thresholds');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
@@ -9,6 +11,164 @@ const { resolveWorktreeCandidates, pathIsDirectory } = require('./lib/path-utils
 const { findLastGitBranch } = require('./lib/session-branch');
 const { detectActiveWorktree } = require('./lib/worktree-detect');
 const ReviewComments = require('./lib/review-comments');
+const https = require('https');
+
+// macOS GUI launches (Dock/Finder) inherit launchd's minimal PATH —
+// `/usr/bin:/bin:/usr/sbin:/sbin` — which omits Homebrew, ~/.local/bin, nvm,
+// etc. That's why `which claude` returns nothing and every `spawn(claude,…)`
+// or `spawn(node,…)` ENOENTs (e.g. headless runs produce "no output"). Fix
+// it once at process start so EVERY subsequent spawn/execFile inherits a
+// real PATH.
+if (process.platform !== 'win32') {
+  const extras = [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    path.join(os.homedir(), '.local/bin'),
+    path.join(os.homedir(), '.volta/bin'),
+    path.join(os.homedir(), '.fnm'),
+    path.join(os.homedir(), 'bin'),
+    path.join(os.homedir(), '.claude/bin'),
+  ];
+  const have = new Set((process.env.PATH || '').split(path.delimiter).filter(Boolean));
+  const missing = extras.filter((p) => !have.has(p));
+  if (missing.length) {
+    process.env.PATH = [process.env.PATH || '', ...missing].filter(Boolean).join(path.delimiter);
+  }
+}
+
+// Cross-platform persistent diagnostic logger. Writes lifecycle/quit/crash
+// events to a per-OS app-log path so we can investigate intermittent freezes
+// (the user can force-quit and the trail still survives).
+//
+//   macOS:   ~/Library/Logs/Claudes/claudes.log
+//   Windows: %LOCALAPPDATA%\Claudes\Logs\claudes.log
+//   Linux:   ~/.local/state/Claudes/logs/claudes.log
+//
+// app.getPath('logs') would resolve these for us but isn't safe to call before
+// 'ready'; we want logging during early startup, so we hand-roll the path.
+function diagLogDir() {
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Logs', 'Claudes');
+  }
+  if (process.platform === 'win32') {
+    // %LOCALAPPDATA% is set on every supported Windows; fall back to the
+    // standard path if it isn't, so packaged installs without that env still
+    // get a usable directory.
+    const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(base, 'Claudes', 'Logs');
+  }
+  // Linux / others: XDG state dir, with a sensible fallback.
+  const xdgState = process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state');
+  return path.join(xdgState, 'Claudes', 'logs');
+}
+let diagLogStream = null;
+let diagLogFilePath = null;
+function diagLogInit() {
+  try {
+    const dir = diagLogDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'claudes.log');
+    // Roll if >5MB so the file doesn't grow forever.
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 5 * 1024 * 1024) {
+        try { fs.unlinkSync(file + '.old'); } catch {}
+        fs.renameSync(file, file + '.old');
+      }
+    } catch {}
+    diagLogStream = fs.createWriteStream(file, { flags: 'a' });
+    diagLogFilePath = file;
+    diagLogStream.write(`\n=== ${new Date().toISOString()} Claudes launch pid=${process.pid} platform=${process.platform} ===\n`);
+  } catch (e) {
+    // Logging is best-effort — never let it break startup.
+    console.error('[diagLog] init failed:', e && e.message);
+  }
+}
+function diagLog(...args) {
+  const line = args.map((a) => (typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })())).join(' ');
+  console.log(line);
+  if (diagLogStream) {
+    try { diagLogStream.write(new Date().toISOString() + ' ' + line + '\n'); } catch {}
+  }
+}
+diagLogInit();
+
+// Lightweight perf instrumentation. Every PERF_SAMPLE_MS we ask Electron
+// for per-process CPU/memory and log a single line. Hook traffic is
+// counted between samples so we can see throughput.
+//
+// To read each [perf] line: "tails=N hooks=H | Browser cpu=X% mem=YMB;
+// Renderer cpu=X% mem=YMB; …". Sustained high CPU on one process points
+// at where to look (Browser = Electron main; Renderer = the window's UI).
+const PERF_SAMPLE_MS = 15_000;
+let perfHookCount = 0;
+let perfFsEvents = 0;        // raw fs.watch callbacks
+let perfCtxReads = 0;        // session:contextTokens IPC handler calls (cache + miss)
+function incrPerfHook() { perfHookCount++; }
+function incrPerfFsEvent() { perfFsEvents++; }
+function incrPerfCtxRead() { perfCtxReads++; }
+function perfSample() {
+  try {
+    const metrics = (typeof app !== 'undefined' && app.getAppMetrics) ? app.getAppMetrics() : [];
+    const procs = metrics.map((m) => {
+      const cpu = m.cpu && typeof m.cpu.percentCPUUsage === 'number' ? m.cpu.percentCPUUsage.toFixed(1) : '?';
+      const memMB = m.memory && m.memory.workingSetSize ? Math.round(m.memory.workingSetSize / 1024) : '?';
+      // type values: Browser, Renderer, GPU, Utility, Tab, Zygote
+      const label = m.type + (m.name ? ('/' + m.name.replace(/\s+/g, '')) : '');
+      return label + ' cpu=' + cpu + '% mem=' + memMB + 'MB';
+    });
+    const cols = (typeof clawdTails !== 'undefined' && clawdTails.size) || 0;
+    const ctxStats = (typeof sampleAndResetReadStats === 'function') ? sampleAndResetReadStats() : { fullReads: 0, bytesRead: 0 };
+    const ctxMB = ctxStats.bytesRead >= 1024 * 1024
+      ? (ctxStats.bytesRead / (1024 * 1024)).toFixed(1) + 'MB'
+      : Math.round(ctxStats.bytesRead / 1024) + 'KB';
+    diagLog('[perf] tails=' + cols
+      + ' hooks=' + perfHookCount
+      + ' fsEvents=' + perfFsEvents
+      + ' ctxReads=' + perfCtxReads + '/' + ctxStats.fullReads + 'full(' + ctxMB + ')'
+      + ' | ' + procs.join('; '));
+  } catch (err) {
+    diagLog('[perf] sample failed:', err && err.message);
+  }
+  perfHookCount = 0;
+  perfFsEvents = 0;
+  perfCtxReads = 0;
+}
+// Schedule once app is ready so getAppMetrics has the full process tree.
+if (typeof app !== 'undefined') {
+  app.whenReady().then(() => {
+    setInterval(perfSample, PERF_SAMPLE_MS).unref();
+    // First sample after 5s — lets startup quiesce before we baseline.
+    setTimeout(perfSample, 5000).unref();
+  });
+}
+
+// Surface uncaught failures so silent crashes leave a trail on disk.
+process.on('uncaughtException', (err) => {
+  diagLog('[crash] uncaughtException:', err && (err.stack || err.message || String(err)));
+});
+process.on('unhandledRejection', (reason) => {
+  diagLog('[crash] unhandledRejection:', reason && (reason.stack || reason.message || String(reason)));
+});
+
+// Per-launch auth token for the local pty-server WebSocket. Generated fresh
+// each time Electron starts, passed to pty-server via env, and handed to the
+// renderer via IPC. The renderer presents it as a Sec-WebSocket-Protocol on
+// connect; pty-server rejects the handshake if it doesn't match. Without
+// this, any local process (including any web page in any browser) could
+// connect to 127.0.0.1:<ptyPort> and spawn arbitrary commands as the user.
+const PTY_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
+
+// Per-launch token gating the local hook HTTP server (POST /hook). Without this,
+// any local process — including a JS payload running in any browser tab — could
+// fabricate a hook event that gets forwarded into the renderer over IPC, which
+// is exactly the cross-process attack surface Electron CSP doesn't cover.
+// Token is included in the curl command we write into the user's settings.json,
+// re-synced on every launch (same flow as the port). Re-syncs cost one file
+// write at startup, which is negligible.
+const HOOK_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
 
 // Set appUserModelId early so Windows uses a consistent taskbar icon across restarts
 app.setAppUserModelId('com.thecodeguy.claudes');
@@ -19,6 +179,7 @@ let isQuitting = false;
 let hookServer;
 let hookServerPort;
 const ptyPort = app.isPackaged ? 3456 : 3457;
+const hookServerListenPort = app.isPackaged ? 53456 : 53457;
 let ptyServerProcess;
 
 const CONFIG_DIR = path.join(os.homedir(), '.claudes');
@@ -43,6 +204,56 @@ const DEFAULT_PIPELINES = {
     ]
   }
 };
+const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
+const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
+
+// --- Path containment ---
+//
+// Many IPC handlers accept renderer-supplied paths. Without containment, any
+// renderer compromise (XSS, malicious paste, future bug) can read or write
+// any file the desktop user can — ssh keys, browser cookies, system files.
+// `assertInsideAllowedRoots` resolves the input and verifies it sits within
+// one of:
+//   - any project root the user has explicitly added (config.projects[].path)
+//   - ~/.claudes/                 (this app's config)
+//   - ~/.claude/                  (Claude CLI's data — sessions, history)
+// Symlink escapes are blocked via realpath when the target exists.
+function listAllowedRoots() {
+  const roots = [path.resolve(CONFIG_DIR), path.resolve(path.join(os.homedir(), '.claude'))];
+  try {
+    const cfg = readConfig();
+    if (Array.isArray(cfg.projects)) {
+      for (const p of cfg.projects) {
+        if (p && typeof p.path === 'string' && p.path) roots.push(path.resolve(p.path));
+      }
+    }
+  } catch { /* fall through with built-in roots */ }
+  return roots;
+}
+function isInsideRoot(target, root) {
+  // Case-insensitive containment check on win32 to match the FS contract.
+  const tNorm = process.platform === 'win32' ? target.toLowerCase() : target;
+  const rNorm = process.platform === 'win32' ? root.toLowerCase() : root;
+  if (tNorm === rNorm) return true;
+  const sep = rNorm.endsWith(path.sep) ? '' : path.sep;
+  return tNorm.startsWith(rNorm + sep);
+}
+function assertInsideAllowedRoots(input) {
+  if (typeof input !== 'string' || !input) throw new Error('refused: empty path');
+  // Reject UNC paths outright — they are network locations and a renderer
+  // should never need to push the app at one.
+  if (/^\\\\/.test(input) || /^\/\//.test(input)) throw new Error('refused: UNC path');
+  let resolved = path.resolve(input);
+  // If the path exists and is a symlink (or under one), realpath will reveal
+  // the true target so we can check containment against the real FS location.
+  try { resolved = fs.realpathSync.native ? fs.realpathSync.native(resolved) : fs.realpathSync(resolved); }
+  catch { /* doesn't exist yet (e.g. write-then-create) — that's ok */ }
+  const roots = listAllowedRoots();
+  for (const r of roots) {
+    if (isInsideRoot(resolved, r)) return resolved;
+  }
+  throw new Error('refused: path outside allowed roots');
+}
 
 // --- Config ---
 
@@ -102,6 +313,140 @@ function flushPendingConfig() {
   }
 }
 
+// --- Endpoint Presets ---
+//
+// Each preset is one of:
+//   { id, name, baseUrl, authToken: { encrypted: <b64> }, model }     // normal case
+//   { id, name, baseUrl, authToken: { plain: <string> }, model }      // safeStorage unavailable
+// The "Anthropic (cloud)" default is synthetic — never persisted.
+//
+// Endpoints live in their own file (ENDPOINTS_FILE), not projects.json. The
+// renderer round-trips projects.json wholesale on every project edit; if we
+// stored endpoints there too, those writes would clobber any preset added
+// outside the renderer's view.
+
+function encryptToken(plain) {
+  if (!plain) return { plain: '' };
+  if (safeStorage.isEncryptionAvailable()) {
+    return { encrypted: safeStorage.encryptString(plain).toString('base64') };
+  }
+  return { plain };
+}
+
+// Exposed to the renderer so the endpoint-presets UI can warn the user when
+// tokens will be stored plaintext (typical on Linux without a keyring, or in
+// headless WSL). Backed by Electron's safeStorage — DPAPI on win32, Keychain
+// on darwin, libsecret on Linux when present.
+ipcMain.handle('security:isTokenStorageEncrypted', () => {
+  try { return safeStorage.isEncryptionAvailable(); }
+  catch { return false; }
+});
+
+function decryptToken(stored) {
+  if (!stored) return '';
+  if (typeof stored === 'string') return stored;
+  if (stored.plain != null) return stored.plain;
+  if (stored.encrypted) {
+    try {
+      return safeStorage.decryptString(Buffer.from(stored.encrypted, 'base64'));
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+function readEndpoints() {
+  ensureConfigDir();
+  try {
+    const raw = fs.readFileSync(ENDPOINTS_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.endpoints)) return data.endpoints;
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+function writeEndpoints(list) {
+  ensureConfigDir();
+  fs.writeFileSync(ENDPOINTS_FILE, JSON.stringify({ endpoints: list }, null, 2), 'utf8');
+}
+
+function getEndpointById(id) {
+  if (!id) return null;
+  const list = readEndpoints();
+  return list.find((e) => e && e.id === id) || null;
+}
+
+function buildEndpointEnv(endpointId, modelOverride) {
+  const preset = getEndpointById(endpointId);
+  if (!preset) return null;
+  const token = decryptToken(preset.authToken);
+  // Per-project model override (set by the endpoint model dropdown in the
+  // spawn options) takes precedence over the preset's default model.
+  const model = (modelOverride && String(modelOverride).trim()) || preset.model || '';
+  // ANTHROPIC_AUTH_TOKEN must be set to *something* — if it's empty or missing
+  // the Claude CLI falls back to the user's real Anthropic credentials and
+  // sends them to whatever local server we've pointed it at. A dummy value
+  // keeps it honest. LM Studio (and other local servers without auth) will
+  // accept any string.
+  const authToken = token || 'no-auth';
+  // URL-embedded creds (e.g. https://user:pass@ngrok-tunnel/) must be lifted
+  // out: undici (used by Claude CLI's internal fetch) refuses URLs with
+  // userinfo. Forward them as a Basic auth header via ANTHROPIC_CUSTOM_HEADERS.
+  //
+  // Auth header conflict: ANTHROPIC_AUTH_TOKEN makes Claude emit
+  // `Authorization: Bearer ...`. If we also set Basic via custom headers, the
+  // proxy sees two Authorization values and 401s. Switch the upstream auth to
+  // ANTHROPIC_API_KEY (sent as `x-api-key`, not `Authorization`) when URL
+  // creds are present so the Basic header is the only Authorization header
+  // reaching the proxy. LM Studio and similar local servers ignore x-api-key.
+  const { url: cleanBaseUrl, basicAuth } = extractUrlCredentials(preset.baseUrl || '');
+  const env = {
+    ANTHROPIC_BASE_URL: cleanBaseUrl,
+    ANTHROPIC_MODEL: model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+    CLAUDE_CODE_SUBAGENT_MODEL: model,
+    DISABLE_PROMPT_CACHING: '1',
+    DISABLE_AUTOUPDATER: '1',
+    DISABLE_TELEMETRY: '1',
+    DISABLE_NON_ESSENTIAL_MODEL_CALLS: '1',
+    // Local-model context discipline — without these, a single large bash or
+    // MCP tool result can blow past the model's context window in one turn.
+    // Conservative caps that won't hurt typical workflows but stop runaway
+    // file dumps from triggering autocompact thrash.
+    BASH_MAX_OUTPUT_LENGTH: '8000',
+    MAX_MCP_OUTPUT_TOKENS: '10000',
+    MAX_THINKING_TOKENS: '2000'
+  };
+  if (basicAuth) {
+    env.ANTHROPIC_CUSTOM_HEADERS = 'Authorization: Basic ' + basicAuth;
+    env.ANTHROPIC_API_KEY = authToken;
+  } else {
+    env.ANTHROPIC_AUTH_TOKEN = authToken;
+  }
+  return env;
+}
+
+// Look up a project by its filesystem path and return the env block for its
+// configured endpoint preset, or null if the project has no preset selected.
+// Used by background spawn paths (headless runs, automation agents, automation
+// managers) which only know the project path, not the renderer's cached state.
+function getProjectEndpointEnvByPath(projectPath) {
+  if (!projectPath) return null;
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  if (!project) return null;
+  const id = project.spawnOptions && project.spawnOptions.endpointId;
+  if (!id) return null;
+  const modelOverride = project.spawnOptions && project.spawnOptions.endpointModel;
+  return buildEndpointEnv(id, modelOverride);
+}
+
 // --- Loops Persistence ---
 
 function readLoops() {
@@ -127,6 +472,18 @@ function readAutomations() {
 function writeAutomations(data) {
   ensureConfigDir();
   fs.writeFileSync(AUTOMATIONS_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// Prompt snippet library — persists to ~/.claudes/snippets.json. Each snippet
+// has { id, trigger, label, body }. Triggered in the renderer by typing
+// "\trigger" in a column terminal.
+function readSnippets() {
+  try { return JSON.parse(fs.readFileSync(SNIPPETS_FILE, 'utf8')); }
+  catch { return { snippets: [] }; }
+}
+function writeSnippets(data) {
+  ensureConfigDir();
+  fs.writeFileSync(SNIPPETS_FILE, JSON.stringify(data, null, 2), 'utf8');
 }
 
 function ensureAgentRunsDir(automationId, agentId) {
@@ -267,13 +624,56 @@ function generateAgentId() {
 // --- Pty Server ---
 
 function findSystemNode() {
+  // macOS GUI apps launched from Finder/Dock inherit a minimal PATH that
+  // omits Homebrew and nvm, so plain `which node` fails and a bare `node`
+  // spawn ENOENTs. Augment PATH with the usual install dirs before probing,
+  // and fall back to scanning known locations directly.
+  const extraDirs = [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    path.join(os.homedir(), '.volta/bin'),
+    path.join(os.homedir(), '.fnm'),
+    path.join(os.homedir(), 'n/bin'),
+  ];
+  const augmentedPath = [process.env.PATH || '', ...extraDirs]
+    .filter(Boolean)
+    .join(path.delimiter);
+
   try {
     const cmd = process.platform === 'win32' ? 'where' : 'which';
-    const result = execFileSync(cmd, ['node'], { encoding: 'utf8' });
-    return result.trim().split(/\r?\n/)[0];
-  } catch {
-    return 'node';
+    const result = execFileSync(cmd, ['node'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: augmentedPath },
+    });
+    const found = result.trim().split(/\r?\n/)[0];
+    if (found) return found;
+  } catch { /* fall through to direct probing */ }
+
+  const candidates = [
+    '/opt/homebrew/bin/node',
+    '/usr/local/bin/node',
+    '/usr/bin/node',
+  ];
+
+  try {
+    const nvmDir = path.join(os.homedir(), '.nvm/versions/node');
+    const versions = fs.readdirSync(nvmDir)
+      .filter((v) => v.startsWith('v'))
+      .sort()
+      .reverse();
+    for (const v of versions) {
+      candidates.push(path.join(nvmDir, v, 'bin/node'));
+    }
+  } catch { /* no nvm install */ }
+
+  for (const p of candidates) {
+    try {
+      if (fs.statSync(p).isFile()) return p;
+    } catch { /* not present */ }
   }
+
+  return 'node';
 }
 
 function getPtyServerScript() {
@@ -287,22 +687,44 @@ function startPtyServer() {
   return new Promise((resolve, reject) => {
     const nodePath = findSystemNode();
     const serverScript = getPtyServerScript();
+    let resolved = false;
 
+    // Opt-in: pty-server runs `claude update` on every startup if this env
+    // is '1'. Off by default to avoid running whichever `claude` binary is
+    // first on PATH unprompted. See Settings → Updates.
+    const autoUpdateClaude = readConfig().autoUpdateClaude === true ? '1' : '0';
     ptyServerProcess = spawn(nodePath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PTY_PORT: String(ptyPort) }
+      env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN, CLAUDES_AUTO_UPDATE_CLAUDE: autoUpdateClaude }
+    });
+
+    ptyServerProcess.on('error', (err) => {
+      if (err && err.code === 'ENOENT') {
+        dialog.showErrorBox(
+          'Node.js not found',
+          `Claudes needs Node.js to run its terminal server, but couldn't find a "node" binary.\n\n` +
+          `Tried: ${nodePath}\n\n` +
+          `Install Node.js (e.g. via Homebrew: "brew install node") and relaunch Claudes.`
+        );
+      } else {
+        dialog.showErrorBox('Failed to start terminal server', String(err && err.message || err));
+      }
+      if (!resolved) {
+        resolved = true;
+        reject(err);
+      }
     });
 
     ptyServerProcess.stderr.on('data', (data) => {
-      console.error('[pty-server]', data.toString());
+      const s = data.toString();
+      console.error('[pty-server]', s);
+      if (diagLogStream) { try { diagLogStream.write(new Date().toISOString() + ' [pty-server:stderr] ' + s.trimEnd() + '\n'); } catch {} }
     });
 
-    ptyServerProcess.on('exit', (code) => {
-      console.log('[pty-server] exited with code', code);
+    ptyServerProcess.on('exit', (code, signal) => {
+      diagLog('[pty-server] exited with code', code, 'signal', signal || '(none)');
     });
 
-    // Wait for ready signal
-    let resolved = false;
     ptyServerProcess.stdout.on('data', (data) => {
       const output = data.toString();
       if (!resolved && output.includes('READY:')) {
@@ -330,6 +752,40 @@ function wasLaunchedAtLogin() {
   return process.argv.includes('--hidden');
 }
 
+// Defense-in-depth: prevent renderer-induced navigation away from the
+// loaded index.html and refuse all window.open / target=_blank requests.
+// shell.openExternal is the only sanctioned way to escape the app.
+function lockdownWebContents(wc) {
+  wc.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+        shell.openExternal(parsed.toString()).catch(() => {});
+      }
+    } catch { /* ignore unparseable URLs */ }
+    return { action: 'deny' };
+  });
+  wc.on('will-navigate', (event, url) => {
+    // Allow navigation only within the app's own file:// origin (initial load).
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'file:') {
+        event.preventDefault();
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:') {
+          shell.openExternal(parsed.toString()).catch(() => {});
+        }
+      }
+    } catch {
+      event.preventDefault();
+    }
+  });
+  // Refuse webview tag attachment outright — there are none today, but if a
+  // future template snuck one in we don't want it inheriting privileges.
+  wc.on('will-attach-webview', (event /*, webPreferences, params*/) => {
+    event.preventDefault();
+  });
+}
+
 function createWindow() {
   const config = readConfig();
   const isLight = config.theme === 'auto' ? !nativeTheme.shouldUseDarkColors : config.theme === 'light';
@@ -353,7 +809,15 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Defence-in-depth: run the renderer in the OS sandbox. The preload only
+      // talks to main via contextBridge + ipcRenderer.invoke, both of which are
+      // sandbox-compatible, so this is a free upgrade.
+      sandbox: true,
+      // Off: we don't need Google's spell-check service phoning home, and
+      // we don't use <webview> at all.
+      spellcheck: false,
+      webviewTag: false
     }
   });
 
@@ -370,6 +834,7 @@ function createWindow() {
     }
   });
 
+  lockdownWebContents(mainWindow.webContents);
   mainWindow.loadFile('index.html');
 
   if (startHidden && process.platform === 'darwin') {
@@ -444,7 +909,15 @@ function createProjectWindow(projectKey) {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Defence-in-depth: run the renderer in the OS sandbox. The preload only
+      // talks to main via contextBridge + ipcRenderer.invoke, both of which are
+      // sandbox-compatible, so this is a free upgrade.
+      sandbox: true,
+      // Off: we don't need Google's spell-check service phoning home, and
+      // we don't use <webview> at all.
+      spellcheck: false,
+      webviewTag: false
     }
   });
 
@@ -461,6 +934,7 @@ function createProjectWindow(projectKey) {
     }
   });
 
+  lockdownWebContents(win.webContents);
   win.loadFile('index.html', {
     query: { mode: 'popout', projectKey: projectKey }
   });
@@ -565,7 +1039,331 @@ ipcMain.handle('config:getProjects', () => {
 });
 
 ipcMain.handle('config:saveProjects', (event, config) => {
+  // The renderer doesn't manage sync state — those fields are written via
+  // the dedicated sync:* IPC handlers. If we accept the renderer's payload
+  // verbatim every column close/resize would clobber sync.sourcePath and
+  // per-project syncExport/syncImports. Merge the on-disk authoritative
+  // sync state back on top before persisting.
+  try {
+    const onDisk = readConfig();
+    if (onDisk && onDisk.sync) config.sync = onDisk.sync;
+    const onDiskByPath = new Map();
+    for (const p of (onDisk.projects || [])) {
+      if (p && p.path) onDiskByPath.set(p.path, p);
+    }
+    for (const p of (config.projects || [])) {
+      if (!p || !p.path) continue;
+      const auth = onDiskByPath.get(p.path);
+      if (auth) {
+        if ('syncExport' in auth) p.syncExport = auth.syncExport;
+        if ('syncImports' in auth) p.syncImports = auth.syncImports;
+      }
+    }
+  } catch (err) { console.error('sync-preserve merge failed:', err); }
+
   scheduleWriteConfig(config);
+  // A project's sync flags may have just changed — re-apply watchers so the
+  // change takes effect without an app restart. Cheap when nothing relevant
+  // moved; lib/sync stops + restarts per-project watchers atomically.
+  try { reapplySyncFromConfig(config); } catch (err) { console.error('sync re-apply failed:', err); }
+});
+
+// --- Cross-device session sync ---
+//
+// Glues lib/sync.js to the IPC layer. Global settings (sync source path,
+// device name) live on the root of projects.json alongside `projects`.
+// Per-project state lives on each project entry as { syncExport, syncImports }.
+
+const sessionSync = require('./lib/sync');
+
+function syncLog(line) { console.log(line); }
+
+function reapplySyncFromConfig(cfg) {
+  const c = cfg || readConfig();
+  const settings = (c && c.sync) || {};
+  sessionSync.applyAllProjects({
+    homedir: os.homedir(),
+    projects: c.projects || [],
+    syncSource: settings.sourcePath || null,
+    deviceName: settings.deviceName || null,
+    log: syncLog
+  });
+}
+
+ipcMain.handle('sync:getSettings', () => {
+  const cfg = readConfig();
+  const s = (cfg && cfg.sync) || {};
+  return {
+    sourcePath: s.sourcePath || '',
+    deviceName: s.deviceName || os.hostname() || ''
+  };
+});
+
+ipcMain.handle('sync:setSettings', (_event, settings) => {
+  if (!settings || typeof settings !== 'object') return { error: 'invalid settings' };
+  const cfg = readConfig();
+  cfg.sync = {
+    sourcePath: typeof settings.sourcePath === 'string' ? settings.sourcePath : '',
+    deviceName: typeof settings.deviceName === 'string' && settings.deviceName.trim()
+      ? settings.deviceName.trim()
+      : (os.hostname() || 'device')
+  };
+  writeConfig(cfg);
+  reapplySyncFromConfig(cfg);
+  return cfg.sync;
+});
+
+ipcMain.handle('sync:browseFolder', async (_event, opts) => {
+  const defaultPath = (opts && opts.defaultPath) || os.homedir();
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    defaultPath
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle('sync:setProjectExport', (_event, projectPath, enabled) => {
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  if (!project) return { error: 'project not found' };
+  project.syncExport = !!enabled;
+  writeConfig(cfg);
+  reapplySyncFromConfig(cfg);
+  return { ok: true };
+});
+
+ipcMain.handle('sync:addProjectImport', (_event, projectPath, importFolder) => {
+  if (!importFolder) return { error: 'no folder' };
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  if (!project) return { error: 'project not found' };
+  if (!Array.isArray(project.syncImports)) project.syncImports = [];
+  if (!project.syncImports.includes(importFolder)) {
+    project.syncImports.push(importFolder);
+  }
+  writeConfig(cfg);
+  reapplySyncFromConfig(cfg);
+  return { ok: true, imports: project.syncImports };
+});
+
+ipcMain.handle('sync:removeProjectImport', (_event, projectPath, importFolder) => {
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  if (!project) return { error: 'project not found' };
+  project.syncImports = (project.syncImports || []).filter((p) => p !== importFolder);
+  writeConfig(cfg);
+  reapplySyncFromConfig(cfg);
+  return { ok: true, imports: project.syncImports };
+});
+
+ipcMain.handle('sync:getProjectStatus', (_event, projectPath) => {
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  const settings = (cfg && cfg.sync) || {};
+  if (!project) return { syncExport: false, syncImports: [], exportFolder: null };
+  return {
+    syncExport: !!project.syncExport,
+    syncImports: project.syncImports || [],
+    exportFolder: sessionSync.resolveExportFolder(
+      settings.sourcePath || '',
+      settings.deviceName || os.hostname() || '',
+      project.name || path.basename(project.path)
+    )
+  };
+});
+
+ipcMain.handle('sync:forceProject', async (_event, projectPath) => {
+  return sessionSync.forceSyncProject(projectPath, { log: syncLog });
+});
+
+// --- Endpoint preset IPC handlers ---
+//
+// Renderer sees plaintext tokens through these handlers. Encrypted blobs
+// never leave main; the spawn flow asks for the env block via endpoint:getEnv
+// rather than handing the token to the renderer when it can be avoided.
+
+ipcMain.handle('endpoint:list', () => {
+  const list = readEndpoints();
+  return list.map((e) => ({
+    id: e.id,
+    name: e.name || '',
+    baseUrl: e.baseUrl || '',
+    model: e.model || '',
+    hasToken: !!decryptToken(e.authToken),
+    fallbackId: e.fallbackId || null,
+    contextWindow: e.contextWindow || null
+  }));
+});
+
+ipcMain.handle('endpoint:get', (event, id) => {
+  const e = getEndpointById(id);
+  if (!e) return null;
+  return {
+    id: e.id,
+    name: e.name || '',
+    baseUrl: e.baseUrl || '',
+    model: e.model || '',
+    authToken: decryptToken(e.authToken),
+    fallbackId: e.fallbackId || null,
+    contextWindow: e.contextWindow || null
+  };
+});
+
+// Claude Code internally appends `/v1/messages` etc. to ANTHROPIC_BASE_URL,
+// so the stored base URL must be the host root WITHOUT a trailing `/v1`.
+// LM Studio's OpenAI-compat router is rooted at `/v1/*`, so users tend to
+// paste `http://host:port/v1` thinking that's the API root — strip it.
+function normalizeBaseUrl(input) {
+  let url = String(input || '').trim();
+  url = url.replace(/\/+$/, '');         // trailing slashes
+  url = url.replace(/\/v1\/?$/i, '');    // trailing /v1 (case insensitive)
+  return url;
+}
+
+// Extract user:pass@ credentials from a URL so callers can send Basic auth
+// explicitly. Required because:
+//   1. Node's undici fetch (Node 18+) refuses URLs with embedded userinfo —
+//      "Request cannot be constructed from a URL that includes credentials".
+//   2. The Claude CLI's internal fetch hits the same restriction when
+//      ANTHROPIC_BASE_URL contains creds.
+// Common shape: ngrok tunnel basic-auth, e.g. https://user:pass@host/...
+// Returns { url: <stripped>, basicAuth: <base64('user:pass')> | null }.
+function extractUrlCredentials(rawUrl) {
+  const input = String(rawUrl || '');
+  if (!input) return { url: '', basicAuth: null };
+  try {
+    const u = new URL(input);
+    if (!u.username && !u.password) return { url: input, basicAuth: null };
+    const user = decodeURIComponent(u.username || '');
+    const pass = decodeURIComponent(u.password || '');
+    u.username = '';
+    u.password = '';
+    // URL.toString() normalizes trailing slash on origin-only URLs — strip it
+    // so the result round-trips cleanly through normalizeBaseUrl.
+    let clean = u.toString();
+    if (!u.pathname || u.pathname === '/') clean = clean.replace(/\/$/, '');
+    return { url: clean, basicAuth: Buffer.from(user + ':' + pass).toString('base64') };
+  } catch {
+    return { url: input, basicAuth: null };
+  }
+}
+
+ipcMain.handle('endpoint:save', (event, preset) => {
+  if (!preset || typeof preset !== 'object') {
+    throw new Error('endpoint:save requires a preset object');
+  }
+  const list = readEndpoints();
+  const id = preset.id || ('ep_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+
+  // Optional fallbackId: must reference another existing preset, never self.
+  // Empty string / undefined / null all mean "no fallback".
+  let fallbackId = null;
+  if (preset.fallbackId) {
+    if (preset.fallbackId === id) {
+      return { ok: false, error: 'Fallback cannot be the same preset.' };
+    }
+    if (!list.find((e) => e && e.id === preset.fallbackId)) {
+      return { ok: false, error: 'Fallback endpoint does not exist.' };
+    }
+    fallbackId = String(preset.fallbackId);
+  }
+
+  // Optional context window — used by the column ctx meter as denominator.
+  // Falsy/invalid values are stored as null so renderer treats it as "unset".
+  let contextWindow = null;
+  if (preset.contextWindow != null) {
+    const n = typeof preset.contextWindow === 'string' ? parseInt(preset.contextWindow, 10) : preset.contextWindow;
+    if (Number.isFinite(n) && n > 0) contextWindow = n;
+  }
+
+  const stored = {
+    id,
+    name: String(preset.name || '').trim(),
+    baseUrl: normalizeBaseUrl(preset.baseUrl),
+    model: String(preset.model || '').trim(),
+    authToken: encryptToken(String(preset.authToken || '')),
+    fallbackId,
+    contextWindow
+  };
+  const idx = list.findIndex((e) => e && e.id === id);
+  if (idx >= 0) list[idx] = stored;
+  else list.push(stored);
+  writeEndpoints(list);
+  // Push to all windows so other open instances reload their dropdown.
+  BrowserWindow.getAllWindows().forEach((w) => {
+    try { w.webContents.send('endpoints:updated'); } catch { /* ignore */ }
+  });
+  return { id, ok: true };
+});
+
+ipcMain.handle('endpoint:delete', (event, id) => {
+  const list = readEndpoints().filter((e) => e && e.id !== id);
+  writeEndpoints(list);
+  BrowserWindow.getAllWindows().forEach((w) => {
+    try { w.webContents.send('endpoints:updated'); } catch { /* ignore */ }
+  });
+  return { ok: true };
+});
+
+ipcMain.handle('endpoint:getEnv', (event, id, modelOverride) => {
+  return buildEndpointEnv(id, modelOverride);
+});
+
+ipcMain.handle('endpoint:fetchModels', async (event, args) => {
+  // Accept either `http://host:port` or `http://host:port/v1`; we store the
+  // bare host but tolerate either form on the way in.
+  const baseUrl = normalizeBaseUrl((args && args.baseUrl) || '');
+  const authToken = String((args && args.authToken) || '');
+  if (!baseUrl) return { ok: false, error: 'Base URL is required' };
+  // URL-embedded creds (ngrok-style basic auth) must be stripped before fetch
+  // — undici refuses URLs with userinfo. Promote them to a Basic auth header.
+  // If both URL creds and an explicit token exist, URL creds win because the
+  // proxy layer is what's gating the request.
+  const { url: cleanBase, basicAuth } = extractUrlCredentials(baseUrl);
+  const url = cleanBase + '/v1/models';
+  const headers = {};
+  if (basicAuth) headers['Authorization'] = 'Basic ' + basicAuth;
+  else if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    let res;
+    try {
+      res = await fetch(url, {
+        method: 'GET',
+        headers,
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) return { ok: false, error: 'HTTP ' + res.status + ' ' + res.statusText };
+    const data = await res.json();
+    const arr = Array.isArray(data && data.data) ? data.data : (Array.isArray(data) ? data : []);
+    const models = arr.map((m) => (m && (m.id || m.model || m.name)) || '').filter(Boolean);
+    // Best-effort context-length probe. LM Studio surfaces these on /v1/models;
+    // vLLM uses max_model_len; some servers use context_length or n_ctx.
+    function pickCtx(m) {
+      if (!m || typeof m !== 'object') return null;
+      const candidates = [
+        m.loaded_context_length, m.max_context_length, m.context_length,
+        m.max_model_len, m.n_ctx, m.context_window
+      ];
+      for (const v of candidates) {
+        const n = typeof v === 'string' ? parseInt(v, 10) : v;
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return null;
+    }
+    const modelInfo = arr
+      .map((m) => ({ id: (m && (m.id || m.model || m.name)) || '', context: pickCtx(m) }))
+      .filter((m) => m.id);
+    return { ok: true, models, modelInfo };
+  } catch (err) {
+    const msg = err && err.name === 'AbortError' ? 'Request timed out' : (err && err.message) || 'Fetch failed';
+    return { ok: false, error: msg };
+  }
 });
 
 ipcMain.handle('pipelines:get', () => {
@@ -679,11 +1477,27 @@ ipcMain.handle('project:closePopoutWindow', (event, projectKey) => {
 });
 
 ipcMain.handle('app:getStartWithOS', () => {
-  const settings = app.getLoginItemSettings();
-  return settings.openAtLogin;
+  // In dev (`npm start`), process.execPath is the bundled electron.exe with no
+  // app-path arg, so any registration would launch Electron's default welcome
+  // screen on boot. Pretend the setting is off so the UI stays consistent with
+  // setStartWithOS being a no-op.
+  if (!app.isPackaged) return false;
+  // On Windows, getLoginItemSettings only reports openAtLogin: true when the
+  // stored registry entry's args exactly match what we query with. Since the
+  // setter writes ['--hidden'], the getter must query with ['--hidden'] too —
+  // querying with the default [] silently returned false even when the
+  // registry entry was present, so the checkbox un-ticked itself on every
+  // re-open of the Settings modal. macOS ignores `args`, so this is a no-op
+  // there.
+  const lookup = process.platform === 'darwin' ? {} : { args: ['--hidden'] };
+  return app.getLoginItemSettings(lookup).openAtLogin;
 });
 
 ipcMain.handle('app:setStartWithOS', (event, enabled) => {
+  // Refuse to register a startup item from dev — process.execPath points at
+  // node_modules\electron\dist\electron.exe and Windows would launch the
+  // default Electron welcome screen on boot.
+  if (!app.isPackaged) return;
   if (process.platform === 'darwin') {
     app.setLoginItemSettings({
       openAtLogin: enabled,
@@ -713,9 +1527,22 @@ ipcMain.handle('theme:setTitleBarOverlay', (event, colors) => {
 
 // --- Session Management ---
 
-// Convert a project path to Claude's project key format
+// Convert a project path to Claude's project key format.
+// Claude CLI encodes every non-alphanumeric character (colons, slashes,
+// backslashes, spaces, dots, underscores, …) as a single '-'. Consecutive
+// non-alphanumerics each become their own '-' (no collapsing). Leading '-'s
+// are stripped so unix paths starting with '/' don't begin with a separator.
+// Examples:
+//   D:\Git Repos\Claudes  → D--Git-Repos-Claudes
+//   /Users/devel          → Users-devel
+//   D:\foo\.bar           → D--foo--bar
 function projectPathToClaudeKey(projectPath) {
-  return projectPath.replace(/[:/\\]/g, '-').replace(/^-/, '');
+  // Claude CLI uses the raw substitution, keeping any leading dashes — so
+  // /Users/ashleypayne/Repos/Claudes becomes -Users-ashleypayne-Repos-Claudes
+  // on macOS/Linux. The earlier `.replace(/^-+/, '')` stripped that leading
+  // dash, making session discovery silently miss every directory on Unix
+  // hosts (Windows paths start with a drive letter so they weren't affected).
+  return projectPath.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 // Get recent session IDs for a project by scanning Claude's data directory
@@ -842,7 +1669,8 @@ ipcMain.handle('git:detectSessionWorktree', async (event, projectPath, sessionId
 // Renderer's persistSessions/restoreSessions handle promotion; main.js just persists the blob atomically
 // (tmp+rename so a partial write can't corrupt multi-workspace state).
 ipcMain.handle('sessions:save', (event, projectPath, blob) => {
-  const claudesDir = path.join(projectPath, '.claudes');
+  const safeBase = assertInsideAllowedRoots(projectPath);
+  const claudesDir = path.join(safeBase, '.claudes');
   if (!fs.existsSync(claudesDir)) {
     fs.mkdirSync(claudesDir, { recursive: true });
   }
@@ -863,8 +1691,9 @@ ipcMain.handle('sessions:save', (event, projectPath, blob) => {
 });
 
 ipcMain.handle('sessions:load', (event, projectPath) => {
-  const sessionsFile = path.join(projectPath, '.claudes', 'sessions.json');
   try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const sessionsFile = path.join(safeBase, '.claudes', 'sessions.json');
     const data = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
     if (data && typeof data === 'object' && !Array.isArray(data)) {
       return {
@@ -1229,11 +2058,202 @@ ipcMain.handle('workspace:scrubArtifacts', (event, projectPath, wsId) => {
   }
 });
 
+// --- Named layouts (per project, persisted in projects.json) ---
+//
+// A layout snapshot is the user's chosen arrangement of rows / columns for a
+// project: how many columns, what each spawns (claude vs custom cmd), the env
+// it carries (endpoint preset, model), and any column title. Restoring a
+// layout re-spawns those columns in the same shape — useful for "investigate
+// bug X" vs "review PRs" workflows.
+
+function listLayouts(projectPath) {
+  const cfg = readConfig();
+  const proj = (cfg.projects || []).find(p => p && p.path === projectPath);
+  return (proj && Array.isArray(proj.layouts)) ? proj.layouts : [];
+}
+function saveLayouts(projectPath, layouts) {
+  const cfg = readConfig();
+  const proj = (cfg.projects || []).find(p => p && p.path === projectPath);
+  if (!proj) return false;
+  proj.layouts = Array.isArray(layouts) ? layouts : [];
+  writeConfig(cfg);
+  return true;
+}
+
+ipcMain.handle('layouts:list', (event, projectPath) => listLayouts(projectPath));
+ipcMain.handle('layouts:save', (event, projectPath, name, layout) => {
+  if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'name required' };
+  if (!layout || typeof layout !== 'object') return { ok: false, error: 'layout required' };
+  const existing = listLayouts(projectPath);
+  const next = existing.filter(l => l.name !== name);
+  next.push({ name: name.trim(), savedAt: Date.now(), layout });
+  return { ok: saveLayouts(projectPath, next) };
+});
+ipcMain.handle('layouts:delete', (event, projectPath, name) => {
+  const existing = listLayouts(projectPath);
+  return { ok: saveLayouts(projectPath, existing.filter(l => l.name !== name)) };
+});
+
+// --- MCP server config (.mcp.json) ---
+//
+// .mcp.json lives at the project root and follows the Claude Code schema:
+//   { "mcpServers": { "name": { "command", "args", "env", "transport" } } }
+// We expose read/write IPCs so the renderer can offer a CRUD UI without
+// users editing JSON by hand.
+ipcMain.handle('mcp:read', (event, projectPath) => {
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const filePath = path.join(safeBase, '.mcp.json');
+    if (!fs.existsSync(filePath)) return { exists: false, mcpServers: {} };
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const data = JSON.parse(raw);
+    return { exists: true, mcpServers: (data && data.mcpServers) || {} };
+  } catch (err) {
+    return { exists: false, mcpServers: {}, error: err && err.message };
+  }
+});
+
+ipcMain.handle('mcp:write', (event, projectPath, mcpServers) => {
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    if (!mcpServers || typeof mcpServers !== 'object') return { ok: false, error: 'mcpServers must be an object' };
+    // Re-read existing file to preserve top-level keys we don't manage (e.g. some
+    // forks store additional settings here). Fall back to a fresh object when absent.
+    const filePath = path.join(safeBase, '.mcp.json');
+    let existing = {};
+    try { existing = JSON.parse(fs.readFileSync(filePath, 'utf8')); }
+    catch { /* missing or malformed — overwrite from scratch */ }
+    const out = Object.assign({}, existing, { mcpServers });
+    fs.writeFileSync(filePath, JSON.stringify(out, null, 2), 'utf8');
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err && err.message };
+  }
+});
+
+// --- Claude Code extensions discovery ---
+// Lists files under .claude/{agents,skills,commands} both project-local and
+// global (~/.claude). The renderer uses this to surface a unified manager UI
+// without each request scanning each scope separately.
+ipcMain.handle('extensions:list', (event, projectPath) => {
+  const out = { agents: [], skills: [], commands: [] };
+
+  function scanScope(baseDir, scope) {
+    function scanCategory(category) {
+      const dir = path.join(baseDir, category);
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch { return; }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          // skills/<name>/SKILL.md style
+          const skillFile = path.join(full, 'SKILL.md');
+          if (fs.existsSync(skillFile)) {
+            out[category].push({ name: e.name, path: skillFile, scope });
+            continue;
+          }
+          // commands can also be nested directories (subdirs of namespaced commands)
+          try {
+            const inner = fs.readdirSync(full, { withFileTypes: true });
+            for (const i of inner) {
+              if (i.isFile() && (i.name.endsWith('.md') || i.name.endsWith('.json'))) {
+                out[category].push({ name: e.name + '/' + i.name.replace(/\.(md|json)$/, ''), path: path.join(full, i.name), scope });
+              }
+            }
+          } catch { /* unreadable */ }
+        } else if (e.isFile() && (e.name.endsWith('.md') || e.name.endsWith('.json'))) {
+          out[category].push({ name: e.name.replace(/\.(md|json)$/, ''), path: full, scope });
+        }
+      }
+    }
+    scanCategory('agents');
+    scanCategory('skills');
+    scanCategory('commands');
+  }
+
+  // Global first so project entries shadow global ones with the same name in
+  // the renderer's grouping. .claude is always an allowed root.
+  scanScope(path.join(os.homedir(), '.claude'), 'global');
+  try {
+    if (projectPath) {
+      const safe = assertInsideAllowedRoots(projectPath);
+      scanScope(path.join(safe, '.claude'), 'project');
+    }
+  } catch { /* project scope unavailable */ }
+  return out;
+});
+
+// Create a new extension file from a tiny template so the manager UI can
+// produce something the user can immediately edit.
+ipcMain.handle('extensions:create', (event, projectPath, category, name, scope) => {
+  if (!['agents', 'skills', 'commands'].includes(category)) return { ok: false, error: 'bad category' };
+  if (typeof name !== 'string' || !/^[A-Za-z0-9_.\-]+$/.test(name)) {
+    return { ok: false, error: 'invalid name' };
+  }
+  let baseDir;
+  if (scope === 'global') baseDir = path.join(os.homedir(), '.claude');
+  else {
+    try { baseDir = path.join(assertInsideAllowedRoots(projectPath), '.claude'); }
+    catch { return { ok: false, error: 'project path not allowed' }; }
+  }
+  const dir = path.join(baseDir, category);
+  let filePath;
+  let content;
+  if (category === 'skills') {
+    filePath = path.join(dir, name, 'SKILL.md');
+    content = '---\nname: ' + name + '\ndescription: A short summary of when to use this skill.\n---\n\n# ' + name + '\n\nReplace this with the skill body.\n';
+    try { fs.mkdirSync(path.dirname(filePath), { recursive: true }); }
+    catch { /* exists */ }
+  } else {
+    filePath = path.join(dir, name + '.md');
+    content = category === 'agents'
+      ? '---\nname: ' + name + '\ndescription: Triggered when the user wants…\nmodel: sonnet\n---\n\nYou are a focused sub-agent that…\n'
+      : '# /' + name + '\n\nReplace this with the slash-command body. The user invokes it as `/' + name + '` from the chat.\n';
+    try { fs.mkdirSync(dir, { recursive: true }); }
+    catch { /* exists */ }
+  }
+  if (fs.existsSync(filePath)) return { ok: false, error: 'already exists', path: filePath };
+  try { fs.writeFileSync(filePath, content, 'utf8'); }
+  catch (err) { return { ok: false, error: err && err.message }; }
+  return { ok: true, path: filePath };
+});
+
+ipcMain.handle('extensions:delete', (event, targetPath) => {
+  let safe;
+  try { safe = assertInsideAllowedRoots(targetPath); }
+  catch { return { ok: false, error: 'forbidden' }; }
+  // Only allow under a .claude/ directory — extra guard so a compromised
+  // renderer can't ask us to delete arbitrary files via this IPC.
+  if (!/[\\/]\.claude[\\/]/.test(safe)) return { ok: false, error: 'not inside .claude' };
+  try {
+    const st = fs.statSync(safe);
+    if (st.isDirectory()) fs.rmSync(safe, { recursive: true, force: true });
+    else fs.unlinkSync(safe);
+  } catch (err) {
+    return { ok: false, error: err && err.message };
+  }
+  return { ok: true };
+});
+
 // --- CLAUDE.md Management ---
 
+// Sentinel passed by the renderer when it wants to edit the global
+// ~/.claude/CLAUDE.md (a Claude CLI feature: instructions that apply to every
+// project). Resolved here so we never expose the home path directly to the
+// renderer and so assertInsideAllowedRoots still gates writes.
+const GLOBAL_CLAUDEMD_SENTINEL = '__GLOBAL__';
+function resolveClaudeMdRoot(arg) {
+  if (arg === GLOBAL_CLAUDEMD_SENTINEL) {
+    return path.join(os.homedir(), '.claude');
+  }
+  return arg;
+}
+
 ipcMain.handle('claudemd:read', (event, projectPath) => {
-  const filePath = path.join(projectPath, 'CLAUDE.md');
   try {
+    const safeBase = assertInsideAllowedRoots(resolveClaudeMdRoot(projectPath));
+    const filePath = path.join(safeBase, 'CLAUDE.md');
     if (!fs.existsSync(filePath)) return { exists: false, content: '' };
     return { exists: true, content: fs.readFileSync(filePath, 'utf8') };
   } catch {
@@ -1242,8 +2262,13 @@ ipcMain.handle('claudemd:read', (event, projectPath) => {
 });
 
 ipcMain.handle('claudemd:save', (event, projectPath, content) => {
-  const filePath = path.join(projectPath, 'CLAUDE.md');
   try {
+    const safeBase = assertInsideAllowedRoots(resolveClaudeMdRoot(projectPath));
+    const filePath = path.join(safeBase, 'CLAUDE.md');
+    if (typeof content !== 'string') return { success: false, error: 'content must be a string' };
+    if (Buffer.byteLength(content, 'utf8') > FS_WRITE_MAX_BYTES) {
+      return { success: false, error: 'content exceeds write size cap (5MB)' };
+    }
     fs.writeFileSync(filePath, content, 'utf8');
     return { success: true };
   } catch (err) {
@@ -1253,13 +2278,16 @@ ipcMain.handle('claudemd:save', (event, projectPath, content) => {
 
 // --- Explorer Panel IPC ---
 
+const FS_WRITE_MAX_BYTES = 5 * 1024 * 1024;  // 5 MB cap on writes — well above any text file the editor handles
+
 ipcMain.handle('fs:readFile', (event, filePath) => {
   try {
-    const stats = fs.statSync(filePath);
+    const safe = assertInsideAllowedRoots(filePath);
+    const stats = fs.statSync(safe);
     if (stats.size > 2 * 1024 * 1024) {
       return { error: 'File is too large to edit (>2MB)' };
     }
-    const buf = fs.readFileSync(filePath);
+    const buf = fs.readFileSync(safe);
     // Check for binary content (null bytes in first 8KB)
     const sample = buf.slice(0, 8192);
     for (let i = 0; i < sample.length; i++) {
@@ -1273,22 +2301,114 @@ ipcMain.handle('fs:readFile', (event, filePath) => {
 
 ipcMain.handle('fs:writeFile', (event, filePath, content) => {
   try {
-    fs.writeFileSync(filePath, content, 'utf8');
+    const safe = assertInsideAllowedRoots(filePath);
+    if (typeof content !== 'string') return { success: false, error: 'content must be a string' };
+    if (Buffer.byteLength(content, 'utf8') > FS_WRITE_MAX_BYTES) {
+      return { success: false, error: 'content exceeds write size cap (5MB)' };
+    }
+    fs.writeFileSync(safe, content, 'utf8');
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
   }
 });
 
+// Minimal .gitignore matcher. Implements the common subset:
+//   - blank / # comments skipped
+//   - trailing /  : matches directories only
+//   - leading /   : anchored to the gitignore root
+//   - bare name   : matches by basename anywhere in the tree
+//   - patterns with / (not leading): anchored relative to gitignore root
+//   - * wildcards inside a segment (no cross-segment ** support here)
+//   - ! negation is honoured (later rule wins)
+// Always implicitly ignores .git and node_modules so even repos without a
+// .gitignore don't flood the explorer.
+const GITIGNORE_CACHE = new Map(); // rootDir -> { mtime, rules }
+const ALWAYS_IGNORED_DIRS = new Set(['.git', 'node_modules', '__pycache__', '.next', '.nuxt', 'dist', '.cache', 'coverage', '.venv', 'venv', 'target']);
+
+function compileGitignorePattern(line) {
+  let neg = false;
+  if (line.startsWith('!')) { neg = true; line = line.slice(1); }
+  let dirOnly = false;
+  if (line.endsWith('/')) { dirOnly = true; line = line.slice(0, -1); }
+  let anchored = false;
+  if (line.startsWith('/')) { anchored = true; line = line.slice(1); }
+  // If the pattern contains a slash (and isn't bare), it's anchored from root.
+  if (!anchored && line.includes('/')) anchored = true;
+  // Escape regex metachars except `*` and `?`, then translate globs.
+  const re = line.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]');
+  let pattern;
+  if (anchored) {
+    // Match against the relative path from gitignore root.
+    pattern = '^' + re + '(/.*)?$';
+  } else {
+    // Match against any path segment by basename, OR by trailing path component.
+    pattern = '(^|/)' + re + '(/.*)?$';
+  }
+  return { neg, dirOnly, re: new RegExp(pattern) };
+}
+
+function loadGitignoreRules(root) {
+  const file = path.join(root, '.gitignore');
+  let stat;
+  try { stat = fs.statSync(file); }
+  catch { GITIGNORE_CACHE.set(root, { mtime: 0, rules: [] }); return []; }
+  const cached = GITIGNORE_CACHE.get(root);
+  if (cached && cached.mtime === stat.mtimeMs) return cached.rules;
+  let raw = '';
+  try { raw = fs.readFileSync(file, 'utf8'); } catch { /* race condition — proceed empty */ }
+  const rules = raw.split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('#'))
+    .map(l => {
+      try { return compileGitignorePattern(l); }
+      catch { return null; }
+    })
+    .filter(Boolean);
+  GITIGNORE_CACHE.set(root, { mtime: stat.mtimeMs, rules });
+  return rules;
+}
+
+function isIgnoredByGitignore(rules, relPath, isDir) {
+  // Normalise to forward slashes (gitignore patterns use /).
+  const p = relPath.split(path.sep).join('/');
+  let ignored = false;
+  for (const r of rules) {
+    if (r.dirOnly && !isDir) continue;
+    if (r.re.test(p)) ignored = !r.neg;
+  }
+  return ignored;
+}
+
 ipcMain.handle('fs:readDir', (event, dirPath) => {
   try {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    const excluded = new Set(['node_modules', '.git', '__pycache__', '.next', '.nuxt']);
+    const safe = assertInsideAllowedRoots(dirPath);
+    const entries = fs.readdirSync(safe, { withFileTypes: true });
+    // Walk up to find a gitignore root: the nearest configured project that
+    // contains `safe`. Falls back to `safe` itself if it's a project root.
+    let gitRoot = safe;
+    try {
+      const cfg = readConfig();
+      if (Array.isArray(cfg.projects)) {
+        for (const p of cfg.projects) {
+          if (p && typeof p.path === 'string' && isInsideRoot(safe, path.resolve(p.path))) {
+            gitRoot = path.resolve(p.path);
+            break;
+          }
+        }
+      }
+    } catch { /* fall through */ }
+    const rules = loadGitignoreRules(gitRoot);
     return entries
-      .filter(e => !excluded.has(e.name))
+      .filter(e => !ALWAYS_IGNORED_DIRS.has(e.name))
+      .filter(e => {
+        const full = path.join(safe, e.name);
+        const rel = path.relative(gitRoot, full);
+        return !isIgnoredByGitignore(rules, rel, e.isDirectory());
+      })
       .map(e => ({
         name: e.name,
-        path: path.join(dirPath, e.name),
+        path: path.join(safe, e.name),
         isDirectory: e.isDirectory()
       }))
       .sort((a, b) => {
@@ -1301,9 +2421,11 @@ ipcMain.handle('fs:readDir', (event, dirPath) => {
 });
 
 ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
-  const excluded = new Set(['node_modules', '.git', '__pycache__', '.next', '.nuxt', 'dist', '.cache', 'coverage']);
+  let safeRoot;
+  try { safeRoot = assertInsideAllowedRoots(rootDir); } catch { return []; }
+  const rules = loadGitignoreRules(safeRoot);
   const results = [];
-  const lowerQuery = query.toLowerCase();
+  const lowerQuery = String(query || '').toLowerCase();
   const MAX_RESULTS = 100;
 
   function walk(dir) {
@@ -1312,9 +2434,10 @@ ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const e of entries) {
         if (results.length >= MAX_RESULTS) return;
-        if (excluded.has(e.name)) continue;
+        if (ALWAYS_IGNORED_DIRS.has(e.name)) continue;
         const fullPath = path.join(dir, e.name);
-        const relativePath = path.relative(rootDir, fullPath);
+        const relativePath = path.relative(safeRoot, fullPath);
+        if (isIgnoredByGitignore(rules, relativePath, e.isDirectory())) continue;
         if (e.name.toLowerCase().includes(lowerQuery)) {
           results.push({ name: e.name, path: fullPath, relativePath, isDirectory: e.isDirectory() });
         }
@@ -1323,15 +2446,152 @@ ipcMain.handle('fs:searchFiles', (event, rootDir, query) => {
     } catch { /* skip inaccessible dirs */ }
   }
 
-  walk(rootDir);
+  walk(safeRoot);
   return results;
+});
+
+// fs.watch wiring for the active project root so the Explorer can refresh
+// itself when files appear, disappear, or get renamed. One watcher per
+// project root; events are coalesced to avoid spamming the renderer.
+const FS_WATCHERS = new Map(); // root -> { watcher, timer }
+const FS_WATCH_DEBOUNCE_MS = 250;
+
+function emitFsChanged(root) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send('fs:changed', root); } catch { /* window closing */ }
+}
+
+ipcMain.handle('fs:startWatch', (event, projectPath) => {
+  let safe;
+  try { safe = assertInsideAllowedRoots(projectPath); } catch { return { ok: false, error: 'forbidden' }; }
+  if (FS_WATCHERS.has(safe)) return { ok: true, alreadyWatching: true };
+  try {
+    // recursive: true is the only sensible mode here. Supported on darwin/win32
+    // natively, and on Linux since Node 20. Fall back to a non-recursive watcher
+    // if the platform refuses recursive.
+    let watcher;
+    function onFsEvent() { incrPerfFsEvent(); scheduleEmit(); }
+    try { watcher = fs.watch(safe, { recursive: true }, onFsEvent); }
+    catch { watcher = fs.watch(safe, { recursive: false }, onFsEvent); }
+    let timer = null;
+    function scheduleEmit() {
+      if (timer) return;
+      timer = setTimeout(() => { timer = null; emitFsChanged(safe); }, FS_WATCH_DEBOUNCE_MS);
+    }
+    watcher.on('error', (err) => {
+      console.warn('[fs:watch] error on', safe, '-', err && err.message);
+    });
+    FS_WATCHERS.set(safe, { watcher, timer: null });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err && err.message };
+  }
+});
+
+ipcMain.handle('fs:stopWatch', (event, projectPath) => {
+  let safe;
+  try { safe = assertInsideAllowedRoots(projectPath); } catch { return { ok: false }; }
+  const entry = FS_WATCHERS.get(safe);
+  if (!entry) return { ok: true };
+  try { entry.watcher.close(); } catch { /* ignore */ }
+  FS_WATCHERS.delete(safe);
+  return { ok: true };
+});
+
+app.on('before-quit', () => {
+  // Make sure native watcher handles are released even if the renderer hasn't
+  // explicitly unwatched.
+  for (const [root, entry] of FS_WATCHERS) {
+    try { entry.watcher.close(); } catch { /* */ }
+  }
+  FS_WATCHERS.clear();
+});
+
+// Project-wide content grep. Plain substring (case-insensitive) match across
+// files under projectRoot, respecting .gitignore. Cheap enough for ~50k files
+// without a worker on modern SSDs; capped at 300 hits + 5 MB per file to keep
+// the renderer responsive on huge repos.
+ipcMain.handle('fs:searchContent', (event, projectRoot, query) => {
+  let safeRoot;
+  try { safeRoot = assertInsideAllowedRoots(projectRoot); } catch { return []; }
+  const q = String(query || '');
+  if (q.length < 2) return [];
+  const needle = q.toLowerCase();
+  const rules = loadGitignoreRules(safeRoot);
+  const hits = [];
+  const MAX_HITS = 300;
+  const MAX_FILE_BYTES = 5 * 1024 * 1024;
+  // Skip binary-looking extensions outright; reading their content is wasteful.
+  const BINARY_EXTS = new Set(['.png','.jpg','.jpeg','.gif','.webp','.bmp','.ico','.tif','.tiff','.psd','.svg','.mp3','.mp4','.mov','.avi','.webm','.wav','.flac','.ogg','.zip','.gz','.tar','.7z','.rar','.pdf','.doc','.docx','.xls','.xlsx','.ppt','.pptx','.bin','.dat','.dll','.so','.dylib','.exe','.class','.jar','.wasm','.lock','.svg']);
+
+  function scanFile(filePath) {
+    if (hits.length >= MAX_HITS) return;
+    const ext = path.extname(filePath).toLowerCase();
+    if (BINARY_EXTS.has(ext)) return;
+    let st;
+    try { st = fs.statSync(filePath); } catch { return; }
+    if (st.size > MAX_FILE_BYTES) return;
+    let content;
+    try { content = fs.readFileSync(filePath, 'utf8'); } catch { return; }
+    // Quick reject — most files don't contain the needle.
+    const lower = content.toLowerCase();
+    let idx = lower.indexOf(needle);
+    if (idx === -1) return;
+    // Compute line/snippet for the first 3 matches in this file.
+    let matchCount = 0;
+    while (idx !== -1 && matchCount < 3 && hits.length < MAX_HITS) {
+      const lineStart = content.lastIndexOf('\n', idx - 1) + 1;
+      const lineEnd = (content.indexOf('\n', idx) === -1) ? content.length : content.indexOf('\n', idx);
+      const line = content.slice(lineStart, lineEnd);
+      // 1-based line number (count newlines before idx).
+      let lineNo = 1;
+      for (let i = 0; i < lineStart; i++) if (content.charCodeAt(i) === 10) lineNo++;
+      hits.push({
+        path: filePath,
+        relativePath: path.relative(safeRoot, filePath),
+        line: lineNo,
+        snippet: line.length > 240 ? line.slice(0, 240) + '…' : line
+      });
+      matchCount++;
+      idx = lower.indexOf(needle, idx + needle.length);
+    }
+  }
+
+  function walk(dir) {
+    if (hits.length >= MAX_HITS) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (hits.length >= MAX_HITS) return;
+      if (ALWAYS_IGNORED_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      const rel = path.relative(safeRoot, full);
+      if (isIgnoredByGitignore(rules, rel, e.isDirectory())) continue;
+      if (e.isDirectory()) walk(full);
+      else scanFile(full);
+    }
+  }
+  walk(safeRoot);
+  return hits;
 });
 
 // Async git runner — never block the Electron main thread.
 // execFile() preserves stderr/stdout on error like execFileSync does.
+//
+// cwd is constrained to the configured allowed roots so a compromised renderer
+// can't aim destructive git ops (checkout/discardFile/pull/push/stashPop) at an
+// arbitrary directory on disk. Read-only ops are also restricted so we don't
+// leak the contents of arbitrary repos.
 function runGit(cwd, args, timeout) {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, encoding: 'utf8', timeout: timeout || 5000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    let safeCwd;
+    try { safeCwd = assertInsideAllowedRoots(cwd); }
+    catch (e) {
+      const err = new Error('refused: cwd outside allowed roots');
+      err.stderr = e && e.message ? e.message : 'forbidden';
+      return reject(err);
+    }
+    execFile('git', args, { cwd: safeCwd, encoding: 'utf8', timeout: timeout || 5000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         err.stderr = err.stderr || stderr;
         err.stdout = err.stdout || stdout;
@@ -1340,6 +2600,13 @@ function runGit(cwd, args, timeout) {
       resolve(stdout);
     });
   });
+}
+
+// Accepts a 4-64 hex commit hash and rejects anything that could be parsed by
+// git as an option (leading `-`) or that contains shell-ish chars. Used by the
+// commit/diff handlers that take an arbitrary ref from the renderer.
+function isSafeGitHash(hash) {
+  return typeof hash === 'string' && /^[0-9a-fA-F]{4,64}$/.test(hash);
 }
 
 ipcMain.handle('git:status', async (event, projectPath, branch) => {
@@ -1451,9 +2718,27 @@ ipcMain.handle('git:branches', async (event, projectPath) => {
   }
 });
 
+// Reject branch names that look like option flags or that contain shell-ish
+// metacharacters. Without this, `git checkout --orphan` and similar are
+// reachable from the renderer. Pattern conforms to the safe subset of
+// git-check-ref-format(1).
+function isSafeGitRefName(name) {
+  if (typeof name !== 'string' || !name) return false;
+  if (name.startsWith('-')) return false;
+  if (name.length > 200) return false;
+  if (!/^[A-Za-z0-9._/+-]+$/.test(name)) return false;
+  if (name.includes('..')) return false;
+  if (name.endsWith('.lock')) return false;
+  return true;
+}
+
 ipcMain.handle('git:checkout', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) {
+    return { success: false, error: 'refused: invalid branch name' };
+  }
   try {
-    await runGit(projectPath, ['checkout', branchName], 10000);
+    // Trailing `--` ensures git treats branchName as a ref, not an option.
+    await runGit(projectPath, ['checkout', branchName, '--'], 10000);
     return { success: true };
   } catch (err) {
     return { success: false, error: (err.stderr || err.message).toString().trim() };
@@ -1461,8 +2746,11 @@ ipcMain.handle('git:checkout', async (event, projectPath, branchName) => {
 });
 
 ipcMain.handle('git:createBranch', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) {
+    return { success: false, error: 'refused: invalid branch name' };
+  }
   try {
-    await runGit(projectPath, ['checkout', '-b', branchName], 10000);
+    await runGit(projectPath, ['checkout', '-b', branchName, '--'], 10000);
     return { success: true };
   } catch (err) {
     return { success: false, error: (err.stderr || err.message).toString().trim() };
@@ -1563,10 +2851,13 @@ ipcMain.handle('git:stashPop', async (event, projectPath) => {
 });
 
 ipcMain.handle('git:commitDetail', async (event, projectPath, hash) => {
+  if (!isSafeGitHash(hash)) {
+    return { hash: '', message: '', author: '', date: '', files: [], error: 'refused: invalid commit hash' };
+  }
   try {
     const [metaOutput, statOutput] = await Promise.all([
-      runGit(projectPath, ['show', '--format=%H|%s|%an|%aI', '-s', hash, '--no-color'], 10000),
-      runGit(projectPath, ['show', '--numstat', '--format=', hash, '--no-color'], 10000)
+      runGit(projectPath, ['show', '--format=%H|%s|%an|%aI', '-s', hash, '--no-color', '--'], 10000),
+      runGit(projectPath, ['show', '--numstat', '--format=', hash, '--no-color', '--'], 10000)
     ]);
     const meta = metaOutput.trim().split('|');
     const files = [];
@@ -1588,10 +2879,11 @@ ipcMain.handle('git:commitDetail', async (event, projectPath, hash) => {
 });
 
 ipcMain.handle('git:diffCommit', async (event, projectPath, hash, filePath) => {
+  if (!isSafeGitHash(hash)) return '';
   try {
     const args = filePath
       ? ['show', '--pretty=format:', '-p', hash, '--', filePath]
-      : ['show', '--pretty=format:', '-p', hash];
+      : ['show', '--pretty=format:', '-p', hash, '--'];
     const output = await runGit(projectPath, args, 10000);
     return output.replace(/^\n+/, '');
   } catch {
@@ -1687,6 +2979,167 @@ ipcMain.handle('git:isInsideWorkTree', async (event, cwd) => {
   }
 });
 
+// --- Git: merge / rebase / conflict / tag / cherry-pick / file history ---
+
+ipcMain.handle('git:merge', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) return { success: false, error: 'refused: invalid branch name' };
+  try {
+    await runGit(projectPath, ['merge', branchName, '--no-edit'], 30000);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: (err.stderr || err.message).toString().trim() };
+  }
+});
+
+ipcMain.handle('git:rebase', async (event, projectPath, branchName) => {
+  if (!isSafeGitRefName(branchName)) return { success: false, error: 'refused: invalid branch name' };
+  try {
+    await runGit(projectPath, ['rebase', branchName], 30000);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: (err.stderr || err.message).toString().trim() };
+  }
+});
+
+ipcMain.handle('git:mergeAbort', async (event, projectPath) => {
+  try { await runGit(projectPath, ['merge', '--abort'], 5000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:rebaseAbort', async (event, projectPath) => {
+  try { await runGit(projectPath, ['rebase', '--abort'], 5000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:rebaseContinue', async (event, projectPath) => {
+  try { await runGit(projectPath, ['rebase', '--continue'], 10000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:mergeContinue', async (event, projectPath) => {
+  // Modern git: `git merge --continue` finalises a conflicted merge once
+  // everything is staged.
+  try { await runGit(projectPath, ['commit', '--no-edit'], 10000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// Conflict resolution helpers. After checkout --ours / --theirs the file must
+// still be staged via git add to mark the conflict resolved.
+ipcMain.handle('git:resolveOurs', async (event, projectPath, filePath) => {
+  try {
+    await runGit(projectPath, ['checkout', '--ours', '--', filePath], 5000);
+    await runGit(projectPath, ['add', '--', filePath], 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:resolveTheirs', async (event, projectPath, filePath) => {
+  try {
+    await runGit(projectPath, ['checkout', '--theirs', '--', filePath], 5000);
+    await runGit(projectPath, ['add', '--', filePath], 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// Reports the current "operation" state so the renderer can show a banner.
+// Walks the .git directory for MERGE_HEAD / REBASE_HEAD / CHERRY_PICK_HEAD
+// markers — cheaper and more reliable than parsing `git status --porcelain`
+// for the same info.
+ipcMain.handle('git:opState', async (event, projectPath) => {
+  try {
+    const gitDir = (await runGit(projectPath, ['rev-parse', '--git-dir'], 5000)).trim();
+    const gd = path.isAbsolute(gitDir) ? gitDir : path.join(projectPath, gitDir);
+    const state = { merging: false, rebasing: false, cherryPicking: false, conflictFiles: [] };
+    if (fs.existsSync(path.join(gd, 'MERGE_HEAD'))) state.merging = true;
+    if (fs.existsSync(path.join(gd, 'rebase-merge')) || fs.existsSync(path.join(gd, 'rebase-apply'))) state.rebasing = true;
+    if (fs.existsSync(path.join(gd, 'CHERRY_PICK_HEAD'))) state.cherryPicking = true;
+    // Conflict file list from porcelain — entries with U / DD / AA / etc.
+    if (state.merging || state.rebasing || state.cherryPicking) {
+      try {
+        const out = await runGit(projectPath, ['status', '--porcelain'], 5000);
+        out.split('\n').forEach(line => {
+          if (!line) return;
+          const code = line.substring(0, 2);
+          if (code.includes('U') || code === 'DD' || code === 'AA') {
+            state.conflictFiles.push(line.substring(3));
+          }
+        });
+      } catch { /* swallow */ }
+    }
+    return state;
+  } catch {
+    return { merging: false, rebasing: false, cherryPicking: false, conflictFiles: [] };
+  }
+});
+
+// Tag list / create / delete.
+ipcMain.handle('git:tags', async (event, projectPath) => {
+  try {
+    const out = await runGit(projectPath, ['for-each-ref', '--format=%(refname:short)|%(objectname:short)|%(subject)', 'refs/tags', '--sort=-creatordate'], 10000);
+    return out.split('\n').filter(Boolean).map(line => {
+      const parts = line.split('|');
+      return { name: parts[0], hash: parts[1], subject: parts.slice(2).join('|') };
+    });
+  } catch { return []; }
+});
+ipcMain.handle('git:tagCreate', async (event, projectPath, tagName, hash) => {
+  if (!isSafeGitRefName(tagName)) return { success: false, error: 'refused: invalid tag name' };
+  if (hash && !isSafeGitHash(hash)) return { success: false, error: 'refused: invalid hash' };
+  try {
+    const args = hash ? ['tag', tagName, hash] : ['tag', tagName];
+    await runGit(projectPath, args, 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+ipcMain.handle('git:tagDelete', async (event, projectPath, tagName) => {
+  if (!isSafeGitRefName(tagName)) return { success: false, error: 'refused: invalid tag name' };
+  try {
+    await runGit(projectPath, ['tag', '-d', tagName], 5000);
+    return { success: true };
+  } catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// Cherry-pick onto current branch.
+ipcMain.handle('git:cherryPick', async (event, projectPath, hash) => {
+  if (!isSafeGitHash(hash)) return { success: false, error: 'refused: invalid hash' };
+  try { await runGit(projectPath, ['cherry-pick', hash], 30000); return { success: true }; }
+  catch (err) { return { success: false, error: (err.stderr || err.message).toString().trim() }; }
+});
+
+// File history: git log for a single path. Returns up to `limit` commits with
+// hash / subject / author / date.
+ipcMain.handle('git:fileHistory', async (event, projectPath, filePath, limit) => {
+  try {
+    const n = Math.max(1, Math.min(500, parseInt(limit) || 50));
+    const out = await runGit(projectPath, ['log', '-n', String(n), '--format=%h|%s|%an|%aI', '--no-color', '--', filePath], 15000);
+    return out.split('\n').filter(Boolean).map(line => {
+      const parts = line.split('|');
+      return { hash: parts[0], message: parts[1], author: parts[2], date: parts[3] };
+    });
+  } catch { return []; }
+});
+
+// Blame for a single file: line -> { hash, author, time, content }
+ipcMain.handle('git:blame', async (event, projectPath, filePath) => {
+  try {
+    const out = await runGit(projectPath, ['blame', '--line-porcelain', '--', filePath], 15000);
+    const lines = out.split('\n');
+    const result = [];
+    let current = null;
+    for (const line of lines) {
+      if (/^[0-9a-f]{40,}\s/.test(line)) {
+        if (current) result.push(current);
+        const parts = line.split(' ');
+        current = { hash: parts[0].slice(0, 8), author: '', time: 0, content: '' };
+      } else if (line.startsWith('author ')) {
+        if (current) current.author = line.slice(7);
+      } else if (line.startsWith('author-time ')) {
+        if (current) current.time = parseInt(line.slice(12)) * 1000;
+      } else if (line.startsWith('\t')) {
+        if (current) { current.content = line.slice(1); result.push(current); current = null; }
+      }
+    }
+    if (current) result.push(current);
+    return result;
+  } catch { return []; }
+});
+
 function stripJsoncComments(text) {
   // Match strings first (preserve them), then strip // and /* */ comments
   return text.replace(/"(?:[^"\\]|\\.)*"|\/\/.*$|\/\*[\s\S]*?\*\//gm, function (match) {
@@ -1752,6 +3205,85 @@ function findLaunchSettingsConfigs(projectPath) {
   return configs;
 }
 
+function detectNpmScripts(projectPath) {
+  const out = [];
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(projectPath, 'package.json'), 'utf8'));
+    if (data && data.scripts && typeof data.scripts === 'object') {
+      for (const [name, body] of Object.entries(data.scripts)) {
+        out.push({
+          name: 'npm: ' + name,
+          type: 'custom',
+          command: 'npm',
+          args: ['run', name],
+          cwd: projectPath,
+          _source: 'package.json',
+          _readonly: true,
+          _hint: typeof body === 'string' ? body : ''
+        });
+      }
+    }
+  } catch { /* no package.json or invalid */ }
+  return out;
+}
+
+function detectMakefileTargets(projectPath) {
+  const out = [];
+  try {
+    const content = fs.readFileSync(path.join(projectPath, 'Makefile'), 'utf8');
+    // Lines like "target: deps" — ignore special targets and pattern rules.
+    const seen = new Set();
+    const re = /^([A-Za-z0-9_.\-\/]+)\s*:\s*(?!=)/gm;
+    let m;
+    while ((m = re.exec(content)) !== null) {
+      const t = m[1];
+      if (t.startsWith('.') || t.includes('%')) continue;
+      if (seen.has(t)) continue;
+      seen.add(t);
+      out.push({ name: 'make: ' + t, type: 'custom', command: 'make', args: [t], cwd: projectPath, _source: 'Makefile', _readonly: true });
+      if (out.length >= 40) break;
+    }
+  } catch { /* no Makefile */ }
+  return out;
+}
+
+function detectCargoBinaries(projectPath) {
+  const out = [];
+  try {
+    const txt = fs.readFileSync(path.join(projectPath, 'Cargo.toml'), 'utf8');
+    // Crude TOML parse — we don't depend on a TOML lib in main. Pull the
+    // package name and any [[bin]] entries; covers the common case.
+    const pkgNameMatch = /\[package\][\s\S]*?name\s*=\s*"([^"]+)"/.exec(txt);
+    if (pkgNameMatch) {
+      out.push({ name: 'cargo run', type: 'custom', command: 'cargo', args: ['run'], cwd: projectPath, _source: 'Cargo.toml', _readonly: true });
+      out.push({ name: 'cargo test', type: 'custom', command: 'cargo', args: ['test'], cwd: projectPath, _source: 'Cargo.toml', _readonly: true });
+    }
+    const binRe = /\[\[bin\]\][\s\S]*?name\s*=\s*"([^"]+)"/g;
+    let m;
+    while ((m = binRe.exec(txt)) !== null) {
+      out.push({ name: 'cargo run --bin ' + m[1], type: 'custom', command: 'cargo', args: ['run', '--bin', m[1]], cwd: projectPath, _source: 'Cargo.toml', _readonly: true });
+    }
+  } catch { /* no Cargo.toml */ }
+  return out;
+}
+
+function detectPyProjectScripts(projectPath) {
+  const out = [];
+  try {
+    const txt = fs.readFileSync(path.join(projectPath, 'pyproject.toml'), 'utf8');
+    // Same caveat as Cargo — minimal TOML parser. Pull [project.scripts] entries.
+    const block = /\[project\.scripts\]([\s\S]*?)(?:\n\[|$)/.exec(txt);
+    if (block) {
+      const lineRe = /^([A-Za-z0-9_.\-]+)\s*=\s*"([^"]+)"/gm;
+      let m;
+      while ((m = lineRe.exec(block[1])) !== null) {
+        out.push({ name: 'pip: ' + m[1], type: 'custom', command: m[1], args: [], cwd: projectPath, _source: 'pyproject.toml', _readonly: true });
+      }
+    }
+  } catch { /* no pyproject.toml */ }
+  return out;
+}
+
 ipcMain.handle('launch:getConfigs', (event, projectPath) => {
   let configs = [];
   // VS Code launch.json
@@ -1763,6 +3295,11 @@ ipcMain.handle('launch:getConfigs', (event, projectPath) => {
   } catch { /* no launch.json or parse error */ }
   // .NET launchSettings.json
   configs = configs.concat(findLaunchSettingsConfigs(projectPath));
+  // Auto-detected from common build/runner manifests
+  configs = configs.concat(detectNpmScripts(projectPath));
+  configs = configs.concat(detectMakefileTargets(projectPath));
+  configs = configs.concat(detectCargoBinaries(projectPath));
+  configs = configs.concat(detectPyProjectScripts(projectPath));
   // Custom configs from .claudes/launch.json
   const customPath = path.join(projectPath, '.claudes', 'launch.json');
   try {
@@ -1786,26 +3323,36 @@ ipcMain.handle('launch:getConfigs', (event, projectPath) => {
 });
 
 ipcMain.handle('launch:saveRecentLaunches', (event, projectPath, recentLaunches) => {
-  const dirPath = path.join(projectPath, '.claudes');
-  try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
-  fs.writeFileSync(path.join(dirPath, 'recent-launches.json'), JSON.stringify(recentLaunches, null, 2), 'utf8');
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const dirPath = path.join(safeBase, '.claudes');
+    try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
+    fs.writeFileSync(path.join(dirPath, 'recent-launches.json'), JSON.stringify(recentLaunches, null, 2), 'utf8');
+  } catch (err) { return { error: err.message }; }
 });
 
 ipcMain.handle('launch:saveConfigs', (event, projectPath, configurations) => {
-  const dirPath = path.join(projectPath, '.claudes');
-  try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
-  fs.writeFileSync(path.join(dirPath, 'launch.json'), JSON.stringify({ configurations }, null, 2), 'utf8');
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const dirPath = path.join(safeBase, '.claudes');
+    try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
+    fs.writeFileSync(path.join(dirPath, 'launch.json'), JSON.stringify({ configurations }, null, 2), 'utf8');
+  } catch (err) { return { error: err.message }; }
 });
 
 ipcMain.handle('launch:saveEnvProfiles', (event, projectPath, profiles) => {
-  const dirPath = path.join(projectPath, '.claudes');
-  try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
-  fs.writeFileSync(path.join(dirPath, 'env-profiles.json'), JSON.stringify(profiles, null, 2), 'utf8');
+  try {
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const dirPath = path.join(safeBase, '.claudes');
+    try { fs.mkdirSync(dirPath, { recursive: true }); } catch { /* exists */ }
+    fs.writeFileSync(path.join(dirPath, 'env-profiles.json'), JSON.stringify(profiles, null, 2), 'utf8');
+  } catch (err) { return { error: err.message }; }
 });
 
 ipcMain.handle('launch:scanCsproj', (event, dirPath) => {
   try {
-    return fs.readdirSync(dirPath).filter(f => f.endsWith('.csproj'));
+    const safe = assertInsideAllowedRoots(dirPath);
+    return fs.readdirSync(safe).filter(f => f.endsWith('.csproj'));
   } catch { return []; }
 });
 
@@ -1820,7 +3367,8 @@ ipcMain.handle('launch:browseFile', async (event, filters) => {
 
 ipcMain.handle('launch:readEnvFile', (event, filePath) => {
   try {
-    const content = fs.readFileSync(filePath, 'utf8');
+    const safe = assertInsideAllowedRoots(filePath);
+    const content = fs.readFileSync(safe, 'utf8');
     const env = {};
     for (const line of content.split(/\r?\n/)) {
       const trimmed = line.trim();
@@ -1950,6 +3498,279 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
+// Plan-usage limits (Max/Pro plan: 5h session, 7d weekly, etc.). Calls the
+// undocumented OAuth-authed endpoint that Claude Code's /usage uses, reading
+// the bearer token from the CLI's credentials file. Cached briefly because the
+// server-side data updates on its own cadence and we don't want to hammer it.
+const PLAN_USAGE_CACHE_MS = 30_000;
+let planUsageCache = { data: null, fetchedAt: 0 };
+// Server-issued cooldown: when the endpoint returns 429 with a Retry-After,
+// honour it. Hammering during cooldown extends the limit further.
+let planUsageRetryAtMs = 0;
+
+ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
+  const now = Date.now();
+  if (!force && planUsageCache.data && (now - planUsageCache.fetchedAt) < PLAN_USAGE_CACHE_MS) {
+    return { ok: true, data: planUsageCache.data, fetchedAt: planUsageCache.fetchedAt, cached: true };
+  }
+
+  // Honour server cooldown regardless of `force` — the user clicking refresh
+  // can't get fresh data when the API has told us to wait, and bypassing this
+  // would just push the unlock further out.
+  if (planUsageRetryAtMs > now) {
+    const remainSec = Math.round((planUsageRetryAtMs - now) / 1000);
+    return {
+      ok: false,
+      error: 'rate-limited',
+      retryAtMs: planUsageRetryAtMs,
+      message: 'Usage endpoint rate-limited — retry in ' + (remainSec >= 60 ? Math.round(remainSec / 60) + ' min' : remainSec + 's') + '.'
+    };
+  }
+
+  const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
+  let token;
+  try {
+    const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
+    token = creds?.claudeAiOauth?.accessToken;
+  } catch {
+    // macOS: Claude CLI stores credentials in the login keychain under
+    // service "Claude Code-credentials" instead of the plaintext file.
+    // Without this fallback the mini usage bar silently stays blank on Mac.
+    if (process.platform === 'darwin') {
+      try {
+        const raw = execFileSync('/usr/bin/security', [
+          'find-generic-password',
+          '-s', 'Claude Code-credentials',
+          '-a', os.userInfo().username,
+          '-w'
+        ], { encoding: 'utf8' }).trim();
+        const creds = JSON.parse(raw);
+        token = creds?.claudeAiOauth?.accessToken;
+      } catch {
+        return { ok: false, error: 'no-creds', message: 'Could not read Claude credentials from the macOS keychain — is Claude Code logged in?' };
+      }
+    } else {
+      return { ok: false, error: 'no-creds', message: 'Could not read ~/.claude/.credentials.json — Claude Code not logged in?' };
+    }
+  }
+  if (!token) {
+    return { ok: false, error: 'no-oauth', message: 'No OAuth token found (API-key users do not have plan limits).' };
+  }
+
+  try {
+    const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'anthropic-beta': 'oauth-2025-04-20'
+      }
+    });
+    if (res.status === 401) {
+      return { ok: false, error: 'unauthorized', message: 'OAuth token expired. Run any Claude Code command to refresh.' };
+    }
+    if (res.status === 429) {
+      // Clamp Retry-After to [60s, 1h] so a server bug can't pin the bar
+      // dead forever, and a missing/zero header still produces a real cooldown.
+      const raw = parseInt(res.headers.get('retry-after') || '', 10);
+      const retryAfterSec = Math.max(60, Math.min(Number.isFinite(raw) && raw > 0 ? raw : 60, 3600));
+      planUsageRetryAtMs = now + retryAfterSec * 1000;
+      return {
+        ok: false,
+        error: 'rate-limited',
+        retryAtMs: planUsageRetryAtMs,
+        message: 'Usage endpoint rate-limited (HTTP 429) — retry in ' + (retryAfterSec >= 60 ? Math.round(retryAfterSec / 60) + ' min' : retryAfterSec + 's') + '.'
+      };
+    }
+    if (!res.ok) {
+      return { ok: false, error: 'http-' + res.status, message: 'Usage endpoint returned HTTP ' + res.status };
+    }
+    const data = await res.json();
+    planUsageCache = { data, fetchedAt: now };
+    planUsageRetryAtMs = 0;
+    return { ok: true, data, fetchedAt: now, cached: false };
+  } catch (e) {
+    return { ok: false, error: 'fetch-failed', message: e.message };
+  }
+});
+
+ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
+  try { return detectPlanLimitCrossings(prev, next); } catch { return []; }
+});
+
+const { fuzzyRank } = require('./lib/fuzzy-rank');
+ipcMain.handle('palette:rank', (_event, items, query) => fuzzyRank(items, query, x => x.label));
+
+const { lastAssistantContextTokens, modelContextLimit, sampleAndResetReadStats } = require('./lib/session-context-tokens');
+
+// One-shot read of the live context-token count for a session.
+// Renderer calls this every ~10s while a Claude column is live.
+ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId, sinceMs) => {
+  if (!projectPath || !sessionId) return null;
+  // projectPath is the renderer's projectKey, which is the raw filesystem path
+  // (e.g. "D:\\Git Repos\\Claudes"). Claude stores sessions under the encoded
+  // form (e.g. "D--Git-Repos-Claudes"), so we must encode before joining.
+  const claudeKey = projectPathToClaudeKey(projectPath);
+  const filePath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+  // Perf instrumentation — count every IPC call. Actual fs.readFileSync
+  // invocations and bytes read are tracked inside the lib and sampled by
+  // perfSample below, so we can see cache effectiveness in the perf line.
+  incrPerfCtxRead();
+  return lastAssistantContextTokens(filePath, sinceMs);
+});
+
+ipcMain.handle('session:modelContextLimit', (_event, model) => modelContextLimit(model));
+
+// ---------- Clawd: per-column session-state machine over JSONL ----------
+// Watches each column's session JSONL and maintains a small per-tail state
+// machine modelled on clawd-tank/host/clawd_tank_daemon/daemon.py:
+//
+//   state: 'idle' | 'working' | 'thinking' | 'sleeping'
+//   tool:  string (only meaningful when state === 'working')
+//
+// Transitions (derived from JSONL line shape, since we don't have direct
+// hook visibility here):
+//
+//   assistant message with tool_use   → state='working', tool=<last tool_use.name>
+//   assistant message with thinking-only (no tool_use, no text) → state='thinking'
+//   assistant message with text-only (no tool_use)              → state='idle'
+//   user message with text (not tool_result)                    → state='thinking'
+//   user message with only tool_result                          → no state change
+//
+// Events are only emitted to the renderer when the *resolved state* changes.
+// That avoids the constant cross-fade flicker when Claude alternates tools
+// (Read → Edit → Read) — the widget only flips when the tool category does.
+const clawdTails = new Map();
+// columnId -> { filePath, offset, buf, timer, sender, sessionId,
+//               state: { kind, tool }, lastEmitted: { kind, tool } }
+
+function _clawdLineToTransition(line) {
+  let entry;
+  try { entry = JSON.parse(line); } catch { return null; }
+  if (!entry || typeof entry !== 'object') return null;
+
+  if (entry.type === 'assistant' && entry.message && Array.isArray(entry.message.content)) {
+    let lastTool = null;
+    let hasThinking = false;
+    let hasText = false;
+    for (const part of entry.message.content) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type === 'tool_use' && typeof part.name === 'string') lastTool = part.name;
+      else if (part.type === 'thinking') hasThinking = true;
+      else if (part.type === 'text') hasText = true;
+    }
+    if (lastTool) return { kind: 'working', tool: lastTool };
+    if (hasText) return { kind: 'idle' };
+    if (hasThinking) return { kind: 'thinking' };
+    return null;
+  }
+
+  if (entry.type === 'user' && entry.message && Array.isArray(entry.message.content)) {
+    // A real user prompt (any non-tool_result content) means Claude is now
+    // processing — mirror clawd-tank's dismiss+UserPromptSubmit → 'thinking'.
+    for (const part of entry.message.content) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type !== 'tool_result') return { kind: 'thinking' };
+    }
+    return null;
+  }
+  return null;
+}
+
+function _clawdStatesEqual(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'working') return (a.tool || '') === (b.tool || '');
+  return true;
+}
+
+function _clawdEmitIfChanged(columnId, t, initial) {
+  if (_clawdStatesEqual(t.state, t.lastEmitted)) return;
+  t.lastEmitted = { kind: t.state.kind, tool: t.state.tool || '' };
+  if (!t.sender || t.sender.isDestroyed()) return;
+  const payload = { columnId, kind: t.state.kind };
+  if (t.state.kind === 'working') payload.tool = t.state.tool || '';
+  if (initial) payload.initial = true;
+  try { t.sender.send('clawd:event', payload); } catch {}
+}
+
+function _clawdReplayBuffer(t, text, opts) {
+  const combined = t.buf + text;
+  const lines = combined.split('\n');
+  t.buf = opts && opts.flush ? '' : (lines.pop() || '');
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const next = _clawdLineToTransition(line);
+    if (!next) continue;
+    t.state = next;
+  }
+}
+
+function clawdPollTail(columnId) {
+  const t = clawdTails.get(columnId);
+  if (!t) return;
+  let stat;
+  try { stat = fs.statSync(t.filePath); } catch { return; }
+  if (stat.size === t.offset) return;
+  if (stat.size < t.offset) { t.offset = 0; t.buf = ''; }
+  let chunk = '';
+  try {
+    const fd = fs.openSync(t.filePath, 'r');
+    const buf = Buffer.alloc(stat.size - t.offset);
+    fs.readSync(fd, buf, 0, buf.length, t.offset);
+    fs.closeSync(fd);
+    chunk = buf.toString('utf8');
+  } catch { return; }
+  t.offset = stat.size;
+  _clawdReplayBuffer(t, chunk, { flush: false });
+  _clawdEmitIfChanged(columnId, t, false);
+}
+
+function clawdStartTail(columnId, projectPath, sessionId, sender) {
+  clawdStopTail(columnId);
+  if (!projectPath || !sessionId) return;
+  const claudeKey = projectPathToClaudeKey(projectPath);
+  const filePath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+  let offset = 0;
+  try { offset = fs.statSync(filePath).size; } catch {}
+  const t = {
+    filePath, offset, buf: '', sender, sessionId,
+    state: { kind: 'idle' },
+    lastEmitted: null,
+  };
+  t.timer = setInterval(() => clawdPollTail(columnId), 150);
+  clawdTails.set(columnId, t);
+  // Deliberately no initial emit. Resurrecting the last turn's state from
+  // the JSONL was misleading (a brand-new column would inherit yesterday's
+  // tool_use as its "current" state). The widget defaults to idle and the
+  // first real transition — from a hook or a fresh JSONL line — drives it.
+}
+
+function clawdStopTail(columnId) {
+  const t = clawdTails.get(columnId);
+  if (!t) return;
+  clearInterval(t.timer);
+  clawdTails.delete(columnId);
+}
+
+ipcMain.handle('clawd:startTail', (event, args) => {
+  if (!args) return;
+  clawdStartTail(args.columnId, args.projectPath, args.sessionId, event.sender);
+});
+ipcMain.handle('clawd:stopTail', (_event, args) => {
+  if (!args) return;
+  clawdStopTail(args.columnId);
+});
+
+ipcMain.handle('notify:show', (_event, opts) => {
+  try {
+    if (!opts || typeof opts !== 'object') return false;
+    if (!Notification.isSupported()) return false;
+    const notif = new Notification({ title: opts.title || 'Claudes', body: opts.body || '' });
+    notif.show();
+    return true;
+  } catch { return false; }
+});
+
 ipcMain.handle('usage:getAll', async () => {
   const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
   const results = [];
@@ -2025,15 +3846,438 @@ ipcMain.handle('usage:getAll', async () => {
   }
 
   writeUsageCache(nextCache);
+  global.__lastUsageDigest = results;
   return results;
 });
 
-// --- Auto Updater (disabled on personal/main) ---
-// Fork is private, no baked GH_TOKEN in the installer, so electron-updater
-// can't reach releases. Keeping setupAutoUpdater + update:install as no-op
-// stubs so call sites (line ~3868, preload.js, renderer.js) keep working.
-function setupAutoUpdater() {}
-ipcMain.handle('update:install', () => {});
+const { sessionCost: calcSessionCost } = require('./lib/cost-calc');
+
+// Roll up per-session costs into totals by model, project, and day.
+// Uses the digest cached by usage:getAll (call usage:getAll first; otherwise
+// returns zeros). Costs are computed from each session's single `model` plus
+// its aggregate token counts — see plan note about multi-model sessions.
+function rollupCosts(digests, sinceMs) {
+  const byModel = { opus: 0, sonnet: 0, haiku: 0, unknown: 0 };
+  const byProject = {};
+  const byDay = {};
+  // Per-bucket breakdown so the user can see *where* the cost is coming from
+  // (cache reads on long sessions are usually the dominant chunk).
+  const byBucket = { input: 0, cacheRead: 0, cacheCreation: 0, output: 0 };
+  let total = 0;
+  if (!Array.isArray(digests)) return { total, byModel, byProject, byDay, byBucket };
+  for (const d of digests) {
+    if (!d) continue;
+    if (sinceMs && d.lastTimestamp && d.lastTimestamp < sinceMs) continue;
+    const inp = d.inputTokens || 0;
+    const cc = d.cacheCreationTokens || 0;
+    const cr = d.cacheReadTokens || 0;
+    const out = d.outputTokens || 0;
+    const c = calcSessionCost({ model: d.model || '', input: inp, cacheCreation: cc, cacheRead: cr, output: out });
+    if (!c) continue;
+    // Per-bucket breakdown reuses the same calc (zero out the others) so the
+    // pieces always add up to the total — no risk of drift from a separate
+    // pricing path.
+    byBucket.input         += calcSessionCost({ model: d.model || '', input: inp });
+    byBucket.cacheCreation += calcSessionCost({ model: d.model || '', cacheCreation: cc });
+    byBucket.cacheRead     += calcSessionCost({ model: d.model || '', cacheRead: cr });
+    byBucket.output        += calcSessionCost({ model: d.model || '', output: out });
+    total += c;
+    const m = String(d.model || '').toLowerCase();
+    if (m.indexOf('opus') !== -1) byModel.opus += c;
+    else if (m.indexOf('sonnet') !== -1) byModel.sonnet += c;
+    else if (m.indexOf('haiku') !== -1) byModel.haiku += c;
+    else byModel.unknown += c;
+    if (d.projectKey) byProject[d.projectKey] = (byProject[d.projectKey] || 0) + c;
+    if (d.lastTimestamp) {
+      const day = new Date(d.lastTimestamp).toISOString().slice(0, 10);
+      byDay[day] = (byDay[day] || 0) + c;
+    }
+  }
+  return { total, byModel, byProject, byDay, byBucket };
+}
+
+ipcMain.handle('usage:getCosts', async (_event, filter) => {
+  const now = Date.now();
+  let sinceMs = null;
+  if (filter === 'today') {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    sinceMs = start.getTime();
+  } else if (filter === '7d') {
+    sinceMs = now - 7 * 24 * 60 * 60 * 1000;
+  } else if (filter === '30d') {
+    sinceMs = now - 30 * 24 * 60 * 60 * 1000;
+  }
+  return rollupCosts(global.__lastUsageDigest || [], sinceMs);
+});
+
+// Full-text search across all session JSONLs. Streaming-style: returns first
+// `limit` hits with surrounding context. Case-insensitive substring match
+// (no regex for V1).
+ipcMain.handle('sessions:search', async (_event, query, limit, projectPath) => {
+  if (!query || typeof query !== 'string' || query.length < 2) return [];
+  const max = Math.max(1, Math.min(200, limit || 50));
+  const needle = query.toLowerCase();
+  const root = path.join(os.homedir(), '.claude', 'projects');
+  let projectDirs;
+  if (projectPath && typeof projectPath === 'string') {
+    // Scope: current project only — restrict the scan to a single dir.
+    const onlyDir = projectPathToClaudeKey(projectPath);
+    try {
+      const stat = await fs.promises.stat(path.join(root, onlyDir));
+      if (!stat.isDirectory()) return [];
+    } catch { return []; }
+    projectDirs = [onlyDir];
+  } else {
+    try { projectDirs = await fs.promises.readdir(root); } catch { return []; }
+  }
+
+  // Extract the user/assistant message text from a parsed JSONL entry, or null
+  // if the entry isn't a content-bearing message (tool calls, system events,
+  // file metadata, etc.). We only want hits that match real conversation text,
+  // not tool inputs or paths.
+  function extractMessageText(obj) {
+    if (!obj || !obj.message || !obj.message.content) return null;
+    if (obj.type !== 'user' && obj.type !== 'assistant') return null;
+    const c = obj.message.content;
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) {
+      // Assistant messages may interleave text + tool_use parts; we only want text.
+      return c.map(p => (p && typeof p.text === 'string') ? p.text : '').join(' ');
+    }
+    return null;
+  }
+
+  const hits = [];
+  outer:
+  for (const dir of projectDirs) {
+    const projDir = path.join(root, dir);
+    let entries;
+    try { entries = await fs.promises.readdir(projDir); } catch { continue; }
+    for (const file of entries) {
+      if (!file.endsWith('.jsonl')) continue;
+      const filePath = path.join(projDir, file);
+      let content;
+      try { content = await fs.promises.readFile(filePath, 'utf8'); } catch { continue; }
+      // Cheap pre-filter: skip files where the needle doesn't appear at all.
+      if (content.toLowerCase().indexOf(needle) === -1) continue;
+
+      // Walk lines; first line whose extracted message-text contains the needle is the hit.
+      const lines = content.split('\n');
+      let matched = null;
+      for (let li = 0; li < lines.length; li++) {
+        const line = lines[li];
+        if (!line || line[0] !== '{') continue;
+        if (line.toLowerCase().indexOf(needle) === -1) continue;
+        let obj;
+        try { obj = JSON.parse(line); } catch { continue; }
+        const text = extractMessageText(obj);
+        if (!text) continue;
+        if (text.toLowerCase().indexOf(needle) === -1) continue;
+        matched = { text, lineIndex: li };
+        break;
+      }
+      if (!matched) continue;  // matches were only in tool inputs / metadata — skip the file
+
+      // Trim to ~200 chars around the needle for display
+      const text = matched.text;
+      const matchInText = text.toLowerCase().indexOf(needle);
+      const start = Math.max(0, matchInText - 80);
+      const end = Math.min(text.length, matchInText + 120);
+      const trimmed = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+
+      hits.push({
+        projectKey: dir,
+        sessionId: file.replace('.jsonl', ''),
+        snippet: trimmed,
+        matchedAt: matched.lineIndex
+      });
+      if (hits.length >= max) break outer;
+    }
+  }
+  return hits;
+});
+
+// Prompt-history search across ~/.claude/history.jsonl. Returns hits in
+// reverse-chronological order (most recent first). Distinct from sessions:search
+// — that one searches assistant transcripts; this one searches user prompts.
+ipcMain.handle('history:search', async (_event, query, limit, projectPath) => {
+  if (!query || typeof query !== 'string' || query.length < 2) return [];
+  const max = Math.max(1, Math.min(200, limit || 100));
+  const file = path.join(os.homedir(), '.claude', 'history.jsonl');
+  let content;
+  try { content = await fs.promises.readFile(file, 'utf8'); } catch { return []; }
+  const needle = query.toLowerCase();
+  // history.jsonl stores `entry.project` as the raw filesystem path. Compare
+  // raw-to-raw to keep the path-shape contract identical to what the entry
+  // already uses, avoiding any double-encoding mismatch.
+  const scopedProject = (projectPath && typeof projectPath === 'string') ? projectPath : null;
+  const lines = content.split('\n');
+  const hits = [];
+  for (let i = lines.length - 1; i >= 0 && hits.length < max; i--) {
+    const line = lines[i];
+    if (!line || line[0] !== '{') continue;
+    if (line.toLowerCase().indexOf(needle) === -1) continue;
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (scopedProject && (entry.project || '') !== scopedProject) continue;
+    const text = entry.display || '';
+    if (!text) continue;
+    if (text.toLowerCase().indexOf(needle) === -1) continue;
+    // Trim to ~200 chars around the needle
+    const matchIdx = text.toLowerCase().indexOf(needle);
+    const start = Math.max(0, matchIdx - 80);
+    const end = Math.min(text.length, matchIdx + 120);
+    const snippet = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+    hits.push({
+      text,
+      snippet,
+      project: entry.project || '',
+      ts: entry.timestamp || null
+    });
+  }
+  return hits;
+});
+
+// --- Auto Updater ---
+//
+// electron-updater on macOS is backed by Squirrel.Mac, which refuses to apply
+// an update unless both the running app and the new bundle have matching
+// valid Developer ID signatures. We don't sign the macOS build, so on darwin
+// we replace the Squirrel flow with a custom GitHub-polling updater that
+// downloads the DMG to ~/Downloads and opens it in Finder — the user drags
+// the new Claudes.app over the old one. The renderer-side IPC contract
+// (`update:available`, `update:progress`, `update:downloaded`, `update:error`,
+// and the `update:install` handler) is identical on both code paths, so the
+// existing update banner in renderer.js works unchanged.
+
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
+
+function setupAutoUpdater() {
+  if (process.platform === 'darwin') {
+    setupDarwinUpdater();
+    return;
+  }
+
+  autoUpdater.on('update-available', (info) => {
+    mainWindow?.webContents.send('update:available', {
+      version: info.version,
+      releaseNotes: info.releaseNotes || ''
+    });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    mainWindow?.webContents.send('update:downloaded', {
+      version: info.version,
+      releaseNotes: info.releaseNotes || ''
+    });
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    mainWindow?.webContents.send('update:progress', { percent: progress.percent });
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('[auto-updater]', err.message);
+    mainWindow?.webContents.send('update:error', { message: err.message });
+  });
+
+  autoUpdater.checkForUpdatesAndNotify();
+
+  ipcMain.handle('update:install', () => {
+    autoUpdater.quitAndInstall();
+  });
+}
+
+// Manual "Check for updates" trigger from the toolbar. On darwin it pokes
+// our custom GitHub-polling updater; elsewhere it asks electron-updater to
+// re-check (which the auto flow only does once at startup).
+ipcMain.handle('update:checkNow', async () => {
+  if (process.platform === 'darwin') {
+    if (typeof darwinCheckForUpdates !== 'function') return { error: 'updater not initialised' };
+    return darwinCheckForUpdates({ manual: true });
+  }
+  try {
+    const result = await autoUpdater.checkForUpdatesAndNotify();
+    const latest = result && result.updateInfo && result.updateInfo.version;
+    if (!latest || !isNewerVersion(latest, app.getVersion())) {
+      mainWindow?.webContents.send('update:none', { version: app.getVersion() });
+      return { available: false };
+    }
+    return { available: true, version: latest };
+  } catch (err) {
+    mainWindow?.webContents.send('update:error', { message: err.message });
+    return { error: err.message };
+  }
+});
+
+// --- macOS custom updater ---
+
+// Integer-triplet comparison sufficient for our X.Y.Z release scheme — avoids
+// pulling in a real semver dep.
+function isNewerVersion(latestTag, current) {
+  const norm = (v) => String(v || '').replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const [la, lb, lc] = norm(latestTag);
+  const [ca, cb, cc] = norm(current);
+  if (la !== ca) return la > ca;
+  if (lb !== cb) return lb > cb;
+  return lc > cc;
+}
+
+// Manual-trigger entry point — populated by setupDarwinUpdater so the
+// toolbar "Check for updates" item can poke the same check function the
+// hourly timer uses.
+let darwinCheckForUpdates = null;
+
+function setupDarwinUpdater() {
+  const REPO = 'paulallington/Claudes';
+  const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64';
+  const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1h
+  const INITIAL_DELAY_MS = 30 * 1000;       // give the window a moment to render
+
+  let downloadedDmgPath = null;
+  let downloading = false;
+  let notifiedVersion = null;
+
+  function fetchJson(url) {
+    return new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const req = https.request({
+        method: 'GET',
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        headers: {
+          'Accept': 'application/vnd.github+json',
+          'User-Agent': 'Claudes-Updater'
+        }
+      }, (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error('HTTP ' + res.statusCode));
+        }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          try { resolve(JSON.parse(body)); }
+          catch (err) { reject(err); }
+        });
+      });
+      req.on('error', reject);
+      req.setTimeout(15000, () => req.destroy(new Error('timeout')));
+      req.end();
+    });
+  }
+
+  function downloadFile(url, targetPath, onProgress) {
+    return new Promise((resolve, reject) => {
+      const sink = fs.createWriteStream(targetPath);
+      sink.on('error', reject);
+
+      function get(href, redirects) {
+        const u = new URL(href);
+        const req = https.request({
+          method: 'GET',
+          hostname: u.hostname,
+          path: u.pathname + u.search,
+          headers: { 'User-Agent': 'Claudes-Updater' }
+        }, (res) => {
+          if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+            res.resume();
+            if (redirects > 5) return reject(new Error('too many redirects'));
+            // GitHub release asset URLs redirect to S3 with a presigned URL.
+            return get(res.headers.location, redirects + 1);
+          }
+          if (res.statusCode !== 200) {
+            res.resume();
+            return reject(new Error('HTTP ' + res.statusCode));
+          }
+          const total = parseInt(res.headers['content-length'] || '0', 10);
+          let received = 0;
+          res.on('data', (chunk) => {
+            received += chunk.length;
+            sink.write(chunk);
+            if (total && onProgress) onProgress((received / total) * 100);
+          });
+          res.on('end', () => { sink.end(resolve); });
+          res.on('error', reject);
+        });
+        req.on('error', reject);
+        req.setTimeout(60000, () => req.destroy(new Error('timeout')));
+        req.end();
+      }
+      get(url, 0);
+    });
+  }
+
+  async function checkForUpdates(opts) {
+    const manual = !!(opts && opts.manual);
+    try {
+      const release = await fetchJson(`https://api.github.com/repos/${REPO}/releases/latest`);
+      const tag = release && release.tag_name;
+      if (!tag || !isNewerVersion(tag, app.getVersion())) {
+        // Manual check needs to tell the user nothing's there so they don't
+        // wonder if it silently failed.
+        if (manual) mainWindow?.webContents.send('update:none', { version: app.getVersion() });
+        return { available: false };
+      }
+      const version = tag.replace(/^v/, '');
+
+      // Only re-notify when a *different* newer version appears (otherwise
+      // every hourly check would re-fire the banner and spam the user).
+      // Manual checks always re-notify so the user gets visible feedback.
+      if (notifiedVersion !== version || manual) {
+        notifiedVersion = version;
+        mainWindow?.webContents.send('update:available', {
+          version,
+          releaseNotes: release.body || ''
+        });
+      }
+
+      if (downloading || downloadedDmgPath) return { available: true, version };
+
+      const asset = (release.assets || []).find((a) => a.name && a.name.endsWith(`-mac-${ARCH}.dmg`));
+      if (!asset) {
+        console.error('[darwin-updater] no DMG asset for arch', ARCH, 'in', tag);
+        return { available: true, version, error: 'no-asset' };
+      }
+
+      downloading = true;
+      const target = path.join(app.getPath('temp'), asset.name);
+      try {
+        await downloadFile(asset.browser_download_url, target, (pct) => {
+          mainWindow?.webContents.send('update:progress', { percent: pct });
+        });
+        downloadedDmgPath = target;
+        mainWindow?.webContents.send('update:downloaded', {
+          version,
+          releaseNotes: release.body || ''
+        });
+      } finally {
+        downloading = false;
+      }
+      return { available: true, version };
+    } catch (err) {
+      console.error('[darwin-updater]', err.message);
+      mainWindow?.webContents.send('update:error', { message: err.message });
+      return { error: err.message };
+    }
+  }
+  darwinCheckForUpdates = checkForUpdates;
+
+  ipcMain.handle('update:install', async () => {
+    if (!downloadedDmgPath) return;
+    // Tell Finder to mount + open the DMG before we quit, so the user lands
+    // on the drag-to-Applications window with no app left to block the
+    // replace.
+    await shell.openPath(downloadedDmgPath);
+    setTimeout(() => app.quit(), 1500);
+  });
+
+  setTimeout(checkForUpdates, INITIAL_DELAY_MS);
+  setInterval(checkForUpdates, CHECK_INTERVAL_MS);
+}
 
 ipcMain.handle('app:getVersion', () => {
   return app.getVersion();
@@ -2059,12 +4303,51 @@ ipcMain.handle('claude:getConfigPath', () => {
 
 function startHookServer() {
   hookServer = http.createServer((req, res) => {
+    // DNS-rebinding mitigation: only accept Host headers that name the loopback
+    // address with the right port. A browser tab that has a DNS name resolving
+    // to 127.0.0.1 would otherwise be able to POST here from a different origin.
+    const host = (req.headers.host || '').toLowerCase();
+    const expectedA = '127.0.0.1:' + hookServerListenPort;
+    const expectedB = 'localhost:' + hookServerListenPort;
+    if (host !== expectedA && host !== expectedB) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
     if (req.method === 'POST' && req.url === '/hook') {
+      // Reject unauthenticated callers. The curl command we write into
+      // settings.json carries the token; anything else POST'ing here is hostile.
+      const token = req.headers['x-auth-token'];
+      let tokenOk = false;
+      if (typeof token === 'string' && token.length === HOOK_AUTH_TOKEN.length) {
+        try {
+          tokenOk = crypto.timingSafeEqual(Buffer.from(token), Buffer.from(HOOK_AUTH_TOKEN));
+        } catch { tokenOk = false; }
+      }
+      if (!tokenOk) {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
       let body = '';
-      req.on('data', chunk => { body += chunk; });
+      let aborted = false;
+      // Bound the body — a hook event payload is normally a few KB; cap at 1 MB
+      // so a malicious local process can't pin memory by streaming forever.
+      req.on('data', chunk => {
+        if (aborted) return;
+        body += chunk;
+        if (body.length > 1024 * 1024) {
+          aborted = true;
+          res.writeHead(413);
+          res.end();
+          req.destroy();
+        }
+      });
       req.on('end', () => {
+        if (aborted) return;
         try {
           const event = JSON.parse(body);
+          incrPerfHook();
           mainWindow?.webContents.send('hook:event', event);
         } catch {}
         res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -2075,14 +4358,252 @@ function startHookServer() {
       res.end();
     }
   });
-  hookServer.listen(0, '127.0.0.1', () => {
-    hookServerPort = hookServer.address().port;
-    console.log('[hook-server] listening on port', hookServerPort);
+  hookServer.on('error', (err) => {
+    console.error('[hook-server] listen error:', err.message);
+  });
+  hookServer.listen(hookServerListenPort, '127.0.0.1', () => {
+    hookServerPort = hookServerListenPort;
+    diagLog('[hook-server] listening on port', hookServerPort);
+    // Self-heal: if the user's settings.json already has our sentinel entries
+    // pointing at a different port (e.g. dev↔packaged switch), rewrite them to
+    // the current port so they don't have to disconnect+reconnect every launch.
+    try { syncHookPortInSettings(hookServerListenPort); } catch (err) {
+      console.error('[hook-server] failed to sync port in settings.json:', err && err.message);
+    }
   });
 }
 
+function syncHookPortInSettings(port) {
+  const file = path.join(os.homedir(), '.claude', 'settings.json');
+  if (!fs.existsSync(file)) return;  // no settings = nothing to sync
+  let data;
+  try { data = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { return; }  // malformed — leave alone
+  if (!data || !data.hooks) return;
+  const wanted = buildHookCommand(port);
+  let changed = 0;
+  let migrated = 0;
+  let removedLegacy = 0;
+  // Strip Claudes-owned groups from events we no longer subscribe to (e.g.
+  // PostToolUse — saves a curl fork per tool call).
+  for (const ev of REMOVED_HOOK_EVENTS) {
+    const groups = data.hooks[ev];
+    if (!Array.isArray(groups)) continue;
+    const kept = groups.filter((g) => {
+      if (isClaudesHookGroup(g)) { removedLegacy++; return false; }
+      return true;
+    });
+    if (kept.length) data.hooks[ev] = kept; else delete data.hooks[ev];
+  }
+  for (const ev of Object.keys(data.hooks)) {
+    const groups = data.hooks[ev];
+    if (!Array.isArray(groups)) continue;
+    for (const g of groups) {
+      if (!isClaudesHookGroup(g)) continue;
+      // Heal legacy entries where the sentinel was stuffed into `matcher` for
+      // tool-use events (which prevented the hook from ever firing).
+      if (g.matcher === CLAUDES_HOOK_SENTINEL && TOOL_NAME_MATCHER_EVENTS.has(ev)) {
+        delete g.matcher;
+        migrated++;
+      }
+      if (!Array.isArray(g.hooks)) continue;
+      for (const h of g.hooks) {
+        if (h && h.type === 'command' && typeof h.command === 'string' && h.command !== wanted) {
+          h.command = wanted;
+          changed++;
+        }
+      }
+    }
+  }
+  if (changed > 0 || migrated > 0 || removedLegacy > 0) {
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+    diagLog('[hook-server] sync: re-pointed', changed, 'hook(s); migrated', migrated, 'legacy matchers; removed', removedLegacy, 'unused-event hook(s); port', port);
+  }
+}
+
 ipcMain.handle('hooks:getPort', () => hookServerPort);
+
+// Events we actively listen to. PostToolUse was previously included but its
+// curl-per-call cost was significant on busy turns (every tool call = 1 fork)
+// and the Clawd state machine doesn't use it for anything — PreToolUse +
+// Stop are enough. Listed here as REMOVED_HOOK_EVENTS so existing installs
+// get cleaned up on next configure/sync.
+const HOOK_EVENTS = [
+  'PreToolUse', 'UserPromptSubmit',
+  'Stop', 'SubagentStop', 'Notification',
+  'SessionStart', 'SessionEnd', 'PreCompact'
+];
+const REMOVED_HOOK_EVENTS = ['PostToolUse'];
+
+// Legacy sentinel matcher we *used* to write into `matcher` to identify our
+// own hook entries. Problem: Claude Code treats `matcher` as a tool-name
+// regex for PreToolUse/PostToolUse, so the sentinel value never matched any
+// real tool and our hooks never fired. New entries omit `matcher` (or set it
+// to a permissive wildcard for tool-use events). The sentinel is still
+// recognised for back-compat detection and migration.
+const CLAUDES_HOOK_SENTINEL = '__claudes_inspector__';
+
+// Events whose `matcher` field is a regex matched against the tool name.
+// Empty/wildcard means "fire for every tool". For these we want no matcher.
+const TOOL_NAME_MATCHER_EVENTS = new Set(['PreToolUse', 'PostToolUse']);
+
+// Does this hook group belong to Claudes? Identifies via command URL pattern
+// (resilient to matcher changes and per-launch token rotation) or the legacy
+// sentinel matcher.
+function isClaudesHookGroup(g) {
+  if (!g) return false;
+  if (g.matcher === CLAUDES_HOOK_SENTINEL) return true;
+  if (!Array.isArray(g.hooks)) return false;
+  return g.hooks.some((h) =>
+    h && h.type === 'command' &&
+    typeof h.command === 'string' &&
+    /127\.0\.0\.1:\d+\/hook/.test(h.command) &&
+    /X-Auth-Token:/i.test(h.command)
+  );
+}
+
+function buildHookCommand(port) {
+  // Cross-platform curl invocation. curl ships with Windows 10+, macOS, and
+  // every Linux distro this app runs on. -d @- reads stdin. The double-quoted
+  // header values are parsed identically by cmd.exe and POSIX shells. The
+  // auth-token header gates the local /hook endpoint — see HOOK_AUTH_TOKEN.
+  return 'curl -s -X POST http://127.0.0.1:' + port + '/hook -d @-' +
+    ' -H "Content-Type: application/json"' +
+    ' -H "X-Auth-Token: ' + HOOK_AUTH_TOKEN + '"';
+}
+
+function readClaudeSettings() {
+  const file = path.join(os.homedir(), '.claude', 'settings.json');
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    return { file, data: JSON.parse(raw) };
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { file, data: {} };
+    throw err;
+  }
+}
+
+function writeClaudeSettings(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// "Configured" means EVERY event in HOOK_EVENTS has the Claudes sentinel.
+// Previously this returned true on first match, which meant a partial install
+// (e.g. only PostToolUse — common after older versions of this code) hid the
+// Connect button and stranded the user without a way to top up the missing
+// events. Now Connect stays visible until coverage is complete; configure() is
+// idempotent so clicking it on a partial install just fills in the gaps.
+ipcMain.handle('hooks:isConfigured', () => {
+  try {
+    const { data } = readClaudeSettings();
+    if (!data || !data.hooks) return false;
+    for (const ev of HOOK_EVENTS) {
+      const groups = data.hooks[ev];
+      if (!Array.isArray(groups)) return false;
+      if (!groups.some(isClaudesHookGroup)) return false;
+    }
+    return true;
+  } catch { return false; }
+});
+
+// Per-event hook coverage report — used by the Clawd settings pane so the
+// user can see exactly which events are wired up vs missing.
+ipcMain.handle('hooks:status', () => {
+  try {
+    const { data } = readClaudeSettings();
+    const hooks = (data && data.hooks) || {};
+    const wired = [];
+    const missing = [];
+    for (const ev of HOOK_EVENTS) {
+      const groups = Array.isArray(hooks[ev]) ? hooks[ev] : [];
+      (groups.some(isClaudesHookGroup) ? wired : missing).push(ev);
+    }
+    return { wired, missing, total: HOOK_EVENTS.length };
+  } catch (e) {
+    return { wired: [], missing: HOOK_EVENTS.slice(), total: HOOK_EVENTS.length, error: String(e && e.message || e) };
+  }
+});
+
+ipcMain.handle('hooks:configure', () => {
+  try {
+    const { file, data } = readClaudeSettings();
+    // Backup the current file (always — even if data was empty, mark the moment).
+    try {
+      const backupPath = file + '.claudes-bak.' + Date.now();
+      const exists = fs.existsSync(file);
+      if (exists) fs.copyFileSync(file, backupPath);
+    } catch { /* backup is best-effort */ }
+
+    if (!data.hooks) data.hooks = {};
+    const command = buildHookCommand(hookServerListenPort);
+    let added = 0;
+    let migrated = 0;
+    let removed = 0;
+    // Strip any Claudes-owned groups for events we no longer subscribe to.
+    // Saves a curl fork per matching tool call on busy turns.
+    for (const ev of REMOVED_HOOK_EVENTS) {
+      const groups = data.hooks[ev];
+      if (!Array.isArray(groups)) continue;
+      const kept = groups.filter((g) => {
+        if (isClaudesHookGroup(g)) { removed++; return false; }
+        return true;
+      });
+      if (kept.length) data.hooks[ev] = kept; else delete data.hooks[ev];
+    }
+    for (const ev of HOOK_EVENTS) {
+      if (!Array.isArray(data.hooks[ev])) data.hooks[ev] = [];
+      // Migrate any legacy Claudes groups: for tool-use events, the sentinel
+      // value sat in `matcher` and prevented the hook from firing (matcher is
+      // a tool-name regex there). Strip it; leave label-style sentinels alone
+      // for events where matcher is informational.
+      for (const g of data.hooks[ev]) {
+        if (g && g.matcher === CLAUDES_HOOK_SENTINEL && TOOL_NAME_MATCHER_EVENTS.has(ev)) {
+          delete g.matcher;
+          migrated++;
+        }
+      }
+      if (data.hooks[ev].some(isClaudesHookGroup)) continue;
+      const group = { hooks: [{ type: 'command', command }] };
+      // For non-tool-use events Claude Code uses `matcher` as a label or
+      // event-subtype filter; including a recognisable string is harmless and
+      // helps users grep settings.json. Skip it for tool-use events so we
+      // actually match every tool.
+      if (!TOOL_NAME_MATCHER_EVENTS.has(ev)) group.matcher = CLAUDES_HOOK_SENTINEL;
+      data.hooks[ev].push(group);
+      added++;
+    }
+    writeClaudeSettings(file, data);
+    return { ok: true, added, migrated, removed, port: hookServerListenPort };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('hooks:disconnect', () => {
+  try {
+    const { file, data } = readClaudeSettings();
+    if (!data || !data.hooks) return { ok: true, removed: 0 };
+    let removed = 0;
+    for (const ev of HOOK_EVENTS) {
+      const groups = data.hooks[ev];
+      if (!Array.isArray(groups)) continue;
+      const filtered = groups.filter((g) => {
+        if (isClaudesHookGroup(g)) { removed++; return false; }
+        return true;
+      });
+      data.hooks[ev] = filtered;
+      // Drop the array entirely if it became empty (keeps settings.json tidy).
+      if (data.hooks[ev].length === 0) delete data.hooks[ev];
+    }
+    if (Object.keys(data.hooks).length === 0) delete data.hooks;
+    writeClaudeSettings(file, data);
+    return { ok: true, removed };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
 ipcMain.handle('pty:getPort', () => ptyPort);
+ipcMain.handle('pty:getAuthToken', () => PTY_AUTH_TOKEN);
 
 ipcMain.handle('window:flashFrame', () => {
   if (mainWindow && !mainWindow.isFocused()) {
@@ -2090,16 +4611,169 @@ ipcMain.handle('window:flashFrame', () => {
   }
 });
 
+ipcMain.handle('window:stopFlashFrame', () => {
+  if (mainWindow && mainWindow.isFocused()) {
+    mainWindow.flashFrame(false);
+  }
+});
+
+// Allow only navigable web schemes through openExternal. Without this filter
+// a renderer compromise (XSS, malicious markdown, etc.) could trigger
+// file://, vscode://, ms-msdt:, and similar handlers that lead to local
+// code execution (Follina-class).
+const SAFE_EXTERNAL_SCHEMES = new Set(['http:', 'https:', 'mailto:']);
 ipcMain.handle('shell:openExternal', (event, url) => {
-  return shell.openExternal(url);
+  try {
+    const parsed = new URL(String(url));
+    if (!SAFE_EXTERNAL_SCHEMES.has(parsed.protocol)) {
+      console.warn('[shell:openExternal] refused scheme:', parsed.protocol);
+      return Promise.reject(new Error('refused: unsupported URL scheme'));
+    }
+    return shell.openExternal(parsed.toString());
+  } catch (err) {
+    console.warn('[shell:openExternal] invalid URL:', err.message);
+    return Promise.reject(new Error('refused: invalid URL'));
+  }
 });
 
 ipcMain.handle('shell:showItemInFolder', (event, fullPath) => {
-  shell.showItemInFolder(fullPath);
+  // Same containment rule as shell:openPath — reveal-in-folder is a low-impact
+  // API but a compromised renderer should not get to navigate Explorer to
+  // arbitrary paths on disk.
+  try {
+    const safe = assertInsideAllowedRoots(fullPath);
+    shell.showItemInFolder(safe);
+  } catch { /* refused */ }
 });
 
+// Refuse the OS handler-launch surface for executable file types and UNC
+// paths. shell.openPath happily runs .bat / .lnk / .scr / .hta etc. with the
+// user's privileges; combined with any renderer XSS that becomes RCE.
+const UNSAFE_OPENPATH_EXTS = new Set([
+  '.exe', '.bat', '.cmd', '.com', '.scr', '.hta', '.pif', '.msi', '.msp',
+  '.lnk', '.url', '.vbs', '.vbe', '.js', '.jse', '.ws', '.wsf', '.wsh',
+  '.ps1', '.psm1', '.cpl', '.reg', '.jar', '.dll', '.app'
+]);
 ipcMain.handle('shell:openPath', (event, fullPath) => {
-  return shell.openPath(fullPath);
+  const p = String(fullPath || '');
+  if (!p) return Promise.resolve('refused: empty path');
+  // Block UNC paths — they can trigger DLL search-order hijacks and cross
+  // a network trust boundary in a way the user never asked for.
+  if (/^\\\\/.test(p) || /^\/\//.test(p)) {
+    console.warn('[shell:openPath] refused UNC:', p);
+    return Promise.resolve('refused: UNC path');
+  }
+  const ext = path.extname(p).toLowerCase();
+  if (UNSAFE_OPENPATH_EXTS.has(ext)) {
+    console.warn('[shell:openPath] refused exec extension:', ext);
+    return Promise.resolve('refused: executable extension');
+  }
+  return shell.openPath(p);
+});
+
+// Launch the user's configured external editor (default: `code` on PATH).
+// Accepts either a single path (string) or [projectPath, filePath]. For the
+// two-arg form we invoke `<editor> <folder> -g <file>` so VS Code opens the
+// folder as a workspace AND focuses the file. Paths with spaces are quoted
+// explicitly because shell:true on Windows lets cmd.exe re-tokenize the line
+// and silently splits "D:\Git Repos\Foo" into two arguments.
+// Falls back to shell.openPath when the command isn't found.
+ipcMain.handle('editor:openExternal', async (event, targetPath) => {
+  const rawArgs = Array.isArray(targetPath) ? targetPath : [targetPath];
+  const safeArgs = [];
+  for (const p of rawArgs) {
+    if (!p || typeof p !== 'string') continue;
+    try { safeArgs.push(assertInsideAllowedRoots(p)); }
+    catch { return { ok: false, error: 'refused: path outside allowed roots' }; }
+  }
+  if (safeArgs.length === 0) return { ok: false, error: 'no target path' };
+  const cfg = readConfig();
+  const cmd = (cfg && typeof cfg.externalEditorCommand === 'string' && cfg.externalEditorCommand.trim())
+    || (process.platform === 'win32' ? 'code.cmd' : 'code');
+
+  // For the two-arg [folder, file] form, use `code <folder> -g <file>` so the
+  // workspace is opened and the file is focused. Single-arg form passes
+  // through unchanged (folder OR file).
+  let invocationArgs;
+  if (safeArgs.length >= 2) {
+    invocationArgs = [safeArgs[0], '-g', safeArgs[1]];
+  } else {
+    invocationArgs = safeArgs;
+  }
+
+  function quoteForWin(s) {
+    // cmd.exe doesn't honour backslash-escape; wrap any arg with whitespace,
+    // & ; | < > ^ in double quotes. Embedded double quotes are doubled.
+    if (!/[\s&;|<>^"]/.test(s)) return s;
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+
+  return new Promise((resolve) => {
+    let child;
+    if (process.platform === 'win32') {
+      // Run through cmd.exe so the .cmd shim resolves, but we build the
+      // command line ourselves (with explicit quoting) instead of letting
+      // shell:true do it — Node's auto-quoting doesn't cover arg arrays
+      // when shell is on, and spaces get split.
+      const cmdLine = quoteForWin(cmd) + ' ' + invocationArgs.map(quoteForWin).join(' ');
+      child = spawn(cmdLine, [], { detached: true, stdio: 'ignore', shell: true });
+    } else {
+      child = spawn(cmd, invocationArgs, { detached: true, stdio: 'ignore' });
+    }
+
+    let settled = false;
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      // Fall back to OS handler on the last arg (file > folder), better than
+      // silently doing nothing.
+      shell.openPath(safeArgs[safeArgs.length - 1]).then((msg) => {
+        resolve({ ok: !msg, error: err && err.message, fallback: 'openPath', openPathMessage: msg });
+      });
+    });
+    child.on('spawn', () => {
+      if (settled) return;
+      settled = true;
+      try { child.unref(); } catch {}
+      resolve({ ok: true });
+    });
+  });
+});
+
+ipcMain.handle('editor:getExternalCommand', () => {
+  const cfg = readConfig();
+  return (cfg && typeof cfg.externalEditorCommand === 'string') ? cfg.externalEditorCommand : '';
+});
+
+ipcMain.handle('editor:setExternalCommand', (event, cmd) => {
+  const cfg = readConfig();
+  cfg.externalEditorCommand = typeof cmd === 'string' ? cmd.trim() : '';
+  writeConfig(cfg);
+  return { ok: true };
+});
+
+ipcMain.handle('config:getAutoUpdateClaude', () => {
+  return readConfig().autoUpdateClaude === true;
+});
+ipcMain.handle('config:setAutoUpdateClaude', (event, enabled) => {
+  const cfg = readConfig();
+  cfg.autoUpdateClaude = !!enabled;
+  writeConfig(cfg);
+  return { ok: true };
+});
+
+// Persisted terminal settings (font / scrollback / cursor / background colour).
+// Read by the renderer when constructing each Terminal so user prefs apply
+// to every spawn.
+ipcMain.handle('config:getTerminalSettings', () => {
+  const cfg = readConfig();
+  return cfg.terminal || {};
+});
+ipcMain.handle('config:setTerminalSettings', (event, settings) => {
+  const cfg = readConfig();
+  cfg.terminal = Object.assign({}, cfg.terminal || {}, settings && typeof settings === 'object' ? settings : {});
+  writeConfig(cfg);
+  return { ok: true, settings: cfg.terminal };
 });
 
 // --- Automations IPC Handlers ---
@@ -2187,7 +4861,8 @@ ipcMain.handle('automations:updateAgent', (event, automationId, agentId, updates
   const agent = automation.agents.find(ag => ag.id === agentId);
   if (!agent) return null;
   const safeFields = ['name', 'prompt', 'schedule', 'runMode', 'runAfter', 'runOnUpstreamFailure',
-    'passUpstreamContext', 'isolation', 'enabled', 'skipPermissions', 'firstStartOnly', 'dbConnectionString', 'dbReadOnly'];
+    'passUpstreamContext', 'isolation', 'enabled', 'skipPermissions', 'firstStartOnly', 'dbConnectionString', 'dbReadOnly',
+    'endpointId', 'endpointModel'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) agent[field] = updates[field];
   });
@@ -2412,13 +5087,36 @@ ipcMain.handle('automations:runAutomationNow', async (event, automationId) => {
   return true;
 });
 
+// Sanitise a single path segment so it cannot escape its parent directory
+// (no '..', no separators) and is safe on Windows (no reserved chars). Used
+// where renderer-supplied automation/project metadata flows into a path.
+function sanitiseDirSegment(name) {
+  return String(name || '').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^-+|-+$/g, '') || 'unnamed';
+}
+
+// Verify that a constructed path resolves to a location strictly inside the
+// expected parent directory. Combined with sanitiseDirSegment, this catches
+// any future regression where a segment leaks past the sanitiser.
+function assertInsideParent(child, parent) {
+  const c = path.resolve(child);
+  const p = path.resolve(parent);
+  if (c === p) return c;
+  const sep = p.endsWith(path.sep) ? '' : path.sep;
+  const ok = process.platform === 'win32'
+    ? c.toLowerCase().startsWith((p + sep).toLowerCase())
+    : c.startsWith(p + sep);
+  if (!ok) throw new Error('refused: child path escapes parent');
+  return c;
+}
+
 function safeRemoveDir(dirPath) {
+  // Use fs.rmSync on every platform (Node 16+ handles Windows locked files
+  // and long paths via maxRetries/retryDelay). Previously this branched to
+  // `cmd /c rmdir /s /q <dirPath>` on Windows; cmd re-parses its tail, so
+  // metacharacters (& | ^ %) in dirPath could result in command injection
+  // if the path ever flowed from renderer-controlled data.
   try {
-    if (process.platform === 'win32') {
-      execFileSync('cmd', ['/c', 'rmdir', '/s', '/q', dirPath], { encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
-    } else {
-      fs.rmSync(dirPath, { recursive: true, force: true });
-    }
+    fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } catch { /* ignore — directory may be partially removed or locked */ }
 }
 
@@ -2430,11 +5128,15 @@ ipcMain.handle('automations:setupAgentClone', async (event, automationId, agentI
   if (!agent) return { error: 'Agent not found' };
   if (!agent.isolation || !agent.isolation.enabled) return { error: 'Agent does not have isolation enabled' };
 
-  // Determine clone path
+  // Determine clone path. Both segments are sanitised — `automation.projectPath`
+  // can be persisted with `..` or odd characters and would otherwise let
+  // safeRemoveDir delete arbitrary directories outside agentReposBaseDir.
   const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
-  const projectName = automation.projectPath.split(/[/\\]/).pop();
-  const agentDirName = agent.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  const projectName = sanitiseDirSegment((automation.projectPath || '').split(/[/\\]/).pop());
+  const agentDirName = sanitiseDirSegment(agent.name).toLowerCase();
   const clonePath = path.join(baseDir, projectName, agentDirName);
+  try { assertInsideParent(clonePath, baseDir); }
+  catch (err) { return { error: err.message }; }
 
   // Check if clone already exists with correct remote
   if (fs.existsSync(clonePath)) {
@@ -2473,7 +5175,10 @@ ipcMain.handle('automations:setupAgentClone', async (event, automationId, agentI
 
   // Clone
   return new Promise((resolve) => {
-    const child = spawn('git', ['clone', remoteUrl, clonePath], {
+    // Trailing `--` between flags and positional args defends against the
+    // "remote URL begins with --upload-pack=..." class of git CVEs where a
+    // repo's saved remote URL is parsed as a git option.
+    const child = spawn('git', ['clone', '--', remoteUrl, clonePath], {
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
@@ -2820,6 +5525,7 @@ ipcMain.handle('automations:validateDependencies', (event, agents) => {
 ipcMain.handle('automations:getSettings', () => {
   const data = readAutomations();
   return {
+    globalEnabled: data.globalEnabled !== undefined ? data.globalEnabled : true,
     agentReposBaseDir: data.agentReposBaseDir || AGENTS_DIR_DEFAULT,
     runWindow: data.runWindow || null
   };
@@ -2908,9 +5614,11 @@ ipcMain.handle('automations:setupManagerClone', async (event, automationId) => {
   if (!automation.manager.isolation || !automation.manager.isolation.enabled) return { error: 'Manager isolation not enabled' };
 
   const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
-  const projectName = automation.projectPath.split(/[/\\]/).pop();
-  const automationDirName = automation.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  const projectName = sanitiseDirSegment((automation.projectPath || '').split(/[/\\]/).pop());
+  const automationDirName = sanitiseDirSegment(automation.name).toLowerCase();
   const clonePath = path.join(baseDir, projectName, '_manager-' + automationDirName);
+  try { assertInsideParent(clonePath, baseDir); }
+  catch (err) { return { error: err.message }; }
 
   if (fs.existsSync(clonePath)) {
     try {
@@ -2946,7 +5654,7 @@ ipcMain.handle('automations:setupManagerClone', async (event, automationId) => {
   fs.mkdirSync(path.dirname(clonePath), { recursive: true });
 
   return new Promise((resolve) => {
-    const child = spawn('git', ['clone', remoteUrl, clonePath], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('git', ['clone', '--', remoteUrl, clonePath], { stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', (chunk) => {
       if (mainWindow) mainWindow.webContents.send('automations:clone-progress', { automationId, agentId: '_manager', line: chunk.toString() });
     });
@@ -2999,6 +5707,31 @@ ipcMain.handle('headless:cancel', (_event, runId) => {
 
 ipcMain.handle('headless:delete', (_event, projectPath, runId) => {
   return { deleted: deleteHeadless(projectPath, runId) };
+});
+
+ipcMain.handle('snippets:list', () => readSnippets().snippets || []);
+
+ipcMain.handle('snippets:save', (_event, snippet) => {
+  if (!snippet || typeof snippet !== 'object') return null;
+  const data = readSnippets();
+  if (!Array.isArray(data.snippets)) data.snippets = [];
+  if (snippet.id) {
+    const i = data.snippets.findIndex(s => s.id === snippet.id);
+    if (i >= 0) data.snippets[i] = snippet; else data.snippets.push(snippet);
+  } else {
+    snippet.id = 'snip_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    data.snippets.push(snippet);
+  }
+  writeSnippets(data);
+  return snippet;
+});
+
+ipcMain.handle('snippets:delete', (_event, id) => {
+  if (!id) return false;
+  const data = readSnippets();
+  data.snippets = (data.snippets || []).filter(s => s.id !== id);
+  writeSnippets(data);
+  return true;
 });
 
 // --- Automations Scheduler & Execution ---
@@ -3115,8 +5848,9 @@ function reconcileInterruptedHeadlessRuns() {
 }
 
 function findClaudePath() {
+  const lookup = process.platform === 'win32' ? 'where' : 'which';
   try {
-    const result = execFileSync('where', ['claude'], { encoding: 'utf8' });
+    const result = execFileSync(lookup, ['claude'], { encoding: 'utf8' });
     return result.trim().split(/\r?\n/)[0];
   } catch {
     return 'claude';
@@ -3363,7 +6097,7 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
   const child = spawn(getClaudePath(), args, {
     cwd: cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: Object.assign({}, process.env)
+    env: opts.env ? Object.assign({}, process.env, opts.env) : Object.assign({}, process.env)
   });
 
   let streamBuffer = '';
@@ -3436,6 +6170,13 @@ function runHeadless(projectPath, prompt) {
   const outputFile = headlessOutputPath(projectPath, runId);
   fs.writeFileSync(outputFile, '', 'utf8');
 
+  // Resolve the connection name for the dock chip.
+  let connectionName = 'Cloud';
+  if (spawnOptions.endpointId) {
+    const preset = getEndpointById(spawnOptions.endpointId);
+    if (preset) connectionName = preset.name || 'local';
+  }
+
   // Prepend the new run, then evict oldest beyond cap.
   let index = readHeadlessIndex(projectPath);
   const entry = {
@@ -3446,7 +6187,8 @@ function runHeadless(projectPath, prompt) {
     startedAt,
     completedAt: null,
     durationMs: 0,
-    exitCode: null
+    exitCode: null,
+    connectionName
   };
   index = { ...index, runs: [entry, ...(index.runs || [])] };
   index = applyHeadlessEviction(projectPath, index);
@@ -3464,10 +6206,12 @@ function runHeadless(projectPath, prompt) {
     throw err;
   }
 
+  const endpointEnv = getProjectEndpointEnvByPath(projectPath);
   const spawned = spawnHeadlessClaude(prompt, projectPath, {
     skipPermissions: !!spawnOptions.skipPermissions,
     bare: !!spawnOptions.bare,
-    model: spawnOptions.model || null,
+    model: endpointEnv ? null : (spawnOptions.model || null),
+    env: endpointEnv,
     onText: (text) => {
       try { outputStream.write(text); } catch { /* ignore */ }
       if (mainWindow) mainWindow.webContents.send('headless:output', { projectPath, runId, chunk: text });
@@ -3560,6 +6304,19 @@ function deleteHeadless(projectPath, runId) {
   return true;
 }
 
+// Resolve the env block for an agent. Agents created or edited with the
+// per-agent connection picker have an explicit `endpointId` field (null = cloud,
+// string = preset id). Legacy agents that pre-date the picker have no field
+// at all — they fall back to the project's configured endpoint so we don't
+// silently switch a user's existing automations to cloud.
+function getAgentEndpointEnv(agent, projectPath) {
+  if (agent && Object.prototype.hasOwnProperty.call(agent, 'endpointId')) {
+    if (!agent.endpointId) return null;
+    return buildEndpointEnv(agent.endpointId, agent.endpointModel || null);
+  }
+  return getProjectEndpointEnvByPath(projectPath);
+}
+
 async function runAgent(automationId, agentId) {
   let data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
@@ -3618,6 +6375,48 @@ async function runAgent(automationId, agentId) {
       automationId, agentId, status: 'error', error: agent.lastError
     });
     return;
+  }
+
+  // Capacity gate: skip the run if any configured usage window is too full.
+  // Each gate is per-agent; absent / null means no gate for that window.
+  const sessionGate = agent.usageGate && typeof agent.usageGate.sessionMaxPct === 'number'
+    ? agent.usageGate.sessionMaxPct
+    : null;
+  const weeklyGate = agent.usageGate && typeof agent.usageGate.weeklyMaxPct === 'number'
+    ? agent.usageGate.weeklyMaxPct
+    : null;
+  if ((sessionGate != null || weeklyGate != null) && planUsageCache && planUsageCache.data) {
+    const planData = planUsageCache.data;
+    let skipReason = null;
+    if (sessionGate != null && planData.five_hour && typeof planData.five_hour.utilization === 'number') {
+      const util = planData.five_hour.utilization;
+      if (util > sessionGate) {
+        skipReason = 'Skipped: session usage ' + util.toFixed(1) + '% > gate ' + sessionGate + '%';
+      }
+    }
+    if (!skipReason && weeklyGate != null && planData.seven_day && typeof planData.seven_day.utilization === 'number') {
+      const util = planData.seven_day.utilization;
+      if (util > weeklyGate) {
+        skipReason = 'Skipped: weekly usage ' + util.toFixed(1) + '% > gate ' + weeklyGate + '%';
+      }
+    }
+    if (skipReason) {
+      const skipData = readAutomations();
+      const skipAuto = skipData.automations.find(a => a.id === automationId);
+      if (skipAuto) {
+        const skipAgent = skipAuto.agents.find(ag => ag.id === agentId);
+        if (skipAgent) {
+          skipAgent.lastRunStatus = 'skipped';
+          skipAgent.lastRunAt = new Date().toISOString();
+          skipAgent.lastError = skipReason;
+          writeAutomations(skipData);
+        }
+      }
+      if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
+        automationId, agentId, status: 'skipped', error: skipReason
+      });
+      return;
+    }
   }
 
   // Mark as running
@@ -3697,6 +6496,7 @@ async function runAgent(automationId, agentId) {
     mcpConfig: mcpOpts ? mcpOpts.mcpConfig : null,
     mcpConfigPath: mcpOpts ? mcpOpts.mcpConfigPath : null,
     allowedTools: mcpOpts ? mcpOpts.allowedTools : null,
+    env: getAgentEndpointEnv(agent, automation.projectPath),
     onRaw: (raw) => { outputChunks.push(raw); },
     onText: (text) => {
       textChunks.push(text);
@@ -3873,9 +6673,11 @@ async function runManager(automationId) {
     if (!manager.isolation.clonePath || !fs.existsSync(manager.isolation.clonePath)) {
       // Auto-setup clone for manager
       const baseDir = data.agentReposBaseDir || AGENTS_DIR_DEFAULT;
-      const projectName = automation.projectPath.split(/[/\\]/).pop();
-      const automationDirName = automation.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+      const projectName = sanitiseDirSegment((automation.projectPath || '').split(/[/\\]/).pop());
+      const automationDirName = sanitiseDirSegment(automation.name).toLowerCase();
       const clonePath = path.join(baseDir, projectName, '_manager-' + automationDirName);
+      try { assertInsideParent(clonePath, baseDir); }
+      catch (err) { console.error('[Manager] Refused clone path:', err.message); return; }
 
       if (!fs.existsSync(clonePath)) {
         // Clone the repo
@@ -3887,7 +6689,7 @@ async function runManager(automationId) {
         }
         fs.mkdirSync(path.dirname(clonePath), { recursive: true });
         try {
-          execFileSync('git', ['clone', remoteUrl, clonePath], { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
+          execFileSync('git', ['clone', '--', remoteUrl, clonePath], { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
         } catch (e) {
           console.error('[Manager] Clone failed:', e.message);
           // Fall back to project path
@@ -3984,10 +6786,13 @@ async function runManager(automationId) {
     }
   }
 
+  const managerEndpointEnv = getProjectEndpointEnvByPath(automation.projectPath);
   const child = spawn(getClaudePath(), args, {
     cwd: cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: Object.assign({}, process.env)
+    env: managerEndpointEnv
+      ? Object.assign({}, process.env, managerEndpointEnv)
+      : Object.assign({}, process.env)
   });
 
   runningManagers.set(automationId, child);
@@ -4319,7 +7124,13 @@ function createTray() {
     ? path.join(process.resourcesPath, 'app.asar.unpacked', iconFile)
     : path.join(__dirname, iconFile);
   const trayIcon = nativeImage.createFromPath(iconPath);
-  tray = new Tray(process.platform === 'darwin' ? trayIcon.resize({ width: 18, height: 18 }) : trayIcon);
+  // Per-platform sizing: macOS menu bar wants 18x18 templates; KDE / GNOME
+  // legacy tray prefers 22x22; Windows scales the .ico automatically. Picking
+  // a sane Linux default avoids a giant icon on KDE Plasma.
+  let sized = trayIcon;
+  if (process.platform === 'darwin') sized = trayIcon.resize({ width: 18, height: 18 });
+  else if (process.platform === 'linux') sized = trayIcon.resize({ width: 22, height: 22 });
+  tray = new Tray(sized);
   tray.setToolTip('Claudes');
 
   const contextMenu = Menu.buildFromTemplate([
@@ -4379,6 +7190,9 @@ if (!gotLock) {
     startAutomationScheduler();
 
     const cfg = readConfig();
+    // Spin up sync watchers for any project that already has sync enabled
+    // from a previous session.
+    try { reapplySyncFromConfig(cfg); } catch (err) { console.error('sync boot failed:', err); }
     for (const p of cfg.projects) {
       if (p && p.poppedOut) {
         createProjectWindow(p.path);
@@ -4406,29 +7220,91 @@ if (!gotLock) {
   });
 }
 
+// SIGTERM → 2s → SIGKILL. node-pty children of the pty-server can occasionally
+// ignore a polite SIGTERM (e.g. a Claude CLI mid-write to a foreign PTY).
+// Without escalation the parent Electron process waits forever on quit.
+function killPtyServer() {
+  if (!ptyServerProcess || ptyServerProcess.killed) return;
+  const child = ptyServerProcess;
+  const pid = child.pid;
+  diagLog('[quit] killPtyServer: SIGTERM ->', pid);
+  try { child.kill('SIGTERM'); } catch (e) { diagLog('[quit] SIGTERM threw:', e && e.message); }
+  setTimeout(() => {
+    if (child.killed) {
+      diagLog('[quit] pty-server', pid, 'already gone, SIGKILL not needed');
+      return;
+    }
+    diagLog('[quit] pty-server', pid, 'still alive after 2s — SIGKILL');
+    try { child.kill('SIGKILL'); } catch (e) { diagLog('[quit] SIGKILL threw:', e && e.message); }
+  }, 2000).unref();
+}
+
 app.on('window-all-closed', () => {
   // On close-to-tray, windows are hidden not closed, so this only fires on actual quit
   if (process.platform !== 'darwin') {
     stopAutomationScheduler();
-    if (ptyServerProcess) {
-      ptyServerProcess.kill();
-    }
+    killPtyServer();
     app.quit();
   }
 });
 
 app.on('before-quit', () => {
+  const t0 = Date.now();
+  const step = (label) => diagLog('[quit] +' + (Date.now() - t0) + 'ms ' + label);
+  step('before-quit: start');
   isQuitting = true;
+  step('popouts close: ' + popoutWindows.size);
   for (const win of popoutWindows.values()) {
     if (!win.isDestroyed()) {
       try { win.close(); } catch {}
     }
   }
+  step('flushPendingConfig');
   flushPendingConfig();
   flushPendingStickyNotes();
   flushPendingReviewComments();
+  step('stopAutomationScheduler');
   stopAutomationScheduler();
-  if (ptyServerProcess) {
-    ptyServerProcess.kill();
+  step('clawdTails clear: ' + clawdTails.size);
+  for (const [colId, t] of clawdTails) {
+    try { clearInterval(t.timer); } catch {}
   }
+  clawdTails.clear();
+  step('killPtyServer');
+  killPtyServer();
+  // The hook server's listening socket keeps the event loop alive; close it
+  // so Electron can actually exit instead of hanging in 'will-quit'.
+  if (hookServer) {
+    step('hookServer.closeAllConnections + close');
+    try { if (typeof hookServer.closeAllConnections === 'function') hookServer.closeAllConnections(); } catch (e) { diagLog('[quit] closeAllConnections threw:', e && e.message); }
+    try { hookServer.close(() => step('hookServer: close callback')); } catch (e) { diagLog('[quit] hookServer.close threw:', e && e.message); }
+    hookServer = null;
+  }
+  step('FS_WATCHERS close: ' + FS_WATCHERS.size);
+  step('before-quit: done');
+});
+
+app.on('will-quit', () => { diagLog('[quit] will-quit fired'); });
+app.on('quit', () => { diagLog('[quit] quit fired'); });
+
+// Renderer/child-process death and blocked-unload capture — classic culprits
+// behind "Cmd+Q (or Alt+F4) hangs and I have to Force Quit". Cross-platform.
+app.on('render-process-gone', (_event, _wc, details) => {
+  diagLog('[crash] render-process-gone:', JSON.stringify(details));
+});
+app.on('child-process-gone', (_event, details) => {
+  diagLog('[crash] child-process-gone:', JSON.stringify(details));
+});
+app.on('web-contents-created', (_event, wc) => {
+  wc.on('will-prevent-unload', () => {
+    // A beforeunload handler returning falsy will block quit. Log it,
+    // don't override — we want to know if it's happening.
+    diagLog('[quit] will-prevent-unload fired on wc id=' + wc.id + ' url=' + wc.getURL());
+  });
+  wc.on('unresponsive', () => {
+    diagLog('[crash] webContents unresponsive: id=' + wc.id + ' url=' + wc.getURL());
+  });
+  wc.on('responsive', () => {
+    diagLog('[crash] webContents responsive again: id=' + wc.id);
+  });
 });

@@ -204,6 +204,15 @@ html, body {
   gap: 8px;
 }
 
+/* macOS traffic-light buttons sit at the window's top-left under
+   titleBarStyle:'hidden' (top:~13px, ~70px wide). Reserve enough top
+   space that the "PROJECTS" label clears them both vertically and that
+   the resort toggle on the right has breathing room. */
+html[data-platform="darwin"] .sidebar-header {
+  margin-top: 32px;
+  padding-top: 4px;
+}
+
 .sidebar-header-actions {
   display: flex;
   align-items: center;
@@ -331,7 +340,8 @@ html, body {
   -webkit-app-region: drag;
 }
 
-#sidebar button, #sidebar .project-item, #sidebar .project-remove {
+#sidebar button, #sidebar .project-item, #sidebar .project-remove,
+#sidebar .plan-limits-mini {
   -webkit-app-region: no-drag;
 }
 
@@ -656,6 +666,13 @@ html, body {
   -webkit-app-region: drag;
 }
 
+/* macOS traffic-lights live on the LEFT (offset by the sidebar margin), so
+   the right-side reserved space is dead air there. Drop it back to the
+   normal 12px gutter. */
+html[data-platform="darwin"] #toolbar {
+  padding-right: 12px;
+}
+
 .toolbar-left {
   display: flex;
   align-items: center;
@@ -717,22 +734,82 @@ html, body {
   color: var(--accent);
 }
 
+.active-project-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  margin-left: 8px;
+  background: var(--hover-subtle, rgba(255,255,255,0.04));
+  border: 1px solid var(--border-dim);
+  border-radius: 12px;
+  color: var(--text-secondary);
+  min-width: 0;
+  flex-shrink: 1;
+  -webkit-app-region: no-drag;
+}
+
+.active-project-wrap:has(#active-project-name:empty) {
+  display: none;
+}
+
+.active-project-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+  opacity: 0.85;
+}
+
 .active-project-name {
   font-size: 12px;
-  color: var(--text-dim);
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
   flex-shrink: 1;
+  font-weight: 500;
+  letter-spacing: 0.1px;
 }
 
 .toolbar-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   -webkit-app-region: no-drag;
   flex-shrink: 0;
+}
+
+.toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  line-height: 0;
+  font-family: inherit;
+}
+
+.toolbar-btn svg { display: block; }
+
+.toolbar-btn:hover {
+  background: var(--hover-medium);
+  color: var(--text-primary);
+  border-color: var(--border-dim);
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border-dim);
+  margin: 0 4px;
+  align-self: center;
+  display: inline-block;
 }
 
 /* --- Toolbar Menu (three-dot) --- */
@@ -803,23 +880,12 @@ html, body {
   background: none;
 }
 
-#btn-add-row {
-  padding: 4px 12px;
-  background: var(--bg-button);
-  color: var(--text-primary);
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 12px;
-}
+/* #btn-add-row rendered as a .toolbar-btn icon — no extra rules needed. */
 
-#btn-add-row:hover {
-  background: var(--accent);
-  color: var(--text-bright);
-}
+/* --- Spawn Split Button (modernised: filled primary CTA + flush chevron) --- */
 
-/* --- Spawn Split Button --- */
-
+/* Avoid `filter`/`overflow:hidden` here — both create stacking issues that can
+   break absolutely-positioned children like #spawn-dropdown. */
 .spawn-split-btn {
   display: flex;
   align-items: stretch;
@@ -827,46 +893,45 @@ html, body {
 }
 
 .spawn-split-btn #btn-add {
-  padding: 4px 12px;
-  background: var(--bg-button);
-  color: var(--text-primary);
-  border: 1px solid var(--accent);
-  border-right: none;
-  border-radius: 4px 0 0 4px;
+  padding: 5px 14px;
+  background: var(--accent);
+  color: #ffffff;            /* explicit — light theme has --text-bright = #000 */
+  border: none;
+  border-radius: 5px 0 0 5px;
   cursor: pointer;
   font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  letter-spacing: 0.2px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.18);
+  transition: filter 0.12s ease;
 }
 
-.spawn-split-btn #btn-add:hover {
-  background: var(--accent);
-  color: var(--text-bright);
-}
+.spawn-split-btn #btn-add:hover { filter: brightness(1.08); }
 
 .spawn-chevron {
-  padding: 0 6px;
-  background: var(--bg-button);
-  color: var(--text-primary);
-  border: 1px solid var(--accent);
-  border-radius: 0 4px 4px 0;
+  padding: 0 10px;
+  background: var(--accent);
+  color: #ffffff;
+  border: none;
+  border-left: 1px solid rgba(255,255,255,0.28);
+  border-radius: 0 5px 5px 0;
   cursor: pointer;
   font-size: 10px;
   display: flex;
   align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  font-family: inherit;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.18);
+  transition: filter 0.12s ease;
 }
 
-.spawn-chevron:hover {
-  background: var(--accent);
-  color: var(--text-bright);
-}
+.spawn-chevron:hover { filter: brightness(1.08); }
 
-.spawn-split-btn #btn-add.has-options {
-  background: rgba(99, 102, 241, 0.15);
-  border-color: var(--accent);
-}
-
+.spawn-split-btn #btn-add.has-options,
 .spawn-chevron.has-options {
-  background: rgba(99, 102, 241, 0.15);
-  border-color: var(--accent);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.18), inset 0 0 0 1px rgba(255,255,255,0.32);
 }
 
 .spawn-dropdown {
@@ -927,7 +992,9 @@ html, body {
   accent-color: var(--accent);
 }
 
-.spawn-model-row select {
+.spawn-effort-row select,
+.spawn-model-row select,
+.spawn-endpoint-row select {
   background: var(--bg-button);
   color: var(--text-primary);
   border: 1px solid var(--border-dim);
@@ -936,6 +1003,70 @@ html, body {
   font-size: 12px;
   cursor: pointer;
   flex: 1;
+}
+
+.spawn-endpoint-model-row.hidden,
+.spawn-model-row.hidden {
+  display: none;
+}
+
+.spawn-readonly-value {
+  flex: 1;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spawn-endpoint-model-row select {
+  background: var(--bg-button);
+  color: var(--text-primary);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 11px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+}
+
+.spawn-icon-btn {
+  background: var(--bg-button);
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.spawn-icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.spawn-manage-btn {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 4px 8px;
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.spawn-manage-btn:hover {
+  background: var(--hover-medium);
+  color: var(--text-primary);
+  border-color: var(--accent);
 }
 
 .spawn-custom-row input[type="text"] {
@@ -1197,7 +1328,7 @@ html, body {
 
 /* Hide less-critical column actions on narrow columns */
 @container (max-width: 250px) {
-  .col-action, .col-effort { display: none; }
+  .col-action, .col-effort, .col-delta-pill, .col-ctx-meter { display: none; }
 }
 
 .col-action {
@@ -1239,11 +1370,17 @@ html, body {
 .column-header .col-maximize {
   cursor: pointer;
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1;
-  padding: 2px 5px;
+  padding: 2px 6px;
   border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
 }
+
+.column-header .col-maximize svg { display: block; }
 
 .column-header .col-maximize:hover {
   background: var(--hover-strong);
@@ -1276,6 +1413,53 @@ html, body {
 .column-header .col-close:hover {
   background: var(--accent);
   color: var(--text-bright);
+}
+
+.col-delta-pill {
+  font-size: 10px;
+  color: var(--text-dimmer);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+  cursor: help;
+}
+.col-delta-pill[hidden] { display: none !important; }
+
+.col-ctx-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+  height: 16px;
+  width: 90px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+  cursor: help;
+}
+.col-ctx-meter[hidden] { display: none !important; }
+.col-ctx-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #4f8cff;
+  width: 0;
+  transition: width 200ms ease;
+}
+.col-ctx-fill.warning { background: #e0a020; }
+.col-ctx-fill.critical { background: #e05050; }
+.col-ctx-text {
+  position: relative;
+  font-size: 10px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  width: 100%;
+  text-align: center;
+  text-shadow: 0 0 2px rgba(0,0,0,0.6);
 }
 
 /* Maximize/Restore states */
@@ -1641,12 +1825,344 @@ html, body {
   color: var(--text-bright);
 }
 
+.modal-btn-save.save-flash {
+  background: #16a34a !important;
+  color: #fff !important;
+  border-color: #16a34a !important;
+  transform: scale(1.04);
+  transition: transform 0.15s ease;
+}
+
+/* --- Endpoint banner (in column above terminal) --- */
+
+.endpoint-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--text-body);
+  white-space: nowrap;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.endpoint-banner--local {
+  background: rgba(255, 165, 0, 0.08);
+  border-bottom: 1px solid rgba(255, 165, 0, 0.35);
+}
+
+.endpoint-banner--cloud {
+  background: rgba(74, 222, 128, 0.08);
+  border-bottom: 1px solid rgba(74, 222, 128, 0.35);
+}
+
+.endpoint-banner-tag {
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.endpoint-banner-tag--local {
+  background: rgba(255, 165, 0, 0.2);
+  color: #ffa500;
+}
+
+.endpoint-banner-tag--cloud {
+  background: rgba(74, 222, 128, 0.2);
+  color: #4ade80;
+}
+
+.endpoint-banner-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.endpoint-banner-sep {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.endpoint-banner-model {
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.endpoint-banner-caveat {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- Endpoint Presets Modal --- */
+
+.endpoints-dialog {
+  width: 720px;
+  max-width: 90vw;
+  max-height: 80vh;
+}
+
+.endpoints-body {
+  display: flex;
+  flex-direction: row;
+  padding: 0;
+  gap: 0;
+  min-height: 360px;
+}
+
+.endpoints-sidebar {
+  width: 220px;
+  border-right: 1px solid var(--border-primary);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-main);
+}
+
+.endpoints-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-primary);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.endpoints-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.endpoints-list li {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-body);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.endpoints-list li:hover {
+  background: var(--hover-medium);
+}
+
+.endpoints-list li.active {
+  background: var(--hover-medium);
+  border-left-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.endpoints-list li.empty {
+  color: var(--text-dim);
+  font-style: italic;
+  cursor: default;
+}
+
+.endpoints-list li.empty:hover {
+  background: transparent;
+}
+
+.endpoints-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.endpoints-empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+  margin: auto;
+}
+
+.endpoints-empty.hidden {
+  display: none;
+}
+
+.endpoints-form.hidden {
+  display: none;
+}
+
+.endpoints-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.endpoints-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.endpoints-field > span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.endpoints-field-hint {
+  font-style: normal;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-dimmer, var(--text-dim));
+  margin-left: 4px;
+  font-size: 10px;
+}
+
+.endpoints-field input[type="text"],
+.endpoints-field input[type="password"],
+.endpoints-field select {
+  background: var(--bg-button);
+  color: var(--text-primary);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+}
+
+.endpoints-field input::placeholder {
+  color: var(--text-dim);
+}
+
+.endpoints-token-row,
+.endpoints-model-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.endpoints-token-row input,
+.endpoints-model-row input,
+.endpoints-model-row select {
+  flex: 1;
+}
+
+.endpoints-model-row > input.hidden,
+.endpoints-model-row > select.hidden {
+  display: none;
+}
+
+.endpoints-icon-btn {
+  background: var(--bg-button);
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.endpoints-icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.endpoints-form-status {
+  font-size: 11px;
+  color: var(--text-dim);
+  min-height: 16px;
+}
+
+.endpoints-form-status.ok {
+  color: var(--accent-success, #4ade80);
+}
+
+.endpoints-form-status.error {
+  color: var(--accent-danger, #f87171);
+}
+
+.endpoints-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border-primary);
+  padding-top: 12px;
+}
+
+.endpoints-form-spacer {
+  flex: 1;
+}
+
+.endpoints-secondary-btn,
+.endpoints-danger-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.endpoints-secondary-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.endpoints-danger-btn:hover {
+  border-color: #f87171;
+  color: #f87171;
+}
+
 /* --- File Editor Modal --- */
 
 .fileeditor-dialog {
   width: 900px;
   max-width: 90vw;
   max-height: 85vh;
+}
+
+.fileeditor-dialog .modal-body {
+  flex-direction: column;
+}
+
+.fileeditor-edit-area {
+  flex: 1;
+  display: flex;
+  min-height: 500px;
+  background: var(--bg-main);
+  position: relative;
+  overflow: hidden;
+}
+
+.fileeditor-gutter {
+  flex-shrink: 0;
+  padding: 16px 8px 16px 12px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dimmer);
+  background: var(--bg-deep, var(--bg-main));
+  border-right: 1px solid var(--border-subtle);
+  text-align: right;
+  white-space: pre;
+  user-select: none;
+  overflow: hidden;
+  min-width: 36px;
+  tab-size: 2;
+  font-variant-numeric: tabular-nums;
 }
 
 #fileeditor-editor {
@@ -1659,16 +2175,110 @@ html, body {
   font-size: 13px;
   line-height: 1.6;
   resize: none;
-  min-height: 500px;
   outline: none;
   tab-size: 2;
   white-space: pre;
   overflow-wrap: normal;
-  overflow-x: auto;
+  overflow: auto;
 }
 
 #fileeditor-editor::placeholder {
   color: var(--text-faint);
+}
+
+/* Find / Replace bar inside the file editor */
+.fileeditor-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-toolbar, var(--bg-deep));
+  flex-shrink: 0;
+}
+
+.fileeditor-find-bar.hidden { display: none; }
+
+.fileeditor-find-input {
+  background: var(--bg-input, var(--bg-main));
+  color: var(--text-primary);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 3px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  flex: 1;
+  min-width: 100px;
+}
+
+.fileeditor-find-input:focus { border-color: var(--accent); }
+
+.fileeditor-find-count {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 40px;
+  text-align: center;
+}
+
+.fileeditor-find-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  min-width: 24px;
+  line-height: 0;
+}
+
+.fileeditor-find-btn:hover {
+  background: var(--hover-medium);
+  color: var(--text-primary);
+  border-color: var(--border-dim);
+}
+
+.fileeditor-find-btn-text {
+  padding: 3px 8px;
+  line-height: 1;
+}
+
+.fileeditor-find-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.fileeditor-find-toggle {
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  user-select: none;
+}
+
+.fileeditor-find-toggle input { accent-color: var(--accent); }
+
+.fileeditor-find-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border-dim);
+  margin: 0 2px;
+}
+
+.fileeditor-cursor-pos {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  margin-right: 12px;
 }
 
 /* --- Explorer Panel --- */
@@ -1745,6 +2355,14 @@ html, body {
   font-family: inherit;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.explorer-tab svg {
+  display: block;
 }
 
 .explorer-tab:hover {
@@ -1778,6 +2396,7 @@ html, body {
 
 .tab-content {
   display: none;
+  overflow-x: hidden;
 }
 
 .tab-content.active {
@@ -1949,12 +2568,16 @@ html, body {
 .file-tree-context-menu {
   position: fixed;
   z-index: 10000;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  /* --bg-secondary didn't exist in the theme — using --bg-panel (real var)
+     means the menu has an actual opaque background on both themes. Without
+     this, the previous rule silently fell through to 'transparent' and the
+     file rows behind bled through. */
+  background: var(--bg-panel);
+  border: 1px solid var(--border-primary, #3a3a52);
   border-radius: 4px;
   padding: 4px 0;
-  min-width: 160px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  min-width: 200px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 
 .file-tree-context-item {
@@ -1962,10 +2585,13 @@ html, body {
   font-size: 12px;
   color: var(--text-primary);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .file-tree-context-item:hover {
-  background: var(--accent-color);
+  /* --accent-color didn't exist either; fall back to --accent (the real one). */
+  background: var(--accent);
+  color: #ffffff;
 }
 
 /* Git Changes */
@@ -2398,78 +3024,111 @@ html, body {
 /* Commit Graph */
 
 .git-graph-list {
-  max-height: 400px;
+  flex: 1;
+  min-height: 0;
+  /* Fallback cap for cases where the panel height isn't propagated all
+     the way down (e.g. mid-render before flex is established). */
+  max-height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
-.git-graph-row {
+/* Make the git tab a vertical flex column so the commits section can
+   take all leftover height instead of being capped at 400px. Branch
+   row, commit input, Changes section keep their natural height; only
+   the commits list scrolls internally. */
+#tab-git.tab-content.active {
   display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+#tab-git #git-changes {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+#tab-git .git-graph-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Grid keeps the subject column fluid (minmax(0, 1fr) is the magic that
+   lets the cell shrink so text-overflow: ellipsis can engage), while the
+   graph / hash / date columns stay sized to their contents. Previously
+   this was flexbox without `min-width: 0` on the message, so the subject
+   refused to shrink and the row pushed past the panel — that's where the
+   horizontal scrollbar was coming from. */
+.git-graph-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: center;
-  height: 28px;
-  padding-right: 8px;
+  height: 30px;
+  padding: 0 8px 0 0;
   cursor: pointer;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
+  border-left: 2px solid transparent;
+  transition: background 80ms ease, border-color 80ms ease;
 }
 
 .git-graph-row:hover {
   background: var(--hover-subtle);
+  border-left-color: rgba(79, 140, 255, 0.6);
 }
 
 .git-graph-hash {
   font-family: 'Cascadia Code', 'Consolas', monospace;
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-dimmer);
-  flex-shrink: 0;
-  min-width: 58px;
-  overflow: hidden;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
 }
 
 .git-graph-msg {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   color: var(--text-body);
 }
 
-.git-graph-refs {
-  display: flex;
-  gap: 3px;
-  flex-shrink: 0;
-}
-
-.git-graph-ref {
-  font-size: 9px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: rgba(233, 69, 96, 0.15);
-  color: var(--accent);
-  white-space: nowrap;
-}
-
-.git-graph-tag {
-  background: rgba(0, 200, 200, 0.15);
-  color: var(--color-cyan);
-}
-
-.git-graph-author {
-  font-size: 11px;
-  color: var(--text-dimmer);
-  flex-shrink: 0;
-  width: 55px;
+.git-graph-subject {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.git-graph-date {
-  font-size: 10px;
-  color: var(--text-dimmer);
+.git-graph-ref {
   flex-shrink: 0;
-  width: 55px;
-  text-align: right;
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(233, 69, 96, 0.18);
+  color: var(--accent);
   white-space: nowrap;
+  letter-spacing: 0.2px;
+}
+
+.git-graph-tag {
+  background: rgba(0, 200, 200, 0.18);
+  color: var(--color-cyan);
+}
+
+.git-graph-date {
+  font-size: 10.5px;
+  color: var(--text-dimmer);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+  min-width: 26px;
 }
 
 .git-empty,
@@ -3321,19 +3980,73 @@ html, body {
 
 /* Settings Modal */
 .settings-dialog {
-  width: 560px;
+  width: 680px;       /* widened so the new Terminal / Tools tabs aren't clipped */
   max-width: 90vw;
+  max-height: 85vh;   /* cap so tall panes (Clawd legend, etc) scroll instead of running off-screen */
+  display: flex;
+  flex-direction: column;
 }
 
 .settings-body {
+  padding: 0;
+  display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  padding: 16px 20px;
+  flex: 1;
+  min-height: 0;      /* let the inner scroll area shrink below content height */
+  overflow: hidden;
 }
 
-.settings-section {
-  margin-bottom: 16px;
+.settings-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border-primary);
+  padding: 0 12px;
+  gap: 2px;
+  flex-shrink: 0;
+  /* Tab strip scrolls horizontally if the dialog gets squeezed below the
+     full set of tabs (e.g. on small viewports). The settings-dialog width
+     accommodates all current tabs without scroll, but this keeps the UI
+     usable when extra tabs are added in future. */
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
+.settings-tabs::-webkit-scrollbar { height: 4px; }
+.settings-tabs::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+.settings-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 10px 14px;
+  margin-bottom: -1px;
+  white-space: nowrap;
+  flex-shrink: 0;     /* don't compress tab labels */
+}
+
+.settings-tab:hover { color: var(--text-secondary); }
+
+.settings-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+.settings-panes {
+  padding: 14px 20px 18px;
+  min-height: 200px;
+  overflow-y: auto;   /* scroll long panes (Clawd legend) instead of clipping */
+  flex: 1;
+}
+
+.settings-pane { display: none; }
+.settings-pane.active { display: block; }
+
+/* Legacy section styles kept for any callers that still render the older markup. */
+.settings-section { margin-bottom: 16px; }
 
 .settings-section-title {
   font-size: 13px;
@@ -3501,6 +4214,282 @@ html, body {
   padding: 14px 16px;
 }
 
+/* Plan usage limits panel (Max/Pro plan: 5h session, 7d weekly, etc.) */
+
+.plan-limits-section {
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.plan-limits-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.plan-limits-title {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.plan-limits-refresh {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.plan-limits-refresh:hover {
+  color: var(--text-primary);
+  border-color: #4f8cff;
+}
+
+.plan-limits-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.plan-limit-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) 2fr auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.plan-limit-meta {
+  min-width: 0;
+}
+
+.plan-limit-label {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.plan-limit-sub {
+  font-size: 11px;
+  color: var(--text-dimmer);
+  margin-top: 2px;
+}
+
+.plan-limit-bar {
+  height: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.plan-limit-bar-fill {
+  height: 100%;
+  background: #4f8cff;
+  border-radius: 4px;
+  transition: width 200ms ease;
+}
+
+.plan-limit-bar-fill.warning { background: #e0a020; }
+.plan-limit-bar-fill.critical { background: #e05050; }
+
+.plan-limit-pct {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 64px;
+  text-align: right;
+}
+
+.plan-limits-loading,
+.plan-limits-error {
+  font-size: 12px;
+  color: var(--text-dimmer);
+  padding: 4px 0;
+}
+
+.plan-limits-footer {
+  font-size: 11px;
+  color: var(--text-dimmer);
+  margin-top: 10px;
+  text-align: right;
+}
+
+/* Sidebar mini bar — compact session + weekly indicator. */
+
+.plan-limits-mini {
+  position: relative;
+  margin: 4px 8px 8px;
+  padding: 8px 10px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+  overflow: visible;
+}
+
+.plan-limits-mini:hover {
+  border-color: #4f8cff;
+}
+
+.plan-limits-mini.hidden { display: none; }
+
+/* Stale: showing last-good snapshot while the API is in a rate-limit cooldown.
+   Dimmed so the user can tell at a glance the numbers aren't live; hover the
+   bar for the explanatory popover. */
+.plan-limits-mini.stale { opacity: 0.55; }
+.plan-limits-mini.stale:hover { opacity: 1; }
+
+.plan-limits-mini-row {
+  display: grid;
+  grid-template-columns: 48px 1fr 32px;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-limits-mini-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.plan-limits-mini-bar {
+  height: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.plan-limits-mini-fill {
+  height: 100%;
+  background: #4f8cff;
+  border-radius: 3px;
+  transition: width 200ms ease;
+}
+
+.plan-limits-mini-fill.warning { background: #e0a020; }
+.plan-limits-mini-fill.critical { background: #e05050; }
+
+.plan-limits-mini-pct {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Hover popover for the sidebar mini bar — instant, CSS-only :hover trigger.
+   Sits directly above the bar (left:0/right:0), inheriting the bar's width
+   so it doesn't extend rightward into the explorer area. Long "resets at…"
+   lines wrap inside the popover. */
+.plan-limits-mini-popover {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  z-index: 999999;
+  /* Visual gap above the mini bar — bridged below by ::after so the cursor
+     doesn't lose hover to the "+ Add Project" button while crossing it. */
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px var(--shadow-heavy);
+  font-size: 12px;
+  color: var(--text-primary);
+  /* visibility:hidden (not pointer-events:none) removes the popover from
+     hit-testing when invisible, so the Add Project button below stays
+     clickable. When shown, pointer-events:auto is already in place, so the
+     popover can capture its own :hover the moment the cursor enters. */
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 80ms ease, transform 80ms ease, visibility 0s linear 80ms;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Hover bridge: fills the 8px gap between the popover and the mini bar so
+   the cursor stays in the popover's :hover when travelling between them.
+   visibility:hidden on the popover also hides this pseudo, so it doesn't
+   intercept clicks meant for the Add Project button when the popover is
+   closed. */
+.plan-limits-mini-popover::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 8px;
+}
+
+.plan-limits-mini:hover .plan-limits-mini-popover,
+.plan-limits-mini-popover:hover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition: opacity 80ms ease, transform 80ms ease, visibility 0s linear 0s;
+}
+
+.plan-limits-popover-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plan-limits-popover-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+}
+
+.plan-limits-popover-label {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  letter-spacing: 0.2px;
+}
+
+.plan-limits-popover-pct {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.plan-limits-popover-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.plan-limits-popover-hint {
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  text-align: center;
+  letter-spacing: 0.3px;
+}
+
 .usage-card-label {
   font-size: 11px;
   color: var(--text-dim);
@@ -3519,6 +4508,68 @@ html, body {
   font-size: 11px;
   color: var(--text-dimmer);
   margin-top: 4px;
+}
+
+/* Cost tab */
+
+.cost-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.cost-card {
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+.cost-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+.cost-value { font-size: 22px; font-weight: 600; color: var(--text-primary); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.cost-table { display: flex; flex-direction: column; gap: 4px; margin-bottom: 20px; }
+.cost-row { display: flex; justify-content: space-between; padding: 6px 10px; background: rgba(255,255,255,0.02); border-radius: 4px; font-size: 12px; }
+.cost-row-name { color: var(--text-primary); }
+.cost-row-val { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.cost-chart { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
+.cost-day-row { display: grid; grid-template-columns: 84px 1fr 70px; gap: 8px; align-items: center; font-size: 11px; }
+.cost-day-label { color: var(--text-dim); }
+.cost-day-bar { height: 8px; background: rgba(255,255,255,0.04); border-radius: 4px; overflow: hidden; }
+.cost-day-fill { height: 100%; background: #4f8cff; border-radius: 4px; }
+.cost-day-val { color: var(--text-primary); text-align: right; font-variant-numeric: tabular-nums; }
+.cost-disclaimer { font-size: 10px; color: var(--text-dimmer); margin-top: 12px; line-height: 1.4; }
+.cost-disclaimer code { font-size: 10px; padding: 1px 4px; background: rgba(255,255,255,0.05); border-radius: 3px; }
+.cost-banner {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: rgba(224, 160, 32, 0.08);
+  border: 1px solid rgba(224, 160, 32, 0.35);
+  border-left-width: 3px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+.cost-banner strong { color: #e0a020; }
+.cost-banner em { color: var(--text-dim); font-style: normal; font-weight: 500; }
+.cost-filter-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.cost-filter-btn {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-dim);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cost-filter-btn:hover { color: var(--text-primary); }
+.cost-filter-btn.active {
+  background: rgba(79,140,255,0.12);
+  border-color: #4f8cff;
+  color: var(--text-primary);
 }
 
 /* Environmental impact */
@@ -4306,25 +5357,25 @@ html, body {
 /* Automation tab indicator: yellow dot = has automations, green pulsing = running */
 .explorer-tab[data-tab="automations"].has-automations::after {
   content: '';
-  display: inline-block;
+  position: absolute;
+  top: 8px;
+  right: calc(50% - 12px);
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: #eab308;
-  margin-left: 5px;
-  vertical-align: middle;
 }
 
 .explorer-tab[data-tab="automations"].has-running::after {
   content: '';
-  display: inline-block;
+  position: absolute;
+  top: 8px;
+  right: calc(50% - 12px);
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: #22c55e;
-  margin-left: 5px;
   animation: automation-tab-pulse 1.5s ease-in-out infinite;
-  vertical-align: middle;
 }
 
 @keyframes automation-tab-pulse {
@@ -5085,25 +6136,26 @@ html, body {
 
 .settings-input {
   flex: 1;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid #444;
-  color: #ccc;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 12px;
 }
+.settings-input:focus { outline: none; border-color: var(--accent); }
 
 .settings-browse-btn {
-  background: rgba(255,255,255,0.06);
-  border: 1px solid #444;
-  color: #ccc;
+  background: var(--bg-button);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
   padding: 4px 8px;
   border-radius: 4px;
   cursor: pointer;
 }
 
 .settings-browse-btn:hover {
-  border-color: #6366f1;
+  border-color: var(--accent);
 }
 
 .settings-hint {
@@ -6131,3 +7183,1014 @@ body.mode-popout #btn-add-project {
 .review-stale-entry:hover { background: #2a2a3e; }
 .review-stale-ref { color: #6ea8fe; font-family: monospace; font-size: 12px; }
 .review-stale-text { color: #aaa; font-size: 12px; margin-top: 2px; white-space: pre-wrap; }
+
+/* Per-agent connection tag on automation cards and headless dock */
+.automation-card-conn-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.automation-card-conn-tag--cloud {
+  background: rgba(100, 210, 255, 0.15);
+  color: var(--color-cyan, #64d2ff);
+  border: 1px solid rgba(100, 210, 255, 0.4);
+}
+.automation-card-conn-tag--local {
+  background: rgba(255, 165, 0, 0.15);
+  color: #ffa500;
+  border: 1px solid rgba(255, 165, 0, 0.4);
+}
+
+.headless-dock-row-conn {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.headless-dock-row-conn--cloud {
+  background: rgba(100, 210, 255, 0.15);
+  color: var(--color-cyan, #64d2ff);
+  border: 1px solid rgba(100, 210, 255, 0.4);
+}
+.headless-dock-row-conn--local {
+  background: rgba(255, 165, 0, 0.15);
+  color: #ffa500;
+  border: 1px solid rgba(255, 165, 0, 0.4);
+}
+
+/* Broadcast popover */
+.broadcast-popover {
+  position: fixed;
+  top: 60px;
+  right: 16px;
+  width: 360px;
+  z-index: 1000;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.broadcast-popover.hidden { display: none; }
+.broadcast-header { display: flex; justify-content: space-between; align-items: center; }
+.broadcast-title { font-weight: 600; font-size: 13px; color: var(--text-primary); }
+.broadcast-close { background: transparent; border: 0; color: var(--text-dim); font-size: 18px; cursor: pointer; }
+.broadcast-close:hover { color: var(--text-primary); }
+.broadcast-popover textarea {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+.broadcast-targets {
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+.broadcast-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.broadcast-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.broadcast-press-enter { font-size: 11px; color: var(--text-dim); }
+.broadcast-send-btn {
+  background: #4f8cff;
+  color: white;
+  border: 0;
+  border-radius: 4px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.broadcast-send-btn:hover { background: #3a78ee; }
+
+.session-search-dialog { width: 720px; max-height: 80vh; }
+.session-search-dialog .modal-body {
+  flex-direction: column;
+  padding: 12px;
+  gap: 8px;
+}
+#session-search-input,
+#quick-open-input,
+#content-search-input {
+  width: 100%;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 14px;
+  margin-bottom: 8px;
+  box-sizing: border-box;
+}
+#session-search-input:focus,
+#quick-open-input:focus,
+#content-search-input:focus { outline: none; border-color: var(--accent); }
+.session-search-results {
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.session-search-hit {
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+}
+.session-search-hit:hover { border-color: #4f8cff; }
+.session-search-hit-meta { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.session-search-hit-snippet { font-size: 12px; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; }
+.session-search-hit-snippet mark { background: rgba(79,140,255,0.4); color: inherit; padding: 0 1px; }
+
+/* Command Palette */
+.palette-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.4);
+  z-index: 2000;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+.palette-overlay.hidden { display: none; }
+.palette {
+  width: 560px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+  overflow: hidden;
+}
+.palette-input {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-size: 16px;
+  padding: 14px 16px;
+  outline: none;
+}
+.palette-results {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.palette-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.palette-row.active { background: rgba(79,140,255,0.18); }
+.palette-row .palette-row-kind {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-left: 12px;
+}
+.palette-hint {
+  font-size: 11px;
+  color: var(--text-dimmer);
+  padding: 6px 16px;
+  border-top: 1px solid var(--border-subtle);
+  text-align: right;
+}
+.hooks-toolbar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border-subtle); }
+#hooks-filter {
+  flex: 1;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+.hooks-btn { background: transparent; border: 1px solid var(--border-subtle); color: var(--text-dim); border-radius: 4px; padding: 4px 8px; font-size: 11px; cursor: pointer; }
+.hooks-btn:hover { color: var(--text-primary); }
+.hooks-pause-toggle { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; }
+.hooks-list { overflow-y: auto; flex: 1; }
+.hook-row {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  font-family: var(--mono-font, monospace);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.hook-row:hover { background: rgba(255,255,255,0.03); }
+.hook-row .hook-time { color: var(--text-dimmer); margin-right: 6px; font-variant-numeric: tabular-nums; }
+.hook-row .hook-event { color: #4f8cff; margin-right: 6px; }
+.hook-row .hook-tool { color: #8be9fd; margin-right: 6px; }
+.hook-row.expanded { background: rgba(79,140,255,0.06); white-space: pre-wrap; }
+.hook-detail {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-body);
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* One stacked column — label above value — so narrow side panels still get full width for content. */
+.hook-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.hook-field-label {
+  color: var(--text-dim);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  font-family: var(--mono-font, monospace);
+  font-weight: 600;
+}
+.hook-field-value {
+  color: var(--text-primary);
+  word-break: break-word;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.hook-field-value.muted { color: var(--text-dimmer); font-style: italic; }
+.hook-field-value.mono { font-family: var(--mono-font, monospace); color: var(--text-secondary); font-size: 10.5px; }
+.hook-field-value.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hook-message {
+  margin: 0;
+  font-family: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+  background: rgba(0,0,0,0.20);
+  border-left: 2px solid var(--accent);
+  padding: 8px 10px;
+  border-radius: 0 3px 3px 0;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 11.5px;
+  color: var(--text-primary);
+}
+.hook-json {
+  margin: 0;
+  font-family: var(--mono-font, monospace);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  background: rgba(0,0,0,0.20);
+  padding: 6px 8px;
+  border-radius: 3px;
+  white-space: pre;
+  overflow-x: auto;
+  max-height: 240px;
+}
+
+/* Inline tighter pairing for the small "metadata" fields shown after the message
+   so they don't take a full row each. Applied via a wrapper class on selected fields. */
+.hook-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: baseline;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  border-top: 1px dashed rgba(255,255,255,0.06);
+  padding-top: 6px;
+  margin-top: 2px;
+}
+.hook-meta .hook-meta-label {
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-family: var(--mono-font, monospace);
+  font-size: 9.5px;
+}
+.hook-meta .hook-meta-value {
+  color: var(--text-secondary);
+  font-family: var(--mono-font, monospace);
+  word-break: break-all;
+}
+.hook-meta .hook-meta-value.truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Snippets Modal ─────────────────────────────────────────────────────── */
+.snippets-dialog { width: 880px; max-height: 80vh; }
+.snippets-dialog .modal-body { flex-direction: row; padding: 12px; gap: 12px; }
+.snippets-body { display: grid; grid-template-columns: 240px 1fr; gap: 12px; height: 60vh; }
+.snippets-list-pane { display: flex; flex-direction: column; gap: 6px; border-right: 1px solid var(--border-subtle); padding-right: 8px; }
+.snippets-list { overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.snippet-item { padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; color: var(--text-primary); }
+.snippet-item:hover { background: rgba(255,255,255,0.04); }
+.snippet-item.active { background: rgba(79,140,255,0.18); }
+.snippet-item-trigger { color: var(--text-dim); font-size: 10px; margin-top: 2px; }
+.snippets-edit-pane { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.snippets-edit-pane label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-dim); }
+.snippets-edit-pane input,
+.snippets-edit-pane textarea {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+.snippets-edit-pane textarea { resize: vertical; }
+.snippets-edit-actions { display: flex; gap: 8px; margin-top: auto; }
+.snippets-btn { background: transparent; border: 1px solid var(--border-subtle); color: var(--text-primary); border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 12px; }
+.snippets-btn:hover { border-color: #4f8cff; }
+.snippets-btn.primary { background: #4f8cff; color: white; border-color: #4f8cff; }
+.snippets-btn.primary:hover { background: #3a78ee; }
+.snippets-btn.danger:hover { color: #e05050; border-color: #e05050; }
+
+.col-failover-badge {
+  font-size: 10px;
+  color: #e0a020;
+  border: 1px solid #e0a020;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-search-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+.session-search-mode,
+.session-search-scope {
+  display: flex;
+  gap: 12px;
+}
+.session-search-mode label,
+.session-search-scope label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.session-search-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border-color, rgba(128,128,128,0.3));
+}
+.hooks-empty-hint {
+  padding: 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-subtle);
+  line-height: 1.4;
+}
+.hooks-empty-hint code {
+  font-size: 10px;
+  background: rgba(255,255,255,0.04);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.hooks-empty-hint.hidden { display: none; }
+.hooks-config-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.hooks-connect-btn {
+  background: #4f8cff;
+  color: white;
+  border-color: #4f8cff;
+}
+.hooks-connect-btn:hover { background: #3a78ee; color: white; }
+.hooks-config-status {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.hooks-config-status.ok { color: #22c55e; }
+.hooks-config-status.error { color: #e05050; }
+.hooks-btn.hidden { display: none; }
+
+/* Hook status row inside the Clawd settings pane. Mirrors hooks pane styling. */
+.clawd-hooks-status { display: flex; align-items: center; gap: 8px; }
+.clawd-hooks-indicator {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  font-size: 11px; font-weight: 700; line-height: 1;
+  background: var(--bg-secondary); color: var(--text-dim);
+}
+.clawd-hooks-indicator.connected { background: #22c55e; color: #0a0a14; }
+.clawd-hooks-indicator.disconnected { background: #e0a040; color: #0a0a14; }
+.clawd-hooks-label { font-size: 12px; color: var(--text-primary); flex: 1; }
+
+/* Inline async prompt for snippet variable input (replacement for window.prompt). */
+
+.snippet-prompt-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.4);
+  z-index: 3000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.snippet-prompt-dialog {
+  background: var(--bg-deep);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 14px 16px;
+  min-width: 360px;
+  max-width: 80vw;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+.snippet-prompt-label {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.snippet-prompt-input {
+  width: 100%;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+}
+.snippet-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.snippet-prompt-ok,
+.snippet-prompt-cancel {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.snippet-prompt-ok {
+  background: #4f8cff;
+  color: white;
+  border-color: #4f8cff;
+}
+.snippet-prompt-ok:hover { background: #3a78ee; }
+.snippet-prompt-cancel:hover { border-color: #4f8cff; }
+
+/* === Shortcuts Reference Modal === */
+.shortcuts-dialog { width: 760px; max-height: 85vh; }
+.shortcuts-dialog .modal-body {
+  flex-direction: column;
+  padding: 16px 20px;
+  overflow-y: auto;
+  gap: 18px;
+}
+.shortcuts-section h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin: 0 0 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 4px;
+}
+.shortcuts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.shortcuts-table td {
+  padding: 4px 8px;
+  vertical-align: top;
+}
+.shortcuts-table td:first-child {
+  width: 200px;
+  white-space: nowrap;
+}
+.shortcuts-table kbd {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin: 0 1px;
+  color: var(--text-primary);
+}
+.shortcuts-features {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+.shortcuts-features li::before {
+  content: "•";
+  margin-right: 6px;
+  color: var(--text-dim);
+}
+.shortcuts-features code {
+  font-size: 11px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.shortcuts-features strong {
+  color: var(--text-primary);
+}
+
+/* One-time inline warning in the Endpoints modal when Electron's safeStorage
+   is unavailable (Linux without keyring, headless WSL) — tokens will be
+   written plaintext under ~/.claudes/. Sized to be noticed without dominating. */
+.endpoints-safestorage-warning {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  margin: 0 0 12px 0;
+  line-height: 1.4;
+}
+
+/* In-terminal find overlay (Ctrl/Cmd+F). Floats top-right of the terminal
+   wrapper so it never obscures the cursor area, semi-transparent so the
+   matched line behind it remains visible. */
+.terminal-wrapper { position: relative; }
+/* Terminal find overlay — flips with the app theme since the terminal does
+   too (light bg in light mode). Defaults are the dark-theme values. */
+.term-search-overlay {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(20, 22, 36, 0.95);
+  border: 1px solid #3a3a52;
+  border-radius: 6px;
+  padding: 4px 6px;
+  z-index: 20;
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.term-search-overlay.hidden { display: none; }
+.term-search-input {
+  background: #0f0f1f;
+  border: 1px solid #2a2a3c;
+  color: #f1f5f9;
+  border-radius: 4px;
+  padding: 3px 8px;
+  width: 180px;
+  font-size: 12px;
+  outline: none;
+}
+.term-search-input::placeholder { color: #6b7280; }
+.term-search-input:focus { border-color: #6366f1; }
+.term-search-count { color: #9ca3af; padding: 0 4px; font-size: 11px; min-width: 48px; text-align: center; }
+.term-search-btn {
+  background: transparent;
+  border: none;
+  color: #cbd5e1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.term-search-btn:hover { background: rgba(255,255,255,0.08); color: #fff; }
+
+/* Light-theme overrides. Mirrors the terminal's own light palette so the
+   overlay isn't a dark blob hovering over a white terminal. */
+html[data-theme="light"] .term-search-overlay {
+  background: rgba(255, 255, 255, 0.97);
+  border-color: #d0d7de;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+html[data-theme="light"] .term-search-input {
+  background: #ffffff;
+  border-color: #d0d7de;
+  color: #1f2328;
+}
+html[data-theme="light"] .term-search-input::placeholder { color: #8c959f; }
+html[data-theme="light"] .term-search-input:focus { border-color: #0969da; }
+html[data-theme="light"] .term-search-count { color: #57606a; }
+html[data-theme="light"] .term-search-btn { color: #1f2328; }
+html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); color: #000; }
+
+/* Header clear-terminal button — same shape as the restart pill. */
+.col-clear {
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+  user-select: none;
+}
+.col-clear:hover { background: rgba(255,255,255,0.06); color: #e5e7eb; }
+
+/* Syntax-highlighted preview overlay for the inline file editor. Shown when
+   the user clicks 'Preview' in the editor footer; the textarea is hidden
+   beneath. Inherits Prism's tomorrow theme colours but keeps the editor's
+   sizing so toggling doesn't shift layout. */
+.fileeditor-preview {
+  flex: 1;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  background: #1e1e2e;
+  color: #e6e6e6;
+  font-family: 'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', 'DejaVu Sans Mono', monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 2;
+  border: none;
+  border-radius: 0;
+}
+.fileeditor-preview.hidden { display: none; }
+.fileeditor-preview code { background: transparent; padding: 0; }
+
+/* Column header sessions/clear pills — same shape as col-restart. */
+.col-sessions {
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+  user-select: none;
+}
+.col-sessions:hover { background: rgba(255,255,255,0.06); color: #e5e7eb; }
+.col-session-picker { min-width: 280px; max-height: 360px; overflow: auto; }
+
+/* Extensions manager modal — wider dialog so list rows can breathe, body
+   scrolls when categories run long, categories + rows span full width. */
+#ext-modal .modal-dialog {
+  width: 820px;
+  max-width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+#ext-modal .modal-body { overflow-y: auto; max-height: calc(85vh - 56px); width: 100%; }
+.ext-categories { display: flex; flex-direction: column; gap: 16px; width: 100%; }
+.ext-cat { border: 1px solid var(--border-primary); border-radius: 6px; padding: 8px 12px; width: 100%; box-sizing: border-box; }
+.ext-cat-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.ext-cat-hint { color: var(--text-dim); font-size: 11px; margin-left: 6px; }
+.ext-list { display: flex; flex-direction: column; gap: 4px; }
+.ext-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; align-items: center; padding: 4px 6px; border-radius: 4px; }
+.ext-row:hover { background: rgba(255,255,255,0.04); }
+.ext-scope { font-size: 10px; padding: 2px 6px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em; }
+.ext-scope-project { background: rgba(59,130,246,0.15); color: #60a5fa; }
+.ext-scope-global { background: rgba(168,85,247,0.15); color: #c084fc; }
+
+/* Branch dropdown mini-actions (merge / rebase). Tucked at the right of each
+   branch row so the row stays clickable for checkout. */
+.git-branch-mini-action {
+  background: transparent;
+  border: 1px solid #444;
+  color: #cbd5e1;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.git-branch-mini-action:hover { background: rgba(255,255,255,0.06); color: #fff; }
+
+/* Conflict banner shown above the changes list when a merge / rebase /
+   cherry-pick is in progress. */
+.git-op-banner {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 6px 8px;
+  font-size: 12px;
+}
+.git-op-banner-header { font-weight: 600; color: #fbbf24; margin-bottom: 6px; }
+.git-op-conflict-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-family: monospace; }
+.git-op-banner-actions { display: flex; gap: 6px; margin-top: 8px; }
+.git-op-mini-btn {
+  background: transparent;
+  border: 1px solid #555;
+  color: #cbd5e1;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.git-op-mini-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
+.git-op-mini-btn.primary { background: rgba(96, 165, 250, 0.18); border-color: #3b82f6; color: #93c5fd; }
+
+/* Toast container — stacked top-right notifications. */
+.toast-container {
+  position: fixed;
+  top: 56px;
+  right: 16px;
+  z-index: 5000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  background: #232336;
+  color: #e6e6e6;
+  border: 1px solid #3a3a52;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 13px;
+  min-width: 240px;
+  max-width: 420px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.toast-out { opacity: 0; transform: translateX(20px); }
+.toast-success { border-color: #22c55e; }
+.toast-error { border-color: #ef4444; }
+.toast-warn { border-color: #f59e0b; }
+
+/* Loading skeletons + first-run hero. */
+.skel {
+  display: block;
+  background: linear-gradient(90deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.12) 50%, rgba(255,255,255,0.05) 100%);
+  background-size: 200% 100%;
+  animation: skel-pulse 1.4s ease-in-out infinite;
+  border-radius: 4px;
+}
+.skel-row { height: 12px; margin: 10px 0; }
+@keyframes skel-pulse {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.empty-state-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 24px;
+  text-align: center;
+}
+.empty-state-icon { font-size: 48px; opacity: 0.5; }
+.empty-state-title { font-size: 22px; font-weight: 600; }
+.empty-state-subtitle { font-size: 13px; opacity: 0.7; max-width: 360px; line-height: 1.5; }
+.empty-state-cta {
+  margin-top: 8px;
+  background: #6366f1;
+  border: none;
+  color: #fff;
+  font-size: 14px;
+  padding: 10px 22px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.empty-state-cta:hover { background: #4f46e5; }
+.empty-state-shortcuts { font-size: 11px; opacity: 0.55; margin-top: 12px; }
+.empty-state-shortcuts kbd { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; }
+
+.shortcuts-platform-note { font-size: 11px; color: #9ca3af; margin: 0 0 8px; }
+
+/* MCP modal — right edit pane fills remaining width, inputs/textareas span
+   the pane so we don't get a thin left-aligned strip of fields. Mirrors the
+   layout of the endpoints modal proper but with explicit form-box flex. */
+.mcp-edit-pane {
+  flex: 1;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+.mcp-edit-pane .settings-field { display: block; }
+.mcp-edit-pane .settings-input,
+.mcp-edit-pane textarea.settings-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.mcp-edit-pane textarea.settings-input {
+  font-family: 'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
+/* ---------- Clawd widget ---------- */
+.clawd-widget {
+  --clawd-size: 180px;
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: var(--clawd-size);
+  height: var(--clawd-size);
+  z-index: 9000;
+  pointer-events: auto;
+  user-select: none;
+  cursor: grab;
+  filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.5));
+  transition: opacity 200ms ease-in-out, width 180ms ease-out, height 180ms ease-out;
+}
+.clawd-widget.hidden { display: none; }
+.clawd-widget.dragging { cursor: grabbing; transition: none; }
+/* Stay out of the way when any modal is open — Clawd's z-index (9000) is
+   higher than .modal-overlay (1000), so without this Clawd would float on
+   top of settings/usage/etc. */
+body:has(.modal-overlay:not(.hidden)) .clawd-widget { display: none; }
+.clawd-widget-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  -webkit-user-drag: none;
+  transition: opacity 100ms ease-in-out;
+}
+.clawd-widget-img.fading { opacity: 0; }
+.clawd-widget-bubble {
+  position: absolute;
+  bottom: 100%;
+  right: 8px;
+  margin-bottom: 6px;
+  background: #2a2a3e;
+  color: #e0e0f0;
+  border: 1px solid #3a3a5e;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 150ms, transform 150ms;
+}
+.clawd-widget-bubble:not(.hidden) {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+[data-theme="light"] .clawd-widget-bubble {
+  background: #ffffff;
+  color: #1a1a2e;
+  border-color: #d0d0e0;
+}
+
+.clawd-debug {
+  position: fixed;
+  right: 20px;
+  bottom: 220px;
+  width: 360px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(20, 22, 32, 0.95);
+  color: #e6e6f0;
+  border: 1px solid #3a3a52;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  z-index: 9998;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+}
+.clawd-debug.hidden { display: none; }
+.clawd-debug-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #2a2a40;
+  background: rgba(0, 0, 0, 0.25);
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+  cursor: move;
+  user-select: none;
+}
+.clawd-debug.dragging { opacity: 0.95; }
+.clawd-debug.dragging * { user-select: none; }
+.clawd-debug-title { flex: 1; font-weight: 600; color: #cfd0e0; }
+.clawd-debug-btn {
+  background: transparent;
+  border: 1px solid #3a3a52;
+  color: #aaaabb;
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  cursor: pointer;
+}
+.clawd-debug-btn:hover { color: #fff; border-color: #5a5a7a; }
+.clawd-debug-now {
+  padding: 6px 8px;
+  border-bottom: 1px solid #2a2a40;
+  color: #b8d4ff;
+  white-space: pre-wrap;
+}
+.clawd-debug-log {
+  overflow-y: auto;
+  flex: 1;
+  padding: 4px 8px;
+  line-height: 1.4;
+}
+.clawd-debug-log .row { display: flex; gap: 6px; white-space: nowrap; }
+.clawd-debug-log .ts { color: #6e7090; flex-shrink: 0; }
+.clawd-debug-log .src-hook { color: #7fdbff; }
+.clawd-debug-log .src-jsonl { color: #ffb86c; }
+.clawd-debug-log .src-set { color: #b388ff; }
+.clawd-debug-log .anim { color: #7be883; }
+.clawd-debug-log .skip { color: #888; }
+body.light-theme .clawd-debug {
+  background: rgba(252, 252, 255, 0.97);
+  color: #1a1a2e;
+  border-color: #c5c5d8;
+}
+body.light-theme .clawd-debug-header { background: rgba(0, 0, 0, 0.04); border-color: #d8d8e8; }
+body.light-theme .clawd-debug-title { color: #20223a; }
+body.light-theme .clawd-debug-btn { border-color: #c5c5d8; color: #4a4a66; }
+body.light-theme .clawd-debug-now { color: #2055a8; border-color: #d8d8e8; }
+body.light-theme .clawd-debug-log .ts { color: #8a8aa0; }
+
+.clawd-size-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.clawd-size-row input[type="range"] { flex: 1; }
+
+.clawd-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px 14px;
+  margin-top: 6px;
+}
+.clawd-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border-primary, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.clawd-legend-item img {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  object-fit: contain;
+}
+.clawd-legend-item > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.clawd-legend-item strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+.clawd-legend-item span {
+  font-size: 11px;
+  opacity: 0.7;
+  line-height: 1.35;
+}

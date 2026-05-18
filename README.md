@@ -6,133 +6,122 @@
   <strong>A desktop IDE for Claude Code — run multiple AI coding agents side-by-side.</strong>
 </p>
 
+<p align="center">
+  <img src="screenshots/hero.png" alt="Claudes — multi-column workspace with sidebar, explorer, terminal, and live plan-limit mini bar" width="950">
+</p>
+
 ---
 
-## How to install
+## Install
 
-Download the latest installer from [**GitHub Releases**](https://github.com/paulallington/Claudes/releases/latest) — grab the `.exe` file and run it. That's it.
+Download the latest installer from [**GitHub Releases**](https://github.com/paulallington/Claudes/releases/latest) — grab the `.exe` and run it.
 
-Claudes will **automatically update itself** when new versions are published. You'll get a notification when an update is available, and it'll install in the background ready for next launch. No need to re-download manually.
+Claudes **auto-updates** in the background via [electron-updater](https://www.electron.build/auto-update); you'll get a notification when a new version is ready and it'll install on next launch.
 
-> **Prerequisite:** You need [Claude Code CLI](https://claude.ai/claude-code) installed and available on your PATH.
+> **Prerequisite:** [Claude Code CLI](https://claude.ai/claude-code) installed and on your `PATH`.
 
 ---
 
 ## What is Claudes?
 
-Claudes is a **Claude Code GUI** — a desktop client that gives you a visual, multi-pane interface for running [Claude Code](https://claude.ai/claude-code) sessions. If you've been looking for a **Claude Code IDE**, a **Claude Code desktop app**, or just a better way to manage multiple AI coding agents at once, this is it.
+Claudes is a **desktop GUI for Claude Code** — a tiling terminal multiplexer purpose-built for running multiple Claude Code sessions at once, organised by project. Spawn Claudes side-by-side, broadcast a prompt to several at once, search every transcript you've ever produced, watch your plan limits and per-column context windows in real time, and run unattended automations on a schedule.
 
-I built it because I like running lots of Claude Code sessions at once and got tired of juggling terminal windows. It gives you a proper multi-column workspace where you can spawn, resize, and organise Claude Code instances by project — like a terminal multiplexer purpose-built for Claude.
+I built it because I run a lot of Claude Code sessions in parallel and got tired of juggling terminal windows. It's a personal project, but it's been polished into something I use every day. Bug reports and PRs welcome — [issues here](https://github.com/paulallington/Claudes/issues).
 
-It's not a commercial project — just a tool I made for myself that I thought others might find useful too. If you find a bug or have an idea, feel free to [raise an issue](https://github.com/paulallington/Claudes/issues) or send me a pull request.
+---
 
-## Screenshot
+## Highlights
+
+- **Multi-column terminal workspace** — resizable rows + columns, drag-to-reorder, maximise, custom titles, activity indicators, popout windows per project
+- **Endpoint presets with auto-failover** — swap between Anthropic Cloud and local LLMs (Ollama, vLLM, ngrok-tunnelled boxes…); set a fallback that takes over automatically if the primary disconnects
+- **Plan-limits awareness** — live 5-hour and weekly utilisation in the sidebar, per-column Δ pill since spawn, threshold notifications at 70 % / 90 %, optional auto-pause of background automations at 90 % weekly
+- **Context-window meter per column** — live tokens / model-max with amber at 70 %, red at 90 %, so you can compact proactively
+- **Cost dashboard** — total, per-model, per-project breakdowns with 7-day / 30-day / All-time filters; tokens-in-perspective panel so the numbers actually mean something
+- **Cross-column broadcast** — send the same prompt to multiple Claudes at once, with per-target opt-out
+- **Session full-text search** (`Ctrl+Shift+F`) — grep every transcript on disk, scoped to the current project or across all of them; click a hit to switch project and resume
+- **Prompt history search** — same modal, toggle to "My prompts" to grep your `~/.claude/history.jsonl`
+- **Automations** — recurring or scheduled Claude Code agents with isolation, usage gates, per-agent endpoint/model, and an optional Mongo-backed coordination DB; "manager mode" lets a controller agent orchestrate the rest
+- **Hooks inspector** — live feed of every Claude Code hook event with a one-click Connect button that wires `~/.claude/settings.json` for you
+- **Snippets** — `\trigger` text expansion with `{{var}}` placeholders, expanded inline in any column terminal
+- **Command palette** (`Ctrl+K`) — fuzzy-match projects, slash commands, and app actions
+- **Built-in file explorer + inline editor**, **full git tab** (status, branches, stage, commit, push/pull, stash, diff viewer, commit log)
+- **CLAUDE.md editor** for the active project
+- **Run tab** — launch your app alongside Claude; auto-detects VS Code `launch.json` and .NET `launchSettings.json`; reusable env profiles
+- **Headless runs**, **session resume on restart**, **dark / light / auto theme**
+
+---
+
+## Tour
+
+### Spawn options
 
 <p align="center">
-  <img src="screenshot.png" alt="Claudes in action" width="900">
+  <img src="screenshots/spawn-options.png" alt="Spawn options popover — endpoint, model, effort, worktree, custom args" width="380">
 </p>
 
-## Features
+The dropdown next to the **Spawn Claude** button is where you tune what gets launched: pick an endpoint preset (cloud or local), force a model, set effort independently for cloud and local backends, toggle Skip Permissions / Remote Control / Bare Mode / Strip MCPs / Headless, optionally launch into a fresh git worktree, and pass any extra CLI args.
 
-### Multi-Column Terminal Layout
+### Power-user shortcuts & features
 
-- **Resizable columns and rows** — run multiple Claude Code agents side-by-side in a flexible grid layout
-- **Drag-and-drop reordering** — grab a column header and drag it to rearrange your workspace
-- **Maximize/minimize columns** — focus on one Claude at a time or see them all
-- **Custom column titles** — double-click a header to rename it
-- **Activity indicators** — see at a glance which Claudes are working, waiting, or idle
+<p align="center">
+  <img src="screenshots/shortcuts-modal.png" alt="Power-user shortcuts and features reference modal" width="700">
+</p>
 
-### Project Workspaces
+Press <kbd>?</kbd> at any time to open the in-app reference. It covers every keyboard shortcut, every plan-limit / usage feature, and every workflow accelerator (broadcast, search, palette, snippets) — so you don't have to remember them.
 
-- **Organise by project** — group your Claude Code sessions by project, switch between them instantly
-- **Persistent sessions** — switching projects preserves running Claudes in the background
-- **Session resume** — remembers which Claude sessions were open per project and resumes them on restart
-- **Branch display** — see the current git branch for each project in the sidebar
+### Automations
 
-### Spawn Options
+<p align="center">
+  <img src="screenshots/automation-create.png" alt="Create-automation modal — repo isolation, usage gates, schedule, connection, model, optional database" width="500">
+</p>
 
-- **Model selection** — choose between Default, Sonnet, Opus, or Haiku per session
-- **Skip Permissions** — bypass permission prompts for trusted workflows
-- **Remote Control** — enable remote access from claude.ai or mobile app
-- **Bare Mode** — lightweight mode skipping hooks, LSP, and plugins
-- **Worktree support** — spawn sessions in isolated git worktrees
-- **Custom arguments** — pass arbitrary CLI flags to Claude Code
+Schedule recurring Claude Code agents per project. Each automation has:
 
-### File Explorer
+- **Repo isolation** — clone the repo into a separate directory so concurrent agents don't fight over branches
+- **Usage gates** — skip a run if 5-hour session or weekly utilisation is above a threshold
+- **Schedule** — every N minutes / hours / days, or specific times on chosen weekdays
+- **Connection + model** — pick any endpoint preset and override the model per agent
+- **Optional database** — wire a Mongo connection so multiple agents can coordinate (or share state with a "manager" agent)
+- **Run history** — every run logged with output, duration, cost, and status
+- **Open in Claude** — pull a run's findings into a fresh interactive Claude session for follow-up
 
-- **Built-in file browser** — browse your project files without leaving the app
-- **Search** — live filtering to quickly find files
-- **Inline editor** — click any file to view and edit it directly
-- **Context menu** — reveal files in your system file manager
+### Usage analytics
 
-### Git Integration
+<p align="center">
+  <img src="screenshots/usage-summary.png" alt="Usage modal — plan limits, API tokens processed, conversation tokens, tokens-in-perspective" width="780">
+</p>
 
-Full git workflow without leaving Claudes:
+The Usage modal (`Ctrl+U`) gives you four tabs:
 
-- **Branch management** — view, switch, and create branches
-- **Staging** — stage/unstage individual files or all at once
-- **Diff viewer** — see staged and unstaged changes with full diff output
-- **Commit** — write commit messages and commit directly, with amend support
-- **Push & Pull** — sync with your remote in one click
-- **Stash management** — create, list, and pop stashes
-- **Git log** — browse commit history with details and diffs
-- **Ahead/behind tracking** — see how your branch compares to the remote
+- **Summary** — current plan-limit utilisation (5h / weekly Sonnet / weekly all-models / Claude Design), totals, and the tokens-in-perspective panel that converts your monthly throughput into K&R books, PhD theses, complete LOTR trilogies, and full Shakespeare plays
+- **Daily** — token chart over time with cache-savings overlay
+- **Sessions** — every session you've run with model, duration, token counts; click to inspect
+- **Cost** — total + per-model + per-project + 30-day chart, filterable by Today / 7 days / 30 days / All time
 
-### Loops (Automated Background Agents)
+---
 
-Set up recurring Claude Code agents that run on a schedule:
-
-- **Interval or daily scheduling** — run every N minutes/hours, or at a specific time on chosen days
-- **Dashboard** — monitor all loops across projects with status indicators
-- **Attention tracking** — loops flag items that need your attention (warnings, errors, failing tests)
-- **Run history** — view past runs with output, duration, cost, and status
-- **Open in Claude** — send loop findings to a new interactive Claude session for investigation
-- **Global controls** — pause/resume all loops, set concurrency limits
-
-### Run Configurations
-
-Launch and manage your application processes alongside Claude:
-
-- **Auto-detect** — picks up configurations from VS Code `launch.json` and .NET `launchSettings.json`
-- **Supported runtimes** — .NET/C#, Node.js, Python, and generic shell commands
-- **Environment profiles** — create reusable sets of environment variables
-- **Launch controls** — start, stop, and restart with visual status indicators
-
-### CLAUDE.md Editor
-
-- **Built-in editor** — read and write your project's CLAUDE.md instructions without switching tools
-
-### Usage Analytics
-
-- **Token tracking** — monitor input/output tokens and cache savings across sessions
-- **Daily breakdown** — chart your usage over time
-- **Session browser** — explore individual sessions with model, duration, and token details
-- **Environmental impact** — see estimated CO2, water, and energy consumption
-
-### Keyboard Shortcuts
+## Keyboard shortcuts
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+Shift+T` | Spawn a new Claude |
-| `Ctrl+Shift+R` | Add a new row |
-| `Ctrl+Shift+W` | Kill focused Claude |
-| `Ctrl+Shift+M` | Maximize/restore focused column |
-| `Ctrl+Shift+E` | Toggle Explorer panel |
-| `Ctrl+1-9` | Jump to column by number |
-| `Ctrl+Arrow Keys` | Navigate between columns |
-| `Ctrl+B` | Toggle sidebar |
-| `Ctrl+Enter` | Commit staged changes (Git tab) |
-| `Ctrl+=`/`Ctrl+-`/`Ctrl+0` | Zoom in / out / reset |
-
-### Theme Support
-
-- **Dark**, **Light**, and **Auto** (syncs with your OS preference)
+| <kbd>Ctrl</kbd>+<kbd>K</kbd> | Command palette — fuzzy-search projects, slash commands, app actions |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> | Search session transcripts / prompt history |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> | Spawn a new Claude in the active project |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> | Add a new row |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd> | Kill the focused column |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> | Maximise / restore focused column |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> | Toggle Explorer panel |
+| <kbd>Ctrl</kbd>+<kbd>1</kbd>‒<kbd>9</kbd> | Jump to column by number |
+| <kbd>Ctrl</kbd>+<kbd>←</kbd>/<kbd>→</kbd> | Navigate between columns |
+| <kbd>Ctrl</kbd>+<kbd>B</kbd> | Toggle sidebar |
+| <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Commit staged changes (Git tab) |
+| <kbd>Ctrl</kbd>+<kbd>=</kbd> / <kbd>−</kbd> / <kbd>0</kbd> | Zoom in / out / reset |
+| <kbd>?</kbd> | Open the in-app shortcuts & features reference |
+| <kbd>Esc</kbd> | Close active modal / popover |
 
 ---
 
 ## Building from source
-
-If you prefer to run from source instead of the installer:
 
 ```bash
 git clone https://github.com/paulallington/Claudes.git
@@ -141,23 +130,27 @@ npm install
 npm start
 ```
 
-Requires [Node.js](https://nodejs.org/) (v18+) and [Claude Code CLI](https://claude.ai/claude-code) on your PATH.
+Requires [Node.js](https://nodejs.org/) v18+ and the [Claude Code CLI](https://claude.ai/claude-code) on your `PATH`.
 
 ## How it works
 
-Claudes is an Electron-based desktop application that acts as a **graphical frontend for Claude Code**. Under the hood, it spawns a separate Node.js process (`pty-server.js`) that manages pseudo-terminal instances via [node-pty](https://github.com/microsoft/node-pty). The Electron renderer communicates with the pty server over WebSocket, rendering each Claude Code terminal with [xterm.js](https://xtermjs.org/).
+Claudes is an Electron app. The Electron main process spawns a sidecar Node process — `pty-server.js` — which owns every PTY and speaks to the renderer over a local WebSocket. Each Claude column is an [xterm.js](https://xtermjs.org/) terminal wired to a [node-pty](https://github.com/microsoft/node-pty) PTY running `claude`. The pty-server runs under system Node so node-pty's prebuilt binaries work without an Electron rebuild.
 
-This architecture avoids the need to compile native modules against Electron's Node.js headers — `node-pty` runs under the system Node.js using its prebuilt binaries.
+```
+Electron renderer  ⇄  WebSocket  ⇄  pty-server.js  ⇄  node-pty  ⇄  Claude CLI
+```
 
-Session state is saved per project (in `.claudes/sessions.json` within the project directory), so when you restart the app your Claude Code sessions are automatically resumed.
+The local WebSocket is gated by a per-launch random auth token (presented as a `Sec-WebSocket-Protocol` on connect) so other local processes can't reach the PTY surface. See [`docs/security/2026-05-06-audit-report.md`](docs/security/2026-05-06-audit-report.md) for the full security model.
+
+App config lives in `~/.claudes/`; per-project session state in `<project>/.claudes/sessions.json`; Claude's own session JSONLs are read from `~/.claude/projects/<encoded-path>/`.
 
 ## Contributing
 
-This is a personal project, but contributions are welcome! If you run into a problem, [open an issue](https://github.com/paulallington/Claudes/issues). If you want to add something, send a pull request and I'll take a look.
+Personal project, but contributions welcome. [Open an issue](https://github.com/paulallington/Claudes/issues) for bugs or feature requests; PRs get reviewed.
 
 ## License
 
-See [LICENSE](LICENSE) for details. Free to use, but the source code may not be modified or redistributed without permission.
+See [LICENSE](LICENSE). Free to use; source may not be modified or redistributed without permission.
 
 ---
 

@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self' blob:;">
   <title>Claudes</title>
+  <script src="./platform-detect.js"></script>
   <link rel="stylesheet" href="./node_modules/@xterm/xterm/css/xterm.css">
   <link rel="stylesheet" href="./styles.css">
 </head>
@@ -19,14 +21,26 @@
       </div>
       <div id="project-list"></div>
       <button id="btn-add-project">+ Add Project</button>
+      <div id="plan-limits-mini" class="plan-limits-mini hidden"></div>
     </div>
     <div id="sidebar-resize-handle"></div>
     <div id="explorer-panel">
       <div class="explorer-tabs">
-        <button class="explorer-tab active" data-tab="files">Files</button>
-        <button class="explorer-tab" data-tab="git">Git</button>
-        <button class="explorer-tab" data-tab="run">Run</button>
-        <button class="explorer-tab" data-tab="automations">Automations</button>
+        <button class="explorer-tab active" data-tab="files" title="Files" aria-label="Files">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 2h4.3l1.4 1.5h7.3a1 1 0 0 1 1 1V13a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm0 3v8h13V4.5H6.6L5.2 3H1.5v2z"/></svg>
+        </button>
+        <button class="explorer-tab" data-tab="git" title="Source Control" aria-label="Source Control">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M11.5 3.5a2 2 0 1 0-2.45 1.95v1.6a2 2 0 0 1-2 2H5.45a3 3 0 0 0-1.95.72V5.45a2 2 0 1 0-1 0v5.1a2 2 0 1 0 1.04-.02 2 2 0 0 1 1.91-1.48h1.6a3 3 0 0 0 3-3v-1.6A2 2 0 0 0 11.5 3.5zM3 3.5a1 1 0 1 1 2 0 1 1 0 0 1-2 0zm1 10a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm5.5-9a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/></svg>
+        </button>
+        <button class="explorer-tab" data-tab="run" title="Run" aria-label="Run">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 2.5v11a.5.5 0 0 0 .77.42l8.5-5.5a.5.5 0 0 0 0-.84l-8.5-5.5A.5.5 0 0 0 4 2.5z"/></svg>
+        </button>
+        <button class="explorer-tab" data-tab="automations" title="Automations" aria-label="Automations">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M9 1L2.5 9.2a.5.5 0 0 0 .4.8H7l-1.5 5.2a.4.4 0 0 0 .7.36L13.5 6.8a.5.5 0 0 0-.4-.8H9.4l1.3-4.55A.4.4 0 0 0 9 1z"/></svg>
+        </button>
+        <button class="explorer-tab" data-tab="hooks" title="Hooks" aria-label="Hooks">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 8.5l-2 2a2.5 2.5 0 1 1-3.5-3.5l2.5-2.5a2.5 2.5 0 0 1 3.5 0"/><path d="M9.5 7.5l2-2a2.5 2.5 0 1 1 3.5 3.5l-2.5 2.5a2.5 2.5 0 0 1-3.5 0"/><path d="M6 10l4-4"/></svg>
+        </button>
       </div>
       <div class="explorer-content">
         <div id="tab-files" class="tab-content active">
@@ -57,7 +71,7 @@
               <label class="git-amend-label"><input type="checkbox" id="git-amend-checkbox"> Amend</label>
               <button id="btn-git-commit" class="git-commit-btn" title="Commit staged changes (Ctrl+Enter)">&#10003; Commit</button>
             </div>
-            <div id="git-status-msg" class="git-status-msg"></div>
+            <div id="git-status-msg" class="git-status-msg" role="status" aria-live="polite"></div>
           </div>
           <div id="git-review-comments-actions" style="display:none">
             <button id="btn-review-copy" title="Copy review comments to clipboard">Copy</button>
@@ -142,6 +156,26 @@
             <pre id="automation-detail-output" class="automation-detail-output"></pre>
           </div>
         </div>
+        <div id="tab-hooks" class="tab-content">
+          <div class="hooks-toolbar">
+            <input type="search" id="hooks-filter" placeholder="Filter events…" autocomplete="off">
+            <button id="hooks-clear" class="hooks-btn" title="Clear">Clear</button>
+            <label class="hooks-pause-toggle">
+              <input type="checkbox" id="hooks-pause"> Pause
+            </label>
+          </div>
+            <div id="hooks-empty-hint" class="hooks-empty-hint">
+              <div id="hooks-empty-text">
+                No hook events yet. Claude CLI needs hooks configured in <code>~/.claude/settings.json</code> to forward tool events here.
+              </div>
+              <div id="hooks-config-actions" class="hooks-config-actions">
+                <button id="btn-hooks-connect" class="hooks-btn hooks-connect-btn">Connect hooks</button>
+                <button id="btn-hooks-disconnect" class="hooks-btn hooks-disconnect-btn hidden">Disconnect</button>
+                <span id="hooks-config-status" class="hooks-config-status"></span>
+              </div>
+            </div>
+          <div id="hooks-list" class="hooks-list"></div>
+        </div>
       </div>
     </div>
     <div id="explorer-resize-handle"></div>
@@ -161,18 +195,39 @@
             </svg>
           </button>
           <span class="app-title">Claudes</span><span id="app-version" class="app-version"></span>
-          <span id="active-project-name" class="active-project-name"></span>
+          <span class="active-project-wrap">
+            <svg class="active-project-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5h4.3l1.4 1.5h7.3a1 1 0 0 1 1 1V13a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V5.5a1 1 0 0 1 1-1z"/></svg>
+            <span id="active-project-name" class="active-project-name"></span>
+          </span>
         </div>
         <div class="toolbar-actions">
-          <button id="btn-automations-flyout" class="toolbar-btn" title="Automations">&#8634;</button>
+          <button id="btn-session-search" class="toolbar-btn" title="Search session transcripts (Ctrl+Shift+F)" aria-label="Search session transcripts">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
+          </button>
+          <button id="btn-broadcast" class="toolbar-btn" title="Broadcast a prompt to multiple columns" aria-label="Broadcast">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h7"/><path d="M7.5 4.5L11 8l-3.5 3.5"/><path d="M13 4v8"/></svg>
+          </button>
+          <button id="btn-snippets" class="toolbar-btn" title="Prompt snippets" aria-label="Snippets">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2h6l3 3v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M10 2v3h3"/><path d="M5.5 8.5h5"/><path d="M5.5 11h5"/></svg>
+          </button>
+          <button id="btn-shortcuts" class="toolbar-btn" title="Power-user shortcuts &amp; features (?)" aria-label="Shortcuts">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M6 6.2a2 2 0 1 1 2.6 1.9c-.6.2-.6.7-.6 1.1"/><circle cx="8" cy="11.5" r="0.4" fill="currentColor"/></svg>
+          </button>
+          <button id="btn-automations-flyout" class="toolbar-btn" title="Automations" aria-label="Automations">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 8a6 6 0 1 1-1.8-4.3"/><path d="M14 2.5V5.5H11"/></svg>
+          </button>
           <button id="btn-sticky-notes" class="toolbar-btn" title="New sticky note">&#10063;</button>
+          <span class="toolbar-divider" aria-hidden="true"></span>
           <div class="toolbar-menu-wrap">
-            <button id="btn-toolbar-menu" class="toolbar-menu-btn" title="Tools &amp; settings">&#8943;</button>
+            <button id="btn-toolbar-menu" class="toolbar-btn" title="Tools &amp; settings" aria-label="Tools and settings">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="13" cy="8" r="1.3"/></svg>
+            </button>
             <div id="toolbar-menu" class="toolbar-menu hidden">
               <button class="toolbar-menu-item" id="btn-claude-md">CLAUDE.md</button>
               <button class="toolbar-menu-item" id="btn-usage">Usage</button>
               <button class="toolbar-menu-item" id="btn-claude-config">Config</button>
               <button class="toolbar-menu-item" id="btn-settings">Settings</button>
+              <button class="toolbar-menu-item" id="btn-check-updates">Check for updates</button>
               <div class="spawn-divider"></div>
               <div class="toolbar-menu-item toolbar-menu-row">
                 <span>Theme</span>
@@ -198,20 +253,57 @@
               </label>
               <label class="spawn-option">
                 <input type="checkbox" id="opt-bare"> Bare Mode
-                <span class="spawn-help" title="Lightweight mode that skips hooks, LSP, and plugins. Best for scripted/automated tasks (--bare).">?</span>
+                <span class="spawn-help" title="Skip hooks, LSP, plugin sync, attribution, auto-memory, background prefetches, keychain reads, and CLAUDE.md auto-discovery (--bare). Auto-ticked when you select a local endpoint preset.">?</span>
+              </label>
+              <label class="spawn-option">
+                <input type="checkbox" id="opt-strip-mcps"> Strip MCPs
+                <span class="spawn-help" title="Disable all MCP servers for this column (--strict-mcp-config + empty config). Useful on local models where MCP tool schemas can chew through the context budget. Off by default — flip on if autocompact starts thrashing.">?</span>
               </label>
               <label class="spawn-option">
                 <input type="checkbox" id="opt-headless"> Headless
                 <span class="spawn-help" title="Run the prompt without a terminal column. Output streams into the headless dock at the bottom.">?</span>
               </label>
               <div class="spawn-divider"></div>
-              <div class="spawn-option spawn-model-row">
+              <div class="spawn-option spawn-endpoint-row">
+                <label for="opt-endpoint">Endpoint:</label>
+                <select id="opt-endpoint">
+                  <option value="">Anthropic (cloud)</option>
+                </select>
+              </div>
+              <div class="spawn-option spawn-model-row" id="opt-model-row">
                 <label for="opt-model">Model:</label>
                 <select id="opt-model">
                   <option value="">Default</option>
                   <option value="sonnet">Sonnet</option>
                   <option value="opus">Opus</option>
                   <option value="haiku">Haiku</option>
+                </select>
+              </div>
+              <div class="spawn-option spawn-endpoint-model-row hidden" id="opt-endpoint-model-row">
+                <label for="opt-endpoint-model">Model:</label>
+                <select id="opt-endpoint-model" title="Model loaded by the endpoint. Defaults to the preset's chosen model.">
+                  <option value="">(loading…)</option>
+                </select>
+                <button type="button" id="opt-endpoint-model-refresh" class="spawn-icon-btn" title="Re-fetch loaded models from endpoint">&#8634;</button>
+              </div>
+              <div class="spawn-option spawn-effort-row">
+                <label for="opt-default-effort-cloud">Cloud effort:</label>
+                <select id="opt-default-effort-cloud" title="Default reasoning effort applied to cloud Claude columns at spawn">
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high" selected>High</option>
+                  <option value="xhigh">XHigh</option>
+                  <option value="max">Max</option>
+                </select>
+              </div>
+              <div class="spawn-option spawn-effort-row">
+                <label for="opt-default-effort-local">Local effort:</label>
+                <select id="opt-default-effort-local" title="Default reasoning effort applied to local-endpoint columns at spawn">
+                  <option value="low">Low</option>
+                  <option value="medium" selected>Medium</option>
+                  <option value="high">High</option>
+                  <option value="xhigh">XHigh</option>
+                  <option value="max">Max</option>
                 </select>
               </div>
               <div class="spawn-divider"></div>
@@ -222,10 +314,13 @@
                 <input type="text" id="opt-custom-args" placeholder="Custom args..." title="Additional CLI arguments">
               </div>
               <div class="spawn-divider"></div>
+              <button type="button" id="btn-manage-endpoints" class="spawn-manage-btn">&#9881; Manage endpoints&hellip;</button>
               <div class="spawn-hint">Options apply to the Spawn button</div>
             </div>
           </div>
-          <button id="btn-add-row" title="Add Row (Ctrl+Shift+R)">+ Add Row</button>
+          <button id="btn-add-row" class="toolbar-btn" title="Add Row (Ctrl+Shift+R)" aria-label="Add Row">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="4" rx="1"/><rect x="2" y="8" width="8.5" height="4" rx="1"/><path d="M13 10h2.5M14.25 8.75v2.5"/></svg>
+          </button>
         </div>
       </div>
       <div id="columns-container">
@@ -286,37 +381,240 @@
         <span id="settings-close" class="modal-close">&times;</span>
       </div>
       <div class="modal-body settings-body">
-        <div class="settings-section">
-          <h3 class="settings-section-title">General</h3>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-start-with-os">
-            <span>Start with OS (launches minimised to tray)</span>
-          </label>
+        <div class="settings-tabs" role="tablist">
+          <button class="settings-tab active" data-settings-tab="general" role="tab">General</button>
+          <button class="settings-tab" data-settings-tab="notifications" role="tab">Notifications</button>
+          <button class="settings-tab" data-settings-tab="automations" role="tab">Automations</button>
+          <button class="settings-tab" data-settings-tab="sync" role="tab">Sync</button>
+          <button class="settings-tab" data-settings-tab="terminal" role="tab">Terminal</button>
+          <button class="settings-tab" data-settings-tab="tools" role="tab">Tools</button>
+          <button class="settings-tab" data-settings-tab="clawd" role="tab">Clawd</button>
         </div>
-        <div class="settings-section">
-          <h3 class="settings-section-title">Notifications</h3>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-notif-taskbar" checked>
-            <span>Flash taskbar when Claude needs attention</span>
-          </label>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-notif-sidebar" checked>
-            <span>Flash sidebar project when Claude needs attention</span>
-          </label>
-          <label class="settings-toggle">
-            <input type="checkbox" id="setting-notif-header" checked>
-            <span>Flash column header when Claude needs attention</span>
-          </label>
-        </div>
-        <div class="settings-section">
-          <h3 class="settings-section-title">Automations</h3>
-          <div class="settings-field">
-            <label for="setting-agent-repos-dir">Agent repos directory</label>
-            <div class="settings-path-row">
-              <input type="text" id="setting-agent-repos-dir" class="settings-input" placeholder="~/.claudes/agents/" spellcheck="false">
-              <button id="btn-browse-agent-repos" class="settings-browse-btn" title="Browse...">...</button>
+        <div class="settings-panes">
+          <div class="settings-pane active" data-settings-pane="general">
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-start-with-os">
+              <span>Start with OS (launches minimised to tray)</span>
+            </label>
+            <div class="settings-field">
+              <label for="setting-ctx-default">Default context window</label>
+              <select id="setting-ctx-default" class="settings-input">
+                <option value="auto">Auto-detect (recommended)</option>
+                <option value="200000">200k tokens</option>
+                <option value="1000000">1M tokens (Claude Max / 1M-context preview)</option>
+              </select>
+              <span class="settings-hint">Used as the initial denominator for column context meters. "Auto" starts at 200k and promotes to 1M when usage exceeds 200k.</span>
             </div>
-            <span class="settings-hint">Base directory for isolated agent repository clones</span>
+          </div>
+          <div class="settings-pane" data-settings-pane="notifications">
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-taskbar" checked>
+              <span>Flash taskbar when Claude needs attention</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-sidebar" checked>
+              <span>Flash sidebar project when Claude needs attention</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-header" checked>
+              <span>Flash column header when Claude needs attention</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-limits-70" checked>
+              <span>Notify when plan limits cross 70%</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-limits-90" checked>
+              <span>Notify when plan limits cross 90%</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-notif-limits-pause" checked>
+              <span>At 90% weekly, prompt to pause automations</span>
+            </label>
+          </div>
+          <div class="settings-pane" data-settings-pane="automations">
+            <div class="settings-field">
+              <label for="setting-agent-repos-dir">Agent repos directory</label>
+              <div class="settings-path-row">
+                <input type="text" id="setting-agent-repos-dir" class="settings-input" placeholder="~/.claudes/agents/" spellcheck="false">
+                <button id="btn-browse-agent-repos" class="settings-browse-btn" title="Browse...">...</button>
+              </div>
+              <span class="settings-hint">Base directory for isolated agent repository clones</span>
+            </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="terminal">
+            <div class="settings-field">
+              <label for="setting-term-font">Font family</label>
+              <select id="setting-term-font" class="settings-input">
+                <option value="">Auto (Cascadia / JetBrains Mono / Menlo / DejaVu)</option>
+                <option value="'Cascadia Code', monospace">Cascadia Code</option>
+                <option value="'JetBrains Mono', monospace">JetBrains Mono</option>
+                <option value="'Menlo', monospace">Menlo</option>
+                <option value="'Consolas', monospace">Consolas</option>
+                <option value="'DejaVu Sans Mono', monospace">DejaVu Sans Mono</option>
+                <option value="monospace">System monospace</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-scrollback">Scrollback (lines)</label>
+              <select id="setting-term-scrollback" class="settings-input">
+                <option value="1000">1,000</option>
+                <option value="5000" selected>5,000</option>
+                <option value="10000">10,000</option>
+                <option value="50000">50,000</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-cursor">Cursor style</label>
+              <select id="setting-term-cursor" class="settings-input">
+                <option value="block" selected>Block</option>
+                <option value="bar">Bar</option>
+                <option value="underline">Underline</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-bg">Terminal background</label>
+              <input type="color" id="setting-term-bg" class="settings-input" value="#1a1a2e">
+            </div>
+            <div class="settings-field">
+              <label for="setting-term-fg">Terminal text colour</label>
+              <input type="color" id="setting-term-fg" class="settings-input" value="#e0e0e0">
+              <span class="settings-hint">Applied to new columns. Existing columns pick up the change on the next reflow.</span>
+            </div>
+            <div class="settings-field">
+              <button id="setting-term-reset" class="settings-browse-btn" style="padding:6px 14px;">Reset to defaults</button>
+              <span class="settings-hint">Restores font / scrollback / cursor / colours to the app defaults.</span>
+            </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="tools">
+            <div class="settings-field">
+              <label for="setting-external-editor">External editor command</label>
+              <input type="text" id="setting-external-editor" class="settings-input" placeholder="code" spellcheck="false">
+              <span class="settings-hint">Used by "Open in external editor" in project / file context menus. Default: <code>code</code> (VS Code) / <code>code.cmd</code> on Windows. Set to anything else on PATH (e.g. <code>cursor</code>, <code>subl</code>).</span>
+            </div>
+            <div class="settings-field">
+              <button id="btn-edit-global-claudemd" class="settings-browse-btn" style="padding:6px 14px;">Edit global ~/.claude/CLAUDE.md</button>
+              <span class="settings-hint">Instructions that apply to every Claude Code session, regardless of project.</span>
+            </div>
+            <div class="settings-field">
+              <label class="settings-toggle">
+                <input type="checkbox" id="setting-auto-update-claude">
+                <span>Auto-run <code>claude update</code> on launch</span>
+              </label>
+              <span class="settings-hint">Off by default — only enable if you trust your PATH (the first <code>claude</code> on PATH will be invoked unprompted at every app launch).</span>
+            </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="clawd">
+            <div class="settings-field" id="clawd-hooks-row">
+              <div class="clawd-hooks-status">
+                <span id="clawd-hooks-indicator" class="clawd-hooks-indicator">…</span>
+                <span id="clawd-hooks-label" class="clawd-hooks-label">Checking hook status…</span>
+                <button id="btn-clawd-hooks-connect" class="hooks-btn hooks-connect-btn hidden">Connect hooks</button>
+              </div>
+              <span class="settings-hint">Hooks let Clawd react to Claude in real time (instant idle when a turn ends, accurate tool icons). Without them, the widget falls back to tailing the session JSONL and can lag or get stuck on a stale state.</span>
+            </div>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-clawd-enabled">
+              <span>Show Clawd</span>
+            </label>
+            <span class="settings-hint">A friendly animated crab that lives in the corner. Each column has its own animation, driven by Claude's actual activity in that session; the widget cross-fades when you switch focus. Left-click the crab to see what state it's in. Drag to reposition.</span>
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-clawd-debug">
+              <span>Show debug overlay</span>
+            </label>
+            <span class="settings-hint">Floats a panel next to the crab listing every hook event and JSONL transition Clawd receives, plus the resolved animation. Use it to see why the widget picked the state it did.</span>
+            <div class="settings-field">
+              <label for="setting-clawd-size">Size</label>
+              <div class="clawd-size-row">
+                <input type="range" id="setting-clawd-size" min="80" max="400" step="10" value="180">
+                <span id="setting-clawd-size-val" class="settings-hint" style="min-width:48px; text-align:right;">180px</span>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label>What the animations mean</label>
+              <div class="clawd-legend">
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-idle-living.svg" alt="">
+                  <div><strong>Idle</strong><span>Claude is waiting for your next prompt</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-thinking.svg" alt="">
+                  <div><strong>Thinking</strong><span>Claude is processing your prompt</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-typing.svg" alt="">
+                  <div><strong>Typing</strong><span>Editing files &mdash; Edit, Write, MultiEdit, NotebookEdit</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-debugger.svg" alt="">
+                  <div><strong>Debugger</strong><span>Reading and searching &mdash; Read, Grep, Glob</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-building.svg" alt="">
+                  <div><strong>Building</strong><span>Running shell commands &mdash; Bash, BashOutput</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-wizard.svg" alt="">
+                  <div><strong>Wizard</strong><span>Browsing the web &mdash; WebSearch, WebFetch</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-conducting.svg" alt="">
+                  <div><strong>Conducting</strong><span>Orchestrating subagents &mdash; Agent, Task</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-beacon.svg" alt="">
+                  <div><strong>Beacon</strong><span>Talking to MCP servers or LSP</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-juggling.svg" alt="">
+                  <div><strong>Juggling</strong><span>Running a skill or slash-command</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-pushing.svg" alt="">
+                  <div><strong>Pushing</strong><span>Tearing things down &mdash; KillShell, KillBash</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-wake.svg" alt="">
+                  <div><strong>Wake</strong><span>Exiting plan mode &mdash; about to act</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-working-sweeping.svg" alt="">
+                  <div><strong>Sweeping</strong><span>Compacting or running notebook cells</span></div>
+                </div>
+                <div class="clawd-legend-item">
+                  <img src="./assets/clawd/clawd-disconnected.svg" alt="">
+                  <div><strong>Disconnected</strong><span>The column's terminal process has exited</span></div>
+                </div>
+              </div>
+              <span class="settings-hint">Animations are from <a href="https://github.com/marciogranzotto/clawd-tank" id="clawd-upstream-link">clawd-tank</a> by Marcio Granzotto (MIT). Synced from upstream commit <code>6f0093b</code>.</span>
+            </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="sync">
+            <div class="settings-field">
+              <label for="setting-sync-device-name">Device name</label>
+              <input type="text" id="setting-sync-device-name" class="settings-input" placeholder="e.g. ashleys-mac" spellcheck="false">
+              <span class="settings-hint">Identifies this device's exported sessions inside the sync folder. Defaults to the machine's hostname.</span>
+            </div>
+            <div class="settings-field">
+              <label for="setting-sync-source-path">Sync source path</label>
+              <div class="settings-path-row">
+                <input type="text" id="setting-sync-source-path" class="settings-input" placeholder="e.g. ~/Google Drive/Claudes-Sync" spellcheck="false">
+                <button id="btn-browse-sync-source" class="settings-browse-btn" title="Browse...">...</button>
+              </div>
+              <span class="settings-hint">A local folder synced to the cloud by your tool of choice (Google Drive Desktop, OneDrive, iCloud, Syncthing&hellip;). Claudes mirrors your project sessions in/out of here. We never talk to a cloud API directly.</span>
+            </div>
+            <div class="settings-field">
+              <button id="btn-sync-save" class="settings-browse-btn" style="padding: 6px 14px;">Save</button>
+              <span id="sync-save-status" class="settings-hint"></span>
+            </div>
+            <hr style="border:none; border-top:1px solid var(--border-primary); margin: 16px 0;">
+            <div class="settings-hint" style="line-height:1.55">
+              <strong>How to use:</strong><br>
+              1. Set the path above on each device (pointing to the same cloud-synced folder).<br>
+              2. Right-click a project in the sidebar &rarr; "Sync convos" to start uploading that project's chats.<br>
+              3. On the other device, right-click the matching project &rarr; "Import syncs&hellip;" and pick this device's folder under the sync source.<br>
+              4. Resumed sessions show up in <code>/resume</code> on either machine.
+            </div>
           </div>
         </div>
         <div class="settings-section">
@@ -348,14 +646,22 @@
         <span id="usage-close" class="modal-close">&times;</span>
       </div>
       <div class="modal-body usage-body">
-        <div id="usage-loading" class="usage-loading">Loading usage data...</div>
+        <div id="usage-loading" class="usage-loading">
+          <div class="skel skel-row" style="width:55%"></div>
+          <div class="skel skel-row" style="width:80%"></div>
+          <div class="skel skel-row" style="width:40%"></div>
+          <div class="skel skel-row" style="width:60%"></div>
+          <div class="skel skel-row" style="width:35%"></div>
+        </div>
         <div id="usage-content" class="usage-content hidden">
           <div class="usage-tabs">
             <button class="usage-tab active" data-usage-tab="summary">Summary</button>
             <button class="usage-tab" data-usage-tab="daily">Daily</button>
             <button class="usage-tab" data-usage-tab="sessions">Sessions</button>
+            <button class="usage-tab" data-usage-tab="cost">Cost</button>
           </div>
           <div id="usage-tab-summary" class="usage-tab-content active">
+            <div id="plan-limits-section" class="plan-limits-section"></div>
             <div class="usage-period-toggle">
               <button class="usage-period-btn" data-period="7d">7 Days</button>
               <button class="usage-period-btn active" data-period="all">All Time</button>
@@ -383,6 +689,42 @@
             </div>
             <div class="usage-table-container" id="usage-sessions-table"></div>
           </div>
+          <div id="usage-tab-cost" class="usage-tab-content">
+            <div class="cost-filter-row">
+              <button class="cost-filter-btn" data-cost-filter="today">Today</button>
+              <button class="cost-filter-btn" data-cost-filter="7d">Last 7 days</button>
+              <button class="cost-filter-btn" data-cost-filter="30d">Last 30 days</button>
+              <button class="cost-filter-btn active" data-cost-filter="all">All time</button>
+            </div>
+            <div class="cost-banner">
+              <strong>API list-price equivalent</strong> — what these tokens
+              would cost on pay-as-you-go API. <em>Not your actual bill</em>:
+              Pro / Max subscriptions are flat. Cache re-reads are the usual
+              culprit on long agentic sessions.
+            </div>
+            <div class="cost-summary">
+              <div class="cost-card"><div class="cost-label">Total</div><div class="cost-value" id="cost-total">—</div></div>
+              <div class="cost-card"><div class="cost-label">Opus</div><div class="cost-value" id="cost-opus">—</div></div>
+              <div class="cost-card"><div class="cost-label">Sonnet</div><div class="cost-value" id="cost-sonnet">—</div></div>
+              <div class="cost-card"><div class="cost-label">Haiku</div><div class="cost-value" id="cost-haiku">—</div></div>
+            </div>
+            <h3 class="usage-section-title">Where the cost comes from</h3>
+            <div class="cost-summary">
+              <div class="cost-card"><div class="cost-label">Cache reads</div><div class="cost-value" id="cost-bucket-cache-read">—</div></div>
+              <div class="cost-card"><div class="cost-label">Cache writes</div><div class="cost-value" id="cost-bucket-cache-creation">—</div></div>
+              <div class="cost-card"><div class="cost-label">Input</div><div class="cost-value" id="cost-bucket-input">—</div></div>
+              <div class="cost-card"><div class="cost-label">Output</div><div class="cost-value" id="cost-bucket-output">—</div></div>
+            </div>
+            <h3 class="usage-section-title">By project</h3>
+            <div id="cost-by-project" class="cost-table"></div>
+            <h3 class="usage-section-title">Last 30 days</h3>
+            <div id="cost-by-day" class="cost-chart"></div>
+            <div class="cost-disclaimer">
+              Token counts come straight from each session's <code>usage</code> blocks; prices are
+              Anthropic's public list rates as of v1.7.x of this app. If list prices have moved since,
+              update <code>lib/cost-calc.js</code> and rebuild.
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -400,7 +742,7 @@
         <textarea id="claudemd-editor" spellcheck="false" placeholder="# Project instructions for Claude&#10;&#10;Add conventions, architecture notes, and preferences here..."></textarea>
       </div>
       <div class="modal-footer">
-        <span id="claudemd-status" class="modal-status"></span>
+        <span id="claudemd-status" class="modal-status" role="status" aria-live="polite"></span>
         <button id="claudemd-save" class="modal-btn-save">Save</button>
       </div>
     </div>
@@ -414,11 +756,106 @@
         <span id="fileeditor-close" class="modal-close">&times;</span>
       </div>
       <div class="modal-body">
-        <textarea id="fileeditor-editor" spellcheck="false"></textarea>
+        <div id="fileeditor-find-bar" class="fileeditor-find-bar hidden">
+          <input type="text" id="fileeditor-find-input" class="fileeditor-find-input" placeholder="Find" spellcheck="false">
+          <span id="fileeditor-find-count" class="fileeditor-find-count">0 / 0</span>
+          <button id="fileeditor-find-prev" class="fileeditor-find-btn" title="Previous match (Shift+Enter)" aria-label="Previous match">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5L6 4.5L9 7.5"/></svg>
+          </button>
+          <button id="fileeditor-find-next" class="fileeditor-find-btn" title="Next match (Enter)" aria-label="Next match">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5L6 7.5L9 4.5"/></svg>
+          </button>
+          <label class="fileeditor-find-toggle" title="Match case"><input type="checkbox" id="fileeditor-find-case"> Aa</label>
+          <span class="fileeditor-find-sep"></span>
+          <input type="text" id="fileeditor-replace-input" class="fileeditor-find-input" placeholder="Replace with" spellcheck="false">
+          <button id="fileeditor-replace-one" class="fileeditor-find-btn fileeditor-find-btn-text" title="Replace current match">Replace</button>
+          <button id="fileeditor-replace-all" class="fileeditor-find-btn fileeditor-find-btn-text" title="Replace all matches">All</button>
+          <button id="fileeditor-find-close" class="fileeditor-find-btn" title="Close (Esc)" aria-label="Close find">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3L9 9M9 3L3 9"/></svg>
+          </button>
+        </div>
+        <div class="fileeditor-edit-area">
+          <div id="fileeditor-gutter" class="fileeditor-gutter" aria-hidden="true">1</div>
+          <textarea id="fileeditor-editor" spellcheck="false"></textarea>
+          <pre id="fileeditor-preview" class="fileeditor-preview hidden" aria-hidden="true"><code></code></pre>
+        </div>
       </div>
       <div class="modal-footer">
-        <span id="fileeditor-status" class="modal-status"></span>
+        <span id="fileeditor-status" class="modal-status" role="status" aria-live="polite"></span>
+        <span id="fileeditor-cursor-pos" class="fileeditor-cursor-pos">Ln 1, Col 1</span>
+        <button id="fileeditor-preview-btn" class="modal-btn-save" type="button" style="background:transparent;border:1px solid var(--border-primary);color:var(--text-secondary);">Preview</button>
         <button id="fileeditor-save" class="modal-btn-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Endpoint Presets Modal -->
+  <div id="endpoints-modal" class="modal-overlay hidden">
+    <div class="modal-dialog endpoints-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Endpoint Presets</span>
+        <span class="modal-subtitle">Point Claude Code at any Anthropic-compatible API (LM Studio, Ollama, remote box).</span>
+        <span id="endpoints-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body endpoints-body">
+        <div class="endpoints-sidebar">
+          <div class="endpoints-list-header">
+            <span>Presets</span>
+            <button type="button" id="endpoints-new" class="endpoints-icon-btn" title="New preset">+</button>
+          </div>
+          <ul id="endpoints-list" class="endpoints-list"></ul>
+        </div>
+        <div class="endpoints-editor" id="endpoints-editor">
+          <div class="endpoints-empty hidden" id="endpoints-empty">
+            <p>No preset selected.</p>
+            <p>Click <strong>+</strong> to create one, or pick one from the list.</p>
+          </div>
+          <div class="endpoints-form" id="endpoints-form">
+            <label class="endpoints-field">
+              <span>Name</span>
+              <input type="text" id="ep-name" placeholder="e.g. LM Studio &ndash; Qwen3 Coder" autocomplete="off">
+            </label>
+            <label class="endpoints-field">
+              <span>Base URL <em class="endpoints-field-hint">(host only — /v1 is added automatically)</em></span>
+              <input type="text" id="ep-base-url" placeholder="http://localhost:1234" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="endpoints-field">
+              <span>Auth Token <em class="endpoints-field-hint">(optional)</em></span>
+              <div class="endpoints-token-row">
+                <input type="password" id="ep-auth-token" placeholder="Leave blank if endpoint has no auth" autocomplete="off" spellcheck="false">
+                <button type="button" id="ep-token-toggle" class="endpoints-icon-btn" title="Show/hide token">&#128065;</button>
+              </div>
+            </label>
+            <label class="endpoints-field">
+              <span>Model</span>
+              <div class="endpoints-model-row">
+                <input type="text" id="ep-model" placeholder="qwen/qwen3-coder-next" autocomplete="off" spellcheck="false">
+                <select id="ep-model-select" class="hidden"></select>
+                <button type="button" id="ep-model-fetch" class="endpoints-icon-btn" title="Fetch loaded models from endpoint">&#8634;</button>
+              </div>
+            </label>
+            <label class="endpoints-field">
+              <span>Context window <em class="endpoints-field-hint">(tokens — used by the column meter as denominator)</em></span>
+              <div class="endpoints-context-row">
+                <input type="number" id="ep-context-window" placeholder="e.g. 262144" autocomplete="off" min="1024" step="1024">
+                <button type="button" id="ep-context-fetch" class="endpoints-icon-btn" title="Fetch context length from endpoint /v1/models">&#8634;</button>
+              </div>
+            </label>
+            <label class="endpoints-field">
+              <span>Fallback endpoint (optional)</span>
+              <select id="ep-fallback">
+                <option value="">(none)</option>
+              </select>
+            </label>
+            <div class="endpoints-form-status" id="ep-status" role="status" aria-live="polite"></div>
+            <div class="endpoints-form-actions">
+              <button type="button" id="ep-test" class="endpoints-secondary-btn">Test connection</button>
+              <button type="button" id="ep-delete" class="endpoints-danger-btn">Delete</button>
+              <span class="endpoints-form-spacer"></span>
+              <button type="button" id="ep-save" class="modal-btn-save">Save</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -567,14 +1004,348 @@
       </div>
     </div>
 
+  <div id="broadcast-popover" class="broadcast-popover hidden">
+    <div class="broadcast-header">
+      <span class="broadcast-title">Broadcast prompt</span>
+      <button id="broadcast-close" class="broadcast-close">&times;</button>
+    </div>
+    <textarea id="broadcast-text" rows="4" placeholder="Type a prompt to send to selected columns…"></textarea>
+    <div id="broadcast-targets" class="broadcast-targets"></div>
+    <div class="broadcast-actions">
+      <label class="broadcast-press-enter">
+        <input type="checkbox" id="broadcast-press-enter" checked> Press Enter after send
+      </label>
+      <button id="broadcast-send" class="broadcast-send-btn">Send to selected</button>
+    </div>
+  </div>
+
+  <!-- Session Search Modal -->
+  <!-- Claude Code extensions manager (skills / agents / commands) -->
+  <div id="ext-modal" class="modal-overlay hidden">
+    <div class="modal-dialog endpoints-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Claude Code extensions</span>
+        <span class="modal-subtitle" id="ext-project-path"></span>
+        <span id="ext-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div class="ext-categories">
+          <div class="ext-cat" data-cat="agents">
+            <div class="ext-cat-header">
+              <span>Sub-agents <span class="ext-cat-hint">(.claude/agents/)</span></span>
+              <button class="settings-browse-btn ext-new" data-cat="agents" style="padding:2px 8px;">+ New</button>
+            </div>
+            <div class="ext-list" data-cat-list="agents"></div>
+          </div>
+          <div class="ext-cat" data-cat="skills">
+            <div class="ext-cat-header">
+              <span>Skills <span class="ext-cat-hint">(.claude/skills/&lt;name&gt;/SKILL.md)</span></span>
+              <button class="settings-browse-btn ext-new" data-cat="skills" style="padding:2px 8px;">+ New</button>
+            </div>
+            <div class="ext-list" data-cat-list="skills"></div>
+          </div>
+          <div class="ext-cat" data-cat="commands">
+            <div class="ext-cat-header">
+              <span>Slash commands <span class="ext-cat-hint">(.claude/commands/)</span></span>
+              <button class="settings-browse-btn ext-new" data-cat="commands" style="padding:2px 8px;">+ New</button>
+            </div>
+            <div class="ext-list" data-cat-list="commands"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MCP server manager -->
+  <div id="mcp-modal" class="modal-overlay hidden">
+    <div class="modal-dialog endpoints-dialog">
+      <div class="modal-header">
+        <span class="modal-title">MCP servers</span>
+        <span class="modal-subtitle" id="mcp-project-path"></span>
+        <span id="mcp-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body endpoints-body">
+        <div class="endpoints-sidebar">
+          <div class="endpoints-list-header">
+            <span>Servers</span>
+            <button id="mcp-new" class="settings-browse-btn" style="padding:2px 8px;">+</button>
+          </div>
+          <div id="mcp-list" class="endpoints-list"></div>
+        </div>
+        <div class="endpoints-edit-pane mcp-edit-pane">
+          <div id="mcp-empty" class="settings-hint" style="padding:24px;">Select a server on the left, or click + to add a new one.</div>
+          <div id="mcp-form" style="display:none;">
+            <div class="settings-field">
+              <label>Name</label>
+              <input type="text" id="mcp-name" class="settings-input" spellcheck="false" placeholder="e.g. github" autocomplete="off">
+            </div>
+            <div class="settings-field">
+              <label>Command</label>
+              <input type="text" id="mcp-command" class="settings-input" spellcheck="false" placeholder="e.g. npx" autocomplete="off">
+            </div>
+            <div class="settings-field">
+              <label>Args (one per line)</label>
+              <textarea id="mcp-args" class="settings-input" rows="3" spellcheck="false" placeholder="-y&#10;@modelcontextprotocol/server-github"></textarea>
+            </div>
+            <div class="settings-field">
+              <label>Env (KEY=value, one per line)</label>
+              <textarea id="mcp-env" class="settings-input" rows="3" spellcheck="false" placeholder="GITHUB_TOKEN=ghp_…"></textarea>
+            </div>
+            <div class="settings-field">
+              <label>Transport (optional)</label>
+              <select id="mcp-transport" class="settings-input">
+                <option value="">stdio (default)</option>
+                <option value="sse">sse</option>
+                <option value="http">http</option>
+              </select>
+            </div>
+            <div class="settings-field" style="display:flex; gap:8px;">
+              <button id="mcp-save" class="modal-btn-save">Save</button>
+              <button id="mcp-delete" class="modal-btn-save" style="background:transparent;border:1px solid #444;color:#f87171;">Delete</button>
+              <span id="mcp-status" class="modal-status"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick-open file palette (Cmd/Ctrl+P) -->
+  <div id="quick-open-modal" class="modal-overlay hidden">
+    <div class="modal-dialog session-search-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Quick open</span>
+        <span id="quick-open-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <input type="search" id="quick-open-input" placeholder="Type a filename to fuzzy-open in the active project…" autocomplete="off">
+        <div id="quick-open-results" class="session-search-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project-wide content grep (Cmd/Ctrl+Shift+G) -->
+  <div id="content-search-modal" class="modal-overlay hidden">
+    <div class="modal-dialog session-search-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Search project contents</span>
+        <span id="content-search-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+        <input type="search" id="content-search-input" placeholder="Search file contents in the active project…" autocomplete="off">
+        <div id="content-search-status" class="session-search-results" style="padding:4px 0;font-size:11px;opacity:0.6;"></div>
+        <div id="content-search-results" class="session-search-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="session-search-modal" class="modal-overlay hidden">
+    <div class="modal-dialog session-search-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Search sessions</span>
+        <span id="session-search-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body">
+            <div class="session-search-controls">
+              <div class="session-search-mode">
+                <label><input type="radio" name="search-mode" value="transcripts" checked> Transcripts</label>
+                <label><input type="radio" name="search-mode" value="prompts"> My prompts</label>
+              </div>
+              <span class="session-search-divider" aria-hidden="true"></span>
+              <div class="session-search-scope">
+                <label><input type="radio" name="search-scope" value="current" checked> Current project</label>
+                <label><input type="radio" name="search-scope" value="all"> All projects</label>
+              </div>
+            </div>
+            <input type="search" id="session-search-input" placeholder="Search session transcripts (current project)…" autocomplete="off">
+        <div id="session-search-results" class="session-search-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Snippets Modal -->
+  <div id="snippets-modal" class="modal-overlay hidden">
+    <div class="modal-dialog snippets-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Prompt snippets</span>
+        <span id="snippets-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body snippets-body">
+        <div class="snippets-list-pane">
+          <button id="snippets-new" class="snippets-btn">+ New</button>
+          <div id="snippets-list" class="snippets-list"></div>
+        </div>
+        <div class="snippets-edit-pane">
+          <label>Trigger (typed as <code>\trigger</code>):
+            <input type="text" id="snippet-trigger" placeholder="e.g. review">
+          </label>
+          <label>Label:
+            <input type="text" id="snippet-label" placeholder="e.g. Code review prompt">
+          </label>
+          <label>Body (use <code>{{name}}</code> for variables):
+            <textarea id="snippet-body" rows="10" placeholder="Please review {{file}} for {{focus_area}}…"></textarea>
+          </label>
+          <div class="snippets-edit-actions">
+            <button id="snippet-save" class="snippets-btn primary">Save</button>
+            <button id="snippet-delete" class="snippets-btn danger">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shortcuts Reference Modal -->
+  <div id="shortcuts-modal" class="modal-overlay hidden">
+    <div class="modal-dialog shortcuts-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Power-user shortcuts &amp; features</span>
+        <span id="shortcuts-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body shortcuts-body">
+        <section class="shortcuts-section">
+          <h3>Keyboard shortcuts</h3>
+          <p class="shortcuts-platform-note">macOS users: <kbd>⌘</kbd> works wherever <kbd>Ctrl</kbd> is shown below.</p>
+          <table class="shortcuts-table">
+            <tbody>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Command palette — fuzzy-search projects, slash commands, app actions</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Quick-open file — fuzzy search files in the active project, opens in inline editor</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Find in terminal (when a column is focused) — Enter / Shift+Enter cycles matches</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td><td>Search sessions — toggle between transcripts and your prompt history</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd></td><td>Search file contents project-wide (respects .gitignore)</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd></td><td>Spawn a new column in the active project</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></td><td>Add a new row to the layout</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></td><td>Kill the focused column</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd></td><td>Toggle Explorer panel</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd></td><td>Maximize / restore the focused column</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd></td><td>Navigate between columns</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd></td><td>Jump to column N</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>B</kbd></td><td>Toggle the Projects sidebar</td></tr>
+              <tr><td><kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> / <kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Change terminal font size</td></tr>
+              <tr><td><kbd>?</kbd></td><td>Open this shortcuts reference</td></tr>
+              <tr><td><kbd>Esc</kbd></td><td>Close the active modal / popover</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Plan limits &amp; usage</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Sidebar mini bar</strong> — live Session and Week percentages from the OAuth-authed plan-limits endpoint. Click to open the full Usage modal.</li>
+            <li><strong>Threshold notifications</strong> — system notification + window flash when 70% / 90% are crossed on session or weekly windows. Toggle individually in Settings.</li>
+            <li><strong>Auto-pause prompt</strong> — at 90% weekly, optional confirm dialog to disable global automations until you re-enable them.</li>
+            <li><strong>Session attribution &Delta; pill</strong> — each Claude column header shows how much of the 5-hour session quota that column has consumed since spawn. Hover for snapshot vs current numbers.</li>
+            <li><strong>Context-window meter</strong> — per-column live tokens / model-max indicator (e.g. <code>12k/200k</code>). Amber at 70%, red at 90% — compact proactively before auto-compact.</li>
+            <li><strong>Cost dashboard</strong> — Usage modal &rarr; Cost tab. Total + per-model + per-project + 30-day chart, with Today / 7-day / 30-day / All-time filter.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Workflow speed</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Cross-column broadcast</strong> (&#10547;) — send the same prompt to multiple Claude columns at once. Picks up custom column titles and project names automatically.</li>
+            <li><strong>Session full-text search</strong> (&#128270; / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd>) — grep across every session JSONL on disk. Click a hit to switch project and resume that session.</li>
+            <li><strong>My prompts search</strong> — same modal, "My prompts" radio mode. Searches <code>~/.claude/history.jsonl</code>. Click a hit to copy the prompt to your clipboard.</li>
+            <li><strong>Cmd-K command palette</strong> — fuzzy search across projects (switch / spawn), slash commands (sent to focused column), and app actions (open Usage, kill column, respawn, etc.).</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Editor &amp; explorer</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Clickable file paths in terminal</strong> — patterns like <code>src/foo.js:42</code> become clickable in any column. Clicks open the inline editor focused on that line. URLs also auto-link.</li>
+            <li><strong>Drag-into-terminal</strong> — drag a file from the Explorer tree onto a terminal; the path (quoted if it has spaces) is written to the pty.</li>
+            <li><strong>Syntax preview</strong> — inline file editor → <em>Preview</em> button switches to a Prism-highlighted read view; toggle back to edit.</li>
+            <li><strong>Open in external editor</strong> — project context menu / Explorer right-click sends the path to your <code>code</code> command (configurable in Settings &rarr; Tools).</li>
+            <li><strong>Quick open</strong> (<kbd>Ctrl</kbd>+<kbd>P</kbd>) — fuzzy file pickers across the active project; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd> for content grep.</li>
+            <li><strong>Auto-refresh</strong> — Explorer watches the project root and updates when files change on disk.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Git tab</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Merge / rebase</strong> — branch dropdown shows per-branch <em>merge</em> and <em>rebase</em> buttons. Conflict banner above the changes list lets you resolve files (<em>use ours</em> / <em>use theirs</em> / <em>open</em>) and continue / abort the operation.</li>
+            <li><strong>File history &amp; blame</strong> — right-click any file in the changes list. History panel includes one-click <em>Cherry-pick onto current</em>.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Project extensions</h3>
+          <ul class="shortcuts-features">
+            <li><strong>MCP servers</strong> — project context menu &rarr; <em>Manage MCP servers&hellip;</em> for a CRUD UI over <code>.mcp.json</code>.</li>
+            <li><strong>Sub-agents / skills / commands</strong> — manage <code>.claude/agents/</code>, <code>.claude/skills/</code>, <code>.claude/commands/</code> in both project and global scope from one modal.</li>
+            <li><strong>Named layouts</strong> — save and restore row/column shapes per project from the context menu.</li>
+            <li><strong>Auto-detected run configs</strong> — Run tab picks up <code>package.json</code> scripts, Makefile targets, Cargo bins, and <code>pyproject.toml</code> scripts.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Snippets &amp; observability</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Prompt snippets</strong> (&#128221;) — save reusable prompt templates with <code>{{variable}}</code> placeholders. Type <code>\trigger</code> + Enter in any Claude column to expand; the app prompts you for each variable, then erases the typed trigger and sends the expanded body.</li>
+            <li><strong>Hook event inspector</strong> — Hooks tab in the explorer panel streams every <code>PreToolUse</code>, <code>PostToolUse</code>, etc. event from Claude CLI. Filter, pause, click to expand JSON. Click <em>Connect hooks</em> to auto-configure <code>~/.claude/settings.json</code>.</li>
+          </ul>
+        </section>
+
+        <section class="shortcuts-section">
+          <h3>Reliability &amp; automation</h3>
+          <ul class="shortcuts-features">
+            <li><strong>Endpoint failover</strong> — optional <em>Fallback endpoint</em> on each preset. If a Claude column exits within 5 seconds with a non-zero code, the app respawns it on the fallback endpoint with a <code>&#8634; failover</code> badge in the header.</li>
+            <li><strong>Automation usage gates</strong> — per-agent <em>Skip if session usage above N%</em> and <em>Skip if weekly usage above N%</em> fields. Scheduled runs auto-skip when over the threshold so they don't burn the rest of your quota.</li>
+          </ul>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Command Palette -->
+  <div id="palette-overlay" class="palette-overlay hidden">
+    <div class="palette">
+      <input type="text" id="palette-input" class="palette-input" placeholder="Type a command, project, or slash command…" autocomplete="off">
+      <div id="palette-results" class="palette-results"></div>
+      <div class="palette-hint">↑↓ navigate · ↵ run · Esc close</div>
+    </div>
+  </div>
+
   <script src="./node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="./node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="./node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
+  <script src="./node_modules/@xterm/addon-search/lib/addon-search.js"></script>
+  <script src="./node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <link rel="stylesheet" href="./node_modules/prismjs/themes/prism-tomorrow.css">
+  <script src="./node_modules/prismjs/prism.js"></script>
+  <script src="./node_modules/prismjs/components/prism-typescript.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-jsx.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-tsx.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-bash.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-python.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-json.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-yaml.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-toml.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-rust.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-go.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-css.min.js"></script>
+  <script src="./node_modules/prismjs/components/prism-markdown.min.js"></script>
   <script src="./lib/git-target.js"></script>
   <script src="./lib/pipeline-matcher.js"></script>
   <script src="./lib/review-comments.js"></script>
   <script src="./lib/maximize-layout.js"></script>
   <script src="./lib/row-layout.js"></script>
+  <div id="clawd-widget" class="clawd-widget hidden" aria-hidden="true">
+    <img id="clawd-widget-img" class="clawd-widget-img" alt="" draggable="false">
+    <div id="clawd-widget-bubble" class="clawd-widget-bubble hidden"></div>
+  </div>
+  <div id="clawd-debug" class="clawd-debug hidden" aria-hidden="true">
+    <div class="clawd-debug-header">
+      <span class="clawd-debug-title">Clawd debug</span>
+      <button id="clawd-debug-refresh" class="clawd-debug-btn" type="button" title="Reset all columns to idle and re-arm JSONL tails">refresh</button>
+      <button id="clawd-debug-clear" class="clawd-debug-btn" type="button">clear</button>
+      <button id="clawd-debug-close" class="clawd-debug-btn" type="button">×</button>
+    </div>
+    <div id="clawd-debug-now" class="clawd-debug-now">—</div>
+    <div id="clawd-debug-log" class="clawd-debug-log"></div>
+  </div>
+  <script src="./lib/clawd-widget.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

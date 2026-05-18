@@ -24,10 +24,38 @@ var spawnDropdown = document.getElementById('spawn-dropdown');
 var optSkipPermissions = document.getElementById('opt-skip-permissions');
 var optRemoteControl = document.getElementById('opt-remote-control');
 var optBare = document.getElementById('opt-bare');
+var optStripMcps = document.getElementById('opt-strip-mcps');
 var optHeadless = document.getElementById('opt-headless');
 var optModel = document.getElementById('opt-model');
+var optModelRow = document.getElementById('opt-model-row');
+var optEndpoint = document.getElementById('opt-endpoint');
+var optEndpointModelRow = document.getElementById('opt-endpoint-model-row');
+var optEndpointModel = document.getElementById('opt-endpoint-model');
+var optEndpointModelRefresh = document.getElementById('opt-endpoint-model-refresh');
 var optWorktree = document.getElementById('opt-worktree');
 var optCustomArgs = document.getElementById('opt-custom-args');
+var optDefaultEffortCloud = document.getElementById('opt-default-effort-cloud');
+var optDefaultEffortLocal = document.getElementById('opt-default-effort-local');
+var btnManageEndpoints = document.getElementById('btn-manage-endpoints');
+
+// Per-endpoint-class default effort applied at spawn. User-configurable in the
+// spawn options panel; persisted in config.defaultEffortCloud/Local.
+var defaultEffortCloud = 'high';
+var defaultEffortLocal = 'medium';
+function isValidEffort(v) {
+  return v === 'low' || v === 'medium' || v === 'high' || v === 'xhigh' || v === 'max';
+}
+
+// Endpoint preset state. Cached in renderer so spawn paths can attach the env
+// block synchronously without waiting on an IPC round-trip per spawn.
+var endpointPresets = [];        // [{ id, name, baseUrl, model, hasToken }]
+var currentEndpointId = null;    // active project's selected preset id (null = Anthropic)
+var currentEndpointModel = null; // user-selected model override for active project (null = use preset default)
+var currentEndpointEnv = null;   // env block returned by endpoint:getEnv, or null
+var firstSpawnLoadComplete = false;  // gate for cloud-default-on-boot
+// Cache of fetched models per endpoint id to avoid refetching on every selection.
+// { [endpointId]: { models: string[], fetchedAt: number, ok: boolean } }
+var endpointModelsCache = {};
 
 
 // Each window has its own counter for new column/pty ids. Give popouts a high
@@ -168,6 +196,13 @@ function renderHeadlessDock() {
       title.textContent = r.title || '(untitled)';
       row.appendChild(title);
 
+      if (r.connectionName && endpointPresets.length > 0) {
+        var conn = document.createElement('span');
+        conn.className = 'headless-dock-row-conn ' + (r.connectionName === 'Cloud' ? 'headless-dock-row-conn--cloud' : 'headless-dock-row-conn--local');
+        conn.textContent = r.connectionName;
+        row.appendChild(conn);
+      }
+
       var time = document.createElement('div');
       time.className = 'headless-dock-row-time';
       time.textContent = formatRelativeTime(r.startedAt);
@@ -250,6 +285,30 @@ function renderHeadlessDetail() {
     window.electronAPI.clipboardWriteText(headlessOutputBuffer);
   });
   header.appendChild(copyBtn);
+
+  // Re-run: fire a fresh headless run with the same prompt and switch the
+  // detail pane to the new entry. Disabled mid-stream so a still-running
+  // task can't be queued twice by accident.
+  var rerunBtn = document.createElement('button');
+  rerunBtn.textContent = 'Re-run';
+  rerunBtn.disabled = entry.status === 'running';
+  rerunBtn.addEventListener('click', function () {
+    if (!projectPath || !entry.prompt) return;
+    rerunBtn.disabled = true;
+    window.electronAPI.headlessRun(projectPath, entry.prompt).then(function (res) {
+      if (res && res.error) {
+        alert('Headless re-run failed: ' + res.error);
+        rerunBtn.disabled = false;
+        return;
+      }
+      if (res && res.runId) {
+        headlessSelectedRunId = res.runId;
+        headlessOutputBuffer = '';
+        renderHeadlessDock();
+      }
+    });
+  });
+  header.appendChild(rerunBtn);
 
   var deleteBtn = document.createElement('button');
   deleteBtn.textContent = 'Delete';
@@ -525,10 +584,15 @@ function persistSessionsDebounced(projectKey, workspaceId) {
 // ============================================================
 
 var wsPort = 3456;
+var wsAuthToken = null;
 var wsHasConnectedBefore = false;
 
 function connectWS() {
-  ws = new WebSocket('ws://127.0.0.1:' + wsPort);
+  // Per-launch token presented as a subprotocol. pty-server rejects the WS
+  // handshake if the token is missing or wrong, so a drive-by browser page
+  // pointed at ws://127.0.0.1:<port> can't open a connection.
+  var protocols = wsAuthToken ? ['claudes-auth-' + wsAuthToken] : undefined;
+  ws = new WebSocket('ws://127.0.0.1:' + wsPort, protocols);
   ws.onopen = function () {
     if (wsHasConnectedBefore) {
       reattachAllColumns();
@@ -584,26 +648,71 @@ function connectWS() {
           if (!resizeSuppressed.has(msg.id) && msg.data && col.hasUserInput) {
           // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
           var trimmed = msg.data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
-          // Detect: input prompt (> / ❯), permission prompt (Yes/No), or "Do you want to proceed"
-          var endsWithPrompt = /\n\s*[>❯]\s*$/.test(trimmed) || /^\s*[>❯]\s*$/.test(trimmed) ||
-            /Do you want to proceed/.test(trimmed) || /Esc to cancel/.test(trimmed) ||
-            /\d\.\s*(Yes|No)\s*$/.test(trimmed);
-          if (endsWithPrompt && col.activityState === 'working') {
-            setColumnActivity(msg.id, 'waiting');
-            notifyAttentionNeeded(msg.id);
-          } else if (msg.data.length > 10 && !endsWithPrompt) {
-            setColumnActivity(msg.id, 'working');
+          // "Interrupted" with or without the middle-dot — the chunk can
+          // arrive partial, so match permissively. This must work on a
+          // resumed session that hasn't seen a user keystroke yet, so it
+          // runs OUTSIDE the col.hasUserInput gate below.
+          var wasInterrupted = /Interrupted/.test(trimmed) &&
+            (/What should Claude do/.test(trimmed) || /\bEsc\b/.test(trimmed));
+          if (wasInterrupted && window.Clawd && window.Clawd.setColumnAnimation) {
+            window.Clawd.setColumnAnimation(msg.id, 'idle');
+          }
+          if (col.hasUserInput) {
+            // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
+            var endsWithPrompt = /\n\s*[>❯]\s*$/.test(trimmed) || /^\s*[>❯]\s*$/.test(trimmed) ||
+              /Do you want to proceed/.test(trimmed) || /Esc to cancel/.test(trimmed) ||
+              /\d\.\s*(Yes|No)\s*$/.test(trimmed);
+            if (endsWithPrompt && col.activityState === 'working') {
+              setColumnActivity(msg.id, 'waiting');
+              notifyAttentionNeeded(msg.id);
+            } else if (msg.data.length > 10 && !endsWithPrompt) {
+              setColumnActivity(msg.id, 'working');
+            }
+            // Safety net for Clawd: whenever a prompt is visible, the column
+            // is awaiting input — flip the widget to idle regardless of the
+            // tracked activityState.
+            if (endsWithPrompt && window.Clawd && window.Clawd.setColumnAnimation) {
+              window.Clawd.setColumnAnimation(msg.id, 'idle');
+            }
           }
         }
-        // Auto-open browser when server starts listening
-        if (col.launchUrl && !col.launchUrlOpened && msg.data.indexOf('Now listening on') !== -1) {
-          col.launchUrlOpened = true;
-          window.electronAPI.openExternal(col.launchUrl);
+        // Auto-open browser when server starts listening. Parse the actual
+        // URL out of the dotnet/asp.net log line ("Now listening on:
+        // https://localhost:7142") rather than using the configured
+        // applicationUrl — .NET's launchSettings.json stores the latter as a
+        // semicolon-separated list (e.g. "https://...;http://..."), which
+        // shell.openExternal can't interpret as a URL on Windows and falls
+        // through to opening File Explorer.
+        if (col.launchUrl && !col.launchUrlOpened) {
+          var nlMatch = msg.data.match(/Now listening on:\s*(https?:\/\/[^\s\r\n]+)/i);
+          if (nlMatch) {
+            col.launchUrlOpened = true;
+            // Kestrel often binds to "any address" (e.g. http://[::]:8080,
+            // http://0.0.0.0:8080, http://+:8080, http://*:8080) and logs that
+            // verbatim. Browsers can't navigate to those — rewrite to
+            // localhost so the auto-open lands on a connectable URL.
+            var openUrl = nlMatch[1].replace(
+              /^(https?:\/\/)(\[::\]|\[::0\]|0\.0\.0\.0|\+|\*)(:|\/|$)/i,
+              '$1localhost$3'
+            );
+            window.electronAPI.openExternal(openUrl);
+          }
         }
       }
     } else if (msg.type === 'exit') {
       var col2 = allColumns.get(msg.id);
       if (col2) {
+        // Endpoint failover: if this is a Claude column that died early with a
+        // non-zero exit code, and the column was spawned with an endpoint that
+        // has a fallback configured, transparently respawn with the fallback
+        // before showing the user an exit overlay.
+        var lifetime = (typeof msg.lifetime_ms === 'number') ? msg.lifetime_ms : Infinity;
+        var earlyExit = lifetime < 5000;
+        var nonZero = msg.exitCode !== 0 && msg.exitCode != null;
+        if (!col2.cmd && earlyExit && nonZero && col2.endpointId && !col2.failedOver) {
+          tryEndpointFailover(msg.id);
+          return;  // skip the default exit overlay; respawn replaces the column in place
+        }
         col2.element.appendChild(createExitOverlay(msg.id, msg.exitCode, col2));
         setColumnActivity(msg.id, 'exited');
         // Refresh run configs to update stop/restart controls
@@ -794,10 +903,21 @@ function setColumnActivity(id, state) {
       }
     }, ACTIVITY_IDLE_MS));
   } else {
-    col.activityState = state; // 'exited'
+    col.activityState = state; // 'exited' | 'waiting' | 'idle' | 'attention'
     activityTimers.delete(id);
     updateActivityIndicator(id);
     updateSidebarActivity();
+    if (window.Clawd && window.Clawd.setColumnAnimation) {
+      if (state === 'exited') {
+        window.Clawd.setColumnAnimation(id, 'disconnected');
+      } else if (state === 'waiting' || state === 'idle') {
+        // Prompt detected (could be Claude finished normally or the user
+        // interrupted mid-turn). Claude CLI emits Stop for normal completion
+        // but not for user interrupts, so we use the prompt-detection signal
+        // as a safety net to keep Clawd from stranding on 'thinking'/working.
+        window.Clawd.setColumnAnimation(id, 'idle');
+      }
+    }
   }
 }
 
@@ -886,24 +1006,33 @@ function updateSidebarActivity() {
 }
 
 // Notification settings (defaults: all on)
-var notifSettings = { taskbar: true, sidebar: true, header: true };
+var notifSettings = { taskbar: true, sidebar: true, header: true, limits70: true, limits90: true, limitsPause: true };
 
 function loadNotifSettings() {
   if (config.notifications) {
-    notifSettings = Object.assign({ taskbar: true, sidebar: true, header: true }, config.notifications);
+    notifSettings = Object.assign({ taskbar: true, sidebar: true, header: true, limits70: true, limits90: true, limitsPause: true }, config.notifications);
   }
   var el1 = document.getElementById('setting-notif-taskbar');
   var el2 = document.getElementById('setting-notif-sidebar');
   var el3 = document.getElementById('setting-notif-header');
+  var el4 = document.getElementById('setting-notif-limits-70');
+  var el5 = document.getElementById('setting-notif-limits-90');
+  var el6 = document.getElementById('setting-notif-limits-pause');
   if (el1) el1.checked = notifSettings.taskbar;
   if (el2) el2.checked = notifSettings.sidebar;
   if (el3) el3.checked = notifSettings.header;
+  if (el4) el4.checked = notifSettings.limits70 !== false;
+  if (el5) el5.checked = notifSettings.limits90 !== false;
+  if (el6) el6.checked = notifSettings.limitsPause !== false;
 }
 
 function saveNotifSettings() {
   notifSettings.taskbar = document.getElementById('setting-notif-taskbar').checked;
   notifSettings.sidebar = document.getElementById('setting-notif-sidebar').checked;
   notifSettings.header = document.getElementById('setting-notif-header').checked;
+  notifSettings.limits70 = document.getElementById('setting-notif-limits-70').checked;
+  notifSettings.limits90 = document.getElementById('setting-notif-limits-90').checked;
+  notifSettings.limitsPause = document.getElementById('setting-notif-limits-pause').checked;
   config.notifications = notifSettings;
   saveConfig();
 }
@@ -1208,12 +1337,361 @@ function getActiveState() {
   return projectStates.get(stateKey(activeProjectKey, wsId)) || null;
 }
 
+// ============================================================
+// Named layouts (save / restore)
+// ============================================================
+
+// Snapshot the project's current row/column shape into a serialisable layout
+// payload. Sessions deliberately aren't captured — restoring spawns fresh
+// columns; the user can then use the recent-sessions picker per column to
+// reattach if desired.
+function snapshotProjectLayout(projectPath) {
+  var state = projectStates.get(projectPath);
+  if (!state) return { rows: [] };
+  return {
+    rows: state.rows.map(function (row) {
+      return {
+        columns: row.columnIds.map(function (id) {
+          var c = state.columns.get(id);
+          if (!c) return null;
+          return {
+            cmd: c.cmd || null,
+            cmdArgs: Array.isArray(c.cmdArgs) ? c.cmdArgs.filter(function (a) {
+              // Drop any resume arg pair — we want a fresh spawn.
+              return a !== '--resume' && (typeof a !== 'string' || !/^[0-9a-f-]{32,}$/i.test(a));
+            }) : [],
+            env: c.env || null,
+            endpointId: c.endpointId || null,
+            title: c.customTitle || null
+          };
+        }).filter(Boolean)
+      };
+    })
+  };
+}
+
+function saveCurrentLayout(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.saveLayout) return;
+  var snap = snapshotProjectLayout(projectPath);
+  if (snap.rows.length === 0) { showToast('No columns to save', { kind: 'warn' }); return; }
+  // window.prompt() is disabled in Electron, use the inline modal that
+  // promptForValue() implements. Returns null on cancel.
+  promptForValue('Save current layout as:').then(function (name) {
+    if (!name) return;
+    name = name.trim();
+    if (!name) return;
+    window.electronAPI.saveLayout(projectPath, name, snap).then(function (r) {
+      if (!r || !r.ok) showToast('Save failed: ' + (r && r.error || 'unknown'), { kind: 'error' });
+      else showToast('Saved layout "' + name + '"', { kind: 'success' });
+    });
+  });
+}
+
+function chooseLayoutToRestore(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.listLayouts) return;
+  window.electronAPI.listLayouts(projectPath).then(function (layouts) {
+    if (!layouts || layouts.length === 0) {
+      showToast('No saved layouts yet — use "Save current layout…" first.', { kind: 'warn', duration: 5000 });
+      return;
+    }
+    showLayoutPickerModal(projectPath, layouts);
+  });
+}
+
+// Lightweight picker for saved layouts. List of names with Restore + Delete
+// buttons per row; Esc / click-outside closes.
+function showLayoutPickerModal(projectPath, layouts) {
+  var existing = document.querySelector('.layout-picker-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay layout-picker-overlay';
+  overlay.innerHTML = '<div class="modal-dialog" style="max-width:480px;"><div class="modal-header"><span class="modal-title">Restore layout</span><span class="modal-close">&times;</span></div><div class="modal-body" id="layout-picker-body" style="padding:8px 0 16px;"></div></div>';
+  document.body.appendChild(overlay);
+  var body = overlay.querySelector('#layout-picker-body');
+  layouts.forEach(function (l) {
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid var(--border-primary);';
+    var label = document.createElement('div');
+    label.style.flex = '1';
+    label.innerHTML = '<div style="font-size:13px;">' + escapeHtml(l.name) + '</div>' +
+      '<div style="font-size:11px;color:#6b7280;">' + escapeHtml(new Date(l.savedAt).toLocaleString()) + ' · ' + (l.layout && l.layout.rows ? l.layout.rows.reduce(function (acc, r) { return acc + r.columns.length; }, 0) : 0) + ' column(s)</div>';
+    var restoreBtn = document.createElement('button');
+    restoreBtn.className = 'settings-browse-btn';
+    restoreBtn.style.padding = '4px 12px';
+    restoreBtn.textContent = 'Restore';
+    restoreBtn.addEventListener('click', function () {
+      close();
+      restoreLayout(projectPath, l.layout);
+      showToast('Restoring "' + l.name + '"…', { kind: 'info', duration: 2000 });
+    });
+    var delBtn = document.createElement('button');
+    delBtn.className = 'settings-browse-btn';
+    delBtn.style.padding = '4px 10px';
+    delBtn.style.color = '#f87171';
+    delBtn.textContent = '✕';
+    delBtn.title = 'Delete this layout';
+    delBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      confirmDialog('Delete layout "' + l.name + '"?', { okLabel: 'Delete', dangerous: true }).then(function (ok) {
+        if (!ok) return;
+        window.electronAPI.deleteLayout(projectPath, l.name).then(function () {
+          row.remove();
+          showToast('Deleted layout "' + l.name + '"', { kind: 'success' });
+          if (!body.querySelector('div[style*="border-bottom"]')) close();
+        });
+      });
+    });
+    row.appendChild(label);
+    row.appendChild(restoreBtn);
+    row.appendChild(delBtn);
+    body.appendChild(row);
+  });
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', function onKey(e) {
+    if (!overlay.parentNode) { document.removeEventListener('keydown', onKey); return; }
+    if (e.key === 'Escape') { e.preventDefault(); close(); document.removeEventListener('keydown', onKey); }
+  });
+}
+
+function restoreLayout(projectPath, layout) {
+  if (!layout || !Array.isArray(layout.rows)) return;
+  // Make sure we're operating on the target project's state.
+  var idx = -1;
+  for (var i = 0; i < config.projects.length; i++) {
+    if (config.projects[i].path === projectPath) { idx = i; break; }
+  }
+  if (idx < 0) return;
+  if (config.activeProjectIndex !== idx) {
+    setActiveProject(idx, false, true);
+  }
+  var state = getOrCreateProjectState(projectPath);
+  // Kill existing columns first so the restore yields exactly the saved shape.
+  var existingIds = [];
+  state.rows.forEach(function (r) { r.columnIds.forEach(function (cid) { existingIds.push(cid); }); });
+  existingIds.forEach(function (cid) { try { removeColumn(cid); } catch (e) { /* */ } });
+  // Spawn rows + columns. addColumn(args, row, opts) — with row=null it goes
+  // into the current row; with addRow() we create a new one.
+  layout.rows.forEach(function (rowSpec, rIdx) {
+    var row = rIdx === 0 ? null : addRow();
+    rowSpec.columns.forEach(function (colSpec) {
+      var opts = {
+        title: colSpec.title || null,
+        cmd: colSpec.cmd || null,
+        env: colSpec.env || null,
+        endpointId: colSpec.endpointId || null
+      };
+      var argList = colSpec.cmd ? (colSpec.cmdArgs || []) : null;
+      addColumn(argList, row, opts);
+    });
+  });
+}
+
 function refocusActiveTerminal() {
   var state = getActiveState();
   if (state && state.focusedColumnId !== null) {
     var col = allColumns.get(state.focusedColumnId);
     if (col && col.terminal) col.terminal.focus();
   }
+}
+
+// Snippet expansion: when the user types "\\trigger" + Enter/Tab in a Claude
+// column, look up the snippet, prompt for any {{variables}}, then erase the
+// typed trigger and send the expanded body via the pty.
+//
+// Returns true if the keystroke was consumed (caller must NOT forward to pty),
+// or false if the keystroke should pass through normally.
+function handleSnippetExpansion(colId, data) {
+  var col = allColumns.get(colId);
+  if (!col) return false;
+  if (typeof col.snippetBuffer !== 'string') col.snippetBuffer = '';
+
+  // Backspace handling: pop one char off our buffer; let the pty handle echo
+  if (data === '\x7f' || data === '\b') {
+    col.snippetBuffer = col.snippetBuffer.slice(0, -1);
+    return false;
+  }
+
+  // Enter / Tab — try to expand. xterm may send '\r', '\n', '\r\n', or '\t';
+  // accept any input that contains an Enter/Tab char.
+  var isEnterTab = data === '\r' || data === '\n' || data === '\t' ||
+                   data === '\r\n' || data === '\n\r';
+  if (isEnterTab) {
+    var m = /\\\\([a-zA-Z0-9_-]+)\s*$/.exec(col.snippetBuffer);
+    if (m) {
+      var trig = m[1];
+      var cache = window.__snippetsCache || [];
+      var snip = cache.find(function (s) { return s.trigger === trig; });
+      if (snip) {
+        // Eat the keystroke now; run the async expansion separately. We can't
+        // use window.prompt() — Electron disables it. promptForValue() is an
+        // inline DOM modal that returns Promise<string|null>.
+        var triggerLen = m[0].length;
+        var trailing = (data === '\r' || data === '\n' || data === '\r\n' || data === '\n\r') ? '\r' : '';
+        col.snippetBuffer = '';
+        runSnippetExpansion(colId, snip, triggerLen, trailing);
+        return true;
+      }
+    }
+    // No match — clear buffer and let the keystroke pass through
+    col.snippetBuffer = '';
+    return false;
+  }
+
+  // Accumulate single printable chars (length 1, >= space) into the buffer.
+  // Bigger chunks (paste) reset rather than accumulate, since multi-char
+  // pastes don't represent typed triggers.
+  if (data.length === 1 && data >= ' ') {
+    col.snippetBuffer += data;
+    if (col.snippetBuffer.length > 200) col.snippetBuffer = col.snippetBuffer.slice(-200);
+  } else if (data.length > 1) {
+    col.snippetBuffer = '';
+  }
+  return false;
+}
+
+// Async snippet expansion: collects {{var}} values one-by-one via an inline
+// modal, then erases the typed trigger and sends the expanded body to the
+// column's pty. Cancel aborts cleanly.
+function runSnippetExpansion(colId, snip, triggerLen, trailing) {
+  var body = snip.body || '';
+  var varNames = [];
+  body.replace(/\{\{(\w+)\}\}/g, function (_, n) {
+    if (varNames.indexOf(n) === -1) varNames.push(n);
+    return _;
+  });
+  var values = {};
+  function next(i) {
+    if (i >= varNames.length) {
+      var expanded = body.replace(/\{\{(\w+)\}\}/g, function (_, n) { return values[n] || ''; });
+      var eraseStr = '';
+      for (var ei = 0; ei < triggerLen; ei++) eraseStr += '\b \b';
+      wsSend({ type: 'write', id: colId, data: eraseStr + expanded + trailing });
+      return;
+    }
+    promptForValue('Value for {{' + varNames[i] + '}}:').then(function (v) {
+      if (v === null) return;  // cancelled — abort the whole expansion
+      values[varNames[i]] = v;
+      next(i + 1);
+    });
+  }
+  next(0);
+}
+
+// Inline async prompt: returns Promise<string|null>. null = cancelled.
+// Replacement for window.prompt() which Electron disables.
+function promptForValue(message) {
+  return new Promise(function (resolve) {
+    var overlay = document.createElement('div');
+    overlay.className = 'snippet-prompt-overlay';
+    var dialog = document.createElement('div');
+    dialog.className = 'snippet-prompt-dialog';
+    var label = document.createElement('div');
+    label.className = 'snippet-prompt-label';
+    label.textContent = message;
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'snippet-prompt-input';
+    var actions = document.createElement('div');
+    actions.className = 'snippet-prompt-actions';
+    var cancel = document.createElement('button');
+    cancel.className = 'snippet-prompt-cancel';
+    cancel.textContent = 'Cancel';
+    var ok = document.createElement('button');
+    ok.className = 'snippet-prompt-ok';
+    ok.textContent = 'OK';
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    dialog.appendChild(label);
+    dialog.appendChild(input);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    setTimeout(function () { input.focus(); }, 0);
+
+    function done(value) {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      resolve(value);
+    }
+    ok.addEventListener('click', function () { done(input.value); });
+    cancel.addEventListener('click', function () { done(null); });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); done(input.value); }
+      else if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    });
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) done(null);
+    });
+  });
+}
+
+// Inline async confirm: returns Promise<boolean>. Non-blocking replacement
+// for window.confirm() which is fine but the OS-level dialog blocks the
+// entire renderer thread (and looks out of place on macOS where it pulls
+// system focus).
+function confirmDialog(message, opts) {
+  opts = opts || {};
+  return new Promise(function (resolve) {
+    var overlay = document.createElement('div');
+    overlay.className = 'snippet-prompt-overlay';
+    var dialog = document.createElement('div');
+    dialog.className = 'snippet-prompt-dialog';
+    var label = document.createElement('div');
+    label.className = 'snippet-prompt-label';
+    label.textContent = message;
+    var actions = document.createElement('div');
+    actions.className = 'snippet-prompt-actions';
+    var cancel = document.createElement('button');
+    cancel.className = 'snippet-prompt-cancel';
+    cancel.textContent = opts.cancelLabel || 'Cancel';
+    var ok = document.createElement('button');
+    ok.className = 'snippet-prompt-ok';
+    ok.textContent = opts.okLabel || 'OK';
+    if (opts.dangerous) ok.style.background = '#dc2626';
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    dialog.appendChild(label);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    setTimeout(function () { ok.focus(); }, 0);
+    function done(v) {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      resolve(v);
+    }
+    ok.addEventListener('click', function () { done(true); });
+    cancel.addEventListener('click', function () { done(false); });
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) done(false); });
+    document.addEventListener('keydown', function onKey(e) {
+      if (!overlay.parentNode) { document.removeEventListener('keydown', onKey); return; }
+      if (e.key === 'Escape') { e.preventDefault(); done(false); document.removeEventListener('keydown', onKey); }
+      else if (e.key === 'Enter') { e.preventDefault(); done(true); document.removeEventListener('keydown', onKey); }
+    });
+  });
+}
+
+// Lightweight toast. Stacks at top-right; auto-dismisses unless duration: 0.
+function showToast(message, opts) {
+  opts = opts || {};
+  var container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+  var toast = document.createElement('div');
+  toast.className = 'toast toast-' + (opts.kind || 'info');
+  toast.textContent = message;
+  container.appendChild(toast);
+  if (opts.duration !== 0) {
+    setTimeout(function () {
+      toast.classList.add('toast-out');
+      setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 200);
+    }, opts.duration || 3500);
+  }
+  return toast;
 }
 
 function saveColumnCounts() {
@@ -1447,9 +1925,13 @@ function loadProjects() {
     if (config.fontSize) {
       fontSize = Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, config.fontSize));
     }
-    if (config.theme) {
-      setThemePreference(config.theme);
-    }
+    if (isValidEffort(config.defaultEffortCloud)) defaultEffortCloud = config.defaultEffortCloud;
+    if (isValidEffort(config.defaultEffortLocal)) defaultEffortLocal = config.defaultEffortLocal;
+    if (optDefaultEffortCloud) optDefaultEffortCloud.value = defaultEffortCloud;
+    if (optDefaultEffortLocal) optDefaultEffortLocal.value = defaultEffortLocal;
+    // Default to 'auto' so the app follows the OS theme out of the box.
+    // Legacy/unset configs land here too.
+    setThemePreference(config.theme || 'auto');
     if (config.sidebarWidth) {
       applySidebarWidth(config.sidebarWidth);
     }
@@ -1690,6 +2172,12 @@ function disposeColumnLocalOnly(id) {
       }
     }
     if (state.focusedColumnId === id) state.focusedColumnId = null;
+    if (window.Clawd && typeof window.Clawd.forgetColumn === 'function') {
+      window.Clawd.forgetColumn(id);
+    }
+    if (window.electronAPI && window.electronAPI.clawdStopTail) {
+      window.electronAPI.clawdStopTail(id);
+    }
   }
 }
 
@@ -2182,6 +2670,45 @@ function buildProjectItem(project, index) {
     } else {
       addMenuItem('Open in new window', 'pop-out');
     }
+    // "Open in external editor" lives on the per-file context menu in the
+    // Explorer tree — at project level it's just a folder-open, which the
+    // user can also reach via "Reveal in Explorer" and the file-tree menu.
+    addMenuItem('Manage MCP servers…', 'manage-mcp');
+    addMenuItem('Skills / agents / commands…', 'manage-ext');
+    addMenuItem('Save current layout…', 'layout-save');
+    addMenuItem('Restore layout…', 'layout-restore');
+
+    // Sync entries — populated async so the labels reflect the current state.
+    var syncDivider = document.createElement('div');
+    syncDivider.className = 'project-context-item project-context-divider';
+    syncDivider.style.cssText = 'border-top:1px solid var(--border-primary); padding:0; margin:4px 0; cursor:default;';
+    menu.appendChild(syncDivider);
+    var syncPlaceholder = document.createElement('div');
+    syncPlaceholder.className = 'project-context-item';
+    syncPlaceholder.textContent = 'Sync…';
+    syncPlaceholder.style.opacity = '0.5';
+    menu.appendChild(syncPlaceholder);
+
+    if (window.electronAPI && window.electronAPI.syncGetProjectStatus) {
+      window.electronAPI.syncGetProjectStatus(project.path).then(function (status) {
+        if (menu.contains(syncPlaceholder)) menu.removeChild(syncPlaceholder);
+        var exportLabel = status && status.syncExport ? '✓ Sync convos (on)' : 'Sync convos';
+        addMenuItem(exportLabel, 'sync-toggle-export');
+        var imports = (status && status.syncImports) || [];
+        // Single entry-point: opens a modal that lists existing imports
+        // with Remove buttons and includes an "Add import…" action. No
+        // separate Manage item — pre-existing imports show in the same
+        // modal as the add action.
+        var importsLabel = imports.length > 0
+          ? 'Import syncs… (' + imports.length + ')'
+          : 'Import syncs…';
+        addMenuItem(importsLabel, 'sync-imports');
+        // Force sync: only useful once something is actually being synced.
+        if ((status && status.syncExport) || imports.length > 0) {
+          addMenuItem('Force sync now', 'sync-force');
+        }
+      });
+    }
 
     menu.style.left = e.clientX + 'px';
     menu.style.top = e.clientY + 'px';
@@ -2209,6 +2736,20 @@ function buildProjectItem(project, index) {
         if (window.electronAPI && window.electronAPI.popInProject) {
           window.electronAPI.popInProject(config.projects[projIndex].path);
         }
+      } else if (action === 'sync-toggle-export') {
+        handleSyncToggleExport(config.projects[projIndex].path);
+      } else if (action === 'sync-imports') {
+        handleSyncImports(config.projects[projIndex].path);
+      } else if (action === 'sync-force') {
+        handleSyncForce(config.projects[projIndex].path);
+      } else if (action === 'manage-mcp') {
+        openMcpModal(config.projects[projIndex].path);
+      } else if (action === 'manage-ext') {
+        openExtensionsModal(config.projects[projIndex].path);
+      } else if (action === 'layout-save') {
+        saveCurrentLayout(config.projects[projIndex].path);
+      } else if (action === 'layout-restore') {
+        chooseLayoutToRestore(config.projects[projIndex].path);
       }
       menu.style.display = 'none';
     };
@@ -2435,12 +2976,21 @@ function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
     if (prevState) prevState.containerEl.style.display = 'none';
     var commitInput = document.getElementById('git-commit-msg');
     if (commitInput) commitInput.value = '';
+    if (window.electronAPI && window.electronAPI.stopFsWatch) {
+      window.electronAPI.stopFsWatch(prevKey).catch(function () {});
+    }
   }
 
   config.activeProjectIndex = projectIndex;
   project.activeWorkspaceId = workspaceId; // null clears, restores Primary
   activeProjectKey = project.path;
   activeProjectNameEl.textContent = project.name;
+  // Start watching the new project root so the Explorer can refresh on disk
+  // changes (file creation/deletion/rename from other tools).
+  if (window.electronAPI && window.electronAPI.startFsWatch) {
+    window.electronAPI.startFsWatch(newKey).catch(function () {});
+  }
+  if (typeof window.__rerenderHookList === 'function') window.__rerenderHookList();
 
   if (window.electronAPI && window.electronAPI.gitBranch) {
     window.electronAPI.gitBranch(project.path).then(function (branch) {
@@ -2564,10 +3114,12 @@ function restoreSessions(projectPath, workspaceId) {
         var cwd = (typeof entry === 'object' && entry && typeof entry.cwd === 'string' && entry.cwd) ? entry.cwd : null;
         var cwdSource = (typeof entry === 'object' && entry && typeof entry.cwdSource === 'string' && entry.cwdSource) ? entry.cwdSource : null;
         var targetBranch = (typeof entry === 'object' && entry && typeof entry.targetBranch === 'string' && entry.targetBranch) ? entry.targetBranch : null;
+        var endpointId = (typeof entry === 'object' && entry && entry.endpointId) ? entry.endpointId : null;
         var pushedEntry = { rowIdx: rowIdx, sessionId: sid, title: title, widthRatio: widthRatio };
         if (cwd) pushedEntry.cwd = cwd;
         if (cwdSource) pushedEntry.cwdSource = cwdSource;
         if (targetBranch) pushedEntry.targetBranch = targetBranch;
+        if (endpointId) pushedEntry.endpointId = endpointId;
         if (typeof entry === 'object' && entry && entry.pipeline) pushedEntry.pipeline = entry.pipeline;
         entries.push(pushedEntry);
       }
@@ -2627,7 +3179,33 @@ function restoreSessions(projectPath, workspaceId) {
         }
         if (e.targetBranch) rowOpts.targetBranch = e.targetBranch;
         if (e.pipeline) rowOpts.pipelineState = e.pipeline;
-        addColumn(spawnArgs.concat(['--resume', e.sessionId]), targetRow, rowOpts);
+
+        // Endpoint-aware resume: if this column was spawned against a non-cloud
+        // endpoint preset, look up the preset's env block and rewrite args. If
+        // the preset is gone (envBlock null) or no endpointId is recorded,
+        // fall back to a cloud-style resume (args stripped of any local-only
+        // flags, no env injected). Sessions saved without endpointId are
+        // treated as Cloud and explicitly do NOT inherit the dropdown's
+        // currentEndpointEnv — otherwise a cloud column would silently get a
+        // local server's URL injected.
+        var resumeArgs;
+        var resumeRowOpts = rowOpts;
+        if (e.endpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
+          var envBlock = null;
+          try { envBlock = await window.electronAPI.endpointGetEnv(e.endpointId); } catch (_) { envBlock = null; }
+          if (envBlock) {
+            resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ true);
+            resumeArgs.push('--resume', e.sessionId);
+            resumeRowOpts = Object.assign({}, rowOpts, { endpointId: e.endpointId, env: envBlock });
+          } else {
+            resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
+            resumeArgs.push('--resume', e.sessionId);
+          }
+        } else {
+          resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
+          resumeArgs.push('--resume', e.sessionId);
+        }
+        addColumn(resumeArgs, targetRow, resumeRowOpts);
       }
 
       for (var rr = state.rows.length - 1; rr >= 0; rr--) {
@@ -2650,6 +3228,60 @@ function restoreSessions(projectPath, workspaceId) {
       window.__repositionStickyNotesForActiveProject();
     }
   });
+}
+
+// Strip args that don't apply to the target column's endpoint kind.
+// - --effort 'xhigh' is a Claude-Code-only extension and 400s on local servers.
+// - When restoring a cloud column while the global dropdown points at a local
+//   preset (or vice-versa), we must rewrite the effort to the kind appropriate
+//   for the column's actual endpoint, not the dropdown's.
+function rewriteArgsForEndpoint(args, isLocal) {
+  var out = [];
+  var sawEffort = false;
+  for (var i = 0; i < args.length; i++) {
+    if (args[i] === '--effort' && i + 1 < args.length) {
+      var raw = args[i + 1];
+      var safeEffort;
+      if (isLocal) {
+        safeEffort = isValidLocalEffort(raw) ? raw : defaultEffortLocal;
+      } else {
+        // Cloud accepts everything; just pass through unless it's empty.
+        safeEffort = raw && isValidEffort(raw) ? raw : defaultEffortCloud;
+      }
+      out.push('--effort', safeEffort);
+      sawEffort = true;
+      i++;
+      continue;
+    }
+    // --model is owned by the endpoint env block on local presets; skip any
+    // explicit cloud-side --model flag so we don't override the env model.
+    if (args[i] === '--model' && i + 1 < args.length && isLocal) {
+      i++;
+      continue;
+    }
+    // --bare is an API-key/proxy-auth flag: it tells Claude to trust
+    // ANTHROPIC_API_KEY without prompting, which suppresses the OAuth
+    // credential lookup. On cloud restores we have neither an API key nor
+    // an auth token in env, so --bare leaves the CLI with no credentials
+    // and it errors with "Not logged in · Please run /login". Strip it.
+    if (args[i] === '--bare' && !isLocal) {
+      continue;
+    }
+    out.push(args[i]);
+  }
+  // If --effort wasn't in the global args at all, append the kind-appropriate
+  // default so the column at least uses its own type's preference.
+  if (!sawEffort) {
+    var def = isLocal ? defaultEffortLocal : defaultEffortCloud;
+    if (isValidEffort(def)) out.push('--effort', def);
+  }
+  return out;
+}
+
+// Local Anthropic-compat servers (LM Studio etc.) accept low/medium/high/max
+// for output_config.effort — 'xhigh' is a Claude-Code-only extension that 400s.
+function isValidLocalEffort(e) {
+  return e === 'low' || e === 'medium' || e === 'high' || e === 'max';
 }
 
 function addProject(folderPath) {
@@ -2680,6 +3312,168 @@ function togglePinProject(index) {
   project.pinned = !project.pinned;
   saveConfig();
   renderProjectList();
+}
+
+// --- Cross-device session sync ---
+//
+// All persistence and watcher orchestration lives in main; these helpers
+// just nudge it via IPC and surface result toasts via alert() for now.
+
+function handleSyncToggleExport(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.syncSetProjectExport) return;
+  window.electronAPI.syncGetProjectStatus(projectPath).then(function (status) {
+    var nowEnabled = !(status && status.syncExport);
+    // Refuse to enable if the global sync source isn't set yet — otherwise
+    // toggling silently does nothing and users wonder why.
+    if (nowEnabled) {
+      return window.electronAPI.syncGetSettings().then(function (s) {
+        if (!s || !s.sourcePath) {
+          alert('Set a sync source path in Settings → Sync first, then toggle "Sync convos" on this project.');
+          return null;
+        }
+        return s;
+      }).then(function (s) {
+        if (!s) return;
+        return window.electronAPI.syncSetProjectExport(projectPath, true);
+      });
+    }
+    return window.electronAPI.syncSetProjectExport(projectPath, false);
+  });
+}
+
+// One entry point. If no imports yet, open the folder picker directly.
+// Otherwise open the modal so the user can see what's configured and
+// add another / remove one.
+function handleSyncImports(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.syncGetProjectStatus) return;
+  window.electronAPI.syncGetProjectStatus(projectPath).then(function (status) {
+    var imports = (status && status.syncImports) || [];
+    if (imports.length === 0) {
+      pickAndAddImport(projectPath);
+    } else {
+      showSyncImportsModal(projectPath, imports);
+    }
+  });
+}
+
+function pickAndAddImport(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.syncBrowseFolder) return Promise.resolve(null);
+  return window.electronAPI.syncGetSettings().then(function (s) {
+    var defaultPath = (s && s.sourcePath) || undefined;
+    return window.electronAPI.syncBrowseFolder({ defaultPath: defaultPath });
+  }).then(function (chosen) {
+    if (!chosen) return null;
+    return window.electronAPI.syncAddProjectImport(projectPath, chosen).then(function (res) {
+      if (res && res.error) { console.warn('[sync] add import failed:', res.error); return null; }
+      return chosen;
+    });
+  });
+}
+
+function handleSyncForce(projectPath) {
+  if (!window.electronAPI || !window.electronAPI.syncForceProject) return;
+  // Optimistic feedback in console; the IPC promise resolves once mirroring
+  // is done in main, which can take a moment for big sessions.
+  console.log('[sync] forcing sync for', projectPath);
+  window.electronAPI.syncForceProject(projectPath).then(function (res) {
+    if (res && res.error) {
+      console.warn('[sync] force failed:', res.error);
+    } else {
+      console.log('[sync] force complete');
+    }
+  });
+}
+
+// Renderer-side modal — Electron's window.prompt is a no-op so we build
+// our own. Plain DOM with a backdrop so it can't drift behind the dock.
+// `.modal-body` defaults to flex-row in this app's CSS, hence the explicit
+// `flex-direction: column` here — otherwise import rows render side-by-side.
+function showSyncImportsModal(projectPath, imports) {
+  var existing = document.getElementById('sync-imports-modal');
+  if (existing) existing.remove();
+
+  var backdrop = document.createElement('div');
+  backdrop.id = 'sync-imports-modal';
+  backdrop.className = 'modal-overlay';
+  backdrop.style.zIndex = '10000';
+
+  var dialog = document.createElement('div');
+  dialog.className = 'modal-dialog';
+  dialog.style.cssText = 'max-width: 720px; width: 90%;';
+
+  var header = document.createElement('div');
+  header.className = 'modal-header';
+  var title = document.createElement('span');
+  title.className = 'modal-title';
+  title.textContent = 'Sync Imports';
+  var close = document.createElement('span');
+  close.className = 'modal-close';
+  close.textContent = '×';
+  close.addEventListener('click', function () { backdrop.remove(); });
+  header.appendChild(title);
+  header.appendChild(close);
+
+  var body = document.createElement('div');
+  body.className = 'modal-body';
+  body.style.cssText = 'padding: 16px; display: flex; flex-direction: column; gap: 0;';
+
+  var list = document.createElement('div');
+  list.style.cssText = 'display: flex; flex-direction: column;';
+  body.appendChild(list);
+
+  function renderRows(rows) {
+    list.innerHTML = '';
+    if (!rows || rows.length === 0) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'opacity:0.7; padding: 12px 0;';
+      empty.textContent = 'No imports configured for this project.';
+      list.appendChild(empty);
+      return;
+    }
+    rows.forEach(function (p) {
+      var row = document.createElement('div');
+      row.style.cssText = 'display:flex; align-items:center; gap:12px; padding: 8px 0; border-bottom: 1px solid var(--border-primary);';
+      var pathEl = document.createElement('div');
+      pathEl.style.cssText = 'flex:1; min-width:0; font-family: monospace; font-size: 12px; word-break: break-all;';
+      pathEl.textContent = p;
+      var rm = document.createElement('button');
+      rm.textContent = 'Remove';
+      rm.style.cssText = 'padding: 4px 10px; cursor: pointer; flex-shrink: 0;';
+      rm.addEventListener('click', function () {
+        rm.disabled = true;
+        window.electronAPI.syncRemoveProjectImport(projectPath, p).then(function (res) {
+          renderRows((res && res.imports) || []);
+        });
+      });
+      row.appendChild(pathEl);
+      row.appendChild(rm);
+      list.appendChild(row);
+    });
+  }
+  renderRows(imports);
+
+  var addBtn = document.createElement('button');
+  addBtn.textContent = '+ Add import…';
+  addBtn.style.cssText = 'margin-top: 12px; padding: 6px 14px; align-self: flex-start; cursor: pointer;';
+  addBtn.addEventListener('click', function () {
+    addBtn.disabled = true;
+    pickAndAddImport(projectPath).then(function () {
+      addBtn.disabled = false;
+      // Refresh the list from authoritative state.
+      window.electronAPI.syncGetProjectStatus(projectPath).then(function (status) {
+        renderRows((status && status.syncImports) || []);
+      });
+    });
+  });
+  body.appendChild(addBtn);
+
+  dialog.appendChild(header);
+  dialog.appendChild(body);
+  backdrop.appendChild(dialog);
+  backdrop.addEventListener('click', function (e) {
+    if (e.target === backdrop) backdrop.remove();
+  });
+  document.body.appendChild(backdrop);
 }
 
 function setGroupPinned(groupKey, pinned) {
@@ -2820,13 +3614,35 @@ function showEmptyState() {
   });
   var empty = document.createElement('div');
   empty.className = 'empty-state';
-  var msg = document.createElement('div');
-  msg.textContent = 'No project selected';
-  var hint = document.createElement('div');
-  hint.className = 'hint';
-  hint.textContent = 'Add a project from the sidebar to get started';
-  empty.appendChild(msg);
-  empty.appendChild(hint);
+  var hasProjects = config && Array.isArray(config.projects) && config.projects.length > 0;
+  if (hasProjects) {
+    var msg = document.createElement('div');
+    msg.textContent = 'No project selected';
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = 'Click a project on the left to start';
+    empty.appendChild(msg);
+    empty.appendChild(hint);
+  } else {
+    // First-run state — give a clear, prominent CTA so the user doesn't stare
+    // at empty space wondering what to do.
+    var hero = document.createElement('div');
+    hero.className = 'empty-state-hero';
+    hero.innerHTML =
+      '<div class="empty-state-icon" aria-hidden="true">⌨</div>' +
+      '<div class="empty-state-title">Welcome to Claudes</div>' +
+      '<div class="empty-state-subtitle">Multi-pane terminal for running Claude Code side-by-side.</div>' +
+      '<button class="empty-state-cta" id="empty-state-add-project">+ Add your first project</button>' +
+      '<div class="empty-state-shortcuts">Tip: press <kbd>?</kbd> any time to see shortcuts.</div>';
+    empty.appendChild(hero);
+    setTimeout(function () {
+      var btn = document.getElementById('empty-state-add-project');
+      if (btn) btn.addEventListener('click', function () {
+        var addBtn = document.getElementById('btn-add-project');
+        if (addBtn) addBtn.click();
+      });
+    }, 0);
+  }
   columnsContainer.appendChild(empty);
 }
 
@@ -2866,37 +3682,88 @@ function createColumnHeader(id, customTitle, opts) {
 
     var effortSelect = document.createElement('select');
     effortSelect.className = 'col-effort';
-    effortSelect.title = 'Effort level';
-    effortSelect.innerHTML = '<option value="">Effort</option><option value="low">Low</option><option value="medium">Med</option><option value="high">High</option>';
-    effortSelect.addEventListener('change', function () {
-      if (effortSelect.value) {
-        wsSend({ type: 'write', id: id, data: '/config set effort ' + effortSelect.value + '\n' });
-      }
+    effortSelect.title = 'Effort level — launched with --effort. To change mid-session, click to open the interactive /effort picker (Claude Code has no non-interactive way to change effort after spawn).';
+    effortSelect.innerHTML = '<option value="">Effort</option><option value="low">Low</option><option value="medium">Med</option><option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option>';
+    // Mid-session effort changes can only be made via the interactive /effort
+    // picker — there's no non-interactive setter. Open the picker and let the
+    // user finish there. Reset the dropdown to its prior value since we can't
+    // know what the user actually picked.
+    effortSelect.addEventListener('mousedown', function (e) {
+      e.stopPropagation();
+      e.preventDefault();
+      wsSend({ type: 'write', id: id, data: '/effort\n' });
+      effortSelect.blur();
     });
-    effortSelect.addEventListener('mousedown', function (e) { e.stopPropagation(); });
 
     actions.appendChild(compactBtn);
     actions.appendChild(teleportBtn);
     actions.appendChild(effortSelect);
   }
 
-  var maximizeBtn = document.createElement('span');
-  maximizeBtn.className = 'col-maximize';
-  maximizeBtn.title = 'Maximize';
-  maximizeBtn.textContent = '\u25A1';
-  maximizeBtn.addEventListener('click', function () {
-    toggleMaximizeColumn(id);
-  });
-  actions.appendChild(maximizeBtn);
-
   if (!opts.isDiff) {
+    var deltaPill = document.createElement('span');
+    deltaPill.className = 'col-delta-pill';
+    deltaPill.dataset.colDelta = '';
+    deltaPill.setAttribute('hidden', '');
+    deltaPill.textContent = 'Δ —';
+    actions.appendChild(deltaPill);
+
+    var ctxMeter = document.createElement('div');
+    ctxMeter.className = 'col-ctx-meter';
+    ctxMeter.dataset.colCtx = '';
+    ctxMeter.setAttribute('hidden', '');
+    ctxMeter.title = 'Context window usage';
+    var ctxFill = document.createElement('div');
+    ctxFill.className = 'col-ctx-fill';
+    var ctxText = document.createElement('span');
+    ctxText.className = 'col-ctx-text';
+    ctxMeter.appendChild(ctxFill);
+    ctxMeter.appendChild(ctxText);
+    actions.appendChild(ctxMeter);
+
     var restartBtn = document.createElement('span');
     restartBtn.className = 'col-restart';
     restartBtn.dataset.id = String(id);
     restartBtn.title = 'Restart';
-    restartBtn.textContent = '\u21bb';
+    restartBtn.textContent = '↻';
     actions.appendChild(restartBtn);
+
+    // Clear scrollback — saves typing `clear` when triaging long sessions.
+    var clearBtn = document.createElement('span');
+    clearBtn.className = 'col-clear';
+    clearBtn.dataset.id = String(id);
+    clearBtn.title = 'Clear terminal';
+    clearBtn.textContent = '⌫';
+    clearBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var c = allColumns.get(id);
+      if (c && c.terminal) c.terminal.clear();
+    });
+    actions.appendChild(clearBtn);
+
+    // Recent sessions picker — opens a small floating menu of the project's
+    // most-recent sessions; clicking one swaps this column to that session
+    // via restartColumn().
+    var sessionsBtn = document.createElement('span');
+    sessionsBtn.className = 'col-sessions';
+    sessionsBtn.dataset.id = String(id);
+    sessionsBtn.title = 'Switch to a recent session';
+    sessionsBtn.textContent = '⏳';
+    sessionsBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      showColumnSessionPicker(id, e.clientX, e.clientY);
+    });
+    actions.appendChild(sessionsBtn);
   }
+
+  var maximizeBtn = document.createElement('span');
+  maximizeBtn.className = 'col-maximize';
+  maximizeBtn.title = 'Maximize';
+  maximizeBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" rx="1"/></svg>';
+  maximizeBtn.addEventListener('click', function () {
+    toggleMaximizeColumn(id);
+  });
+  actions.appendChild(maximizeBtn);
 
   var closeBtn = document.createElement('span');
   closeBtn.className = 'col-close';
@@ -3145,8 +4012,21 @@ function createExitOverlay(id, exitCode, col) {
     wsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
+    // Run-tab launches: the previous exit fired refreshRunConfigs and set the
+    // config row back to "stopped". Now that we've re-spawned the same column
+    // (col.cmd / customTitle unchanged → findRunningColumn matches again),
+    // refresh so the UI flips back to the playing/stop state. Without this
+    // the user's only signal that the restart worked is terminal output.
+    if (col.cmd) setTimeout(refreshRunConfigs, 300);
   });
-  closeBtn.addEventListener('click', function () { removeColumn(id); });
+  closeBtn.addEventListener('click', function () {
+    var hadCmd = !!col.cmd;
+    removeColumn(id);
+    // Sync the run tab — without this, closing a finished run leaves the
+    // config showing as "playing" (the column was the only thing pinning
+    // findRunningColumn's result, and removeColumn doesn't itself notify).
+    if (hadCmd) setTimeout(refreshRunConfigs, 0);
+  });
 
   overlay.appendChild(msg);
   overlay.appendChild(restartBtn);
@@ -3195,8 +4075,69 @@ function addColumn(args, targetRow, opts) {
   col.dataset.id = String(id);
 
   var header = createColumnHeader(id, opts.title);
+
+  // Drop a banner above the terminal so the user can see at a glance which
+  // backend each column is talking to. Two flavours:
+  //   - Orange "Local" banner when an endpoint preset is active, with a
+  //     capability caveat (the prompt-caching warning claude prints on
+  //     startup gets drowned out by claude's own UI redraws; this banner
+  //     stays visible).
+  //   - Green "Cloud" banner when no preset is active, only shown if the
+  //     user has at least one preset configured (so cloud-only users don't
+  //     get a banner cluttering every column).
+  var endpointBanner = null;
+  var hasLocalEnv = opts.env && opts.env.ANTHROPIC_BASE_URL;
+  if (hasLocalEnv) {
+    var preset = currentEndpointId
+      ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
+      : null;
+    var presetName = preset ? preset.name : 'Local endpoint';
+    // Banner shows the model the column was *actually* spawned with — read
+    // it from the env block rather than the preset's default, so per-spawn
+    // model overrides surface correctly.
+    var presetModel = opts.env.ANTHROPIC_MODEL || (preset && preset.model) || 'unknown';
+    endpointBanner = document.createElement('div');
+    endpointBanner.className = 'endpoint-banner endpoint-banner--local';
+    endpointBanner.innerHTML =
+      '<span class="endpoint-banner-tag endpoint-banner-tag--local">Local</span>' +
+      '<span class="endpoint-banner-name">' + escapeHtml(presetName) + '</span>' +
+      '<span class="endpoint-banner-sep">·</span>' +
+      '<span class="endpoint-banner-model">' + escapeHtml(presetModel) + '</span>' +
+      '<span class="endpoint-banner-caveat">Suitable for simple bug fixes and investigation only</span>';
+  } else if (endpointPresets.length > 0 && !opts.cmd) {
+    // Only show cloud banner if user has presets configured (otherwise it's
+    // noise) and only for actual claude columns (not custom-cmd columns).
+    endpointBanner = document.createElement('div');
+    endpointBanner.className = 'endpoint-banner endpoint-banner--cloud';
+    endpointBanner.innerHTML =
+      '<span class="endpoint-banner-tag endpoint-banner-tag--cloud">Cloud</span>' +
+      '<span class="endpoint-banner-name">Anthropic</span>' +
+      '<span class="endpoint-banner-caveat">Suitable for any tasks</span>';
+  }
+
   var termWrapper = document.createElement('div');
   termWrapper.className = 'terminal-wrapper';
+
+  // Accept drops from the Explorer file tree. The dragstart handler stores the
+  // path in application/x-claudes-file; we write the path (quoted if it
+  // contains whitespace) into the pty. No effect for general HTML drag types,
+  // so DOM drag-and-drop elsewhere keeps working.
+  termWrapper.addEventListener('dragover', function (e) {
+    if (!e.dataTransfer) return;
+    var types = e.dataTransfer.types;
+    if (types && Array.prototype.indexOf.call(types, 'application/x-claudes-file') >= 0) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  });
+  termWrapper.addEventListener('drop', function (e) {
+    if (!e.dataTransfer) return;
+    var raw = e.dataTransfer.getData('application/x-claudes-file');
+    if (!raw) return;
+    e.preventDefault();
+    var quoted = /\s/.test(raw) ? '"' + raw + '"' : raw;
+    wsSend({ type: 'write', id: id, data: quoted });
+  });
 
   // Scroll-to-bottom button
   var scrollBtn = document.createElement('button');
@@ -3211,24 +4152,116 @@ function addColumn(args, targetRow, opts) {
     }
   });
 
+  // In-terminal find overlay (Ctrl/Cmd+F). Built once per column; hidden by
+  // default. Wired below once SearchAddon is loaded.
+  var searchOverlay = document.createElement('div');
+  searchOverlay.className = 'term-search-overlay hidden';
+  searchOverlay.innerHTML =
+    '<input type="text" class="term-search-input" placeholder="Find..." autocomplete="off" spellcheck="false">' +
+    '<span class="term-search-count">0/0</span>' +
+    '<button type="button" class="term-search-btn term-search-prev" title="Previous (Shift+Enter)">↑</button>' +
+    '<button type="button" class="term-search-btn term-search-next" title="Next (Enter)">↓</button>' +
+    '<button type="button" class="term-search-btn term-search-close" title="Close (Esc)">✕</button>';
+  termWrapper.appendChild(searchOverlay);
+
   col.appendChild(header);
+  if (endpointBanner) col.appendChild(endpointBanner);
   col.appendChild(termWrapper);
   col.appendChild(scrollBtn);
+
+  // Default the effort dropdown immediately so the visible state matches the
+  // auto-injected slash command that fires later in detectSession. Without
+  // this, the dropdown shows the empty placeholder for ~3s after spawn —
+  // looks like it ignored the change. Per-class defaults are user-configurable
+  // in the spawn options panel (defaultEffortCloud/Local).
+  if (hasLocalEnv) {
+    var effortDropdown = col.querySelector('.col-effort');
+    if (effortDropdown) effortDropdown.value = defaultEffortLocal;
+  } else if (!opts.cmd) {
+    var effortDropdownCloud = col.querySelector('.col-effort');
+    if (effortDropdownCloud) effortDropdownCloud.value = defaultEffortCloud;
+  }
   setupColumnDropTarget(col);
   row.el.appendChild(col);
 
+  // Layer user-chosen colours (if non-default) on top of the active theme so
+  // theme switching still works for any prop the user didn't override.
+  var themeForThisCol = termTheme;
+  var overrides = {};
+  if (termSettings && termSettings.background && termSettings.background !== '#1a1a2e') overrides.background = termSettings.background;
+  if (termSettings && termSettings.foreground && termSettings.foreground !== '#e0e0e0') overrides.foreground = termSettings.foreground;
+  if (Object.keys(overrides).length) themeForThisCol = Object.assign({}, termTheme, overrides);
   var terminal = new Terminal({
-    theme: termTheme,
-    fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
+    theme: themeForThisCol,
+    // Per-platform font fallback: Cascadia/Consolas exist on Windows; JetBrains
+    // Mono / Menlo on macOS; DejaVu Sans Mono / Liberation Mono on most Linux
+    // distros. The closing 'monospace' is a guaranteed final fallback. A user
+    // setting takes precedence when set.
+    fontFamily: (termSettings && termSettings.fontFamily) ||
+      "'Cascadia Code', 'Consolas', 'JetBrains Mono', 'Menlo', 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New', monospace",
     fontSize: fontSize,
+    scrollback: (termSettings && termSettings.scrollback) || 5000,
+    cursorStyle: (termSettings && termSettings.cursorStyle) || 'block',
     cursorBlink: true,
     allowProposedApi: true
   });
 
   var fitAddon = new FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
+  var searchAddon = null;
+  try {
+    if (typeof SearchAddon !== 'undefined' && SearchAddon.SearchAddon) {
+      searchAddon = new SearchAddon.SearchAddon();
+      terminal.loadAddon(searchAddon);
+    }
+  } catch (e) { /* addon optional */ }
+  try {
+    if (typeof WebLinksAddon !== 'undefined' && WebLinksAddon.WebLinksAddon) {
+      terminal.loadAddon(new WebLinksAddon.WebLinksAddon(function (event, uri) {
+        if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal(uri);
+      }));
+    }
+  } catch (e) { /* addon optional */ }
   terminal.open(termWrapper);
   try { terminal.loadAddon(new WebglAddon.WebglAddon()); } catch (e) { console.warn('WebGL addon failed, using canvas renderer:', e); }
+
+  // File:line link provider — clicking e.g. `src/foo.js:42` (or an absolute
+  // path) opens the file in the inline editor, focused on that line. Skipped
+  // when the terminal is hosting a custom command (cmd) since the matched
+  // text may not refer to a local file.
+  if (terminal.registerLinkProvider) {
+    try {
+      var fileLineRe = /(?:^|[\s"'`(\[<])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[\\/])?[\w.\-+]+(?:[\\/][\w.\-+]+)*)\s*:(\d+)(?::(\d+))?/g;
+      terminal.registerLinkProvider({
+        provideLinks: function (lineNo, callback) {
+          var line = terminal.buffer.active.getLine(lineNo - 1);
+          if (!line) return callback(undefined);
+          var text = line.translateToString(true);
+          var links = [];
+          var m;
+          fileLineRe.lastIndex = 0;
+          while ((m = fileLineRe.exec(text)) !== null) {
+            // Skip matches that look like ratios (e.g. "1:1000" inside word context)
+            var p = m[1]; var ln = m[2];
+            if (!p || p.length > 260) continue;
+            var startCol = m.index + (m[0].length - p.length - (':' + ln + (m[3] ? ':' + m[3] : '')).length) + 1;
+            var range = {
+              start: { x: startCol, y: lineNo },
+              end:   { x: startCol + p.length + (':' + ln).length + (m[3] ? ':' + m[3] : '').length - 1, y: lineNo }
+            };
+            links.push({
+              range: range,
+              text: p + ':' + ln + (m[3] ? ':' + m[3] : ''),
+              activate: (function (relPath, lineN) {
+                return function () { openFileAtLine(relPath, parseInt(lineN, 10)); };
+              })(p, ln)
+            });
+          }
+          callback(links.length ? links : undefined);
+        }
+      });
+    } catch (e) { /* link provider optional */ }
+  }
 
   // Show/hide scroll-to-bottom button based on scroll position
   terminal.onScroll(function () {
@@ -3241,10 +4274,19 @@ function addColumn(args, targetRow, opts) {
     }
   });
 
-  // Handle Ctrl+V paste and Shift+Enter newline
+  // Handle Cmd/Ctrl+V paste and Shift+Enter newline
   terminal.attachCustomKeyEventHandler(function (e) {
-    // Ctrl+V: paste from clipboard
-    if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key === 'v') {
+    // Cmd/Ctrl+F: open the column's in-terminal find overlay. We intercept it
+    // here (rather than relying on the document-level keydown) because xterm
+    // consumes the keystroke before the bubble-phase listener sees it.
+    if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      var c = allColumns.get(id);
+      if (c && typeof c._showSearch === 'function') c._showSearch();
+      return false;
+    }
+    // Cmd/Ctrl+V: paste from clipboard
+    if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && e.key === 'v') {
       e.preventDefault();
       window.electronAPI.clipboardReadText().then(function (text) {
         if (text) {
@@ -3253,8 +4295,8 @@ function addColumn(args, targetRow, opts) {
       });
       return false;
     }
-    // Ctrl+Shift+V: also paste
-    if (e.type === 'keydown' && e.ctrlKey && e.shiftKey && e.key === 'V') {
+    // Cmd/Ctrl+Shift+V: also paste
+    if (e.type === 'keydown' && cmdOrCtrl(e) && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
       e.preventDefault();
       window.electronAPI.clipboardReadText().then(function (text) {
         if (text) {
@@ -3263,19 +4305,23 @@ function addColumn(args, targetRow, opts) {
       });
       return false;
     }
-    // Ctrl+C: copy selection if there is one, otherwise send SIGINT
-    if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key === 'c') {
+    // Copy: Cmd+C on darwin always (no SIGINT semantics for Cmd+C), Ctrl+C
+    // on others — copy when there's a selection, otherwise pass through so
+    // xterm forwards the SIGINT.
+    if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && e.key === 'c') {
       var sel = terminal.getSelection();
       if (sel) {
         window.electronAPI.clipboardWriteText(sel);
         terminal.clearSelection();
         return false;
       }
-      // No selection — let xterm send SIGINT as normal
-      return true;
+      // No selection — on darwin swallow (Cmd+C with no selection is a no-op,
+      // we don't want to insert a literal 'c'). On other platforms, let xterm
+      // send SIGINT as normal.
+      return !IS_DARWIN;
     }
     // Shift+Enter: send CSI u sequence so Claude CLI sees it as newline
-    if (e.type === 'keydown' && e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'Enter') {
+    if (e.type === 'keydown' && e.shiftKey && !cmdOrCtrl(e) && !e.altKey && e.key === 'Enter') {
       e.preventDefault();
       // CSI u encoding: ESC [ 13 ; 2 u  (keycode 13, modifier 2=Shift)
       wsSend({ type: 'write', id: id, data: '\x1b[13;2u' });
@@ -3296,6 +4342,13 @@ function addColumn(args, targetRow, opts) {
     fitAddon.fit();
     if (opts.reattachPtyId != null) {
       // Pty already exists in pty-server — just rebind it to this window's WS.
+      // Claude CLI hides xterm's cursor at startup via DECTCEM (\e[?25l) and
+      // enables focus reporting via \e[?1004h so it can animate its own
+      // block cursor only on the focused terminal. Reattach creates a fresh
+      // xterm with both modes at defaults, but running Claude won't re-send
+      // the init sequences — re-apply them here so the reattached terminal
+      // matches what Claude expects.
+      terminal.write('\x1b[?25l\x1b[?1004h');
       wsSend({ type: 'reattach', id: id, cols: terminal.cols, rows: terminal.rows });
       return;
     }
@@ -3317,15 +4370,60 @@ function addColumn(args, targetRow, opts) {
   });
 
   terminal.onData(function (data) {
+    if (handleSnippetExpansion(id, data)) return;  // consumed by snippet expansion
     wsSend({ type: 'write', id: id, data: data });
     var c = allColumns.get(id);
     if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
       c.lastInputAt = Date.now();
+      // Stop attention flash when the user types — clearly they're responding
+      if (c.activityState === 'attention') {
+        c.hasUserInput = false;
+        c.notified = true;
+        if (c.headerEl) c.headerEl.classList.remove('attention-flash');
+        var projKey = c.projectKey;
+        if (projKey) {
+          var sidebarItem = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(projKey) + '"]');
+          if (sidebarItem && sidebarItem.classList.contains('attention-flash')) {
+            var otherFlashing = false;
+            allColumns.forEach(function (other) {
+              if (other !== c && other.projectKey === projKey && other.headerEl &&
+                  other.headerEl.classList.contains('attention-flash')) {
+                otherFlashing = true;
+              }
+            });
+            if (!otherFlashing) {
+              projectsNeedingAttention.delete(projKey);
+              sidebarItem.classList.remove('attention-flash');
+            }
+          }
+        }
+        // Stop taskbar flash too (only if window is focused — clicking already stops it)
+        if (window.electronAPI && window.electronAPI.stopFlashFrame && document.hasFocus()) {
+          window.electronAPI.stopFlashFrame();
+        }
+      }
       // Only set hasUserInput when user actually submits (Enter key = \r or \n)
       // Not on typing/pasting, which happens before submission
       if (data.indexOf('\r') !== -1 || data.indexOf('\n') !== -1) {
+        if (!c.hasUserInput && !c.contextEnabled) {
+          // First submission on a brand-new column — enable the ctx meter
+          // and lock a `since` timestamp so the synthetic system-prompt
+          // assistant entry Claude wrote at startup is filtered out.
+          c.contextEnabled = true;
+          c.contextSinceMs = Date.now();
+        }
         c.hasUserInput = true;
         c.notified = false;
+        // Snap Clawd to thinking immediately on submit. UserPromptSubmit
+        // hooks usually arrive within a few ms, but on freshly-spawned
+        // columns the sessionId mapping may not be resolved yet so the
+        // hook lands in the orphan bucket. This is a direct, race-free
+        // path because we *know* the user just submitted. (Column id is
+        // the closure variable `id`; the column object itself has no
+        // `id` property — Map key only.)
+        if (window.Clawd && window.Clawd.setColumnAnimation) {
+          window.Clawd.setColumnAnimation(id, 'thinking');
+        }
       }
     }
   });
@@ -3362,11 +4460,22 @@ function addColumn(args, targetRow, opts) {
   for (var ai = 0; ai < claudeArgs.length - 1; ai++) {
     if (claudeArgs[ai] === '--resume') { resumeSessionId = claudeArgs[ai + 1]; break; }
   }
+  // Detect the model from --model flag or ANTHROPIC_MODEL env, so the ctx meter
+  // can pick the correct limit (200k vs 1M). Falls back to 'sonnet' (200k).
+  var detectedModel = null;
+  for (var mi = 0; mi < claudeArgs.length - 1; mi++) {
+    if (claudeArgs[mi] === '--model') { detectedModel = claudeArgs[mi + 1]; break; }
+  }
+  if (!detectedModel && opts.env && opts.env.ANTHROPIC_MODEL) {
+    detectedModel = opts.env.ANTHROPIC_MODEL;
+  }
 
   var colData = {
     element: col,
     terminal: terminal,
     fitAddon: fitAddon,
+    searchAddon: searchAddon,
+    searchOverlay: searchOverlay,
     headerEl: header,
     cwd: cwd,
     cwdSource: opts.cwdSource || null,
@@ -3387,6 +4496,7 @@ function addColumn(args, targetRow, opts) {
     customTitle: opts.title || null,
     cmd: cmd,
     cmdArgs: claudeArgs,
+    model: detectedModel,    // for ctx meter limit (200k vs 1M)
     env: opts.env || null,
     launchUrl: opts.launchUrl || null,
     launchUrlOpened: false,
@@ -3399,7 +4509,26 @@ function addColumn(args, targetRow, opts) {
     pipelineResizeObserver: null,
     bannerTail: '',
     bannerEverMatched: false,
-    bannerDriftWarned: false
+    bannerDriftWarned: false,
+    spawnSessionPct: null,    // (unused) five_hour.utilization at spawn — kept for backward compat
+    spawnWeeklyPct: null,     // (unused) reserved
+    spawnSessionTokens: null, // context-token count at spawn — set on first ctx poll
+    // For resumed columns the meter is enabled immediately so the existing
+    // context is shown. For brand-new columns it stays disabled until the
+    // user actually submits — Claude CLI writes a synthetic assistant entry
+    // with the system-prompt + CLAUDE.md usage at startup (~40k+) whose
+    // timestamp lands just after spawn, so a pure timestamp filter doesn't
+    // suppress it. Gating on real user interaction does.
+    contextEnabled: !!resumeSessionId,
+    contextSinceMs: null,
+    deltaSessionEl: null,     // header element, captured below
+    ctxMeterEl: null,
+    ctxFillEl: null,
+    ctxTextEl: null,
+    ctxPollTimer: null,
+    snippetBuffer: '',  // accumulates printable chars to detect "\\trigger" patterns
+    endpointId: opts.endpointId || (typeof currentEndpointId !== 'undefined' ? currentEndpointId : null) || null,
+    failedOver: false  // set true after one failover so we don't ping-pong
   };
 
   // Wire up ResizeObserver for compact-mode toggling on the pipeline strip.
@@ -3425,14 +4554,36 @@ function addColumn(args, targetRow, opts) {
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
+  attachTerminalSearchOverlay(colData);
+  colData.deltaSessionEl = header.querySelector('[data-col-delta]');
+  colData.ctxMeterEl = header.querySelector('[data-col-ctx]');
+  colData.ctxFillEl = colData.ctxMeterEl ? colData.ctxMeterEl.querySelector('.col-ctx-fill') : null;
+  colData.ctxTextEl = colData.ctxMeterEl ? colData.ctxMeterEl.querySelector('.col-ctx-text') : null;
+  startContextMeterPoll(id);
   setFocusedColumn(id);
+  if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
+    var d0 = lastPlanLimitsResult.data;
+    colData.spawnSessionPct = d0.five_hour ? d0.five_hour.utilization : null;
+    colData.spawnWeeklyPct = d0.seven_day ? d0.seven_day.utilization : null;
+  }
   refitAll();
   saveColumnCounts();
   updateProjectBadges();
 
+  // Render delta pill immediately (shows Δ 0.0% right away if we have data)
+  if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
+    updateColumnDeltaPills(lastPlanLimitsResult.data);
+  }
+
   // Auto-fetch title from session if resuming without a saved title
   if (resumeSessionId && !opts.title && !cmd) {
     fetchAndSetSessionTitle(id, cwd, resumeSessionId);
+  }
+
+  // Start the Clawd JSONL tail for resumed sessions — for fresh spawns this
+  // kicks in once detectSession discovers the new sessionId.
+  if (resumeSessionId && !cmd) {
+    ensureClawdTail(id);
   }
 
   // Start periodic session sync for Claude columns (not custom commands)
@@ -3447,7 +4598,7 @@ function addRow() {
   if (!state) return;
 
   var row = addRowToProject(state);
-  addColumn(null, row);
+  addColumn(null, row, spawnOpts());
 }
 
 // ============================================================
@@ -4357,6 +5508,85 @@ function renderSplitDiff(container, parsed) {
   rightPanel.addEventListener('scroll', function () { leftPanel.scrollTop = rightPanel.scrollTop; });
 }
 
+// ---------- Clawd: drive per-column animation from real session activity ----------
+// Tool → animation map. Started from clawd-tank/host/clawd_tank_daemon/daemon.py's
+// TOOL_ANIMATION_MAP and expanded so under-used Claude Code tools land on
+// distinct animations instead of all falling back to 'typing'.
+var CLAWD_TOOL_ANIMATIONS = {
+  // file edits → typing
+  'edit': 'typing', 'write': 'typing', 'notebookedit': 'typing', 'multiedit': 'typing',
+  'todowrite': 'typing',
+  // file reads / search → debugger
+  'read': 'debugger', 'grep': 'debugger', 'glob': 'debugger', 'ls': 'debugger',
+  // shell execution → building
+  'bash': 'building', 'bashoutput': 'building',
+  // tearing things down → pushing (visually distinct from starting them up)
+  'killshell': 'pushing', 'killbash': 'pushing',
+  // orchestration → conducting
+  'agent': 'conducting', 'task': 'conducting',
+  // web access → wizard
+  'websearch': 'wizard', 'webfetch': 'wizard',
+  // skill / slash-command invocation → juggling (busy, many-balls feel)
+  'skill': 'juggling', 'slashcommand': 'juggling',
+  // plan mode → wake (Claude "wakes up" out of plan mode into action)
+  'exitplanmode': 'wake',
+  // LSP / language server → beacon
+  'lsp': 'beacon',
+  // notebook execution / IDE bridge → sweeping for cleanup-style work
+  'notebookrun': 'sweeping',
+};
+
+function clawdAnimationForTool(toolName) {
+  if (!toolName) return 'typing';
+  var key = String(toolName).toLowerCase();
+  if (CLAWD_TOOL_ANIMATIONS[key]) return CLAWD_TOOL_ANIMATIONS[key];
+  // MCP server calls and IDE/MCP bridges → beacon (off-process comms)
+  if (key.indexOf('mcp__') === 0) return 'beacon';
+  if (key.indexOf('plugin_') === 0 || key.indexOf('plugin__') === 0) return 'beacon';
+  // Read-shaped tools we don't know yet → default to debugger so they don't
+  // collapse onto 'typing' alongside Edit/Write.
+  if (key.indexOf('search') !== -1 || key.indexOf('find') !== -1 || key.indexOf('list') !== -1) return 'debugger';
+  // Write-shaped tools we don't know yet stay on typing.
+  return 'typing';
+}
+
+// Translate session-state → animation, following clawd-tank's
+// _compute_display_state mapping.
+function applyClawdEvent(columnId, evt) {
+  if (!window.Clawd || !window.Clawd.setColumnAnimation) return;
+  var animId = null;
+  if (evt.kind === 'working') animId = clawdAnimationForTool(evt.tool);
+  else if (evt.kind === 'thinking') animId = 'thinking';
+  else if (evt.kind === 'confused') animId = 'confused';
+  else if (evt.kind === 'error') animId = 'dizzy';
+  else if (evt.kind === 'idle') animId = 'idle';
+  if (window.Clawd.logJsonlEvent) {
+    window.Clawd.logJsonlEvent({ col: columnId, kind: evt.kind, tool: evt.tool || '', anim: animId });
+  }
+  if (animId) window.Clawd.setColumnAnimation(columnId, animId);
+}
+
+if (window.electronAPI && window.electronAPI.onClawdEvent) {
+  window.electronAPI.onClawdEvent(function (data) {
+    if (!data || data.columnId == null) return;
+    var col = allColumns.get(data.columnId);
+    if (!col) return;
+    applyClawdEvent(data.columnId, data);
+  });
+}
+
+// Idempotent: start the tail for a column's current sessionId. If we already
+// had a tail running for an older sessionId, stop it first. Safe to call as
+// often as we like — called on every assignment site.
+function ensureClawdTail(columnId) {
+  if (!window.electronAPI || !window.electronAPI.clawdStartTail) return;
+  var col = allColumns.get(columnId);
+  if (!col || !col.sessionId || !col.projectKey) return;
+  if (col.clawdTailSessionId === col.sessionId) return;
+  col.clawdTailSessionId = col.sessionId;
+  window.electronAPI.clawdStartTail(columnId, col.projectKey, col.sessionId);
+}
+
 function fetchAndSetSessionTitle(columnId, projectPath, sessionId) {
   if (!window.electronAPI || !window.electronAPI.getSessionTitle) return;
   var col = allColumns.get(columnId);
@@ -4385,16 +5615,21 @@ function getClaimedSessionIds(excludeColumnId) {
 
 // Detect which session ID was created by a newly spawned Claude
 function detectSession(columnId, projectPath, preExistingIds, attempt) {
-  if (attempt > 15) return;
+  if (attempt > 15) {
+    console.log('[detectSession] col=' + columnId + ' GAVE UP after 15 attempts. preIds count=' + Object.keys(preExistingIds).length);
+    return;
+  }
   setTimeout(function () {
     window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
       var claimed = getClaimedSessionIds(columnId);
+      console.log('[detectSession] col=' + columnId + ' attempt=' + attempt + ' projectPath=' + projectPath + ' got ' + sessions.length + ' sessions, ' + Object.keys(preExistingIds).length + ' preIds, ' + Object.keys(claimed).length + ' claimed');
       for (var i = 0; i < sessions.length; i++) {
         var sid = sessions[i].sessionId;
         if (!preExistingIds[sid] && !claimed[sid]) {
           var col = allColumns.get(columnId);
           if (col) {
             var oldSid = col.sessionId;
+            console.log('[detectSession] col=' + columnId + ' MATCHED sessionId=' + sid);
             col.sessionId = sid;
             col.sessionMtime = sessions[i].modified || 0;
             if (window.electronAPI && window.electronAPI.migrateReviewCommentsForColumn && col.element) {
@@ -4403,6 +5638,18 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
             }
             persistSessions(col.projectKey, col.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
+            ensureClawdTail(columnId);
+            // Effort is now set at spawn via --effort (the only non-interactive
+            // mechanism — /config set effort doesn't exist and /effort opens
+            // an interactive picker). Just sync the column header dropdown
+            // visual to whatever default this column was launched with so the
+            // tab honestly reflects what claude is running on.
+            if (!col.effortApplied) {
+              var isLocal = col.env && col.env.ANTHROPIC_BASE_URL;
+              col.effortApplied = true;
+              var effortEl = col.element && col.element.querySelector('.col-effort');
+              if (effortEl) effortEl.value = isLocal ? defaultEffortLocal : defaultEffortCloud;
+            }
           }
           return;
         }
@@ -4463,6 +5710,7 @@ function startSessionSync(columnId, projectPath) {
               }
               persistSessions(col2.projectKey, col2.workspaceId);
               fetchAndSetSessionTitle(columnId, projectPath, s.sessionId);
+              ensureClawdTail(columnId);
               return;
             }
           }
@@ -4483,6 +5731,7 @@ function startSessionSync(columnId, projectPath) {
             }
             persistSessions(col2.projectKey, col2.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
+            ensureClawdTail(columnId);
             return;
           }
         }
@@ -4607,6 +5856,10 @@ function persistSessions(projectKey, workspaceId) {
           var serializedPipe = PipelineMatcherAPI.serializePipeline(col2.pipeline);
           if (serializedPipe) entry.pipeline = serializedPipe;
         }
+        // Persist endpoint association so restored columns come back on the
+        // same local endpoint (LM Studio, Ollama, etc.) instead of defaulting
+        // to whatever the global Spawn dropdown is currently pointing at.
+        if (col2.endpointId) entry.endpointId = col2.endpointId;
         rowEntries.push(entry);
       }
 
@@ -4682,6 +5935,7 @@ function removeColumn(id) {
     try { col.pipelineResizeObserver.disconnect(); } catch (e) { /* ignore */ }
     col.pipelineResizeObserver = null;
   }
+  stopContextMeterPoll(id);
 
   if (!col.isDiff) wsSend({ type: 'kill', id: id });
 
@@ -4828,6 +6082,14 @@ function restartColumn(id) {
   // Kill the current process
   wsSend({ type: 'kill', id: id });
 
+  // Reset the per-column delta baseline so the Δ pill measures from this respawn,
+  // not from the original spawn. The next ctx poll repopulates spawnSessionTokens.
+  col.spawnSessionTokens = null;
+  if (col.deltaSessionEl) col.deltaSessionEl.setAttribute('hidden', '');
+
+  // Hide the context meter — the new session's first poll will repopulate it.
+  if (col && col.ctxMeterEl) col.ctxMeterEl.setAttribute('hidden', '');
+
   // Remove any existing exit overlay
   var overlay = col.element.querySelector('.exit-overlay');
   if (overlay) overlay.remove();
@@ -4847,6 +6109,58 @@ function restartColumn(id) {
   setColumnActivity(id, 'working');
 }
 
+function tryEndpointFailover(colId) {
+  var col = allColumns.get(colId);
+  if (!col || col.failedOver) return;
+  if (!window.electronAPI || !window.electronAPI.endpointGet || !window.electronAPI.endpointGetEnv) return;
+  window.electronAPI.endpointGet(col.endpointId).then(function (preset) {
+    if (!preset || !preset.fallbackId) {
+      // No fallback configured — fall through to the normal exit overlay path.
+      col.element.appendChild(createExitOverlay(colId, null, col));
+      setColumnActivity(colId, 'exited');
+      return;
+    }
+    return window.electronAPI.endpointGetEnv(preset.fallbackId).then(function (envBlock) {
+      if (!envBlock) {
+        col.element.appendChild(createExitOverlay(colId, null, col));
+        setColumnActivity(colId, 'exited');
+        return;
+      }
+      col.failedOver = true;
+      col.endpointId = preset.fallbackId;
+      col.env = envBlock;
+
+      // Header badge
+      if (col.headerEl && !col.headerEl.querySelector('.col-failover-badge')) {
+        var badge = document.createElement('span');
+        badge.className = 'col-failover-badge';
+        badge.textContent = '↺ failover';
+        badge.title = 'Auto-failed-over to ' + preset.fallbackId;
+        col.headerEl.appendChild(badge);
+      }
+
+      // Re-create the pty with the same column id and the fallback env.
+      // Reuse existing args (--resume sessionId if present) so the user keeps their place.
+      try { col.terminal.clear(); } catch (e) {}
+      col.fitAddon.fit();
+      var respawnMsg = {
+        type: 'create',
+        id: colId,
+        cols: col.terminal.cols,
+        rows: col.terminal.rows,
+        cwd: col.cwd,
+        args: col.sessionId ? ['--resume', col.sessionId] : (col.cmdArgs || [])
+      };
+      respawnMsg.env = envBlock;
+      wsSend(respawnMsg);
+      setColumnActivity(colId, 'working');
+    });
+  }).catch(function () {
+    col.element.appendChild(createExitOverlay(colId, null, col));
+    setColumnActivity(colId, 'exited');
+  });
+}
+
 function setFocusedColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
@@ -4860,6 +6174,9 @@ function setFocusedColumn(id) {
   state.focusedColumnId = id;
   col.element.classList.add('focused');
   if (col.terminal) col.terminal.focus();
+  if (window.Clawd && typeof window.Clawd.setFocusedColumn === 'function') {
+    window.Clawd.setFocusedColumn(id);
+  }
 
   // Clear attention flash on this column's header
   if (col.headerEl) col.headerEl.classList.remove('attention-flash');
@@ -5031,6 +6348,130 @@ function toggleMaximizeColumn(id) {
   }
   refitAll();
   window.__stickyNotesApplyMaximizeVisibility?.();
+}
+
+// ============================================================
+// Recent sessions picker (per-column header)
+// ============================================================
+
+function showColumnSessionPicker(colId, clientX, clientY) {
+  var col = allColumns.get(colId);
+  if (!col || !window.electronAPI || !window.electronAPI.getRecentSessions) return;
+  // Close any prior picker.
+  var prior = document.querySelector('.col-session-picker');
+  if (prior) prior.remove();
+
+  var menu = document.createElement('div');
+  menu.className = 'col-session-picker project-context-menu';
+  menu.style.left = clientX + 'px';
+  menu.style.top = clientY + 'px';
+  var loading = document.createElement('div');
+  loading.className = 'project-context-item';
+  loading.style.opacity = '0.6';
+  loading.textContent = 'Loading recent sessions…';
+  menu.appendChild(loading);
+  document.body.appendChild(menu);
+
+  function close() { menu.remove(); document.removeEventListener('mousedown', outside, true); }
+  function outside(ev) { if (!menu.contains(ev.target)) close(); }
+  setTimeout(function () { document.addEventListener('mousedown', outside, true); }, 0);
+
+  // Resolve the column's project path from activeProjectKey on the colData.
+  var projectPath = col.projectKey || activeProjectKey;
+  if (!projectPath) { loading.textContent = 'No project for this column.'; return; }
+
+  window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+    while (menu.firstChild) menu.removeChild(menu.firstChild);
+    var others = (sessions || []).filter(function (s) { return s.sessionId !== col.sessionId; });
+    if (others.length === 0) {
+      var none = document.createElement('div');
+      none.className = 'project-context-item';
+      none.style.opacity = '0.6';
+      none.textContent = 'No other recent sessions.';
+      menu.appendChild(none);
+      return;
+    }
+    others.slice(0, 12).forEach(function (s) {
+      var item = document.createElement('div');
+      item.className = 'project-context-item';
+      var when = new Date(s.modified);
+      item.textContent = s.sessionId.slice(0, 8) + '  ·  ' + when.toLocaleString();
+      item.addEventListener('click', function () {
+        // Swap to the chosen session and restart in place.
+        col.sessionId = s.sessionId;
+        restartColumn(colId);
+        close();
+      });
+      menu.appendChild(item);
+      // Title fetch is best-effort — the short id + date is informative enough
+      // on first paint; refine asynchronously when available.
+      window.electronAPI.getSessionTitle(projectPath, s.sessionId).then(function (title) {
+        if (title) item.textContent = (title.length > 60 ? title.slice(0, 60) + '…' : title) + '  ·  ' + when.toLocaleString();
+      }).catch(function () { /* keep id-based label */ });
+    });
+  }).catch(function () {
+    loading.textContent = 'Failed to load sessions.';
+  });
+}
+
+// ============================================================
+// Per-terminal Ctrl/Cmd+F find overlay
+// ============================================================
+
+function attachTerminalSearchOverlay(col) {
+  if (!col || !col.searchOverlay || !col.terminal) return;
+  var overlay = col.searchOverlay;
+  var input = overlay.querySelector('.term-search-input');
+  var countEl = overlay.querySelector('.term-search-count');
+  var prevBtn = overlay.querySelector('.term-search-prev');
+  var nextBtn = overlay.querySelector('.term-search-next');
+  var closeBtn = overlay.querySelector('.term-search-close');
+  var addon = col.searchAddon;
+
+  function show() {
+    overlay.classList.remove('hidden');
+    input.focus();
+    input.select();
+  }
+  function hide() {
+    overlay.classList.add('hidden');
+    if (addon && addon.clearDecorations) addon.clearDecorations();
+    try { col.terminal.focus(); } catch (e) { /* */ }
+  }
+  function search(dir) {
+    var q = input.value;
+    if (!q) { countEl.textContent = '0/0'; if (addon && addon.clearDecorations) addon.clearDecorations(); return; }
+    if (!addon) return;
+    var opts = {
+      decorations: {
+        matchBackground: '#3b82f680',
+        matchBorder: '#60a5fa',
+        matchOverviewRuler: '#60a5fa',
+        activeMatchBackground: '#f59e0b80',
+        activeMatchBorder: '#fbbf24',
+        activeMatchColorOverviewRuler: '#fbbf24'
+      },
+      regex: false,
+      wholeWord: false,
+      caseSensitive: false
+    };
+    var found = dir === -1
+      ? (addon.findPrevious ? addon.findPrevious(q, opts) : false)
+      : (addon.findNext ? addon.findNext(q, opts) : false);
+    countEl.textContent = found ? 'match' : 'no match';
+  }
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { e.preventDefault(); hide(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); search(e.shiftKey ? -1 : 1); return; }
+  });
+  input.addEventListener('input', function () { search(1); });
+  prevBtn.addEventListener('click', function () { search(-1); });
+  nextBtn.addEventListener('click', function () { search(1); });
+  closeBtn.addEventListener('click', hide);
+
+  col._showSearch = show;
+  col._hideSearch = hide;
 }
 
 // ============================================================
@@ -5356,58 +6797,75 @@ window.addEventListener('resize', function () {
   }, 100);
 });
 
+// On Windows, when the OS window loses focus mid-keypress (Alt-Tab, Win+arrow
+// snap, foreground steal), the keyup for held modifiers never reaches xterm's
+// hidden textarea — leaving Space/Shift "stuck" until the user manually
+// refocuses. Bounce the active terminal's focus on every window focus change
+// so xterm's input state resets cleanly.
+window.addEventListener('blur', function () {
+  var state = getActiveState();
+  if (state && state.focusedColumnId !== null) {
+    var col = allColumns.get(state.focusedColumnId);
+    if (col && col.terminal) col.terminal.blur();
+  }
+});
+window.addEventListener('focus', function () {
+  refocusActiveTerminal();
+});
+
 // ============================================================
 // Keyboard Shortcuts
 // ============================================================
 
 document.addEventListener('keydown', function (e) {
-  if (e.ctrlKey && e.shiftKey && e.key === 'T') {
+  var mod = cmdOrCtrl(e);
+  if (mod && e.shiftKey && (e.key === 'T' || e.key === 't')) {
     e.preventDefault();
-    addColumn();
+    addColumn(null, null, spawnOpts());
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'R') {
+  if (mod && e.shiftKey && (e.key === 'R' || e.key === 'r')) {
     e.preventDefault();
     addRow();
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'W') {
+  if (mod && e.shiftKey && (e.key === 'W' || e.key === 'w')) {
     e.preventDefault();
     var state = getActiveState();
     if (state && state.focusedColumnId !== null) removeColumn(state.focusedColumnId);
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowLeft') {
+  if (mod && !e.shiftKey && e.key === 'ArrowLeft') {
     e.preventDefault();
     navigateColumn('left');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowRight') {
+  if (mod && !e.shiftKey && e.key === 'ArrowRight') {
     e.preventDefault();
     navigateColumn('right');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowUp') {
+  if (mod && !e.shiftKey && e.key === 'ArrowUp') {
     e.preventDefault();
     navigateColumn('up');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'ArrowDown') {
+  if (mod && !e.shiftKey && e.key === 'ArrowDown') {
     e.preventDefault();
     navigateColumn('down');
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === 'b') {
+  if (mod && !e.shiftKey && e.key === 'b') {
     e.preventDefault();
     toggleSidebar();
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'E') {
+  if (mod && e.shiftKey && (e.key === 'E' || e.key === 'e')) {
     e.preventDefault();
     toggleExplorer();
     return;
   }
-  if (e.ctrlKey && e.shiftKey && e.key === 'M') {
+  if (mod && e.shiftKey && (e.key === 'M' || e.key === 'm')) {
     e.preventDefault();
     var state = getActiveState();
     if (state && state.focusedColumnId !== null) {
@@ -5415,7 +6873,7 @@ document.addEventListener('keydown', function (e) {
     }
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key >= '1' && e.key <= '9') {
+  if (mod && !e.shiftKey && e.key >= '1' && e.key <= '9') {
     var num = parseInt(e.key);
     var state = getActiveState();
     if (state) {
@@ -5432,20 +6890,34 @@ document.addEventListener('keydown', function (e) {
     }
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && (e.key === '=' || e.key === '+')) {
+  if (mod && !e.shiftKey && (e.key === '=' || e.key === '+')) {
     e.preventDefault();
     changeFontSize(1);
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === '-') {
+  if (mod && !e.shiftKey && e.key === '-') {
     e.preventDefault();
     changeFontSize(-1);
     return;
   }
-  if (e.ctrlKey && !e.shiftKey && e.key === '0') {
+  if (mod && !e.shiftKey && e.key === '0') {
     e.preventDefault();
     resetFontSize();
     return;
+  }
+  // Cmd/Ctrl+F: open in-terminal find. Falls through if any modal-bound
+  // editor handler already consumed it (those run on the textarea, not
+  // document, and stopPropagation in their listeners prevents re-entry here).
+  if (mod && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+    var st = getActiveState();
+    if (st && st.focusedColumnId !== null) {
+      var c = allColumns.get(st.focusedColumnId);
+      if (c && typeof c._showSearch === 'function') {
+        e.preventDefault();
+        c._showSearch();
+        return;
+      }
+    }
   }
 });
 
@@ -5615,6 +7087,22 @@ function showFileTreeContextMenu(e, entry) {
   });
   menu.appendChild(showInExplorer);
 
+  if (window.electronAPI && window.electronAPI.openInExternalEditor) {
+    var openExt = document.createElement('div');
+    openExt.className = 'file-tree-context-item';
+    openExt.textContent = 'Open in external editor';
+    openExt.addEventListener('click', function () {
+      // Pass [project, file] so e.g. VS Code opens the project as a workspace
+      // AND focuses the chosen file, instead of opening the file standalone.
+      var args = entry.isDirectory ? [entry.path] : [activeProjectKey, entry.path];
+      window.electronAPI.openInExternalEditor(args).then(function (r) {
+        if (r && !r.ok && r.error) console.warn('[editor:openExternal]', r.error);
+      });
+      menu.remove();
+    });
+    menu.appendChild(openExt);
+  }
+
   document.body.appendChild(menu);
 
   function closeMenu(ev) {
@@ -5738,6 +7226,20 @@ function createTreeItem(entry, level) {
     e.stopPropagation();
     showFileTreeContextMenu(e, entry);
   });
+
+  // Drag from Explorer into a terminal — drop pastes the file path. Picks up
+  // a quoted form when the path contains spaces. Disabled for directories
+  // since the common use case is `cmd /path/to/file`.
+  if (!entry.isDirectory) {
+    row.setAttribute('draggable', 'true');
+    row.addEventListener('dragstart', function (e) {
+      e.dataTransfer.effectAllowed = 'copy';
+      var p = entry.path;
+      var quoted = /\s/.test(p) ? '"' + p + '"' : p;
+      e.dataTransfer.setData('text/plain', quoted);
+      e.dataTransfer.setData('application/x-claudes-file', p);
+    });
+  }
 
   if (entry.isDirectory) {
     var children = document.createElement('div');
@@ -6030,11 +7532,216 @@ function refreshGitStatus(force) {
   }, done);
 }
 
+function showGitFileContextMenu(e, filePath) {
+  var existing = document.querySelector('.git-file-ctx-menu');
+  if (existing) existing.remove();
+  var menu = document.createElement('div');
+  menu.className = 'project-context-menu git-file-ctx-menu';
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  function add(label, fn) {
+    var it = document.createElement('div');
+    it.className = 'project-context-item';
+    it.textContent = label;
+    it.addEventListener('click', function () { menu.remove(); fn(); });
+    menu.appendChild(it);
+  }
+  // filePath here is repo-relative — resolve against the active project root
+  // for editor / shell IPCs that expect absolute paths.
+  function absolutePath() {
+    if (!activeProjectKey) return null;
+    return activeProjectKey.replace(/[\\/]$/, '') + '/' + filePath;
+  }
+  add('Open in external editor', function () {
+    var abs = absolutePath();
+    if (!abs || !window.electronAPI || !window.electronAPI.openInExternalEditor) return;
+    window.electronAPI.openInExternalEditor([activeProjectKey, abs]).then(function (r) {
+      if (r && !r.ok && r.error) showToast('Open in editor failed: ' + r.error, { kind: 'error' });
+    });
+  });
+  add('File history…', function () { showFileHistory(filePath); });
+  add('Blame…', function () { showFileBlame(filePath); });
+  document.body.appendChild(menu);
+  setTimeout(function () {
+    function out(ev) {
+      if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', out, true); }
+    }
+    document.addEventListener('mousedown', out, true);
+  }, 0);
+}
+
+// Lightweight modal-less floating panels for blame / file history. They reuse
+// the existing modal-overlay styling so layout is consistent with the rest
+// of the app.
+function showFileHistory(filePath) {
+  var existing = document.querySelector('.git-history-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay git-history-overlay';
+  overlay.innerHTML = '<div class="modal-dialog"><div class="modal-header"><span class="modal-title">File history</span><span class="modal-subtitle">' + escapeHtml(filePath) + '</span><span class="modal-close">&times;</span></div><div class="modal-body"><div class="git-history-list" style="max-height:60vh;overflow:auto;"></div></div></div>';
+  document.body.appendChild(overlay);
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  var listEl = overlay.querySelector('.git-history-list');
+  listEl.textContent = 'Loading…';
+  window.electronAPI.gitFileHistory(activeProjectKey, filePath, 100).then(function (rows) {
+    listEl.innerHTML = '';
+    if (!rows.length) { listEl.textContent = 'No history.'; return; }
+    rows.forEach(function (r) {
+      var item = document.createElement('div');
+      item.className = 'git-history-item';
+      item.style.cssText = 'padding:6px 8px;border-bottom:1px solid var(--border-primary);cursor:pointer;';
+      item.innerHTML = '<div style="font-family:monospace;font-size:11px;color:#9ca3af;">' + escapeHtml(r.hash) + '  •  ' + escapeHtml(r.author) + '  •  ' + escapeHtml(new Date(r.date).toLocaleString()) + '</div>' +
+        '<div style="font-size:13px;margin-top:2px;">' + escapeHtml(r.message) + '</div>' +
+        '<div class="git-history-cp" style="margin-top:4px;"><button class="git-op-mini-btn">Cherry-pick onto current</button></div>';
+      var cpBtn = item.querySelector('.git-op-mini-btn');
+      cpBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (!confirm('Cherry-pick ' + r.hash + ' onto current branch?')) return;
+        window.electronAPI.gitCherryPick(activeProjectKey, r.hash).then(function (rr) {
+          if (!rr.success) alert('Cherry-pick failed: ' + rr.error);
+          refreshGitStatus(true);
+        });
+      });
+      listEl.appendChild(item);
+    });
+  });
+}
+
+function showFileBlame(filePath) {
+  var existing = document.querySelector('.git-blame-overlay');
+  if (existing) existing.remove();
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay git-blame-overlay';
+  overlay.innerHTML = '<div class="modal-dialog" style="max-width:90vw;width:90vw;"><div class="modal-header"><span class="modal-title">Blame</span><span class="modal-subtitle">' + escapeHtml(filePath) + '</span><span class="modal-close">&times;</span></div><div class="modal-body"><pre class="git-blame-pre" style="max-height:70vh;overflow:auto;font-size:12px;line-height:1.4;margin:0;"></pre></div></div>';
+  document.body.appendChild(overlay);
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+  var pre = overlay.querySelector('.git-blame-pre');
+  pre.textContent = 'Loading blame…';
+  window.electronAPI.gitBlame(activeProjectKey, filePath).then(function (rows) {
+    if (!rows.length) { pre.textContent = 'No blame data.'; return; }
+    pre.innerHTML = '';
+    rows.forEach(function (r, i) {
+      var line = document.createElement('div');
+      var meta = '<span style="color:#9ca3af;display:inline-block;width:80px;">' + escapeHtml(r.hash) + '</span>' +
+                 '<span style="color:#6b7280;display:inline-block;width:120px;">' + escapeHtml((r.author || '').slice(0, 16)) + '</span>' +
+                 '<span style="color:#52525b;display:inline-block;width:50px;">' + (i + 1) + '</span>';
+      line.innerHTML = meta + '<span style="white-space:pre;">' + escapeHtml(r.content || '') + '</span>';
+      pre.appendChild(line);
+    });
+  });
+}
+
+function renderGitOpBanner() {
+  if (!window.electronAPI || !window.electronAPI.gitOpState) return;
+  window.electronAPI.gitOpState(activeProjectKey).then(function (s) {
+    if (!s || (!s.merging && !s.rebasing && !s.cherryPicking)) return;
+    var op = s.merging ? 'merge' : s.rebasing ? 'rebase' : 'cherry-pick';
+    var banner = document.createElement('div');
+    banner.className = 'git-op-banner';
+    var hdr = document.createElement('div');
+    hdr.className = 'git-op-banner-header';
+    hdr.textContent = 'In progress: ' + op + (s.conflictFiles.length ? '  •  ' + s.conflictFiles.length + ' conflict(s)' : '');
+    banner.appendChild(hdr);
+    s.conflictFiles.forEach(function (f) {
+      var row = document.createElement('div');
+      row.className = 'git-op-conflict-row';
+      var name = document.createElement('span');
+      name.textContent = f;
+      name.style.flex = '1';
+      var ours = document.createElement('button');
+      ours.className = 'git-op-mini-btn';
+      ours.textContent = 'use ours';
+      ours.addEventListener('click', function () {
+        window.electronAPI.gitResolveOurs(activeProjectKey, f).then(function (r) {
+          if (!r.success) alert('Resolve failed: ' + r.error);
+          refreshGitStatus(true);
+        });
+      });
+      var theirs = document.createElement('button');
+      theirs.className = 'git-op-mini-btn';
+      theirs.textContent = 'use theirs';
+      theirs.addEventListener('click', function () {
+        window.electronAPI.gitResolveTheirs(activeProjectKey, f).then(function (r) {
+          if (!r.success) alert('Resolve failed: ' + r.error);
+          refreshGitStatus(true);
+        });
+      });
+      var openIt = document.createElement('button');
+      openIt.className = 'git-op-mini-btn';
+      openIt.textContent = 'open';
+      openIt.addEventListener('click', function () {
+        var full = activeProjectKey.replace(/[\\/]$/, '') + '/' + f;
+        openFileEditor(full);
+      });
+      row.appendChild(name); row.appendChild(ours); row.appendChild(theirs); row.appendChild(openIt);
+      banner.appendChild(row);
+    });
+    var actions = document.createElement('div');
+    actions.className = 'git-op-banner-actions';
+    var continueBtn = document.createElement('button');
+    continueBtn.className = 'git-op-mini-btn primary';
+    continueBtn.textContent = s.conflictFiles.length === 0 ? 'Continue' : 'Continue (when staged)';
+    continueBtn.addEventListener('click', function () {
+      var p = s.rebasing
+        ? window.electronAPI.gitRebaseContinue(activeProjectKey)
+        : window.electronAPI.gitMergeContinue(activeProjectKey);
+      p.then(function (r) {
+        if (!r.success) alert('Continue failed: ' + r.error);
+        refreshGitStatus(true);
+      });
+    });
+    var abortBtn = document.createElement('button');
+    abortBtn.className = 'git-op-mini-btn';
+    abortBtn.textContent = 'Abort';
+    abortBtn.addEventListener('click', function () {
+      if (!confirm('Abort the in-progress ' + op + '?')) return;
+      var p = s.rebasing
+        ? window.electronAPI.gitRebaseAbort(activeProjectKey)
+        : window.electronAPI.gitMergeAbort(activeProjectKey);
+      p.then(function (r) {
+        if (!r.success) alert('Abort failed: ' + r.error);
+        refreshGitStatus(true);
+      });
+    });
+    actions.appendChild(continueBtn);
+    actions.appendChild(abortBtn);
+    banner.appendChild(actions);
+    gitChangesEl.insertBefore(banner, gitChangesEl.firstChild);
+  });
+}
+
+function updateActiveProjectBranchLabels(branch) {
+  if (!activeProjectKey) return;
+  var project = config.projects.find(function (p) { return p.path === activeProjectKey; });
+  if (!project) return;
+  var trimmed = (branch || '').trim();
+
+  if (activeProjectNameEl) {
+    activeProjectNameEl.textContent = trimmed
+      ? project.name + '  ⎇ ' + trimmed
+      : project.name;
+  }
+
+  var item = document.querySelector('.project-item[data-project-path="' + CSS.escape(activeProjectKey) + '"]');
+  if (item) {
+    var tag = item.querySelector('.project-branch');
+    if (tag) tag.textContent = trimmed ? '⎇ ' + trimmed : '';
+  }
+}
+
 function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstagedStats, stagedStats, diffVsBase, branchOverride) {
   graphLaneState = null;
   var readOnly = !!branchOverride;
+  if (!readOnly) updateActiveProjectBranchLabels(branch);
   while (gitHeaderEl.firstChild) gitHeaderEl.removeChild(gitHeaderEl.firstChild);
   while (gitChangesEl.firstChild) gitChangesEl.removeChild(gitChangesEl.firstChild);
+  // Conflict / mid-operation banner. Fired async; the banner is inserted at
+  // the top of gitChangesEl when state shows merging/rebasing/cherry-picking.
+  renderGitOpBanner();
 
   if (readOnly) {
     gitHeaderEl.classList.add('git-readonly');
@@ -6219,13 +7926,50 @@ function toggleBranchDropdown(parentRow, currentBranch) {
       (function (b) {
         var item = document.createElement('div');
         item.className = 'git-branch-dropdown-item' + (b.isCurrent ? ' current' : '');
-        item.textContent = (b.isCurrent ? '\u2713 ' : '  ') + b.name;
+        item.style.display = 'flex';
+        item.style.alignItems = 'center';
+        item.style.gap = '4px';
+        var label = document.createElement('span');
+        label.style.flex = '1';
+        label.textContent = (b.isCurrent ? '\u2713 ' : '  ') + b.name;
+        item.appendChild(label);
         if (!b.isCurrent) {
-          item.addEventListener('click', function (e) {
+          label.style.cursor = 'pointer';
+          label.addEventListener('click', function (e) {
             e.stopPropagation();
             dropdown.remove();
             gitCheckout(b.name);
           });
+          // Quick merge / rebase actions per branch \u2014 operate on the current
+          // branch, integrating the row's branch.
+          var mergeBtn = document.createElement('button');
+          mergeBtn.className = 'git-branch-mini-action';
+          mergeBtn.textContent = 'merge';
+          mergeBtn.title = 'Merge ' + b.name + ' into current branch';
+          mergeBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            dropdown.remove();
+            if (!confirm('Merge "' + b.name + '" into current branch?')) return;
+            window.electronAPI.gitMerge(activeProjectKey, b.name).then(function (r) {
+              if (!r.success) alert('Merge failed: ' + r.error);
+              refreshGit();
+            });
+          });
+          var rebaseBtn = document.createElement('button');
+          rebaseBtn.className = 'git-branch-mini-action';
+          rebaseBtn.textContent = 'rebase';
+          rebaseBtn.title = 'Rebase current branch onto ' + b.name;
+          rebaseBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            dropdown.remove();
+            if (!confirm('Rebase current branch onto "' + b.name + '"?')) return;
+            window.electronAPI.gitRebase(activeProjectKey, b.name).then(function (r) {
+              if (!r.success) alert('Rebase failed: ' + r.error);
+              refreshGit();
+            });
+          });
+          item.appendChild(mergeBtn);
+          item.appendChild(rebaseBtn);
         }
         dropdown.appendChild(item);
       })(branches[i]);
@@ -6385,12 +8129,25 @@ function renderGraphSvg(commit) {
   return svg;
 }
 
+// Turn git's verbose "4 hours ago" into a tight "4h" so the date column
+// stays narrow and the subject can breathe in a sidebar-width panel.
+function compactRelativeDate(rel) {
+  if (!rel || typeof rel !== 'string') return rel || '';
+  var s = rel.trim().toLowerCase();
+  if (s === 'just now' || s.indexOf('seconds') !== -1 || s.indexOf('second ') !== -1) return 'now';
+  var m = s.match(/^(\d+)\s+(minute|hour|day|week|month|year)s?\s*ago$/);
+  if (!m) return rel;
+  var unit = m[2][0];
+  if (m[2] === 'month') unit = 'mo';
+  return m[1] + unit;
+}
+
 function createGitGraphSection(graphLog) {
   var state = computeGraphLanes(graphLog, graphLaneState);
   graphLaneState = { lanes: state.lanes, commitLanes: state.commitLanes };
 
   var section = document.createElement('div');
-  section.className = 'git-section';
+  section.className = 'git-section git-graph-section';
 
   var header = document.createElement('div');
   header.className = 'git-section-header';
@@ -6411,6 +8168,8 @@ function createGitGraphSection(graphLog) {
     (function (commit) {
       var row = document.createElement('div');
       row.className = 'git-graph-row';
+      // Full info on hover (truncated subject + author + full date).
+      row.title = commit.message + '\n\n' + commit.author + ' \u00b7 ' + commit.relativeDate;
       row.addEventListener('click', function () {
         addDiffColumn({
           commitHash: commit.hash,
@@ -6423,34 +8182,30 @@ function createGitGraphSection(graphLog) {
 
       var hashEl = document.createElement('span');
       hashEl.className = 'git-graph-hash';
-      hashEl.textContent = commit.abbrev;
+      hashEl.textContent = commit.abbrev.slice(0, 7);
 
+      // Inline ref chips render before the subject so they don't get pushed
+      // off-screen when the row is narrow.
       var msgEl = document.createElement('span');
       msgEl.className = 'git-graph-msg';
-      msgEl.textContent = commit.message;
-
-      var refsEl = document.createElement('span');
-      refsEl.className = 'git-graph-refs';
       for (var r = 0; r < commit.refs.length; r++) {
         var ref = commit.refs[r];
         var badge = document.createElement('span');
         badge.className = 'git-graph-ref' + (ref.startsWith('tag:') ? ' git-graph-tag' : '');
         badge.textContent = ref.replace(/^HEAD -> /, '').replace(/^tag: /, '');
-        refsEl.appendChild(badge);
+        msgEl.appendChild(badge);
       }
-
-      var authorEl = document.createElement('span');
-      authorEl.className = 'git-graph-author';
-      authorEl.textContent = commit.author;
+      var subjectEl = document.createElement('span');
+      subjectEl.className = 'git-graph-subject';
+      subjectEl.textContent = commit.message;
+      msgEl.appendChild(subjectEl);
 
       var dateEl = document.createElement('span');
       dateEl.className = 'git-graph-date';
-      dateEl.textContent = commit.relativeDate;
+      dateEl.textContent = compactRelativeDate(commit.relativeDate);
 
       row.appendChild(hashEl);
       row.appendChild(msgEl);
-      row.appendChild(refsEl);
-      row.appendChild(authorEl);
       row.appendChild(dateEl);
       list.appendChild(row);
     })(state.commits[i]);
@@ -6642,6 +8397,14 @@ function createGitFileRow(file, isStaged, statsMap, depth, readOnly) {
       staged: isStaged,
       status: file.status
     }, { title: parts[parts.length - 1] + ' (' + file.status + ')' });
+  });
+  // Right-click on the row (not just the filename span) gives Open in editor /
+  // File History / Blame access — easier to hit, especially over the stat /
+  // action columns where users instinctively right-click.
+  row.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    showGitFileContextMenu(e, file.file);
   });
 
   var statEl = document.createElement('span');
@@ -7591,7 +9354,24 @@ function launchConfig(config) {
     }
 
     var launchUrl = (config.openBrowserOnLaunch !== false && config.applicationUrl) ? config.applicationUrl : null;
-    addColumn(cmdArgs, null, { cmd: cmd, title: config.name, cwd: cwd, env: env, launchUrl: launchUrl });
+    // Run-tab launches share a dedicated row so multiple runs stack
+    // alongside each other without shoving Claude columns around. If a row
+    // already contains run columns (col.cmd set on any of its members),
+    // append into that row; otherwise spawn a fresh one.
+    var state = getActiveState();
+    var row = null;
+    if (state) {
+      for (var ri = 0; ri < state.rows.length; ri++) {
+        var ids = state.rows[ri].columnIds;
+        for (var ci = 0; ci < ids.length; ci++) {
+          var c = allColumns.get(ids[ci]);
+          if (c && c.cmd) { row = state.rows[ri]; break; }
+        }
+        if (row) break;
+      }
+      if (!row) row = addRowToProject(state);
+    }
+    addColumn(cmdArgs, row, { cmd: cmd, title: config.name, cwd: cwd, env: env, launchUrl: launchUrl });
 
     // Track in recent launches and refresh list to show stop/restart controls
     trackRecentLaunch(config);
@@ -7763,7 +9543,7 @@ document.getElementById('btn-run-delete').addEventListener('click', function () 
 });
 document.getElementById('btn-git-commit').addEventListener('click', gitCommit);
 gitCommitMsg.addEventListener('keydown', function (e) {
-  if (e.ctrlKey && e.key === 'Enter') {
+  if (cmdOrCtrl(e) && e.key === 'Enter') {
     e.preventDefault();
     gitCommit();
   }
@@ -7800,7 +9580,7 @@ function resetFontSize() {
 // Theme
 // ============================================================
 
-var themePreference = 'dark'; // 'dark' | 'light' | 'auto'
+var themePreference = 'auto'; // 'dark' | 'light' | 'auto'
 
 function applyVisualTheme(visual) {
   currentTheme = visual;
@@ -7848,19 +9628,156 @@ if (window.electronAPI && window.electronAPI.onOsThemeChanged) {
   });
 }
 
+// Auto-refresh the Explorer tree when files change on disk. Debounced in main;
+// here we only refresh if the file tab is open and the change is for the
+// active project.
+if (window.electronAPI && window.electronAPI.onFsChanged) {
+  window.electronAPI.onFsChanged(function (root) {
+    if (!activeProjectKey || root !== activeProjectKey) return;
+    var activeTab = document.querySelector('.explorer-tab.active');
+    if (activeTab && activeTab.dataset.tab === 'files') {
+      try { refreshFileTree(); } catch (e) { /* */ }
+    }
+  });
+}
+
 // ============================================================
 // Hook Server Integration
 // ============================================================
 
+// Per-column flag: once a hook has fired for the column's current session,
+// the JSONL tail is redundant. Stopping it eliminates ~7 fs.statSync per
+// second per column and a curl-spawn-driven feedback loop on busy turns.
+var clawdHookSeenBySession = Object.create(null);
+
+// Pending PostToolUse → thinking transitions. Without this, a tool chain
+// (Edit, Read, Edit) would flash 'thinking' between each tool. Any later
+// hook event for the same column cancels the pending commit so the chain
+// stays visually on a work animation.
+var clawdPostToolPending = new Map(); // colId -> { timer }
+function clearClawdPostTool(colId) {
+  var p = clawdPostToolPending.get(colId);
+  if (p) { clearTimeout(p.timer); clawdPostToolPending.delete(colId); }
+}
+
+// Resolve which column a hook event belongs to. Two cases:
+//
+//  1. sessionId match — the column owns this exact session. Normal path.
+//  2. cwd fallback   — sessionId doesn't match any column, but the event's
+//     cwd identifies an unambiguous column. Covers two real cases:
+//       (a) the detectSession race on freshly-spawned columns, where the
+//           sessionId mapping isn't resolved yet when the first hooks fire;
+//       (b) subagent (Agent/Task) tool calls, which fire hooks under a
+//           *different* sessionId than the parent column. They still happen
+//           in the parent's cwd, so we route them to that column without
+//           ever overwriting its real sessionId.
+//
+// We deliberately do NOT mutate col.sessionId here. Doing so caused an
+// earlier bug where adopting a subagent's sessionId orphaned every
+// subsequent parent-session hook.
+function clawdResolveHookColumn(event) {
+  var sid = event && event.session_id;
+  var cwd = event && event.cwd;
+  var match = null;
+  if (sid) {
+    allColumns.forEach(function (col, id) {
+      if (col.sessionId === sid) match = id;
+    });
+    if (match != null) return match;
+  }
+  if (cwd) {
+    var found = null;
+    var ambiguous = false;
+    allColumns.forEach(function (col, id) {
+      if (col.projectKey !== cwd) return;
+      if (found != null) ambiguous = true;
+      else found = id;
+    });
+    if (!ambiguous && found != null) return found;
+  }
+  return null;
+}
+
 if (window.electronAPI && window.electronAPI.onHookEvent) {
   window.electronAPI.onHookEvent(function (event) {
-    allColumns.forEach(function (col, id) {
-      if (col.sessionId && event.session_id === col.sessionId) {
-        if (event.matcher === 'idle_prompt' || event.matcher === 'permission_prompt') {
-          setActivity(id, 'waiting');
-        }
+    var sid = event && event.session_id;
+    var evtName = (event && (event.hook_event_name || event.event)) || '';
+    var colId = clawdResolveHookColumn(event);
+    if (colId == null) {
+      // Truly orphan — different project, no claiming column. Log it so it
+      // shows up in the debug overlay but don't act on it.
+      if (window.Clawd && window.Clawd.logHookEvent) {
+        window.Clawd.logHookEvent({
+          col: null,
+          event: evtName,
+          tool: (event && event.tool_name) || '',
+          matcher: (event && event.matcher) || '',
+          anim: null,
+        });
       }
-    });
+      return;
+    }
+    // Route hooks for the resolved column's *primary* session through the
+    // tail-stop path; subagent hooks (different sid, same cwd) skip it
+    // because the primary tail is still useful for the parent.
+    var col = allColumns.get(colId);
+    var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
+    if (sidMatchesColumn && sid && !clawdHookSeenBySession[sid]) {
+      clawdHookSeenBySession[sid] = true;
+      if (window.electronAPI && window.electronAPI.clawdStopTail) {
+        window.electronAPI.clawdStopTail(colId);
+      }
+    }
+    if (event.matcher === 'idle_prompt' || event.matcher === 'permission_prompt') {
+      setActivity(colId, 'waiting');
+    }
+    // Any incoming event for this column supersedes a pending post-tool
+    // transition — keeps tool chains from flashing 'thinking' between tools.
+    clearClawdPostTool(colId);
+    var animId = null;
+    if (evtName === 'UserPromptSubmit') animId = 'thinking';
+    else if (evtName === 'PreToolUse') animId = clawdAnimationForTool(event.tool_name);
+    else if (evtName === 'PostToolUse') {
+      // Deferred commit: if no other event arrives within 250ms, leave the
+      // tool animation and park on 'thinking' (Claude is processing the
+      // result). This is also the safety net for dropped Stop hooks — we
+      // never get stuck on a work animation after a tool actually finished.
+      var pendingTimer = setTimeout(function () {
+        clawdPostToolPending.delete(colId);
+        if (window.Clawd && window.Clawd.setColumnAnimation) {
+          window.Clawd.setColumnAnimation(colId, 'thinking');
+        }
+        if (window.Clawd && window.Clawd.logHookEvent) {
+          window.Clawd.logHookEvent({ col: colId, event: 'PostToolUse(commit)', tool: event.tool_name || '', matcher: '', anim: 'thinking' });
+        }
+      }, 250);
+      clawdPostToolPending.set(colId, { timer: pendingTimer });
+    }
+    else if (evtName === 'Stop' || evtName === 'SubagentStop') {
+      // Only the primary-session Stop ends a turn for the widget. A
+      // subagent's SubagentStop firing while the parent is still working
+      // would otherwise briefly flip Clawd to idle.
+      if (sidMatchesColumn) animId = 'idle';
+    }
+    else if (evtName === 'Notification') {
+      if (event.matcher === 'permission_prompt') animId = 'confused';
+      else if (event.matcher === 'idle_prompt') animId = 'idle';
+    }
+    else if (evtName === 'SessionEnd') {
+      if (sidMatchesColumn) animId = 'disconnected';
+    }
+    if (window.Clawd && window.Clawd.logHookEvent) {
+      window.Clawd.logHookEvent({
+        col: colId,
+        event: evtName + (sidMatchesColumn ? '' : ' (cwd)'),
+        tool: event.tool_name || '',
+        matcher: event.matcher || '',
+        anim: animId,
+      });
+    }
+    if (animId && window.Clawd && window.Clawd.setColumnAnimation) {
+      window.Clawd.setColumnAnimation(colId, animId);
+    }
   });
 }
 
@@ -7869,6 +9786,32 @@ if (window.electronAPI && window.electronAPI.getHookServerPort) {
     if (port) console.log('[hooks] Hook server at http://127.0.0.1:' + port + '/hook');
   });
 }
+
+// Manual recovery for the case where a hook gets dropped (e.g. PostToolUse
+// never arrives) and Clawd is parked on a stale tool animation. Resets every
+// column to idle as a safe baseline and re-arms the JSONL tail so the
+// fallback resumes — the next real activity will set the correct state.
+function clawdForceRefresh() {
+  if (typeof allColumns === 'undefined' || !allColumns || !allColumns.forEach) return;
+  var resetCount = 0;
+  allColumns.forEach(function (col, id) {
+    if (col && col.sessionId) clawdHookSeenBySession[col.sessionId] = false;
+    if (col) col.clawdTailSessionId = null;
+    if (window.Clawd && window.Clawd.setColumnAnimation) {
+      window.Clawd.setColumnAnimation(id, 'idle');
+    }
+    if (typeof ensureClawdTail === 'function') ensureClawdTail(id);
+    resetCount++;
+  });
+  if (window.Clawd && window.Clawd.logHookEvent) {
+    window.Clawd.logHookEvent({ col: null, event: 'manual-refresh', tool: '', matcher: '', anim: 'idle (x' + resetCount + ')' });
+  }
+}
+
+(function () {
+  var btn = document.getElementById('clawd-debug-refresh');
+  if (btn) btn.addEventListener('click', clawdForceRefresh);
+})();
 
 // ============================================================
 // Init
@@ -7958,10 +9901,31 @@ function buildSpawnArgs(resolved) {
   if (optRemoteControl.checked) {
     args.push('--remote-control');
   }
-  if (optBare.checked) {
+  // Force --bare whenever the endpoint env carries an Authorization custom
+  // header (set by main.js when the base URL has user:pass@). Reasoning:
+  //   - ANTHROPIC_AUTH_TOKEN sends `Authorization: Bearer ...` which collides
+  //     with our `Authorization: Basic ...` at the proxy and 401s ngrok.
+  //   - The collision-free alternative is ANTHROPIC_API_KEY (sent as x-api-key,
+  //     not Authorization), but Claude prompts to confirm any non-bare API key.
+  //   - --bare trusts ANTHROPIC_API_KEY without prompting, so it's the only
+  //     combo that actually communicates.
+  var endpointEnv = currentEndpointEnv || {};
+  var needsBareForProxyAuth = !!endpointEnv.ANTHROPIC_CUSTOM_HEADERS;
+  if (optBare.checked || needsBareForProxyAuth) {
     args.push('--bare');
   }
-  if (optModel.value) {
+  // --bare and --strict-mcp-config are independent: bare covers hooks/LSP/
+  // plugins/CLAUDE.md, strip-mcps covers MCP servers. Locally you usually
+  // want bare on (smaller startup) but MCPs available (otherwise the model
+  // has no tools beyond bash/file ops). Toggle each independently.
+  if (optStripMcps.checked) {
+    args.push('--strict-mcp-config');
+    args.push('--mcp-config', '{"mcpServers":{}}');
+  }
+  // The CLI's --model flag overrides ANTHROPIC_MODEL env, so when an endpoint
+  // preset is active we skip it — the env block already pins every model tier
+  // to the preset's model and CLI flags would override that.
+  if (optModel.value && !currentEndpointId) {
     args.push('--model', optModel.value);
   }
   var worktree = optWorktree.value.trim();
@@ -7969,6 +9933,14 @@ function buildSpawnArgs(resolved) {
     if (!resolved || resolved.kind === 'flag' || resolved.kind === 'none') {
       args.push('--worktree', worktree);
     }
+  }
+  // --effort is the only non-interactive way to set reasoning effort. The
+  // /effort slash command opens an interactive arrow-key picker and `/config
+  // set effort` doesn't exist, so this flag is the lever. Cloud and local get
+  // separate user-configurable defaults.
+  var effort = currentEndpointId ? defaultEffortLocal : defaultEffortCloud;
+  if (isValidEffort(effort)) {
+    args.push('--effort', effort);
   }
   var custom = optCustomArgs.value.trim();
   if (custom) {
@@ -7980,12 +9952,25 @@ function buildSpawnArgs(resolved) {
   return args;
 }
 
+function truncateLabel(s, max) {
+  if (!s) return '';
+  return s.length > max ? s.slice(0, max - 1) + '\u2026' : s;
+}
+
 function updateSpawnButtonLabel() {
   var tags = [];
-  if (optModel.value) tags.push(optModel.value);
+  var preset = currentEndpointId
+    ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
+    : null;
+  if (preset) {
+    tags.push(truncateLabel(preset.name || 'endpoint', 16));
+  } else if (optModel && optModel.value) {
+    tags.push(optModel.value);
+  }
   if (optSkipPermissions.checked) tags.push('yolo');
   if (optRemoteControl.checked) tags.push('remote');
-  if (optBare.checked) tags.push('bare');
+  if (optBare.checked || (currentEndpointEnv && currentEndpointEnv.ANTHROPIC_CUSTOM_HEADERS)) tags.push('bare');
+  if (optStripMcps.checked) tags.push('no-mcp');
   if (optWorktree.value.trim()) tags.push('worktree');
   if (optCustomArgs.value.trim()) tags.push('custom');
 
@@ -8006,9 +9991,12 @@ function saveSpawnOptions() {
     skipPermissions: optSkipPermissions.checked,
     remoteControl: optRemoteControl.checked,
     bare: optBare.checked,
+    stripMcps: optStripMcps.checked,
     model: optModel.value,
     worktree: optWorktree.value,
-    customArgs: optCustomArgs.value
+    customArgs: optCustomArgs.value,
+    endpointId: currentEndpointId || null,
+    endpointModel: currentEndpointModel || null
   };
   saveConfig();
 }
@@ -8021,10 +10009,44 @@ function loadSpawnOptions() {
   optSkipPermissions.checked = !!opts.skipPermissions;
   optRemoteControl.checked = !!opts.remoteControl;
   optBare.checked = !!opts.bare;
+  optStripMcps.checked = !!opts.stripMcps;
   optModel.value = opts.model || '';
   optWorktree.value = opts.worktree || '';
   optCustomArgs.value = opts.customArgs || '';
+
+  // First call on app boot always defaults to cloud (Anthropic), regardless of
+  // what was saved. Subsequent calls (project switches within the session)
+  // respect the saved endpointId.
+  var endpointId;
+  if (!firstSpawnLoadComplete) {
+    endpointId = null;
+    firstSpawnLoadComplete = true;
+  } else {
+    // If the persisted endpointId no longer refers to a known preset (deleted in
+    // the meantime), silently fall back to the default Anthropic endpoint.
+    endpointId = opts.endpointId || null;
+    if (endpointId && !endpointPresets.find(function (p) { return p.id === endpointId; })) {
+      endpointId = null;
+    }
+  }
+  // Restore the per-project model selection BEFORE applyEndpointSelection so
+  // populateEndpointModelDropdown can preselect it.
+  currentEndpointModel = endpointId ? (opts.endpointModel || null) : null;
+  applyEndpointSelection(endpointId, /* persist */ false);
   updateSpawnButtonLabel();
+}
+
+// Returns an opts object for addColumn, including the endpoint env if a preset
+// is active. Spread any caller-supplied opts on top.
+function spawnOpts(extra) {
+  var o = {};
+  if (extra) {
+    for (var k in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, k)) o[k] = extra[k];
+    }
+  }
+  if (currentEndpointEnv) o.env = currentEndpointEnv;
+  return o;
 }
 
 btnAddOptions.addEventListener('click', function (e) {
@@ -8037,9 +10059,290 @@ function onSpawnOptionChanged() { updateSpawnButtonLabel(); saveSpawnOptions(); 
 optSkipPermissions.addEventListener('change', onSpawnOptionChanged);
 optRemoteControl.addEventListener('change', onSpawnOptionChanged);
 optBare.addEventListener('change', onSpawnOptionChanged);
+optStripMcps.addEventListener('change', onSpawnOptionChanged);
 optModel.addEventListener('change', onSpawnOptionChanged);
 optWorktree.addEventListener('input', onSpawnOptionChanged);
 optCustomArgs.addEventListener('input', onSpawnOptionChanged);
+
+// Default-effort selectors are app-global (not per-project), so they bypass
+// saveSpawnOptions and persist straight to config root.
+if (optDefaultEffortCloud) {
+  optDefaultEffortCloud.addEventListener('change', function () {
+    if (!isValidEffort(optDefaultEffortCloud.value)) return;
+    defaultEffortCloud = optDefaultEffortCloud.value;
+    config.defaultEffortCloud = defaultEffortCloud;
+    saveConfig();
+  });
+  optDefaultEffortCloud.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+  optDefaultEffortCloud.addEventListener('click', function (e) { e.stopPropagation(); });
+}
+if (optDefaultEffortLocal) {
+  optDefaultEffortLocal.addEventListener('change', function () {
+    if (!isValidEffort(optDefaultEffortLocal.value)) return;
+    defaultEffortLocal = optDefaultEffortLocal.value;
+    config.defaultEffortLocal = defaultEffortLocal;
+    saveConfig();
+  });
+  optDefaultEffortLocal.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+  optDefaultEffortLocal.addEventListener('click', function (e) { e.stopPropagation(); });
+}
+
+// --- Endpoint preset wiring ---
+
+function renderEndpointDropdown() {
+  // Preserve current value across rebuild.
+  var prev = optEndpoint.value;
+  while (optEndpoint.firstChild) optEndpoint.removeChild(optEndpoint.firstChild);
+  var defaultOpt = document.createElement('option');
+  defaultOpt.value = '';
+  defaultOpt.textContent = 'Anthropic (cloud)';
+  optEndpoint.appendChild(defaultOpt);
+  endpointPresets.forEach(function (p) {
+    var o = document.createElement('option');
+    o.value = p.id;
+    o.textContent = p.name || '(unnamed)';
+    optEndpoint.appendChild(o);
+  });
+  // Restore selection if still valid; otherwise fall back to current state.
+  if (prev && endpointPresets.find(function (p) { return p.id === prev; })) {
+    optEndpoint.value = prev;
+  } else {
+    optEndpoint.value = currentEndpointId || '';
+  }
+}
+
+function applyEndpointSelection(endpointId, persist) {
+  var wasNoPreset = !currentEndpointId;
+  var idChanged = currentEndpointId !== (endpointId || null);
+  currentEndpointId = endpointId || null;
+  optEndpoint.value = currentEndpointId || '';
+
+  // Auto-toggle Bare Mode on user-initiated cloud↔local transitions:
+  //   cloud → preset: tick bare (local models can't fit the full system prompt)
+  //   preset → cloud: untick bare (cloud has no reason to strip MCPs/hooks)
+  // persist=true marks user-initiated changes; loadSpawnOptions on app load
+  // passes persist=false so saved bare preferences are honoured across restarts.
+  if (persist) {
+    if (wasNoPreset && currentEndpointId && !optBare.checked) {
+      optBare.checked = true;
+    } else if (!wasNoPreset && !currentEndpointId && optBare.checked) {
+      optBare.checked = false;
+    }
+  }
+
+  var preset = currentEndpointId
+    ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
+    : null;
+
+  // Toggle which "Model" row is shown: cloud uses the Sonnet/Opus/Haiku
+  // dropdown; local uses an endpoint-specific dropdown populated from
+  // /v1/models on the active server (with the preset's chosen model as the
+  // default fallback).
+  if (preset) {
+    optModelRow.classList.add('hidden');
+    optEndpointModelRow.classList.remove('hidden');
+    if (idChanged) {
+      // Only reset the dropdown when the endpoint identity changed; switching
+      // back to the same preset shouldn't wipe an in-progress selection.
+      populateEndpointModelDropdown(preset);
+    }
+  } else {
+    optModelRow.classList.remove('hidden');
+    optEndpointModelRow.classList.add('hidden');
+  }
+
+  refreshEndpointEnv();
+
+  if (persist) {
+    saveSpawnOptions();
+  }
+  updateSpawnButtonLabel();
+}
+
+// Refresh the cached env block (async — main process decrypts the token and
+// resolves the model override). Shared between selection changes and per-spawn
+// model picks, so all callsites stay in sync.
+function refreshEndpointEnv() {
+  if (currentEndpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
+    var capturedId = currentEndpointId;
+    var capturedModel = currentEndpointModel;
+    window.electronAPI.endpointGetEnv(capturedId, capturedModel).then(function (env) {
+      // Guard against a later selection arriving before this resolves.
+      if (currentEndpointId === capturedId) {
+        currentEndpointEnv = env || null;
+        // Refresh the spawn button label so the auto-forced 'bare' tag
+        // appears as soon as a URL-cred endpoint is picked.
+        updateSpawnButtonLabel();
+      }
+    }).catch(function () { currentEndpointEnv = null; updateSpawnButtonLabel(); });
+  } else {
+    currentEndpointEnv = null;
+    updateSpawnButtonLabel();
+  }
+}
+
+// Populate the local-model dropdown: render whatever's in cache immediately
+// (so the UI doesn't sit on "(loading…)" if we just looked at this endpoint
+// a moment ago), then fire a background refresh from /v1/models.
+function populateEndpointModelDropdown(preset) {
+  var defaultModel = preset && preset.model ? preset.model : '';
+  var cached = endpointModelsCache[preset.id];
+  if (cached && cached.ok && cached.models && cached.models.length > 0) {
+    renderEndpointModelOptions(cached.models, defaultModel);
+  } else {
+    // Show the default while we wait, so the user can spawn immediately
+    // without staring at "(loading…)".
+    renderEndpointModelOptions(defaultModel ? [defaultModel] : [], defaultModel);
+    fetchEndpointModels(preset, /* force */ false);
+  }
+}
+
+function renderEndpointModelOptions(models, defaultModel) {
+  while (optEndpointModel.firstChild) optEndpointModel.removeChild(optEndpointModel.firstChild);
+  // Preference: project's saved override → preset default → first available.
+  var preferred = currentEndpointModel || defaultModel || (models && models[0]) || '';
+  var preferredFound = false;
+  models.forEach(function (m) {
+    var opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = m;
+    if (m === preferred) { opt.selected = true; preferredFound = true; }
+    optEndpointModel.appendChild(opt);
+  });
+  // If the preferred (saved) model isn't in the fetched list, prepend it as
+  // a stale entry so the user can see why their setting isn't applying.
+  if (preferred && !preferredFound) {
+    var stale = document.createElement('option');
+    stale.value = preferred;
+    stale.textContent = preferred + ' (not loaded)';
+    stale.selected = true;
+    optEndpointModel.insertBefore(stale, optEndpointModel.firstChild);
+  }
+  // Keep currentEndpointModel in sync with the visible selection so spawnOpts
+  // builds the right env even if the user never opens the dropdown.
+  currentEndpointModel = optEndpointModel.value || null;
+  refreshEndpointEnv();
+  updateSpawnButtonLabel();
+}
+
+function fetchEndpointModels(preset, force) {
+  if (!preset || !window.electronAPI || !window.electronAPI.endpointFetchModels) return;
+  // Skip refetch within 5 minutes unless forced.
+  var cached = endpointModelsCache[preset.id];
+  if (!force && cached && cached.ok && (Date.now() - cached.fetchedAt) < 5 * 60 * 1000) return;
+
+  // Need the auth token for the fetch — main has it, ask via endpointGet.
+  window.electronAPI.endpointGet(preset.id).then(function (full) {
+    if (!full) return;
+    return window.electronAPI.endpointFetchModels({
+      baseUrl: full.baseUrl,
+      authToken: full.authToken
+    });
+  }).then(function (result) {
+    if (!result) return;
+    if (result.ok && Array.isArray(result.models)) {
+      endpointModelsCache[preset.id] = {
+        ok: true,
+        models: result.models,
+        fetchedAt: Date.now()
+      };
+      // Only re-render if this preset is still the active one.
+      if (currentEndpointId === preset.id) {
+        renderEndpointModelOptions(result.models, preset.model || '');
+      }
+    } else {
+      endpointModelsCache[preset.id] = { ok: false, models: [], fetchedAt: Date.now() };
+    }
+  }).catch(function () {
+    endpointModelsCache[preset.id] = { ok: false, models: [], fetchedAt: Date.now() };
+  });
+}
+
+optEndpoint.addEventListener('change', function () {
+  // Reset model selection on endpoint change — the new endpoint will likely
+  // have different model identifiers than the old one.
+  currentEndpointModel = null;
+  applyEndpointSelection(optEndpoint.value || null, /* persist */ true);
+});
+// Don't let the select's mouse interactions close the spawn dropdown.
+optEndpoint.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+optEndpoint.addEventListener('click', function (e) { e.stopPropagation(); });
+var endpointSelectOpen = false;
+optEndpoint.addEventListener('focus', function () { endpointSelectOpen = true; });
+optEndpoint.addEventListener('blur', function () { endpointSelectOpen = false; });
+
+// Per-project model override dropdown. Selecting a different model rebuilds
+// the env block and persists the choice in spawnOptions.endpointModel.
+optEndpointModel.addEventListener('change', function () {
+  currentEndpointModel = optEndpointModel.value || null;
+  refreshEndpointEnv();
+  saveSpawnOptions();
+  updateSpawnButtonLabel();
+});
+// Refresh the model list when the user opens the dropdown — local models can
+// be loaded/swapped in LM Studio without restarting Claudes, so the cached
+// list goes stale fast. mousedown fires before the native picker opens.
+optEndpointModel.addEventListener('mousedown', function (e) {
+  e.stopPropagation();
+  var preset = currentEndpointId
+    ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
+    : null;
+  if (preset) fetchEndpointModels(preset, /* force */ true);
+});
+optEndpointModel.addEventListener('click', function (e) { e.stopPropagation(); });
+var endpointModelSelectOpen = false;
+optEndpointModel.addEventListener('focus', function () { endpointModelSelectOpen = true; });
+optEndpointModel.addEventListener('blur', function () { endpointModelSelectOpen = false; });
+
+if (optEndpointModelRefresh) {
+  optEndpointModelRefresh.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var preset = currentEndpointId
+      ? endpointPresets.find(function (p) { return p.id === currentEndpointId; })
+      : null;
+    if (preset) fetchEndpointModels(preset, /* force */ true);
+  });
+}
+
+function loadEndpointPresets() {
+  if (!window.electronAPI || !window.electronAPI.endpointList) return Promise.resolve();
+  return window.electronAPI.endpointList().then(function (list) {
+    endpointPresets = Array.isArray(list) ? list : [];
+    // Invalidate the cached effective limit on every column so the next ctx
+    // poll re-resolves it against the freshly-loaded preset data. Cheap, and
+    // it means saving a new contextWindow takes effect on existing columns.
+    if (typeof allColumns !== 'undefined') {
+      allColumns.forEach(function (c) { if (c) c.effectiveLimit = null; });
+    }
+    renderEndpointDropdown();
+    // Re-load spawn options so the active project's persisted endpointId can
+    // be validated and applied. Without this, app startup races —
+    // setActiveProject runs before this IPC resolves, so loadSpawnOptions
+    // validates against an empty cache, decides the id is unknown, and zeros
+    // out the in-memory selection. Re-running here picks it back up.
+    if (typeof config !== 'undefined' && config && config.activeProjectIndex != null
+        && config.projects && config.projects[config.activeProjectIndex]) {
+      loadSpawnOptions();
+    } else if (currentEndpointId && !endpointPresets.find(function (p) { return p.id === currentEndpointId; })) {
+      applyEndpointSelection(null, /* persist */ true);
+    } else {
+      applyEndpointSelection(currentEndpointId, /* persist */ false);
+    }
+  });
+}
+
+if (window.electronAPI && window.electronAPI.onEndpointsUpdated) {
+  window.electronAPI.onEndpointsUpdated(function () {
+    loadEndpointPresets();
+  });
+}
+
+// Kick off initial load. If electronAPI isn't ready yet (popout windows
+// sometimes initialize the bridge late), this is a no-op and a later
+// loadSpawnOptions call will trigger applyEndpointSelection without env.
+if (window.electronAPI && window.electronAPI.endpointList) {
+  loadEndpointPresets();
+}
 
 // Prevent model select interactions from closing the spawn dropdown
 optModel.addEventListener('mousedown', function (e) { e.stopPropagation(); });
@@ -8057,7 +10360,9 @@ document.addEventListener('click', function (e) {
   if (!spawnDropdown.classList.contains('hidden') &&
       !spawnDropdown.contains(e.target) &&
       e.target !== btnAddOptions &&
-      !modelSelectOpen) {
+      !modelSelectOpen &&
+      !endpointSelectOpen &&
+      !endpointModelSelectOpen) {
     closeSpawnDropdown();
   }
 });
@@ -8065,6 +10370,389 @@ document.addEventListener('click', function (e) {
 // Prevent dropdown clicks from closing it
 spawnDropdown.addEventListener('click', function (e) {
   e.stopPropagation();
+});
+
+// ============================================================
+// Endpoint Presets Modal
+// ============================================================
+
+var endpointsModal = document.getElementById('endpoints-modal');
+var endpointsCloseBtn = document.getElementById('endpoints-close');
+var endpointsListEl = document.getElementById('endpoints-list');
+var endpointsNewBtn = document.getElementById('endpoints-new');
+var endpointsForm = document.getElementById('endpoints-form');
+var endpointsEmpty = document.getElementById('endpoints-empty');
+var epName = document.getElementById('ep-name');
+var epBaseUrl = document.getElementById('ep-base-url');
+var epAuthToken = document.getElementById('ep-auth-token');
+var epTokenToggle = document.getElementById('ep-token-toggle');
+var epModelInput = document.getElementById('ep-model');
+var epModelSelect = document.getElementById('ep-model-select');
+var epModelFetchBtn = document.getElementById('ep-model-fetch');
+var epFallback = document.getElementById('ep-fallback');
+var epContextWindow = document.getElementById('ep-context-window');
+var epContextFetchBtn = document.getElementById('ep-context-fetch');
+var epStatus = document.getElementById('ep-status');
+var epTestBtn = document.getElementById('ep-test');
+var epDeleteBtn = document.getElementById('ep-delete');
+var epSaveBtn = document.getElementById('ep-save');
+
+// Editing state. null = no preset selected (form hidden); a string id =
+// editing an existing preset; the sentinel '__new__' = unsaved new preset.
+var editingPresetId = null;
+
+function setEpStatus(text, kind) {
+  epStatus.textContent = text || '';
+  epStatus.classList.remove('ok', 'error');
+  if (kind === 'ok') epStatus.classList.add('ok');
+  else if (kind === 'error') epStatus.classList.add('error');
+}
+
+function showEndpointForm(show) {
+  if (show) {
+    endpointsForm.classList.remove('hidden');
+    endpointsEmpty.classList.add('hidden');
+  } else {
+    endpointsForm.classList.add('hidden');
+    endpointsEmpty.classList.remove('hidden');
+  }
+}
+
+function clearEndpointForm() {
+  epName.value = '';
+  epBaseUrl.value = '';
+  epAuthToken.value = '';
+  epAuthToken.type = 'password';
+  epModelInput.value = '';
+  epModelInput.classList.remove('hidden');
+  epModelSelect.classList.add('hidden');
+  if (epContextWindow) epContextWindow.value = '';
+  while (epModelSelect.firstChild) epModelSelect.removeChild(epModelSelect.firstChild);
+  if (epFallback) {
+    while (epFallback.firstChild) epFallback.removeChild(epFallback.firstChild);
+    var noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = '(none)';
+    epFallback.appendChild(noneOpt);
+  }
+  setEpStatus('');
+}
+
+function populateFallbackOptions(currentEditingId, currentFallbackId) {
+  if (!epFallback) return;
+  while (epFallback.firstChild) epFallback.removeChild(epFallback.firstChild);
+  var none = document.createElement('option');
+  none.value = '';
+  none.textContent = '(none)';
+  epFallback.appendChild(none);
+  for (var i = 0; i < endpointPresets.length; i++) {
+    var p = endpointPresets[i];
+    if (p.id === currentEditingId) continue;  // can't fallback to self
+    var opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name || '(unnamed)';
+    if (p.id === currentFallbackId) opt.selected = true;
+    epFallback.appendChild(opt);
+  }
+}
+
+function renderEndpointsListUI() {
+  while (endpointsListEl.firstChild) endpointsListEl.removeChild(endpointsListEl.firstChild);
+  if (endpointPresets.length === 0) {
+    var empty = document.createElement('li');
+    empty.className = 'empty';
+    empty.textContent = 'No presets yet — click + to add one.';
+    endpointsListEl.appendChild(empty);
+    return;
+  }
+  endpointPresets.forEach(function (p) {
+    var li = document.createElement('li');
+    li.textContent = p.name || '(unnamed)';
+    li.dataset.id = p.id;
+    if (p.id === editingPresetId) li.classList.add('active');
+    li.addEventListener('click', function () { selectEndpointForEdit(p.id); });
+    endpointsListEl.appendChild(li);
+  });
+}
+
+function selectEndpointForEdit(id) {
+  editingPresetId = id;
+  if (!window.electronAPI || !window.electronAPI.endpointGet) return;
+  window.electronAPI.endpointGet(id).then(function (preset) {
+    if (!preset) {
+      // Stale list; refresh and clear.
+      editingPresetId = null;
+      showEndpointForm(false);
+      loadEndpointPresets();
+      return;
+    }
+    epName.value = preset.name || '';
+    epBaseUrl.value = preset.baseUrl || '';
+    epAuthToken.value = preset.authToken || '';
+    epAuthToken.type = 'password';
+    epModelInput.value = preset.model || '';
+    epModelInput.classList.remove('hidden');
+    epModelSelect.classList.add('hidden');
+    if (epContextWindow) epContextWindow.value = preset.contextWindow || '';
+    populateFallbackOptions(preset.id, preset.fallbackId || '');
+    setEpStatus('');
+    showEndpointForm(true);
+    renderEndpointsListUI();
+    epName.focus();
+  });
+}
+
+function startNewEndpoint() {
+  editingPresetId = '__new__';
+  clearEndpointForm();
+  populateFallbackOptions(null, '');
+  showEndpointForm(true);
+  renderEndpointsListUI();
+  epName.focus();
+}
+
+function openEndpointsModal() {
+  closeSpawnDropdown();
+  // One-time-per-session check: on Linux without a keyring (or in headless
+  // WSL), Electron's safeStorage falls back to plaintext for endpoint tokens.
+  // The user should know so they can install a keyring or avoid storing
+  // tokens here.
+  maybeShowSafeStorageWarning();
+  loadEndpointPresets().then(function () {
+    endpointsModal.classList.remove('hidden');
+    // Auto-select something so the user isn't staring at an empty form:
+    // prefer the active project's selected preset, otherwise the first one,
+    // otherwise show the empty-state with the "+" hint.
+    var preferred = currentEndpointId
+      || (endpointPresets[0] && endpointPresets[0].id)
+      || null;
+    if (preferred) {
+      selectEndpointForEdit(preferred);
+    } else {
+      editingPresetId = null;
+      clearEndpointForm();
+      showEndpointForm(false);
+      renderEndpointsListUI();
+    }
+  });
+}
+
+function closeEndpointsModal() {
+  endpointsModal.classList.add('hidden');
+  editingPresetId = null;
+}
+
+var safeStorageWarningShown = false;
+function maybeShowSafeStorageWarning() {
+  if (safeStorageWarningShown) return;
+  if (!window.electronAPI || !window.electronAPI.isTokenStorageEncrypted) return;
+  window.electronAPI.isTokenStorageEncrypted().then(function (ok) {
+    if (ok) return;
+    safeStorageWarningShown = true;
+    var body = endpointsModal.querySelector('.modal-body') || endpointsModal;
+    if (body.querySelector('.endpoints-safestorage-warning')) return;
+    var warn = document.createElement('div');
+    warn.className = 'endpoints-safestorage-warning';
+    warn.textContent = '⚠  OS keyring unavailable — endpoint auth tokens will be saved in plaintext under ~/.claudes/. Install gnome-keyring / libsecret (Linux) for encrypted storage.';
+    body.insertBefore(warn, body.firstChild);
+  }).catch(function () { /* IPC missing in dev — ignore */ });
+}
+
+function collectFormPayload() {
+  var ctx = epContextWindow ? parseInt(epContextWindow.value, 10) : NaN;
+  return {
+    id: editingPresetId === '__new__' ? null : editingPresetId,
+    name: epName.value.trim(),
+    baseUrl: epBaseUrl.value.trim(),
+    authToken: epAuthToken.value, // pass as-is; main encrypts
+    model: epModelInput.classList.contains('hidden')
+      ? epModelSelect.value
+      : epModelInput.value.trim(),
+    fallbackId: (epFallback && epFallback.value) || null,
+    contextWindow: Number.isFinite(ctx) && ctx > 0 ? ctx : null
+  };
+}
+
+function saveCurrentPreset() {
+  console.log('[ep-save] clicked');
+  var payload = collectFormPayload();
+  console.log('[ep-save] payload', JSON.stringify(payload));
+  if (!payload.name) { setEpStatus('Name is required', 'error'); return; }
+  if (!payload.baseUrl) { setEpStatus('Base URL is required', 'error'); return; }
+  if (!payload.model) { setEpStatus('Model is required', 'error'); return; }
+  setEpStatus('Saving…');
+  window.electronAPI.endpointSave(payload).then(function (result) {
+    console.log('[ep-save] result', result);
+    if (result && result.ok === false) {
+      setEpStatus(result.error || 'Save failed', 'error');
+      return;
+    }
+    setEpStatus('Saved ✓', 'ok');
+    // Also flash the save button briefly so the success is unmissable.
+    if (epSaveBtn) {
+      epSaveBtn.classList.add('save-flash');
+      setTimeout(function () { epSaveBtn.classList.remove('save-flash'); }, 1200);
+    }
+    var newId = (result && result.id) || payload.id;
+    return loadEndpointPresets().then(function () {
+      if (newId) {
+        editingPresetId = newId;
+        renderEndpointsListUI();
+        // Auto-apply the saved preset to the active project when nothing
+        // valid is currently selected. This catches: (a) the very first
+        // preset being created, (b) the active project's stored id pointing
+        // at a deleted/renamed preset, (c) user editing a preset and
+        // expecting it to "just work" without a separate dropdown click.
+        var hasValidCurrent = currentEndpointId
+          && endpointPresets.some(function (p) { return p.id === currentEndpointId; });
+        if (!hasValidCurrent) {
+          applyEndpointSelection(newId, /* persist */ true);
+        } else if (newId === currentEndpointId) {
+          // Refresh the cached env block when the active preset is edited.
+          applyEndpointSelection(newId, /* persist */ false);
+        }
+      }
+    });
+  }).catch(function (err) {
+    setEpStatus('Save failed: ' + (err && err.message ? err.message : err), 'error');
+  });
+}
+
+function deleteCurrentPreset() {
+  if (!editingPresetId || editingPresetId === '__new__') {
+    // Nothing persisted to delete — just clear the form.
+    editingPresetId = null;
+    clearEndpointForm();
+    showEndpointForm(false);
+    renderEndpointsListUI();
+    return;
+  }
+  if (!confirm('Delete this preset? Projects using it will fall back to Anthropic (cloud).')) return;
+  window.electronAPI.endpointDelete(editingPresetId).then(function () {
+    editingPresetId = null;
+    clearEndpointForm();
+    showEndpointForm(false);
+    return loadEndpointPresets();
+  }).catch(function (err) {
+    setEpStatus('Delete failed: ' + (err && err.message ? err.message : err), 'error');
+  });
+}
+
+function fetchModelsFromForm() {
+  var baseUrl = epBaseUrl.value.trim();
+  var authToken = epAuthToken.value;
+  if (!baseUrl) { setEpStatus('Base URL is required to fetch models', 'error'); return; }
+  setEpStatus('Fetching models…');
+  window.electronAPI.endpointFetchModels({ baseUrl: baseUrl, authToken: authToken }).then(function (result) {
+    if (!result || !result.ok) {
+      setEpStatus('Fetch failed: ' + ((result && result.error) || 'unknown'), 'error');
+      return;
+    }
+    if (!result.models || result.models.length === 0) {
+      setEpStatus('No models reported by endpoint', 'error');
+      return;
+    }
+    // Switch to the select dropdown, populate, preselect current value if present.
+    while (epModelSelect.firstChild) epModelSelect.removeChild(epModelSelect.firstChild);
+    var current = epModelInput.value.trim();
+    var foundCurrent = false;
+    result.models.forEach(function (m) {
+      var o = document.createElement('option');
+      o.value = m;
+      o.textContent = m;
+      if (m === current) { o.selected = true; foundCurrent = true; }
+      epModelSelect.appendChild(o);
+    });
+    if (!foundCurrent && current) {
+      // Keep the user's current value as a manual option at the top.
+      var manual = document.createElement('option');
+      manual.value = current;
+      manual.textContent = current + ' (manual)';
+      manual.selected = true;
+      epModelSelect.insertBefore(manual, epModelSelect.firstChild);
+    }
+    epModelInput.classList.add('hidden');
+    epModelSelect.classList.remove('hidden');
+    // Auto-fill context window from the selected model's metadata when present.
+    if (epContextWindow && Array.isArray(result.modelInfo)) {
+      var sel = epModelSelect.value;
+      var info = result.modelInfo.find(function (m) { return m.id === sel; });
+      if (info && info.context && !epContextWindow.value) {
+        epContextWindow.value = info.context;
+      }
+    }
+    setEpStatus('Loaded ' + result.models.length + ' model' + (result.models.length === 1 ? '' : 's'), 'ok');
+  }).catch(function (err) {
+    setEpStatus('Fetch failed: ' + (err && err.message ? err.message : err), 'error');
+  });
+}
+
+function fetchContextLengthOnly() {
+  var baseUrl = epBaseUrl.value.trim();
+  var authToken = epAuthToken.value;
+  var modelName = epModelInput.classList.contains('hidden') ? epModelSelect.value : epModelInput.value.trim();
+  if (!baseUrl) { setEpStatus('Base URL is required', 'error'); return; }
+  setEpStatus('Probing context length…');
+  window.electronAPI.endpointFetchModels({ baseUrl: baseUrl, authToken: authToken }).then(function (result) {
+    if (!result || !result.ok) {
+      setEpStatus('Fetch failed: ' + ((result && result.error) || 'unknown'), 'error');
+      return;
+    }
+    var info = (result.modelInfo || []).find(function (m) { return m.id === modelName; });
+    if (info && info.context) {
+      if (epContextWindow) epContextWindow.value = info.context;
+      setEpStatus('Set context length to ' + info.context.toLocaleString(), 'ok');
+    } else {
+      // Fall back to the largest reported across models if our model isn't matched.
+      var max = (result.modelInfo || []).reduce(function (acc, m) { return m.context && m.context > acc ? m.context : acc; }, 0);
+      if (max && epContextWindow) {
+        epContextWindow.value = max;
+        setEpStatus('Endpoint did not report context length for that model; used largest seen (' + max.toLocaleString() + ')', 'ok');
+      } else {
+        setEpStatus('Endpoint did not report a context length — enter manually', 'error');
+      }
+    }
+  }).catch(function (err) {
+    setEpStatus('Fetch failed: ' + (err && err.message ? err.message : err), 'error');
+  });
+}
+
+function testConnection() {
+  var baseUrl = epBaseUrl.value.trim();
+  var authToken = epAuthToken.value;
+  if (!baseUrl) { setEpStatus('Base URL is required to test', 'error'); return; }
+  setEpStatus('Testing…');
+  window.electronAPI.endpointFetchModels({ baseUrl: baseUrl, authToken: authToken }).then(function (result) {
+    if (result && result.ok) {
+      setEpStatus('Connection OK (' + (result.models ? result.models.length : 0) + ' models)', 'ok');
+    } else {
+      setEpStatus('Failed: ' + ((result && result.error) || 'unknown'), 'error');
+    }
+  }).catch(function (err) {
+    setEpStatus('Failed: ' + (err && err.message ? err.message : err), 'error');
+  });
+}
+
+if (btnManageEndpoints) {
+  btnManageEndpoints.addEventListener('click', function (e) {
+    e.stopPropagation();
+    openEndpointsModal();
+  });
+}
+endpointsCloseBtn.addEventListener('click', closeEndpointsModal);
+endpointsNewBtn.addEventListener('click', startNewEndpoint);
+epSaveBtn.addEventListener('click', saveCurrentPreset);
+epDeleteBtn.addEventListener('click', deleteCurrentPreset);
+epModelFetchBtn.addEventListener('click', fetchModelsFromForm);
+if (epContextFetchBtn) epContextFetchBtn.addEventListener('click', fetchContextLengthOnly);
+epTestBtn.addEventListener('click', testConnection);
+epTokenToggle.addEventListener('click', function () {
+  epAuthToken.type = epAuthToken.type === 'password' ? 'text' : 'password';
+});
+
+// Click on backdrop (outside dialog) closes the modal.
+endpointsModal.addEventListener('click', function (e) {
+  if (e.target === endpointsModal) closeEndpointsModal();
 });
 
 // ============================================================
@@ -8102,15 +10790,29 @@ document.addEventListener('click', function (e) {
 // CLAUDE.md Modal
 // ============================================================
 
-function openClaudeMdModal() {
-  if (!activeProjectKey || !window.electronAPI) return;
+// Tracks whether the CLAUDE.md modal is showing the project-scoped file or
+// the global ~/.claude/CLAUDE.md. The same modal is reused for both — only the
+// root path the read/save IPCs are asked to operate on differs.
+var claudeMdEditingGlobal = false;
+var GLOBAL_CLAUDE_DIR_KEY = '__GLOBAL__';
 
-  claudeMdPath.textContent = activeProjectKey + '/CLAUDE.md';
+function openClaudeMdModal(opts) {
+  if (!window.electronAPI) return;
+  var global = !!(opts && opts.global);
+  // Project-scoped variant still requires an active project (current behaviour).
+  if (!global && !activeProjectKey) return;
+  claudeMdEditingGlobal = global;
+  var root = global
+    ? (window.__claudesHome || '~/.claude')   // resolved in main; this is a label only
+    : activeProjectKey;
+  claudeMdPath.textContent = root + '/CLAUDE.md';
   claudeMdStatus.textContent = 'Loading...';
   claudeMdEditor.value = '';
   claudeMdModal.classList.remove('hidden');
-
-  window.electronAPI.readClaudeMd(activeProjectKey).then(function (result) {
+  // The IPC expects a real path; for global we pass a sentinel that main
+  // resolves to os.homedir()/.claude.
+  var rootArg = global ? GLOBAL_CLAUDE_DIR_KEY : activeProjectKey;
+  window.electronAPI.readClaudeMd(rootArg).then(function (result) {
     claudeMdEditor.value = result.content;
     claudeMdStatus.textContent = result.exists ? '' : 'File does not exist yet — will be created on save';
   });
@@ -8121,10 +10823,12 @@ function closeClaudeMdModal() {
 }
 
 function saveClaudeMd() {
-  if (!activeProjectKey || !window.electronAPI) return;
+  if (!window.electronAPI) return;
+  if (!claudeMdEditingGlobal && !activeProjectKey) return;
 
   claudeMdStatus.textContent = 'Saving...';
-  window.electronAPI.saveClaudeMd(activeProjectKey, claudeMdEditor.value).then(function (result) {
+  var rootArg = claudeMdEditingGlobal ? GLOBAL_CLAUDE_DIR_KEY : activeProjectKey;
+  window.electronAPI.saveClaudeMd(rootArg, claudeMdEditor.value).then(function (result) {
     if (result.success) {
       claudeMdStatus.textContent = 'Saved';
       setTimeout(function () {
@@ -8146,11 +10850,185 @@ document.getElementById('btn-settings').addEventListener('click', function () {
   loadNotifSettings();
   loadStartWithOS();
   bindPipelineEditor();
+  var ctxSel = document.getElementById('setting-ctx-default');
+  if (ctxSel) ctxSel.value = getCtxDefaultPref();
   window.electronAPI.getAutomationSettings().then(function (settings) {
     document.getElementById('setting-agent-repos-dir').value = settings.agentReposBaseDir || '';
   });
+  // Sync settings: pulled lazily so changes in main.js persist round-trip.
+  if (window.electronAPI && window.electronAPI.syncGetSettings) {
+    window.electronAPI.syncGetSettings().then(function (s) {
+      var nameEl = document.getElementById('setting-sync-device-name');
+      var pathEl = document.getElementById('setting-sync-source-path');
+      if (nameEl) nameEl.value = (s && s.deviceName) || '';
+      if (pathEl) pathEl.value = (s && s.sourcePath) || '';
+      var status = document.getElementById('sync-save-status');
+      if (status) status.textContent = '';
+    });
+  }
   settingsModal.classList.remove('hidden');
 });
+
+(function wireSyncSettings() {
+  var browseBtn = document.getElementById('btn-browse-sync-source');
+  var saveBtn = document.getElementById('btn-sync-save');
+  var pathEl = document.getElementById('setting-sync-source-path');
+  var nameEl = document.getElementById('setting-sync-device-name');
+  var status = document.getElementById('sync-save-status');
+  if (!browseBtn || !saveBtn || !pathEl || !nameEl) return;
+
+  browseBtn.addEventListener('click', function () {
+    window.electronAPI.syncBrowseFolder({ defaultPath: pathEl.value || undefined }).then(function (chosen) {
+      if (chosen) pathEl.value = chosen;
+    });
+  });
+
+  saveBtn.addEventListener('click', function () {
+    saveBtn.disabled = true;
+    if (status) status.textContent = 'Saving…';
+    window.electronAPI.syncSetSettings({
+      sourcePath: pathEl.value.trim(),
+      deviceName: nameEl.value.trim()
+    }).then(function (saved) {
+      saveBtn.disabled = false;
+      if (status) {
+        if (saved && saved.sourcePath) status.textContent = 'Saved. Watchers will pick up enabled projects.';
+        else status.textContent = 'Saved (no source path → sync inactive).';
+      }
+    }).catch(function (err) {
+      saveBtn.disabled = false;
+      if (status) status.textContent = 'Save failed: ' + (err && err.message || err);
+    });
+  });
+})();
+
+(function wireClawdSettings() {
+  function attach() {
+    var enabledEl = document.getElementById('setting-clawd-enabled');
+    var sizeEl = document.getElementById('setting-clawd-size');
+    var sizeValEl = document.getElementById('setting-clawd-size-val');
+    var debugEl = document.getElementById('setting-clawd-debug');
+    if (!enabledEl || !sizeEl || !window.Clawd) return;
+
+    var hookIndicator = document.getElementById('clawd-hooks-indicator');
+    var hookLabel = document.getElementById('clawd-hooks-label');
+    var hookConnectBtn = document.getElementById('btn-clawd-hooks-connect');
+
+    function setHookStatus(connected, msg) {
+      if (hookIndicator) {
+        hookIndicator.textContent = connected ? '✓' : '!';
+        hookIndicator.classList.toggle('connected', !!connected);
+        hookIndicator.classList.toggle('disconnected', !connected);
+      }
+      if (hookLabel) hookLabel.textContent = msg;
+      if (hookConnectBtn) hookConnectBtn.classList.toggle('hidden', !!connected);
+    }
+
+    function refreshHooks() {
+      var api = window.electronAPI || {};
+      if (api.getHooksStatus) {
+        api.getHooksStatus().then(function (status) {
+          if (!status) {
+            setHookStatus(false, 'Couldn’t read hook status.');
+            return;
+          }
+          var wired = (status.wired && status.wired.length) || 0;
+          var total = status.total || 0;
+          if (wired === total) {
+            setHookStatus(true, 'Hooks connected (' + wired + '/' + total + ') — Clawd reacts in real time.');
+          } else if (wired === 0) {
+            setHookStatus(false, 'Hooks not connected — Clawd may lag or stick on stale states.');
+          } else {
+            setHookStatus(false,
+              'Partial coverage (' + wired + '/' + total + '). Missing: ' +
+              (status.missing || []).join(', ') + '. Click Connect to top up.');
+          }
+        }).catch(function () { setHookStatus(false, 'Couldn’t read hook status.'); });
+      } else if (api.isHooksConfigured) {
+        api.isHooksConfigured().then(function (configured) {
+          if (configured) setHookStatus(true, 'Hooks connected — Clawd reacts in real time.');
+          else setHookStatus(false, 'Hooks not connected — Clawd may lag or stick on stale states.');
+        }).catch(function () { setHookStatus(false, 'Couldn’t read hook status.'); });
+      } else {
+        setHookStatus(false, 'Hooks API unavailable.');
+      }
+    }
+
+    function refresh() {
+      enabledEl.checked = window.Clawd.isEnabled();
+      var size = window.Clawd.getSize();
+      sizeEl.value = String(size);
+      if (sizeValEl) sizeValEl.textContent = size + 'px';
+      if (debugEl && window.Clawd.isDebugEnabled) debugEl.checked = window.Clawd.isDebugEnabled();
+      refreshHooks();
+    }
+    refresh();
+
+    enabledEl.addEventListener('change', function () {
+      if (enabledEl.checked) window.Clawd.enable();
+      else window.Clawd.disable();
+    });
+    sizeEl.addEventListener('input', function () {
+      var n = parseInt(sizeEl.value, 10);
+      if (isNaN(n)) return;
+      window.Clawd.setSize(n);
+      if (sizeValEl) sizeValEl.textContent = n + 'px';
+    });
+    if (debugEl) {
+      debugEl.addEventListener('change', function () {
+        if (debugEl.checked) window.Clawd.enableDebug();
+        else window.Clawd.disableDebug();
+      });
+    }
+
+    if (hookConnectBtn && window.electronAPI && window.electronAPI.configureHooks) {
+      hookConnectBtn.addEventListener('click', function () {
+        hookConnectBtn.disabled = true;
+        if (hookLabel) hookLabel.textContent = 'Connecting…';
+        window.electronAPI.configureHooks().then(function (result) {
+          hookConnectBtn.disabled = false;
+          if (result && result.ok) {
+            setHookStatus(true, 'Hooks connected. Respawn open Claude columns to start receiving events.');
+          } else {
+            setHookStatus(false, 'Connect failed: ' + ((result && result.error) || 'unknown error'));
+          }
+        }).catch(function (err) {
+          hookConnectBtn.disabled = false;
+          setHookStatus(false, 'Connect failed: ' + (err && err.message || err));
+        });
+      });
+    }
+
+    var btn = document.getElementById('btn-settings');
+    if (btn) btn.addEventListener('click', refresh);
+
+    var upstreamLink = document.getElementById('clawd-upstream-link');
+    if (upstreamLink && window.electronAPI && window.electronAPI.openExternal) {
+      upstreamLink.addEventListener('click', function (e) {
+        e.preventDefault();
+        window.electronAPI.openExternal(upstreamLink.href);
+      });
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+
+(function wireCtxDefaultSetting() {
+  var sel = document.getElementById('setting-ctx-default');
+  if (!sel) return;
+  sel.addEventListener('change', function () {
+    setCtxDefaultPref(sel.value);
+    // Apply immediately to live columns: clear cached effectiveLimit so the
+    // next poll picks up the new pref. (Heuristic still promotes if tokens > 200k.)
+    if (typeof allColumns !== 'undefined') {
+      allColumns.forEach(function (c) { c.effectiveLimit = null; });
+    }
+  });
+})();
 
 document.getElementById('settings-close').addEventListener('click', function () {
   settingsModal.classList.add('hidden');
@@ -8158,6 +11036,16 @@ document.getElementById('settings-close').addEventListener('click', function () 
 
 settingsModal.addEventListener('click', function (e) {
   if (e.target === settingsModal) settingsModal.classList.add('hidden');
+});
+
+settingsModal.querySelectorAll('.settings-tab').forEach(function (tab) {
+  tab.addEventListener('click', function () {
+    var key = tab.getAttribute('data-settings-tab');
+    settingsModal.querySelectorAll('.settings-tab').forEach(function (t) { t.classList.toggle('active', t === tab); });
+    settingsModal.querySelectorAll('.settings-pane').forEach(function (p) {
+      p.classList.toggle('active', p.getAttribute('data-settings-pane') === key);
+    });
+  });
 });
 
 document.getElementById('setting-notif-taskbar').addEventListener('change', saveNotifSettings);
@@ -8182,6 +11070,92 @@ document.getElementById('setting-agent-repos-dir').addEventListener('keydown', f
   e.stopPropagation();
 });
 
+// --- Tools tab wiring ---
+(function wireToolsTab() {
+  var editorInput = document.getElementById('setting-external-editor');
+  var editorBtn = document.getElementById('btn-edit-global-claudemd');
+  var autoUpdEl = document.getElementById('setting-auto-update-claude');
+  if (!editorInput) return;
+  if (window.electronAPI && window.electronAPI.getExternalEditorCommand) {
+    window.electronAPI.getExternalEditorCommand().then(function (cmd) {
+      editorInput.value = cmd || '';
+    });
+  }
+  if (window.electronAPI && window.electronAPI.getAutoUpdateClaude && autoUpdEl) {
+    window.electronAPI.getAutoUpdateClaude().then(function (v) { autoUpdEl.checked = !!v; });
+  }
+  editorInput.addEventListener('change', function () {
+    if (window.electronAPI && window.electronAPI.setExternalEditorCommand) {
+      window.electronAPI.setExternalEditorCommand(editorInput.value.trim());
+    }
+  });
+  editorInput.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  if (autoUpdEl) {
+    autoUpdEl.addEventListener('change', function () {
+      if (window.electronAPI && window.electronAPI.setAutoUpdateClaude) {
+        window.electronAPI.setAutoUpdateClaude(autoUpdEl.checked);
+      }
+    });
+  }
+  if (editorBtn) {
+    editorBtn.addEventListener('click', function () {
+      settingsModal.classList.add('hidden');
+      openClaudeMdModal({ global: true });
+    });
+  }
+})();
+
+// --- Terminal tab wiring ---
+var TERM_DEFAULTS = { fontFamily: '', scrollback: 5000, cursorStyle: 'block', background: '#1a1a2e', foreground: '#e0e0e0' };
+var termSettings = Object.assign({}, TERM_DEFAULTS);
+(function wireTerminalTab() {
+  var fontEl = document.getElementById('setting-term-font');
+  var sbEl = document.getElementById('setting-term-scrollback');
+  var cursorEl = document.getElementById('setting-term-cursor');
+  var bgEl = document.getElementById('setting-term-bg');
+  var fgEl = document.getElementById('setting-term-fg');
+  var resetBtn = document.getElementById('setting-term-reset');
+  if (!fontEl) return;
+  function applyToUi() {
+    fontEl.value = termSettings.fontFamily || '';
+    sbEl.value = String(termSettings.scrollback || 5000);
+    cursorEl.value = termSettings.cursorStyle || 'block';
+    bgEl.value = termSettings.background || TERM_DEFAULTS.background;
+    if (fgEl) fgEl.value = termSettings.foreground || TERM_DEFAULTS.foreground;
+  }
+  if (window.electronAPI && window.electronAPI.getTerminalSettings) {
+    window.electronAPI.getTerminalSettings().then(function (s) {
+      termSettings = Object.assign({}, TERM_DEFAULTS, s || {});
+      applyToUi();
+    });
+  }
+  function save(partial) {
+    termSettings = Object.assign(termSettings, partial);
+    if (window.electronAPI && window.electronAPI.setTerminalSettings) {
+      window.electronAPI.setTerminalSettings(termSettings);
+    }
+  }
+  fontEl.addEventListener('change', function () { save({ fontFamily: fontEl.value }); });
+  sbEl.addEventListener('change', function () { save({ scrollback: parseInt(sbEl.value, 10) || 5000 }); });
+  cursorEl.addEventListener('change', function () { save({ cursorStyle: cursorEl.value }); });
+  bgEl.addEventListener('change', function () { save({ background: bgEl.value }); });
+  if (fgEl) fgEl.addEventListener('change', function () { save({ foreground: fgEl.value }); });
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      termSettings = Object.assign({}, TERM_DEFAULTS);
+      applyToUi();
+      if (window.electronAPI && window.electronAPI.setTerminalSettings) {
+        window.electronAPI.setTerminalSettings(termSettings);
+      }
+      if (typeof showToast === 'function') showToast('Terminal settings reset to defaults', { kind: 'success' });
+    });
+  }
+  [fontEl, sbEl, cursorEl, bgEl, fgEl].forEach(function (el) {
+    if (!el) return;
+    el.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  });
+})();
+
 btnClaudeMd.addEventListener('click', openClaudeMdModal);
 
 document.getElementById('btn-claude-config').addEventListener('click', function () {
@@ -8190,6 +11164,45 @@ document.getElementById('btn-claude-config').addEventListener('click', function 
     openFileEditor(configPath);
   });
 });
+
+(function wireCheckForUpdates() {
+  var btn = document.getElementById('btn-check-updates');
+  if (!btn || !window.electronAPI || !window.electronAPI.checkForUpdates) return;
+  btn.addEventListener('click', function () {
+    btn.disabled = true;
+    var origLabel = btn.textContent;
+    btn.textContent = 'Checking…';
+    window.electronAPI.checkForUpdates().then(function (res) {
+      btn.disabled = false;
+      btn.textContent = origLabel;
+      // We rely on the existing update banner events (update:available /
+      // update:downloaded / update:none) for visible feedback, so nothing
+      // more to do here. Errors get surfaced via update:error.
+      if (res && res.error) console.warn('[update] check failed:', res.error);
+    }).catch(function (err) {
+      btn.disabled = false;
+      btn.textContent = origLabel;
+      console.warn('[update] check threw:', err && err.message);
+    });
+  });
+
+  // "You're up to date" toast — surfaced as a transient update bar
+  // message so we don't add a new UI element.
+  if (window.electronAPI.onUpdateNone) {
+    window.electronAPI.onUpdateNone(function (info) {
+      var bar = document.getElementById('update-bar');
+      var msg = document.getElementById('update-message');
+      var action = document.getElementById('update-action');
+      var notes = document.getElementById('update-notes-toggle');
+      if (!bar || !msg) return;
+      msg.textContent = "You're on the latest version (v" + (info && info.version) + ').';
+      if (action) action.style.display = 'none';
+      if (notes) notes.classList.add('hidden');
+      bar.classList.remove('hidden');
+      setTimeout(function () { bar.classList.add('hidden'); }, 4000);
+    });
+  }
+})();
 claudeMdClose.addEventListener('click', closeClaudeMdModal);
 claudeMdSave.addEventListener('click', saveClaudeMd);
 
@@ -8198,8 +11211,8 @@ claudeMdModal.addEventListener('click', function (e) {
 });
 
 claudeMdEditor.addEventListener('keydown', function (e) {
-  // Ctrl+S to save
-  if (e.ctrlKey && e.key === 's') {
+  // Cmd/Ctrl+S to save
+  if (cmdOrCtrl(e) && e.key === 's') {
     e.preventDefault();
     saveClaudeMd();
   }
@@ -8226,7 +11239,37 @@ var fileEditorStatus = document.getElementById('fileeditor-status');
 var fileEditorCurrentPath = null;
 var fileEditorOriginal = '';
 
-function openFileEditor(filePath) {
+// Map file extensions to Prism language identifiers. Anything not mapped
+// falls back to no highlight (the preview just shows uncolored monospace).
+var PRISM_LANG_BY_EXT = {
+  '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
+  '.jsx': 'jsx', '.ts': 'typescript', '.tsx': 'tsx',
+  '.json': 'json', '.html': 'markup', '.xml': 'markup', '.svg': 'markup',
+  '.css': 'css', '.scss': 'css', '.less': 'css',
+  '.py': 'python', '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
+  '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'toml',
+  '.rs': 'rust', '.go': 'go',
+  '.md': 'markdown', '.markdown': 'markdown'
+};
+function prismLanguageFor(filePath) {
+  var i = (filePath || '').lastIndexOf('.');
+  if (i < 0) return null;
+  return PRISM_LANG_BY_EXT[filePath.slice(i).toLowerCase()] || null;
+}
+function syncFileEditorPreview() {
+  var pre = document.getElementById('fileeditor-preview');
+  if (!pre) return;
+  var code = pre.querySelector('code');
+  code.className = '';
+  var lang = prismLanguageFor(fileEditorCurrentPath || '');
+  if (lang) code.className = 'language-' + lang;
+  code.textContent = fileEditorEditor.value;
+  if (typeof Prism !== 'undefined' && lang && Prism.languages && Prism.languages[lang]) {
+    try { Prism.highlightElement(code); } catch (e) { /* */ }
+  }
+}
+
+function openFileEditor(filePath, jumpToLine) {
   if (!window.electronAPI) return;
 
   var name = filePath.replace(/\\/g, '/').split('/').pop();
@@ -8249,8 +11292,53 @@ function openFileEditor(filePath) {
       fileEditorEditor.disabled = false;
       fileEditorSave.disabled = false;
       fileEditorStatus.textContent = '';
+      updateFileEditorGutter();
+      updateCursorPos();
+      fileEditorEditor.scrollTop = 0;
+      syncGutterScroll();
+      if (jumpToLine && jumpToLine > 1) jumpEditorToLine(jumpToLine);
     }
   });
+}
+
+// Place the textarea cursor at the start of the requested 1-based line and
+// scroll the line into view. Used by terminal link clicks like `foo.js:42`.
+function jumpEditorToLine(line) {
+  var text = fileEditorEditor.value;
+  var idx = 0;
+  var current = 1;
+  while (current < line) {
+    var nl = text.indexOf('\n', idx);
+    if (nl === -1) break;
+    idx = nl + 1;
+    current++;
+  }
+  fileEditorEditor.focus();
+  fileEditorEditor.setSelectionRange(idx, idx);
+  // Approximate scroll: textarea rows aren't directly addressable, but
+  // setSelectionRange + a small scroll bump pulls the cursor into view.
+  var lineHeight = parseInt(getComputedStyle(fileEditorEditor).lineHeight, 10) || 18;
+  fileEditorEditor.scrollTop = Math.max(0, (line - 3) * lineHeight);
+  if (typeof syncGutterScroll === 'function') syncGutterScroll();
+}
+
+// Resolve a terminal-emitted file:line click against the column's cwd, then
+// open the inline editor focused on that line. Skips absolute paths that
+// fall outside the project (main rejects them anyway).
+function openFileAtLine(relPath, line) {
+  if (!relPath) return;
+  // Find the focused column's cwd to resolve relative paths.
+  var cwd = null;
+  try {
+    var st = getActiveState();
+    if (st && st.focusedColumnId !== null) {
+      var c = allColumns.get(st.focusedColumnId);
+      if (c) cwd = c.cwd || null;
+    }
+  } catch (e) { /* no focused column */ }
+  var isAbsolute = /^([A-Za-z]:[\\/]|[\\/])/.test(relPath);
+  var full = isAbsolute ? relPath : (cwd ? (cwd.replace(/[\\/]$/, '') + '/' + relPath) : relPath);
+  openFileEditor(full, line);
 }
 
 function closeFileEditor() {
@@ -8260,6 +11348,13 @@ function closeFileEditor() {
   fileEditorModal.classList.add('hidden');
   fileEditorCurrentPath = null;
   fileEditorOriginal = '';
+  if (typeof findBar !== 'undefined' && findBar) findBar.classList.add('hidden');
+  // Reset preview state so the next file opens in edit mode.
+  var pre = document.getElementById('fileeditor-preview');
+  if (pre) pre.classList.add('hidden');
+  fileEditorEditor.style.display = '';
+  var pbtn = document.getElementById('fileeditor-preview-btn');
+  if (pbtn) pbtn.textContent = 'Preview';
 }
 
 function saveFileEditor() {
@@ -8279,6 +11374,26 @@ function saveFileEditor() {
   });
 }
 
+// Preview toggle — swap the textarea for a syntax-highlighted readonly view.
+var fileEditorPreviewBtn = document.getElementById('fileeditor-preview-btn');
+if (fileEditorPreviewBtn) {
+  fileEditorPreviewBtn.addEventListener('click', function () {
+    var pre = document.getElementById('fileeditor-preview');
+    if (!pre) return;
+    var isPreviewing = !pre.classList.contains('hidden');
+    if (isPreviewing) {
+      pre.classList.add('hidden');
+      fileEditorEditor.style.display = '';
+      fileEditorPreviewBtn.textContent = 'Preview';
+    } else {
+      syncFileEditorPreview();
+      pre.classList.remove('hidden');
+      fileEditorEditor.style.display = 'none';
+      fileEditorPreviewBtn.textContent = 'Edit';
+    }
+  });
+}
+
 fileEditorClose.addEventListener('click', closeFileEditor);
 fileEditorSave.addEventListener('click', saveFileEditor);
 
@@ -8287,15 +11402,27 @@ fileEditorModal.addEventListener('click', function (e) {
 });
 
 fileEditorEditor.addEventListener('keydown', function (e) {
-  // Ctrl+S to save
-  if (e.ctrlKey && e.key === 's') {
+  var mod = cmdOrCtrl(e);
+  // Cmd/Ctrl+S to save
+  if (mod && e.key === 's') {
     e.preventDefault();
     saveFileEditor();
+  }
+  // Cmd/Ctrl+F to open find bar
+  if (mod && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault();
+    openFindBar(false);
+  }
+  // Cmd/Ctrl+H to open find+replace
+  if (mod && (e.key === 'h' || e.key === 'H')) {
+    e.preventDefault();
+    openFindBar(true);
   }
   // Escape to close
   if (e.key === 'Escape') {
     e.preventDefault();
-    closeFileEditor();
+    if (!findBar.classList.contains('hidden')) closeFindBar();
+    else closeFileEditor();
   }
   // Tab inserts spaces instead of changing focus
   if (e.key === 'Tab') {
@@ -8304,10 +11431,209 @@ fileEditorEditor.addEventListener('keydown', function (e) {
     var end = fileEditorEditor.selectionEnd;
     fileEditorEditor.value = fileEditorEditor.value.substring(0, start) + '  ' + fileEditorEditor.value.substring(end);
     fileEditorEditor.selectionStart = fileEditorEditor.selectionEnd = start + 2;
+    updateFileEditorGutter();
   }
-  // Prevent shortcuts from bubbling to terminal
   e.stopPropagation();
 });
+
+// ─────────────────────────────────────────────────────────
+// File editor: line-number gutter + find/replace
+// ─────────────────────────────────────────────────────────
+var fileEditorGutter = document.getElementById('fileeditor-gutter');
+var fileEditorCursorPos = document.getElementById('fileeditor-cursor-pos');
+var findBar = document.getElementById('fileeditor-find-bar');
+var findInput = document.getElementById('fileeditor-find-input');
+var findCount = document.getElementById('fileeditor-find-count');
+var findPrev = document.getElementById('fileeditor-find-prev');
+var findNext = document.getElementById('fileeditor-find-next');
+var findCase = document.getElementById('fileeditor-find-case');
+var replaceInput = document.getElementById('fileeditor-replace-input');
+var replaceOne = document.getElementById('fileeditor-replace-one');
+var replaceAll = document.getElementById('fileeditor-replace-all');
+var findClose = document.getElementById('fileeditor-find-close');
+
+var findMatches = [];
+var findCurrentIdx = -1;
+
+function updateFileEditorGutter() {
+  if (!fileEditorGutter) return;
+  var lines = fileEditorEditor.value.split('\n').length;
+  // Cap is generous; assembling huge strings is still cheap (<200k lines is fine).
+  var nums = '';
+  for (var i = 1; i <= lines; i++) nums += (i === 1 ? '' : '\n') + i;
+  fileEditorGutter.textContent = nums;
+}
+
+function syncGutterScroll() {
+  if (!fileEditorGutter) return;
+  fileEditorGutter.scrollTop = fileEditorEditor.scrollTop;
+}
+
+function updateCursorPos() {
+  if (!fileEditorCursorPos) return;
+  var pos = fileEditorEditor.selectionStart;
+  var before = fileEditorEditor.value.substring(0, pos);
+  var line = before.split('\n').length;
+  var col = pos - before.lastIndexOf('\n');
+  fileEditorCursorPos.textContent = 'Ln ' + line + ', Col ' + col;
+}
+
+fileEditorEditor.addEventListener('input', function () {
+  updateFileEditorGutter();
+  updateCursorPos();
+  // Re-run search if find bar is open
+  if (!findBar.classList.contains('hidden')) runFind(false);
+});
+fileEditorEditor.addEventListener('scroll', syncGutterScroll);
+fileEditorEditor.addEventListener('keyup', updateCursorPos);
+fileEditorEditor.addEventListener('click', updateCursorPos);
+
+function openFindBar(focusReplace) {
+  findBar.classList.remove('hidden');
+  // Pre-fill with selected text if any
+  var start = fileEditorEditor.selectionStart;
+  var end = fileEditorEditor.selectionEnd;
+  if (start !== end) findInput.value = fileEditorEditor.value.substring(start, end);
+  runFind(false);
+  if (focusReplace) replaceInput.focus();
+  else { findInput.focus(); findInput.select(); }
+}
+
+function closeFindBar() {
+  findBar.classList.add('hidden');
+  findMatches = [];
+  findCurrentIdx = -1;
+  fileEditorEditor.focus();
+}
+
+function runFind(advance) {
+  var needle = findInput.value;
+  if (!needle) {
+    findMatches = [];
+    findCurrentIdx = -1;
+    findCount.textContent = '0 / 0';
+    return;
+  }
+  var hay = fileEditorEditor.value;
+  var caseSensitive = findCase.checked;
+  if (!caseSensitive) { hay = hay.toLowerCase(); needle = needle.toLowerCase(); }
+  findMatches = [];
+  var idx = 0;
+  while ((idx = hay.indexOf(needle, idx)) !== -1) {
+    findMatches.push(idx);
+    idx += needle.length || 1;
+  }
+  if (!findMatches.length) {
+    findCurrentIdx = -1;
+    findCount.textContent = '0 / 0';
+    return;
+  }
+  // Pick the match nearest to (or after) the current caret
+  var caret = fileEditorEditor.selectionStart;
+  var pick = 0;
+  for (var i = 0; i < findMatches.length; i++) {
+    if (findMatches[i] >= caret) { pick = i; break; }
+    pick = i;
+  }
+  findCurrentIdx = advance ? (pick + 1) % findMatches.length : pick;
+  highlightCurrentMatch();
+}
+
+function highlightCurrentMatch() {
+  if (findCurrentIdx < 0 || !findMatches.length) {
+    findCount.textContent = '0 / 0';
+    return;
+  }
+  findCount.textContent = (findCurrentIdx + 1) + ' / ' + findMatches.length;
+  var pos = findMatches[findCurrentIdx];
+  var len = findInput.value.length;
+  fileEditorEditor.focus();
+  fileEditorEditor.setSelectionRange(pos, pos + len);
+  // Scroll the selection into view (textarea has no native scroll-to-selection)
+  scrollSelectionIntoView();
+  updateCursorPos();
+}
+
+function scrollSelectionIntoView() {
+  // Approximate: put the selection's line at the centre of the visible area.
+  var pos = fileEditorEditor.selectionStart;
+  var line = fileEditorEditor.value.substring(0, pos).split('\n').length;
+  var lineHeight = parseFloat(getComputedStyle(fileEditorEditor).lineHeight) || 21;
+  var target = Math.max(0, line * lineHeight - fileEditorEditor.clientHeight / 2);
+  fileEditorEditor.scrollTop = target;
+}
+
+function findNextMatch() {
+  if (!findMatches.length) { runFind(false); if (!findMatches.length) return; }
+  findCurrentIdx = (findCurrentIdx + 1) % findMatches.length;
+  highlightCurrentMatch();
+}
+
+function findPrevMatch() {
+  if (!findMatches.length) { runFind(false); if (!findMatches.length) return; }
+  findCurrentIdx = (findCurrentIdx - 1 + findMatches.length) % findMatches.length;
+  highlightCurrentMatch();
+}
+
+function replaceCurrent() {
+  if (findCurrentIdx < 0 || !findMatches.length) return;
+  var needle = findInput.value;
+  var replacement = replaceInput.value;
+  var pos = findMatches[findCurrentIdx];
+  var content = fileEditorEditor.value;
+  fileEditorEditor.value = content.substring(0, pos) + replacement + content.substring(pos + needle.length);
+  fileEditorEditor.setSelectionRange(pos + replacement.length, pos + replacement.length);
+  updateFileEditorGutter();
+  runFind(false);
+  // Re-locate to the next match after this position
+  for (var i = 0; i < findMatches.length; i++) {
+    if (findMatches[i] >= pos + replacement.length) { findCurrentIdx = i; highlightCurrentMatch(); return; }
+  }
+  if (findMatches.length) { findCurrentIdx = 0; highlightCurrentMatch(); }
+}
+
+function replaceAllMatches() {
+  if (!findInput.value) return;
+  var needle = findInput.value;
+  var replacement = replaceInput.value;
+  var caseSensitive = findCase.checked;
+  var content = fileEditorEditor.value;
+  var out = '';
+  var i = 0;
+  var hay = caseSensitive ? content : content.toLowerCase();
+  var n = caseSensitive ? needle : needle.toLowerCase();
+  var count = 0;
+  while (i < hay.length) {
+    var found = hay.indexOf(n, i);
+    if (found === -1) { out += content.substring(i); break; }
+    out += content.substring(i, found) + replacement;
+    i = found + n.length;
+    count++;
+  }
+  if (count === 0) return;
+  fileEditorEditor.value = out;
+  updateFileEditorGutter();
+  runFind(false);
+  findCount.textContent = count + ' replaced';
+}
+
+findInput.addEventListener('input', function () { runFind(false); });
+findInput.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? findPrevMatch() : findNextMatch(); }
+  if (e.key === 'Escape') { e.preventDefault(); closeFindBar(); }
+  e.stopPropagation();
+});
+replaceInput.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') { e.preventDefault(); replaceCurrent(); }
+  if (e.key === 'Escape') { e.preventDefault(); closeFindBar(); }
+  e.stopPropagation();
+});
+findCase.addEventListener('change', function () { runFind(false); });
+findNext.addEventListener('click', findNextMatch);
+findPrev.addEventListener('click', findPrevMatch);
+replaceOne.addEventListener('click', replaceCurrent);
+replaceAll.addEventListener('click', replaceAllMatches);
+findClose.addEventListener('click', closeFindBar);
 
 // ============================================================
 // Usage Modal
@@ -8350,11 +11676,596 @@ function projectKeyToName(key) {
   return parts[parts.length - 1] || key;
 }
 
+function projectPathToKey(p) {
+  if (!p) return '';
+  // Claude encodes the project directory by replacing every non-alphanumeric
+  // character with '-' (this includes ':', '\', '/', spaces, and underscores).
+  return String(p).replace(/[^a-zA-Z0-9]/g, '-').replace(/^-+/, '');
+}
+
+function fmtResetsIn(iso) {
+  if (!iso) return '—';
+  var diff = new Date(iso).getTime() - Date.now();
+  if (diff <= 0) return 'now';
+  var hr = Math.floor(diff / 3600000);
+  var min = Math.floor((diff % 3600000) / 60000);
+  if (hr === 0) return min + ' min';
+  return hr + ' hr ' + min + ' min';
+}
+
+function buildPlanLimitRow(label, sub, pct) {
+  var row = document.createElement('div');
+  row.className = 'plan-limit-row';
+
+  var meta = document.createElement('div');
+  meta.className = 'plan-limit-meta';
+  var lbl = document.createElement('div');
+  lbl.className = 'plan-limit-label';
+  lbl.textContent = label;
+  var subEl = document.createElement('div');
+  subEl.className = 'plan-limit-sub';
+  subEl.textContent = sub;
+  meta.appendChild(lbl);
+  meta.appendChild(subEl);
+
+  var bar = document.createElement('div');
+  bar.className = 'plan-limit-bar';
+  var fill = document.createElement('div');
+  fill.className = 'plan-limit-bar-fill';
+  fill.style.width = Math.min(100, Math.max(0, pct)) + '%';
+  if (pct >= 90) fill.classList.add('critical');
+  else if (pct >= 70) fill.classList.add('warning');
+  bar.appendChild(fill);
+
+  var pctEl = document.createElement('div');
+  pctEl.className = 'plan-limit-pct';
+  pctEl.textContent = Math.round(pct) + '% used';
+
+  row.appendChild(meta);
+  row.appendChild(bar);
+  row.appendChild(pctEl);
+  return row;
+}
+
+function renderPlanLimits(result) {
+  var container = document.getElementById('plan-limits-section');
+  if (!container) return;
+  container.innerHTML = '';
+
+  var header = document.createElement('div');
+  header.className = 'plan-limits-header';
+  var title = document.createElement('div');
+  title.className = 'plan-limits-title';
+  title.textContent = 'Plan limits';
+  var refreshBtn = document.createElement('button');
+  refreshBtn.className = 'plan-limits-refresh';
+  refreshBtn.title = 'Refresh';
+  refreshBtn.textContent = '↻';
+  refreshBtn.addEventListener('click', function () { loadPlanLimits(true); });
+  header.appendChild(title);
+  header.appendChild(refreshBtn);
+  container.appendChild(header);
+
+  if (!result || !result.ok) {
+    var msg = document.createElement('div');
+    msg.className = 'plan-limits-error';
+    msg.textContent = (result && result.message) || 'Plan limits unavailable.';
+    container.appendChild(msg);
+    return;
+  }
+
+  var d = result.data || {};
+  var rows = [];
+  if (d.five_hour) {
+    rows.push(['Current session', 'Resets in ' + fmtResetsIn(d.five_hour.resets_at), d.five_hour.utilization || 0]);
+  }
+  if (d.seven_day) {
+    rows.push(['All models (weekly)', 'Resets in ' + fmtResetsIn(d.seven_day.resets_at), d.seven_day.utilization || 0]);
+  }
+  if (d.seven_day_opus) {
+    rows.push(['Opus only (weekly)', 'Resets in ' + fmtResetsIn(d.seven_day_opus.resets_at), d.seven_day_opus.utilization || 0]);
+  }
+  if (d.seven_day_sonnet) {
+    rows.push(['Sonnet only (weekly)', 'Resets in ' + fmtResetsIn(d.seven_day_sonnet.resets_at), d.seven_day_sonnet.utilization || 0]);
+  }
+  if (d.seven_day_omelette) {
+    rows.push(['Claude Design (weekly)', d.seven_day_omelette.resets_at ? 'Resets in ' + fmtResetsIn(d.seven_day_omelette.resets_at) : 'Not used yet', d.seven_day_omelette.utilization || 0]);
+  }
+
+  if (rows.length === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'plan-limits-error';
+    empty.textContent = 'No plan limits returned.';
+    container.appendChild(empty);
+    return;
+  }
+
+  var list = document.createElement('div');
+  list.className = 'plan-limits-list';
+  for (var i = 0; i < rows.length; i++) {
+    list.appendChild(buildPlanLimitRow(rows[i][0], rows[i][1], rows[i][2]));
+  }
+  container.appendChild(list);
+
+  if (result.fetchedAt) {
+    var foot = document.createElement('div');
+    foot.className = 'plan-limits-footer';
+    var ago = Math.max(0, Math.round((Date.now() - result.fetchedAt) / 1000));
+    foot.textContent = 'Last updated: ' + (ago < 5 ? 'just now' : ago + 's ago') + (result.cached ? ' (cached)' : '');
+    container.appendChild(foot);
+  }
+}
+
+// Most recent plan-limits result (used by both the Usage modal panel and the
+// persistent sidebar mini-bar). Refreshed by loadPlanLimits().
+var lastPlanLimitsResult = null;
+var prevPlanLimitsData = null;  // last successful data, used for crossing detection
+// Stickiness: hold on to the last *successful* render so transient API failures
+// during background polls don't make the sidebar bar vanish. Persisted to
+// localStorage so a cold start during a server-issued cooldown still shows
+// data (greyed) instead of an empty sidebar.
+var lastGoodPlanLimitsData = null;
+var lastGoodPlanLimitsAtMs = 0;
+var PLAN_LIMITS_LASTGOOD_KEY = 'claudes.planLimitsLastGood';
+var PLAN_LIMITS_LASTGOOD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+(function restoreLastGoodPlanLimits() {
+  try {
+    var raw = window.localStorage && window.localStorage.getItem(PLAN_LIMITS_LASTGOOD_KEY);
+    if (!raw) return;
+    var saved = JSON.parse(raw);
+    if (!saved || !saved.data || !saved.fetchedAt) return;
+    if (Date.now() - saved.fetchedAt > PLAN_LIMITS_LASTGOOD_MAX_AGE_MS) return;
+    lastGoodPlanLimitsData = saved.data;
+    lastGoodPlanLimitsAtMs = saved.fetchedAt;
+  } catch { /* corrupt entry — ignore */ }
+})();
+
+function persistLastGoodPlanLimits(data, fetchedAt) {
+  try {
+    if (window.localStorage) {
+      window.localStorage.setItem(PLAN_LIMITS_LASTGOOD_KEY, JSON.stringify({ data, fetchedAt }));
+    }
+  } catch { /* quota / privacy mode — ignore */ }
+}
+
+function renderPlanLimitsMini(result) {
+  var el = document.getElementById('plan-limits-mini');
+  if (!el) return;
+  var ok = result && result.ok && result.data;
+  if (!ok) {
+    // No live data this poll. If we have a last-good snapshot (in-memory from
+    // a prior poll, or restored from localStorage at startup), keep showing
+    // it — flagged stale when the failure was a server cooldown — instead of
+    // hiding the bar silently.
+    if (lastGoodPlanLimitsData) {
+      var stale = result && result.error === 'rate-limited';
+      renderPlanLimitsMiniFrom(el, lastGoodPlanLimitsData, stale);
+    } else {
+      el.classList.add('hidden');
+    }
+    return;
+  }
+  var d = result.data;
+  lastGoodPlanLimitsData = d;
+  lastGoodPlanLimitsAtMs = result.fetchedAt || Date.now();
+  persistLastGoodPlanLimits(d, lastGoodPlanLimitsAtMs);
+  // Hide if the API returned nothing useful (e.g. API-key user).
+  if (!d.five_hour && !d.seven_day) {
+    el.classList.add('hidden');
+    return;
+  }
+  renderPlanLimitsMiniFrom(el, d, false);
+}
+
+function renderPlanLimitsMiniFrom(el, d, stale) {
+  if (!d.five_hour && !d.seven_day) {
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.remove('hidden');
+  el.classList.toggle('stale', !!stale);
+  el.innerHTML = '';
+
+  function row(label, slot) {
+    if (!slot) return null;
+    var pct = slot.utilization || 0;
+    var r = document.createElement('div');
+    r.className = 'plan-limits-mini-row';
+    var lbl = document.createElement('span');
+    lbl.className = 'plan-limits-mini-label';
+    lbl.textContent = label;
+    var bar = document.createElement('div');
+    bar.className = 'plan-limits-mini-bar';
+    var fill = document.createElement('div');
+    fill.className = 'plan-limits-mini-fill';
+    fill.style.width = Math.min(100, Math.max(0, pct)) + '%';
+    if (pct >= 90) fill.classList.add('critical');
+    else if (pct >= 70) fill.classList.add('warning');
+    bar.appendChild(fill);
+    var pctEl = document.createElement('span');
+    pctEl.className = 'plan-limits-mini-pct';
+    pctEl.textContent = Math.round(pct) + '%';
+    r.appendChild(lbl);
+    r.appendChild(bar);
+    r.appendChild(pctEl);
+    return r;
+  }
+
+  var sessionRow = row('Session', d.five_hour);
+  var weekRow = row('Week', d.seven_day);
+  if (sessionRow) el.appendChild(sessionRow);
+  if (weekRow) el.appendChild(weekRow);
+  // Re-attach the hover popover after innerHTML wipe.
+  if (typeof updatePlanLimitsPopover === 'function') updatePlanLimitsPopover();
+}
+
+function loadPlanLimits(force) {
+  var container = document.getElementById('plan-limits-section');
+  // Only show the modal's loading state when the modal is actually open and
+  // we don't already have data to display from a prior background poll.
+  if (container && !force && !usageModal.classList.contains('hidden') && !lastPlanLimitsResult) {
+    container.innerHTML = '<div class="plan-limits-loading">Loading plan limits…</div>';
+  }
+  if (!window.electronAPI || !window.electronAPI.getPlanLimits) {
+    var miss = { ok: false, message: 'Plan limits API not available.' };
+    lastPlanLimitsResult = miss;
+    renderPlanLimits(miss);
+    renderPlanLimitsMini(miss);
+    return Promise.resolve(miss);
+  }
+  return window.electronAPI.getPlanLimits(!!force).then(function (r) {
+    lastPlanLimitsResult = r;
+    if (!usageModal.classList.contains('hidden')) renderPlanLimits(r);
+    renderPlanLimitsMini(r);
+    if (r && r.ok && r.data) {
+      if (prevPlanLimitsData) {
+        window.electronAPI.detectThresholdCrossings(prevPlanLimitsData, r.data).then(function (crossings) {
+          if (crossings && crossings.length) handleThresholdCrossings(crossings);
+        });
+      }
+      prevPlanLimitsData = r.data;
+      updateColumnDeltaPills(r.data);
+    }
+    return r;
+  }).catch(function (e) {
+    var err = { ok: false, message: e && e.message ? e.message : String(e) };
+    lastPlanLimitsResult = err;
+    if (!usageModal.classList.contains('hidden')) renderPlanLimits(err);
+    renderPlanLimitsMini(err);
+    return err;
+  });
+}
+
+function handleThresholdCrossings(crossings) {
+  for (var i = 0; i < crossings.length; i++) {
+    var c = crossings[i];
+    var enabled70 = !notifSettings || notifSettings.limits70 !== false;
+    var enabled90 = !notifSettings || notifSettings.limits90 !== false;
+    if (c.threshold === 70 && !enabled70) continue;
+    if (c.threshold === 90 && !enabled90) continue;
+    showThresholdNotification(c);
+    if (c.threshold === 90 && c.window === 'seven_day' && (!notifSettings || notifSettings.limitsPause !== false)) {
+      promptPauseAutomations(c);
+    }
+  }
+}
+
+var CTX_POLL_MS = 10000;  // 10s — JSONL grows on every assistant turn
+var CTX_LIMIT_CACHE = new Map();  // model -> max tokens, populated lazily
+
+// User preference for the meter's denominator. Persisted in config.ctxDefault
+// so it survives across launches in the same place as other app settings.
+// 'auto' (default) | '200000' | '1000000'
+function getCtxDefaultPref() {
+  return (config && config.ctxDefault) ? config.ctxDefault : 'auto';
+}
+function setCtxDefaultPref(v) {
+  if (!config) return;
+  config.ctxDefault = v;
+  saveConfig();
+}
+
+function showCtxMeterPlaceholder(col, label) {
+  if (!col || !col.ctxMeterEl) return;
+  col.ctxMeterEl.removeAttribute('hidden');
+  if (col.ctxFillEl) col.ctxFillEl.style.width = '0%';
+  if (col.ctxTextEl) col.ctxTextEl.textContent = label;
+  col.ctxMeterEl.title = label;
+}
+
+function showDeltaPillPlaceholder(col) {
+  if (!col || !col.deltaSessionEl) return;
+  col.deltaSessionEl.removeAttribute('hidden');
+  col.deltaSessionEl.textContent = 'Δ —';
+  col.deltaSessionEl.title = 'Waiting for first assistant turn…';
+}
+
+function startContextMeterPoll(colId) {
+  var c = allColumns.get(colId);
+  if (!c || c.cmd) return;  // skip non-Claude columns (custom commands)
+  // Show placeholders immediately so the user can see the widgets exist.
+  showCtxMeterPlaceholder(c, '—');
+  showDeltaPillPlaceholder(c);
+  function tick() {
+    var ts = new Date().toISOString().slice(11, 19);
+    var col = allColumns.get(colId);
+    if (!col || !col.ctxMeterEl) return;
+    console.log('[ctx-meter ' + ts + '] tick col=' + colId + ' sessionId=' + col.sessionId + ' projectKey=' + col.projectKey + ' cmd=' + col.cmd);
+    if (!col.sessionId) {
+      showCtxMeterPlaceholder(col, '…');
+      return;
+    }
+    if (!col.contextEnabled) {
+      // Brand-new column, no user submission yet — don't surface Claude's
+      // startup system-prompt entry as if it were live conversation context.
+      showCtxMeterPlaceholder(col, '—');
+      return;
+    }
+    if (!window.electronAPI || !window.electronAPI.getSessionContextTokens) {
+      console.log('[ctx-meter] electronAPI.getSessionContextTokens missing');
+      return;
+    }
+    window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId, col.contextSinceMs).then(function (tokens) {
+      console.log('[ctx-meter ' + ts + '] col=' + colId + ' → tokens=' + tokens);
+      if (tokens == null) {
+        showCtxMeterPlaceholder(col, '0');
+        return;
+      }
+      if (col.spawnSessionTokens == null) {
+        col.spawnSessionTokens = tokens;
+      } else if (tokens < col.spawnSessionTokens * 0.6) {
+        // Tokens dropped sharply → compaction (or /clear). Reset baseline so the
+        // delta starts counting from the post-compaction state.
+        console.log('[ctx-meter] col=' + colId + ' detected compaction (' + col.spawnSessionTokens + ' → ' + tokens + '); resetting baseline');
+        col.spawnSessionTokens = tokens;
+      }
+      updateColumnDeltaFromTokens(col, tokens);
+      var modelKey = col.model || 'sonnet';
+      var limit = CTX_LIMIT_CACHE.get(modelKey);
+      // Endpoint-aware: if this column is on a local-endpoint preset that
+      // declares a context window, use that as the limit. Beats the global pref.
+      if (!col.effectiveLimit && col.endpointId) {
+        var ep = (typeof endpointPresets !== 'undefined' ? endpointPresets : [])
+          .find(function (p) { return p && p.id === col.endpointId; });
+        console.log('[ctx-meter] col=' + colId + ' endpoint lookup: id=' + col.endpointId + ' ep=' + (ep ? ep.name : 'NOT FOUND') + ' contextWindow=' + (ep ? ep.contextWindow : 'n/a'));
+        if (ep && ep.contextWindow && ep.contextWindow > 0) {
+          col.effectiveLimit = ep.contextWindow;
+        }
+      }
+      // Pref-driven baseline: user can lock 200k or 1M via Settings.
+      if (!col.effectiveLimit) {
+        var pref = getCtxDefaultPref();
+        if (pref === '1000000') col.effectiveLimit = 1000000;
+        else if (pref === '200000') col.effectiveLimit = 200000;
+      }
+      // Heuristic fallback: if observed tokens exceed 200k, the session must be
+      // on 1M-context (otherwise the API would error). Promote regardless of pref.
+      if (tokens > 200000 && (!col.effectiveLimit || col.effectiveLimit < 1000000)) {
+        console.log('[ctx-meter] col=' + colId + ' tokens=' + tokens + ' exceed 200k → promoting to 1M');
+        col.effectiveLimit = 1000000;
+      }
+      function draw() {
+        var effLim = col.effectiveLimit || limit;
+        col.ctxMeterEl.removeAttribute('hidden');
+        var pct = Math.min(100, (tokens / effLim) * 100);
+        col.ctxFillEl.style.width = pct + '%';
+        col.ctxFillEl.classList.toggle('warning', pct >= 70 && pct < 90);
+        col.ctxFillEl.classList.toggle('critical', pct >= 90);
+        function k(n) { return n >= 1000 ? Math.round(n / 1000) + 'k' : String(n); }
+        function kLim(n) {
+          if (n >= 1000000) return (n / 1000000) + 'M';
+          if (n >= 1000) return Math.round(n / 1000) + 'k';
+          return String(n);
+        }
+        col.ctxTextEl.textContent = k(tokens) + '/' + kLim(effLim);
+        col.ctxMeterEl.title =
+          'Context window: ' + tokens.toLocaleString() + ' / ' + effLim.toLocaleString() + ' tokens (' + Math.round(pct) + '%)\n' +
+          'Cumulative tokens currently held in this session\'s context.';
+      }
+      if (limit) { draw(); return; }
+      window.electronAPI.getModelContextLimit(modelKey).then(function (lim) {
+        CTX_LIMIT_CACHE.set(modelKey, lim);
+        limit = lim;
+        draw();
+      }).catch(function () { /* fall back silently — pill stays hidden */ });
+    }).catch(function (err) { console.debug('[ctx-meter] error', err); });
+  }
+  tick();  // immediate first poll
+  c.ctxPollTimer = setInterval(tick, CTX_POLL_MS);
+}
+
+function stopContextMeterPoll(colId) {
+  var c = allColumns.get(colId);
+  if (c && c.ctxPollTimer) {
+    clearInterval(c.ctxPollTimer);
+    c.ctxPollTimer = null;
+  }
+}
+
+// Per-column delta: tokens added to this session's context since the column spawned.
+// Driven from the same JSONL read as the context-meter poll, so it's truly per-column
+// (not the global plan-limits 5h utilisation, which mixes all concurrent sessions).
+function updateColumnDeltaFromTokens(col, tokens) {
+  if (!col || !col.deltaSessionEl) return;
+  if (col.spawnSessionTokens == null || typeof tokens !== 'number') return;
+  var delta = tokens - col.spawnSessionTokens;
+  if (delta < 0) delta = 0;  // compaction can shrink context — clamp to 0
+  function k(n) {
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k';
+    return String(n);
+  }
+  col.deltaSessionEl.removeAttribute('hidden');
+  col.deltaSessionEl.textContent = 'Δ ' + k(delta);
+  col.deltaSessionEl.title =
+    'Δ — context growth in THIS column since you opened it.\n' +
+    'Different from the bar, which shows TOTAL context tokens currently in the session.\n\n' +
+    'Spawn baseline: ' + col.spawnSessionTokens.toLocaleString() + '\n' +
+    'Now:            ' + tokens.toLocaleString() + '\n' +
+    'Δ (clamped ≥0): ' + delta.toLocaleString() + '\n\n' +
+    'Resets after /compact or /clear.';
+}
+
+// Kept as a no-op shim for the old global-plan-limits trigger sites.
+// Per-column delta is now driven by updateColumnDeltaFromTokens via the ctx poll.
+function updateColumnDeltaPills(_data) { /* no-op */ }
+
+function promptPauseAutomations(c) {
+  if (!window.electronAPI || !window.electronAPI.getAutomationSettings || !window.electronAPI.toggleAutomationsGlobal) return;
+  // Non-blocking inline confirm (replaces the renderer-blocking window.confirm).
+  confirmDialog(
+    'You\'ve crossed 90% of your weekly limit (' + Math.round(c.value) + '%).\n\n' +
+    'Pause all your automations? You can re-enable them any time from the Automations panel.',
+    { okLabel: 'Pause all', cancelLabel: 'Not now' }
+  ).then(function (ok) {
+    if (!ok) return;
+    // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
+    window.electronAPI.getAutomationSettings().then(function (settings) {
+      if (settings && settings.globalEnabled) {
+        window.electronAPI.toggleAutomationsGlobal();
+      }
+    }).catch(function () { /* ignore — silent failure is acceptable here */ });
+  });
+}
+
+function showThresholdNotification(c) {
+  var label = ({
+    five_hour: 'Current session',
+    seven_day: 'Weekly (all models)',
+    seven_day_sonnet: 'Weekly (Sonnet)',
+    seven_day_opus: 'Weekly (Opus)',
+    seven_day_omelette: 'Weekly (Claude Design)'
+  })[c.window] || c.window;
+  var msg = label + ' just crossed ' + c.threshold + '% (' + Math.round(c.value) + '% used).';
+  if (!document.hasFocus() && window.electronAPI && window.electronAPI.flashFrame) {
+    window.electronAPI.flashFrame();
+  }
+  if (window.electronAPI && window.electronAPI.showSystemNotification) {
+    window.electronAPI.showSystemNotification({ title: 'Claude usage limit', body: msg });
+  }
+}
+
+// Background polling for the sidebar mini-bar.
+//   - Refresh on window focus if data is older than 2 minutes
+//   - Poll every 5 minutes while window is focused
+//   - Pause polling while window is blurred (no token noise when away)
+var PLAN_LIMITS_POLL_MS = 60 * 1000;
+var PLAN_LIMITS_FOCUS_STALE_MS = 60 * 1000;
+var planLimitsPollTimer = null;
+
+function startPlanLimitsPolling() {
+  if (planLimitsPollTimer) return;
+  planLimitsPollTimer = setInterval(function () { loadPlanLimits(false); }, PLAN_LIMITS_POLL_MS);
+}
+function stopPlanLimitsPolling() {
+  if (planLimitsPollTimer) { clearInterval(planLimitsPollTimer); planLimitsPollTimer = null; }
+}
+
+window.addEventListener('focus', function () {
+  var age = lastPlanLimitsResult && lastPlanLimitsResult.fetchedAt
+    ? Date.now() - lastPlanLimitsResult.fetchedAt
+    : Infinity;
+  if (age > PLAN_LIMITS_FOCUS_STALE_MS) loadPlanLimits(false);
+  startPlanLimitsPolling();
+});
+window.addEventListener('blur', stopPlanLimitsPolling);
+
+// When any non-xterm input/textarea/select gains focus, blur every xterm
+// terminal so they release keystroke capture. Without this, freshly-focused
+// inputs (rename inline edit, settings fields, modal inputs) sometimes don't
+// receive keystrokes until the user alt-tabs to break xterm's capture.
+document.addEventListener('focusin', function (e) {
+  var t = e.target;
+  if (!t || !t.tagName) return;
+  var tag = t.tagName;
+  if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return;
+  // Don't blur if the focused element IS xterm's own helper textarea.
+  if (t.classList && t.classList.contains('xterm-helper-textarea')) return;
+  if (typeof allColumns === 'undefined') return;
+  allColumns.forEach(function (c) {
+    if (c.terminal && typeof c.terminal.blur === 'function') c.terminal.blur();
+  });
+});
+
+// Show the restored last-good snapshot (if any) right away so the bar isn't
+// blank during the initial IPC roundtrip — especially important when the
+// endpoint is under a multi-minute server cooldown.
+if (lastGoodPlanLimitsData) {
+  var miniEl0 = document.getElementById('plan-limits-mini');
+  if (miniEl0) renderPlanLimitsMiniFrom(miniEl0, lastGoodPlanLimitsData, true);
+}
+
+// Initial fetch on app start. Previously gated behind document.hasFocus(),
+// which meant a backgrounded launch (auto-start, taskbar click) left the
+// mini-bar empty until focus returned. Just fire the fetch — it's cheap.
+loadPlanLimits(false);
+startPlanLimitsPolling();
+
+// Click the mini-bar to open the full Usage modal.
+(function () {
+  var mini = document.getElementById('plan-limits-mini');
+  if (mini) mini.addEventListener('click', openUsageModal);
+})();
+
+// Live-update the hover popover's content whenever new plan-limits data
+// arrives. Popover is a child of #plan-limits-mini and is shown via CSS
+// :hover. Shows only the usage details (Session/Week + reset times) — no
+// "Click for full usage" hint or refresh button, per UX preference.
+function updatePlanLimitsPopover() {
+  var mini = document.getElementById('plan-limits-mini');
+  if (!mini) return;
+  var pop = mini.querySelector('.plan-limits-mini-popover');
+  if (!pop) {
+    pop = document.createElement('div');
+    pop.className = 'plan-limits-mini-popover';
+    mini.appendChild(pop);
+  }
+  function fmtSlot(label, slot) {
+    if (!slot) return '';
+    var pct = Math.round(slot.utilization || 0);
+    var html = '<div class="plan-limits-popover-slot">' +
+      '<div class="plan-limits-popover-row">' +
+        '<span class="plan-limits-popover-label">' + label + '</span>' +
+        '<span class="plan-limits-popover-pct">' + pct + '%</span>' +
+      '</div>';
+    if (slot.resets_at) {
+      var when = new Date(slot.resets_at);
+      var hhmm = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      var datePart = when.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+      html += '<div class="plan-limits-popover-sub">Resets ' + datePart +
+        ' at ' + hhmm + ' (in ' + fmtResetsIn(slot.resets_at) + ')</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+  var d = lastGoodPlanLimitsData;
+  var slots = '';
+  if (d) {
+    slots += fmtSlot('Session', d.five_hour);
+    slots += fmtSlot('Week', d.seven_day);
+  }
+  if (!slots) slots = '<div class="plan-limits-popover-sub">Loading usage…</div>';
+  var inner = slots;
+  // Surface why the bar might look frozen — rate-limited polls keep the
+  // last-good values on screen with a `.stale` class on the mini bar.
+  var lr = lastPlanLimitsResult;
+  if (lr && !lr.ok && lr.error === 'rate-limited' && d) {
+    var ageMin = lastGoodPlanLimitsAtMs ? Math.round((Date.now() - lastGoodPlanLimitsAtMs) / 60000) : null;
+    var ageLabel = ageMin == null ? '' : (ageMin < 1 ? 'just now' : ageMin + ' min ago');
+    inner += '<div class="plan-limits-popover-sub">Rate-limited' +
+      (ageLabel ? ' — last good ' + ageLabel : '') + '</div>';
+  }
+  inner += '<div class="plan-limits-popover-hint">Click for full usage</div>';
+  pop.innerHTML = inner;
+}
+
 function openUsageModal() {
   usageModal.classList.remove('hidden');
   usageLoading.style.display = '';
   usageContent.classList.add('hidden');
   usageSubtitle.textContent = '';
+
+  loadPlanLimits(false);
 
   window.electronAPI.getUsage().then(function (data) {
     usageData = data;
@@ -8378,6 +12289,12 @@ function openUsageModal() {
     renderUsageSummary(data);
     renderUsageDaily(data);
     renderUsageSessions(data);
+    if (window.electronAPI && window.electronAPI.getUsageCosts) {
+      // Default to whatever filter button is currently active (defaults to 'all' on first open)
+      var activeBtn = document.querySelector('.cost-filter-btn.active');
+      var filter = activeBtn ? activeBtn.dataset.costFilter : 'all';
+      window.electronAPI.getUsageCosts(filter).then(renderCostTab).catch(function () {});
+    }
   });
 }
 
@@ -9098,6 +13015,92 @@ function renderUsageSessions(data, filterProject) {
   tableContainer.appendChild(table);
 }
 
+function fmtUsd(n) {
+  if (!n) return '$0.00';
+  if (n < 0.01) return '<$0.01';
+  return '$' + n.toFixed(2);
+}
+
+function renderCostTab(c) {
+  if (!c) return;
+  var totalEl = document.getElementById('cost-total');
+  if (totalEl) totalEl.textContent = fmtUsd(c.total);
+  var opusEl = document.getElementById('cost-opus');
+  if (opusEl) opusEl.textContent = fmtUsd(c.byModel && c.byModel.opus);
+  var sonnetEl = document.getElementById('cost-sonnet');
+  if (sonnetEl) sonnetEl.textContent = fmtUsd(c.byModel && c.byModel.sonnet);
+  var haikuEl = document.getElementById('cost-haiku');
+  if (haikuEl) haikuEl.textContent = fmtUsd(c.byModel && c.byModel.haiku);
+  var bucket = c.byBucket || {};
+  var crEl = document.getElementById('cost-bucket-cache-read');
+  if (crEl) crEl.textContent = fmtUsd(bucket.cacheRead);
+  var ccEl = document.getElementById('cost-bucket-cache-creation');
+  if (ccEl) ccEl.textContent = fmtUsd(bucket.cacheCreation);
+  var inEl = document.getElementById('cost-bucket-input');
+  if (inEl) inEl.textContent = fmtUsd(bucket.input);
+  var outEl = document.getElementById('cost-bucket-output');
+  if (outEl) outEl.textContent = fmtUsd(bucket.output);
+
+  var byProj = document.getElementById('cost-by-project');
+  if (byProj) {
+    byProj.innerHTML = '';
+    var keys = c.byProject ? Object.keys(c.byProject) : [];
+    var rows = keys.map(function (k) { return [k, c.byProject[k]]; });
+    rows.sort(function (a, b) { return b[1] - a[1]; });
+    if (!rows.length) {
+      byProj.innerHTML = '<div class="cost-row" style="opacity:.6">No usage recorded.</div>';
+    } else {
+      rows.forEach(function (r) {
+        var d = document.createElement('div');
+        d.className = 'cost-row';
+        var name = document.createElement('span');
+        name.className = 'cost-row-name';
+        name.textContent = r[0];
+        var val = document.createElement('span');
+        val.className = 'cost-row-val';
+        val.textContent = fmtUsd(r[1]);
+        d.appendChild(name);
+        d.appendChild(val);
+        byProj.appendChild(d);
+      });
+    }
+  }
+
+  var byDayEl = document.getElementById('cost-by-day');
+  if (byDayEl) {
+    byDayEl.innerHTML = '';
+    var dayKeys = c.byDay ? Object.keys(c.byDay) : [];
+    var days = dayKeys.sort().slice(-30);
+    if (!days.length) {
+      byDayEl.innerHTML = '<div class="cost-row" style="opacity:.6">No daily data.</div>';
+    } else {
+      var max = 0;
+      for (var di = 0; di < days.length; di++) if (c.byDay[days[di]] > max) max = c.byDay[days[di]];
+      if (!max) max = 1;
+      days.forEach(function (d) {
+        var row = document.createElement('div');
+        row.className = 'cost-day-row';
+        var label = document.createElement('span');
+        label.className = 'cost-day-label';
+        label.textContent = d;
+        var bar = document.createElement('div');
+        bar.className = 'cost-day-bar';
+        var fill = document.createElement('div');
+        fill.className = 'cost-day-fill';
+        fill.style.width = ((c.byDay[d] / max) * 100) + '%';
+        bar.appendChild(fill);
+        var val = document.createElement('span');
+        val.className = 'cost-day-val';
+        val.textContent = fmtUsd(c.byDay[d]);
+        row.appendChild(label);
+        row.appendChild(bar);
+        row.appendChild(val);
+        byDayEl.appendChild(row);
+      });
+    }
+  }
+}
+
 btnUsage.addEventListener('click', openUsageModal);
 usageClose.addEventListener('click', closeUsageModal);
 
@@ -9118,10 +13121,16 @@ document.getElementById('usage-project-filter').addEventListener('change', funct
   if (usageData) renderUsageSessions(usageData, this.value);
 });
 
-// Fetch PTY port (dev uses 3457 to avoid conflict with production on 3456)
+// Fetch PTY port + per-launch auth token before connecting. The token must
+// be in hand before connectWS so the WebSocket handshake includes it as a
+// subprotocol — without it, pty-server refuses the connection.
 if (window.electronAPI && window.electronAPI.getPtyPort) {
-  window.electronAPI.getPtyPort().then(function (port) {
-    if (port) wsPort = port;
+  Promise.all([
+    window.electronAPI.getPtyPort(),
+    window.electronAPI.getPtyAuthToken ? window.electronAPI.getPtyAuthToken() : Promise.resolve(null)
+  ]).then(function (results) {
+    if (results[0]) wsPort = results[0];
+    if (results[1]) wsAuthToken = results[1];
     connectWS();
   });
 } else {
@@ -9140,15 +13149,84 @@ window.electronAPI.getVersion().then(function(v) {
       window.electronAPI.openExternal('https://github.com/paulallington/Claudes/releases');
     }
   });
+
+  // First-launch-after-update walkthrough. We only show it when the previous
+  // app version (cached in localStorage) is older than the current. Pickers
+  // for highlight text live in WHATS_NEW_BY_VERSION below — only versions
+  // listed there ever trigger an overlay.
+  try {
+    var seenKey = 'claudes.lastSeenAppVersion';
+    var prev = window.localStorage && window.localStorage.getItem(seenKey);
+    if (prev !== v) {
+      window.localStorage && window.localStorage.setItem(seenKey, v);
+      if (prev) showWhatsNewOverlay(prev, v);
+    }
+  } catch { /* localStorage unavailable in private modes — skip */ }
 });
+
+// A tiny catalogue of "things worth pointing at" per release. Keep entries
+// short — the overlay should be a glance, not a wall of text. If a version
+// isn't listed here we just silently mark the user as up-to-date.
+var WHATS_NEW_BY_VERSION = {
+  '1.7.47': [
+    'Cmd/Ctrl+F finds inside the focused terminal.',
+    'File paths like src/foo.js:42 are now clickable links.',
+    'Cmd/Ctrl+P quick-open and Cmd/Ctrl+Shift+G project content grep.',
+    'Settings → Terminal: font, scrollback, cursor style, background.',
+    'Git tab: merge / rebase / conflict resolution + file history + blame.',
+    'Project context menu: Manage MCP servers, Skills/agents/commands, Layouts.'
+  ]
+};
+function showWhatsNewOverlay(prev, current) {
+  var highlights = WHATS_NEW_BY_VERSION[current];
+  if (!highlights || highlights.length === 0) return;
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = '<div class="modal-dialog" style="max-width:560px;"><div class="modal-header"><span class="modal-title">What\'s new in ' + escapeHtml(current) + '</span><span class="modal-subtitle">Upgrading from ' + escapeHtml(prev) + '</span><span class="modal-close">&times;</span></div><div class="modal-body" style="padding:16px 24px 24px;"><ul class="shortcuts-features" id="wn-list" style="margin:0;padding-left:20px;"></ul><div style="margin-top:16px;text-align:right;"><button class="modal-btn-save" id="wn-ok">Got it</button></div></div></div>';
+  document.body.appendChild(overlay);
+  var list = overlay.querySelector('#wn-list');
+  highlights.forEach(function (h) {
+    var li = document.createElement('li');
+    li.textContent = h;
+    list.appendChild(li);
+  });
+  function close() { overlay.remove(); }
+  overlay.querySelector('.modal-close').addEventListener('click', close);
+  overlay.querySelector('#wn-ok').addEventListener('click', close);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+}
 
 // ============================================================
 // Utility: escapeHtml
 // ============================================================
 
 function escapeHtml(str) {
-  if (!str) return '';
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // Coerce so 0 / false / numbers serialise correctly; only null/undefined skip.
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Defence-in-depth for numeric fields that come from disk-loaded JSON
+// (automations.json, imports). Forces anything non-numeric to 0 so a crafted
+// payload like `{ count: '"><img src=x onerror=...>' }` can't break out of
+// surrounding HTML when interpolated.
+function safeNum(n) {
+  var v = Number(n);
+  return Number.isFinite(v) ? v : 0;
+}
+
+// Cmd on darwin, Ctrl elsewhere. Every shortcut in the app should route through
+// here so the binding works the way users expect on their platform — without
+// this, macOS users have no way to trigger Ctrl-only shortcuts (Cmd is the
+// natural modifier, Ctrl is rarely typed and clashes with system bindings).
+var IS_DARWIN = (typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || ''));
+function cmdOrCtrl(e) {
+  return IS_DARWIN ? !!e.metaKey : !!e.ctrlKey;
 }
 
 function runWindowBadgeHtml(auto) {
@@ -9329,8 +13407,19 @@ function renderAutomationCards(automations, container) {
         '<button class="automation-btn-edit" title="Edit">&#9998;</button>' +
         '<button class="automation-btn-delete" title="Delete">&times;</button></span>';
 
+      var connTag = '';
+      if (endpointPresets.length > 0) {
+        if (!agent.endpointId) {
+          connTag = '<span class="automation-card-conn-tag automation-card-conn-tag--cloud">Cloud</span>';
+        } else {
+          var preset = endpointPresets.find(function (p) { return p.id === agent.endpointId; });
+          connTag = '<span class="automation-card-conn-tag automation-card-conn-tag--local">' + escapeHtml(preset ? preset.name : 'local') + '</span>';
+        }
+      }
+
       card.innerHTML = '<div class="automation-card-header">' +
         '<span class="automation-card-name">' + escapeHtml(agent.name) + '</span>' +
+        connTag +
         '<span class="automation-card-schedule">' + schedText + '</span>' +
         '</div>' +
         '<div class="automation-card-status">' + lastRunText + '</div>' +
@@ -9363,8 +13452,24 @@ function renderAutomationCards(automations, container) {
         '<button class="automation-btn-edit" title="Edit">&#9998;</button>' +
         '<button class="automation-btn-delete" title="Delete">&times;</button></span>';
 
+      var connTagsHtml = '';
+      if (endpointPresets.length > 0) {
+        var connNames = {};
+        automation.agents.forEach(function (ag) {
+          if (!ag.endpointId) connNames['Cloud'] = 'cloud';
+          else {
+            var p = endpointPresets.find(function (pp) { return pp.id === ag.endpointId; });
+            if (p) connNames[p.name] = 'local';
+          }
+        });
+        Object.keys(connNames).forEach(function (n) {
+          connTagsHtml += '<span class="automation-card-conn-tag automation-card-conn-tag--' + connNames[n] + '">' + escapeHtml(n) + '</span>';
+        });
+      }
+
       card.innerHTML = '<div class="automation-card-header">' +
         '<span class="automation-card-name">' + escapeHtml(automation.name) + '</span>' +
+        connTagsHtml +
         '<span class="automation-card-schedule">' + agentSummary + '</span>' +
         '</div>' + dotsHtml +
         '<div class="automation-card-footer">' +
@@ -9555,7 +13660,7 @@ function launchManagerTerminal(automation) {
   }
   spawnArgs.push('--append-system-prompt', context);
 
-  addColumn(spawnArgs, null, { title: automation.name + ' Manager' });
+  addColumn(spawnArgs, null, spawnOpts({ title: automation.name + ' Manager' }));
 
   window.electronAPI.dismissManager(automation.id);
   refreshAutomations();
@@ -9786,7 +13891,7 @@ function renderMultiAgentDetail(automation) {
         '--- AGENT OUTPUT ---\n' + output + '\n--- END AGENT OUTPUT ---';
       var spawnArgs = buildSpawnArgs();
       spawnArgs.push('--append-system-prompt', context);
-      addColumn(spawnArgs, null, { title: agentName });
+      addColumn(spawnArgs, null, spawnOpts({ title: agentName }));
     });
     row.querySelector('.pipeline-btn-history').addEventListener('click', function () {
       viewingAgentInPipeline = true;
@@ -9977,7 +14082,7 @@ function openAutomationModal(existingAutomation) {
   if (existingAutomation) {
     modalAgents = existingAutomation.agents.map(function (ag) { return Object.assign({}, ag); });
   } else {
-    modalAgents = [{ name: '', prompt: '', schedule: { type: 'interval', minutes: 60 }, runMode: 'independent', runAfter: [], runOnUpstreamFailure: false, isolation: { enabled: false, clonePath: null }, skipPermissions: false, dbConnectionString: null, dbReadOnly: true, firstStartOnly: false }];
+    modalAgents = [{ name: '', prompt: '', schedule: { type: 'interval', minutes: 60 }, runMode: 'independent', runAfter: [], runOnUpstreamFailure: false, isolation: { enabled: false, clonePath: null }, skipPermissions: false, dbConnectionString: null, dbReadOnly: true, firstStartOnly: false, endpointId: null, endpointModel: null }];
   }
 
   var isMulti = modalAgents.length > 1;
@@ -10077,6 +14182,57 @@ function renderModalAgentCards() {
   updateRunAfterChipStates();
 }
 
+function renderAgentConnectionSection(agent) {
+  var selectedId = (agent && agent.endpointId) || '';
+  var selectedModel = (agent && agent.endpointModel) || '';
+
+  var connOpts = '<option value=""' + (selectedId === '' ? ' selected' : '') + '>Cloud (Anthropic)</option>';
+  endpointPresets.forEach(function (p) {
+    connOpts += '<option value="' + escapeHtml(p.id) + '"' + (selectedId === p.id ? ' selected' : '') + '>' + escapeHtml(p.name || '(unnamed)') + '</option>';
+  });
+
+  var modelOpts;
+  var refreshBtn = '';
+  if (!selectedId) {
+    var cloudModels = [
+      { v: '', t: 'Default' },
+      { v: 'sonnet', t: 'Sonnet (latest)' },
+      { v: 'opus', t: 'Opus (latest)' },
+      { v: 'haiku', t: 'Haiku (latest)' }
+    ];
+    modelOpts = cloudModels.map(function (m) {
+      return '<option value="' + m.v + '"' + (selectedModel === m.v ? ' selected' : '') + '>' + m.t + '</option>';
+    }).join('');
+  } else {
+    var cached = endpointModelsCache[selectedId];
+    var preset = endpointPresets.find(function (p) { return p.id === selectedId; });
+    var defaultModel = preset ? (preset.model || '') : '';
+    var models = (cached && cached.models) ? cached.models.slice() : [];
+    if (defaultModel && models.indexOf(defaultModel) === -1) models.unshift(defaultModel);
+    if (selectedModel && models.indexOf(selectedModel) === -1) models.unshift(selectedModel);
+    if (models.length === 0) models = [defaultModel || ''];
+    modelOpts = models.map(function (m) {
+      var isSel = selectedModel ? (m === selectedModel) : (m === defaultModel);
+      return '<option value="' + escapeHtml(m) + '"' + (isSel ? ' selected' : '') + '>' + escapeHtml(m || '(default)') + '</option>';
+    }).join('');
+    refreshBtn = '<button type="button" class="agent-endpoint-model-refresh spawn-icon-btn" title="Re-fetch loaded models from endpoint">&#8634;</button>';
+  }
+
+  return '<div class="automation-form-group agent-connection-group">' +
+    '<label>Connection</label>' +
+    '<div class="automation-schedule-row">' +
+      '<select class="agent-endpoint">' + connOpts + '</select>' +
+    '</div>' +
+    '</div>' +
+    '<div class="automation-form-group agent-model-group">' +
+    '<label>Model</label>' +
+    '<div class="automation-schedule-row">' +
+      '<select class="agent-endpoint-model">' + modelOpts + '</select>' +
+      refreshBtn +
+    '</div>' +
+    '</div>';
+}
+
 function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
   var isMulti = allAgents.length > 1;
   var cardId = 'agent-card-' + agentIndex;
@@ -10153,6 +14309,21 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
     '</div>' +
     '</div>';
 
+  var sessionMaxPct = agent && agent.usageGate && (typeof agent.usageGate.sessionMaxPct === 'number') ? agent.usageGate.sessionMaxPct : '';
+  var weeklyMaxPct = agent && agent.usageGate && (typeof agent.usageGate.weeklyMaxPct === 'number') ? agent.usageGate.weeklyMaxPct : '';
+  var usageGateHtml = '<div class="automation-form-group">' +
+    '<label>Skip if session usage above ' +
+      '<input type="number" class="automation-input agent-usage-gate-session" min="0" max="100" step="1" value="' + escapeHtml(String(sessionMaxPct)) + '" placeholder="e.g. 80" style="width:80px;display:inline-block;margin:0 6px;"> ' +
+      '%' +
+      ' <span class="automation-permission-hint">(blank to always run)</span>' +
+    '</label>' +
+    '<label style="margin-top:6px;display:block;">Skip if weekly usage above ' +
+      '<input type="number" class="automation-input agent-usage-gate-weekly" min="0" max="100" step="1" value="' + escapeHtml(String(weeklyMaxPct)) + '" placeholder="e.g. 80" style="width:80px;display:inline-block;margin:0 6px;"> ' +
+      '%' +
+      ' <span class="automation-permission-hint">(blank to always run)</span>' +
+    '</label>' +
+    '</div>';
+
   var scheduleDisplay = runMode === 'run_after' ? 'display:none;' : '';
   var bodyStyle = isCollapsed ? 'display:none;' : '';
 
@@ -10182,6 +14353,7 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
       runAfterHtml +
       passContextHtml +
       isolationHtml +
+      usageGateHtml +
       '<div class="agent-schedule-section" style="' + scheduleDisplay + '">' +
         '<div class="automation-form-group">' +
           '<label>Schedule</label>' +
@@ -10224,6 +14396,7 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
           '</div>' +
         '</div>' +
       '</div>' +
+      renderAgentConnectionSection(agent) +
       '<div class="automation-form-group">' +
         '<label>Database <span class="automation-permission-hint">(optional)</span></label>' +
         '<div class="automation-db-row">' +
@@ -10269,6 +14442,16 @@ function updateCardHeaderBadges(card, agentIndex) {
     frag.appendChild(b2);
   }
   title.after(frag);
+}
+
+function refreshAgentModelDropdown(card, endpointId) {
+  var modelGroup = card.querySelector('.agent-model-group');
+  if (!modelGroup) return;
+  var stub = { endpointId: endpointId || null, endpointModel: null };
+  var temp = document.createElement('div');
+  temp.innerHTML = renderAgentConnectionSection(stub);
+  var newModelGroup = temp.querySelector('.agent-model-group');
+  if (newModelGroup) modelGroup.replaceWith(newModelGroup);
 }
 
 function bindAgentCardEvents(card, agentIndex) {
@@ -10363,6 +14546,31 @@ function bindAgentCardEvents(card, agentIndex) {
       if (startupFields) startupFields.style.display = type === 'app_startup' ? '' : 'none';
     });
   }
+
+  // Connection picker — change swaps the model dropdown to that connection's
+  // model list. Refresh button is delegated because it's re-created on swap.
+  var epSelect = card.querySelector('.agent-endpoint');
+  if (epSelect) {
+    epSelect.addEventListener('change', function () {
+      refreshAgentModelDropdown(card, epSelect.value);
+    });
+  }
+  card.addEventListener('click', function (e) {
+    if (!e.target.classList || !e.target.classList.contains('agent-endpoint-model-refresh')) return;
+    var ep = card.querySelector('.agent-endpoint');
+    if (!ep || !ep.value) return;
+    var preset = endpointPresets.find(function (p) { return p.id === ep.value; });
+    if (!preset || !window.electronAPI || !window.electronAPI.endpointFetchModels) return;
+    var btn = e.target;
+    var origHtml = btn.innerHTML;
+    btn.textContent = '…';
+    window.electronAPI.endpointFetchModels({ baseUrl: preset.baseUrl, authToken: '' }).then(function (result) {
+      btn.innerHTML = origHtml;
+      if (!result || !result.ok || !result.models || result.models.length === 0) return;
+      endpointModelsCache[preset.id] = { models: result.models, fetchedAt: Date.now(), ok: true };
+      refreshAgentModelDropdown(card, ep.value);
+    }).catch(function () { btn.innerHTML = origHtml; });
+  });
 
   // Update chip labels and header when agent name changes
   var nameInput = card.querySelector('.agent-name');
@@ -10478,6 +14686,21 @@ function syncAgentFromCard(card, agentIndex) {
     agent.isolation.enabled = isoCheckbox.checked;
   }
 
+  var usageGateSessionEl = card.querySelector('.agent-usage-gate-session');
+  var usageGateWeeklyEl = card.querySelector('.agent-usage-gate-weekly');
+  if (usageGateSessionEl || usageGateWeeklyEl) {
+    function readPct(el) {
+      if (!el) return null;
+      var raw = (el.value || '').trim();
+      if (raw === '' || isNaN(parseFloat(raw))) return null;
+      return Math.max(0, Math.min(100, parseFloat(raw)));
+    }
+    agent.usageGate = {
+      sessionMaxPct: readPct(usageGateSessionEl),
+      weeklyMaxPct: readPct(usageGateWeeklyEl)
+    };
+  }
+
   var schedTypeEl = card.querySelector('.agent-schedule-type');
   if (schedTypeEl) {
     var schedType = schedTypeEl.value;
@@ -10500,6 +14723,11 @@ function syncAgentFromCard(card, agentIndex) {
   agent.skipPermissions = (card.querySelector('.agent-skip-permissions') || {}).checked || false;
   agent.dbConnectionString = (card.querySelector('.agent-db-connection') || {}).value.trim() || null;
   agent.dbReadOnly = (card.querySelector('.agent-db-readonly') || {}).checked !== false;
+
+  var epEl = card.querySelector('.agent-endpoint');
+  agent.endpointId = (epEl && epEl.value) ? epEl.value : null;
+  var epModelEl = card.querySelector('.agent-endpoint-model');
+  agent.endpointModel = (epModelEl && epModelEl.value) ? epModelEl.value : null;
 }
 
 function syncAllAgentsFromCards() {
@@ -10785,7 +15013,8 @@ document.getElementById('btn-add-agent').addEventListener('click', function () {
   modalAgents.push({
     name: '', prompt: '', schedule: { type: 'interval', minutes: 60 },
     runMode: 'independent', runAfter: [], runOnUpstreamFailure: false, isolation: { enabled: false, clonePath: null },
-    skipPermissions: false, dbConnectionString: null, dbReadOnly: true, firstStartOnly: false
+    skipPermissions: false, dbConnectionString: null, dbReadOnly: true, firstStartOnly: false,
+    endpointId: null, endpointModel: null
   });
   renderModalAgentCards();
   document.getElementById('automation-manager-section').style.display = '';
@@ -10845,11 +15074,11 @@ function showImportPreview(preview) {
   var headerHtml = '<div class="import-progress-header">' +
     '<strong>Import Preview</strong>' +
     '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' +
-    preview.automationCount + ' automations, ' + preview.totalAgents + ' agents';
-  if (preview.totalManagers > 0) headerHtml += ', ' + preview.totalManagers + ' managers';
+    safeNum(preview.automationCount) + ' automations, ' + safeNum(preview.totalAgents) + ' agents';
+  if (safeNum(preview.totalManagers) > 0) headerHtml += ', ' + safeNum(preview.totalManagers) + ' managers';
   headerHtml += '</div>';
-  if (preview.totalIsolated > 0) {
-    headerHtml += '<div style="font-size:11px;color:#f59e0b;margin-top:2px;">' + preview.totalIsolated + ' repo clone(s) will be set up after import</div>';
+  if (safeNum(preview.totalIsolated) > 0) {
+    headerHtml += '<div style="font-size:11px;color:#f59e0b;margin-top:2px;">' + safeNum(preview.totalIsolated) + ' repo clone(s) will be set up after import</div>';
   }
   headerHtml += '</div>';
 
@@ -10859,12 +15088,12 @@ function showImportPreview(preview) {
     var badges = '';
     if (a.hasManager) badges += '<span class="agent-badge agent-badge-chained" style="margin-left:6px;">Manager</span>';
     if (a.hasChaining) badges += '<span class="agent-badge agent-badge-isolated" style="margin-left:4px;">Chained</span>';
-    if (a.isolatedCount > 0) badges += '<span class="agent-badge" style="margin-left:4px;background:rgba(59,130,246,0.15);color:#60a5fa;">' + a.isolatedCount + ' clone(s)</span>';
+    if (safeNum(a.isolatedCount) > 0) badges += '<span class="agent-badge" style="margin-left:4px;background:rgba(59,130,246,0.15);color:#60a5fa;">' + safeNum(a.isolatedCount) + ' clone(s)</span>';
 
     listHtml += '<div class="import-progress-row">' +
       '<span class="import-progress-icon">&#9711;</span>' +
       '<span class="import-progress-name">' + escapeHtml(a.name) + '</span>' +
-      '<span style="font-size:11px;opacity:0.5;">' + a.agentCount + ' agent' + (a.agentCount > 1 ? 's' : '') + '</span>' +
+      '<span style="font-size:11px;opacity:0.5;">' + safeNum(a.agentCount) + ' agent' + (safeNum(a.agentCount) > 1 ? 's' : '') + '</span>' +
       badges +
       '</div>';
   });
@@ -10906,7 +15135,7 @@ function showImportPreview(preview) {
       } else {
         // No clones needed — show done
         panel.querySelector('.import-progress-header').innerHTML = '<strong>Import Complete</strong>' +
-          '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' + result.count + ' automations imported (paused)</div>';
+          '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' + safeNum(result.count) + ' automations imported (paused)</div>';
         // Mark all rows as ready
         panel.querySelectorAll('.import-progress-icon').forEach(function (icon) {
           icon.innerHTML = '&#10003;';
@@ -10928,8 +15157,8 @@ function showImportProgress(importResult, needsClone) {
   var panel = document.createElement('div');
   panel.className = 'import-progress-panel';
   panel.innerHTML = '<div class="import-progress-header">' +
-    '<strong>Imported ' + importResult.count + ' automations (paused)</strong>' +
-    '<div class="import-progress-subtitle">Setting up ' + needsClone.length + ' repo clone(s)...</div>' +
+    '<strong>Imported ' + safeNum(importResult.count) + ' automations (paused)</strong>' +
+    '<div class="import-progress-subtitle">Setting up ' + safeNum(needsClone.length) + ' repo clone(s)...</div>' +
     '</div>' +
     '<div class="import-progress-list"></div>' +
     '<pre class="import-progress-log"></pre>' +
@@ -10948,7 +15177,7 @@ function showImportProgress(importResult, needsClone) {
     var statusIcon = auto.needsClone ? '&#9711;' : '&#10003;';
     var statusColor = auto.needsClone ? '' : 'color:#22c55e;';
     row.innerHTML = '<span class="import-progress-icon" style="' + statusColor + '">' + statusIcon + '</span>' +
-      '<span class="import-progress-name">' + auto.name + '</span>' +
+      '<span class="import-progress-name">' + escapeHtml(auto.name) + '</span>' +
       '<span class="import-progress-status">' + (auto.needsClone ? 'Pending clone...' : 'Ready') + '</span>';
     progressList.appendChild(row);
   });
@@ -11604,7 +15833,7 @@ document.getElementById('btn-automation-open-claude').addEventListener('click', 
 
   var spawnArgs = buildSpawnArgs();
   spawnArgs.push('--append-system-prompt', context);
-  addColumn(spawnArgs, null, { title: automationName });
+  addColumn(spawnArgs, null, spawnOpts({ title: automationName }));
 });
 
 document.getElementById('btn-automation-copy-output').addEventListener('click', function () {
@@ -11672,12 +15901,11 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
 
   updateNotesToggle.addEventListener('click', function () {
     if (updateNotesEl.classList.contains('hidden')) {
-      // Release notes can be HTML (from GitHub) or plain text
-      if (updateReleaseNotes.indexOf('<') !== -1) {
-        updateNotesEl.innerHTML = updateReleaseNotes;
-      } else {
-        updateNotesEl.textContent = updateReleaseNotes;
-      }
+      // Release notes come from the GitHub release feed via electron-updater.
+      // Render as text only — never as HTML — so a poisoned release (or any
+      // future change to how the feed is fetched) can't inject script via
+      // `<img onerror>`-style payloads in this Electron renderer.
+      updateNotesEl.textContent = updateReleaseNotes || '';
       updateNotesEl.classList.remove('hidden');
       updateNotesToggle.textContent = 'Hide notes';
     } else {
@@ -12388,4 +16616,1305 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
 
   // Initial render in case setActiveProject already fired before this IIFE executed.
   renderForActiveProject();
+})();
+
+(function setupBroadcast() {
+  var btn = document.getElementById('btn-broadcast');
+  var popover = document.getElementById('broadcast-popover');
+  var closeBtn = document.getElementById('broadcast-close');
+  var sendBtn = document.getElementById('broadcast-send');
+  var textEl = document.getElementById('broadcast-text');
+  var targetsEl = document.getElementById('broadcast-targets');
+  var pressEnterEl = document.getElementById('broadcast-press-enter');
+  if (!btn || !popover) return;
+
+  function refreshTargets() {
+    targetsEl.innerHTML = '';
+    var ordinalByProject = new Map();  // projectKey -> running count
+    var any = false;
+    allColumns.forEach(function (c, id) {
+      if (c.cmd) return;       // skip custom-command columns
+      if (c.isDiff) return;    // skip diff columns
+      any = true;
+      var ord = (ordinalByProject.get(c.projectKey) || 0) + 1;
+      ordinalByProject.set(c.projectKey, ord);
+      var proj = (config && config.projects)
+        ? config.projects.find(function (p) { return p.path === c.projectKey; })
+        : null;
+      var projName = (proj && proj.name)
+        || (typeof projectKeyToName === 'function' ? projectKeyToName(c.projectKey) : c.projectKey);
+      var label = document.createElement('label');
+      label.className = 'broadcast-target';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.dataset.colId = id;
+      cb.checked = true;
+      var span = document.createElement('span');
+      span.textContent = c.customTitle
+        ? projName + ' — ' + c.customTitle
+        : projName + ' — Claude #' + ord;
+      label.appendChild(cb);
+      label.appendChild(span);
+      targetsEl.appendChild(label);
+    });
+    if (!any) {
+      var empty = document.createElement('div');
+      empty.className = 'broadcast-target';
+      empty.style.opacity = '0.6';
+      empty.textContent = 'No Claude columns open.';
+      targetsEl.appendChild(empty);
+    }
+  }
+
+  btn.addEventListener('click', function () {
+    refreshTargets();
+    popover.classList.remove('hidden');
+    // Blur all xterm terminals so they release keyboard capture; the textarea
+    // can then receive keystrokes without needing an OS-level focus bounce.
+    allColumns.forEach(function (c) {
+      if (c.terminal && typeof c.terminal.blur === 'function') c.terminal.blur();
+    });
+    setTimeout(function () { textEl.focus(); }, 0);
+  });
+  closeBtn.addEventListener('click', function () {
+    popover.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !popover.classList.contains('hidden')) {
+      popover.classList.add('hidden');
+      if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+    }
+  });
+
+  sendBtn.addEventListener('click', function () {
+    var text = textEl.value;
+    if (!text) return;
+    var checks = targetsEl.querySelectorAll('input[type=checkbox]:checked');
+    var pressEnter = pressEnterEl.checked;
+    checks.forEach(function (cb) {
+      var id = parseInt(cb.dataset.colId, 10);
+      var col = allColumns.get(id);
+      if (!col) return;
+      wsSend({ type: 'write', id: id, data: text + (pressEnter ? '\r' : '') });
+    });
+    popover.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+    textEl.value = '';
+  });
+})();
+
+(function setupSessionSearch() {
+  var btn = document.getElementById('btn-session-search');
+  var modal = document.getElementById('session-search-modal');
+  var closeBtn = document.getElementById('session-search-close');
+  var input = document.getElementById('session-search-input');
+  var resultsEl = document.getElementById('session-search-results');
+  if (!btn || !modal) return;
+
+  function open() {
+    modal.classList.remove('hidden');
+    input.focus();
+    input.select();
+  }
+  function close() { modal.classList.add('hidden'); }
+
+  btn.addEventListener('click', open);
+  closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (cmdOrCtrl(e) && e.shiftKey && (e.key === 'F' || e.key === 'f')) { e.preventDefault(); open(); }
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (m) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m];
+    });
+  }
+
+  function highlight(text, q) {
+    var safe = escapeHtml(text);
+    var idx = safe.toLowerCase().indexOf(q.toLowerCase());
+    if (idx === -1) return safe;
+    return safe.slice(0, idx) + '<mark>' + safe.slice(idx, idx + q.length) + '</mark>' + safe.slice(idx + q.length);
+  }
+
+  var debounceTimer = null;
+  input.addEventListener('input', function () {
+    clearTimeout(debounceTimer);
+    var q = input.value.trim();
+    if (q.length < 2) { resultsEl.innerHTML = ''; return; }
+    debounceTimer = setTimeout(function () { runSearch(q); }, 200);
+  });
+
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (!t || (t.name !== 'search-mode' && t.name !== 'search-scope')) return;
+    var input2 = document.getElementById('session-search-input');
+    if (!input2) return;
+    var modeRadio = document.querySelector('input[name=search-mode]:checked');
+    var scopeRadio = document.querySelector('input[name=search-scope]:checked');
+    var mode = (modeRadio && modeRadio.value) || 'transcripts';
+    var scope = (scopeRadio && scopeRadio.value) || 'all';
+    var scopeLabel = (scope === 'current') ? 'current project' : 'all projects';
+    if (mode === 'prompts') {
+      input2.placeholder = 'Search your past prompts (' + scopeLabel + ')…';
+    } else {
+      input2.placeholder = 'Search session transcripts (' + scopeLabel + ')…';
+    }
+    var q = input2.value.trim();
+    if (q.length >= 2) runSearch(q);
+  });
+
+  function runSearch(q) {
+    resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Searching…</div>';
+    var modeRadio = document.querySelector('input[name=search-mode]:checked');
+    var mode = (modeRadio && modeRadio.value) || 'transcripts';
+    var scopeRadio = document.querySelector('input[name=search-scope]:checked');
+    var scope = (scopeRadio && scopeRadio.value) || 'all';
+    // Scope to the focused project's path when "current". When no project is
+    // active, fall back to all-projects so the search still produces results.
+    var scopedPath = (scope === 'current' && activeProjectKey) ? activeProjectKey : null;
+    var apiCall;
+    if (mode === 'prompts') {
+      if (!window.electronAPI || !window.electronAPI.searchHistory) {
+        resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
+        return;
+      }
+      apiCall = window.electronAPI.searchHistory(q, 100, scopedPath).then(function (hits) {
+        // Normalize prompt hits to the same shape transcript hits use:
+        // { projectKey, sessionId, snippet }. sessionId is empty for prompts —
+        // openHit treats empty sessionId as "no resume; copy text instead".
+        return (hits || []).map(function (h) {
+          return {
+            projectKey: h.project || '',
+            sessionId: '',
+            snippet: h.snippet || h.text || '',
+            text: h.text || ''
+          };
+        });
+      });
+    } else {
+      if (!window.electronAPI || !window.electronAPI.searchSessions) {
+        resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search API not available.</div>';
+        return;
+      }
+      apiCall = window.electronAPI.searchSessions(q, 50, scopedPath);
+    }
+    apiCall.then(function (hits) {
+      resultsEl.innerHTML = '';
+      if (!hits || !hits.length) {
+        resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">No matches.</div>';
+        return;
+      }
+      hits.forEach(function (h) {
+        var div = document.createElement('div');
+        div.className = 'session-search-hit';
+        var meta = document.createElement('div');
+        meta.className = 'session-search-hit-meta';
+        var metaParts = [h.projectKey || ''];
+        if (h.sessionId) metaParts.push(h.sessionId.slice(0, 8));
+        meta.textContent = metaParts.filter(Boolean).join('  •  ');
+        var snip = document.createElement('div');
+        snip.className = 'session-search-hit-snippet';
+        snip.innerHTML = highlight(h.snippet || '', q);
+        div.appendChild(meta);
+        div.appendChild(snip);
+        div.addEventListener('click', function () { openHit(h); });
+        resultsEl.appendChild(div);
+      });
+    }).catch(function () {
+      resultsEl.innerHTML = '<div style="opacity:.6;font-size:12px">Search failed.</div>';
+    });
+  }
+
+  function openHit(h) {
+    if (!h.sessionId) {
+      // Prompt-mode hit — copy the full prompt text to the clipboard.
+      if (window.electronAPI && window.electronAPI.clipboardWriteText) {
+        window.electronAPI.clipboardWriteText(h.text || h.snippet || '');
+      }
+      close();
+      return;
+    }
+    if (!config || !config.projects) return;
+    var idx = -1;
+    for (var i = 0; i < config.projects.length; i++) {
+      if (projectPathToKey(config.projects[i].path) === h.projectKey) { idx = i; break; }
+    }
+    if (idx < 0) {
+      alert('That session\'s project is not in your project list. Add it first.');
+      return;
+    }
+    setActiveProject(idx, false, true);
+    addColumn(['--resume', h.sessionId], null, spawnOpts({ sessionId: h.sessionId }));
+    close();
+  }
+})();
+
+(function setupCostFilters() {
+  var btns = document.querySelectorAll('.cost-filter-btn');
+  if (!btns.length) return;
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      btns.forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      if (window.electronAPI && window.electronAPI.getUsageCosts) {
+        window.electronAPI.getUsageCosts(b.dataset.costFilter).then(renderCostTab).catch(function () {});
+      }
+    });
+  });
+})();
+
+(function setupPalette() {
+  var overlay = document.getElementById('palette-overlay');
+  var input = document.getElementById('palette-input');
+  var results = document.getElementById('palette-results');
+  if (!overlay) return;
+
+  var SLASH_COMMANDS = [
+    '/help', '/clear', '/compact', '/cost', '/usage', '/model', '/agents',
+    '/mcp', '/release', '/review', '/security-review', '/init'
+  ];
+
+  function buildCommands() {
+    var cmds = [];
+    if (config && config.projects) {
+      config.projects.forEach(function (p) {
+        cmds.push({
+          label: 'Switch to ' + (p.name || projectKeyToName(p.path)),
+          kind: 'project',
+          run: function () { setActiveProject(config.projects.indexOf(p), false); }
+        });
+        cmds.push({
+          label: 'Spawn in ' + (p.name || projectKeyToName(p.path)),
+          kind: 'spawn',
+          run: function () {
+            setActiveProject(config.projects.indexOf(p), false, true);
+            addColumn(null, null, spawnOpts());
+          }
+        });
+      });
+    }
+    SLASH_COMMANDS.forEach(function (s) {
+      cmds.push({
+        label: s,
+        kind: 'slash',
+        run: function () {
+          var st = getActiveState();
+          if (st && st.focusedColumnId != null) {
+            wsSend({ type: 'write', id: st.focusedColumnId, data: s + '\r' });
+          }
+        }
+      });
+    });
+    cmds.push({ label: 'Open Usage', kind: 'action', run: openUsageModal });
+    cmds.push({ label: 'Open snippet library', kind: 'action', run: function () {
+      if (typeof window.openSnippetsManager === 'function') window.openSnippetsManager();
+    }});
+    cmds.push({ label: 'Add project…', kind: 'action', run: function () {
+      var btn = document.getElementById('btn-add-project');
+      if (btn) btn.click();
+    }});
+    cmds.push({ label: 'Toggle sidebar', kind: 'action', run: function () {
+      var btn = document.getElementById('btn-toggle-sidebar');
+      if (btn) btn.click();
+    }});
+    cmds.push({ label: 'Kill focused column', kind: 'action', run: function () {
+      var st = getActiveState();
+      if (st && st.focusedColumnId != null) removeColumn(st.focusedColumnId);
+    }});
+    cmds.push({ label: 'Respawn focused column', kind: 'action', run: function () {
+      var st = getActiveState();
+      if (st && st.focusedColumnId != null) restartColumn(st.focusedColumnId);
+    }});
+    return cmds;
+  }
+
+  var commands = [];
+  var lastFiltered = [];
+  var selectedIdx = 0;
+
+  function open() {
+    commands = buildCommands();
+    lastFiltered = commands;
+    selectedIdx = 0;
+    overlay.classList.remove('hidden');
+    input.value = '';
+    // Blur active xterm so the input receives keystrokes immediately
+    if (typeof allColumns !== 'undefined') {
+      allColumns.forEach(function (c) {
+        if (c.terminal && typeof c.terminal.blur === 'function') c.terminal.blur();
+      });
+    }
+    setTimeout(function () { input.focus(); }, 0);
+    render(lastFiltered);
+  }
+  function close() {
+    overlay.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+
+  function render(list) {
+    results.innerHTML = '';
+    list.slice(0, 50).forEach(function (cmd, i) {
+      var row = document.createElement('div');
+      row.className = 'palette-row' + (i === selectedIdx ? ' active' : '');
+      row.dataset.idx = String(i);
+      var label = document.createElement('span');
+      label.textContent = cmd.label;
+      var kind = document.createElement('span');
+      kind.className = 'palette-row-kind';
+      kind.textContent = cmd.kind;
+      row.appendChild(label);
+      row.appendChild(kind);
+      row.addEventListener('click', function () { runAt(i, list); });
+      results.appendChild(row);
+    });
+  }
+
+  function runAt(i, list) {
+    var cmd = list[i];
+    if (!cmd) return;
+    close();
+    try { cmd.run(); } catch (e) { console.error('palette command failed', e); }
+  }
+
+  // Register Cmd/Ctrl+K in capture phase so xterm can't swallow it.
+  document.addEventListener('keydown', function (e) {
+    if (cmdOrCtrl(e) && (e.key === 'k' || e.key === 'K') && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      open();
+    }
+  }, true);
+
+  // Navigation / dismissal handler — only acts when palette is open, so it can
+  // stay in normal bubble phase and not interfere with anything else.
+  document.addEventListener('keydown', function (e) {
+    if (overlay.classList.contains('hidden')) return;
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    var rendered = results.querySelectorAll('.palette-row');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedIdx = Math.min(rendered.length - 1, selectedIdx + 1);
+      updateActive(rendered);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedIdx = Math.max(0, selectedIdx - 1);
+      updateActive(rendered);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      runAt(selectedIdx, lastFiltered);
+    }
+  });
+
+  function updateActive(rows) {
+    rows.forEach(function (r, i) { r.classList.toggle('active', i === selectedIdx); });
+    var active = rows[selectedIdx];
+    if (active && typeof active.scrollIntoView === 'function') {
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  input.addEventListener('input', function () {
+    var q = input.value;
+    if (!window.electronAPI || !window.electronAPI.paletteRank) {
+      lastFiltered = commands;
+      selectedIdx = 0;
+      render(lastFiltered);
+      return;
+    }
+    window.electronAPI.paletteRank(commands.map(function (c) {
+      return { label: c.label, kind: c.kind };
+    }), q).then(function (rankedShallow) {
+      // Map back to full commands by label::kind composite key
+      var byLabel = new Map();
+      commands.forEach(function (c) { byLabel.set(c.label + '::' + c.kind, c); });
+      lastFiltered = rankedShallow.map(function (s) {
+        return byLabel.get(s.label + '::' + s.kind);
+      }).filter(Boolean);
+      selectedIdx = 0;
+      render(lastFiltered);
+    }).catch(function () {
+      lastFiltered = commands;
+      selectedIdx = 0;
+      render(lastFiltered);
+    });
+  });
+
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) close();
+  });
+})();
+
+(function setupHooks() {
+  var listEl = document.getElementById('hooks-list');
+  var filterEl = document.getElementById('hooks-filter');
+  var clearBtn = document.getElementById('hooks-clear');
+  var pauseEl = document.getElementById('hooks-pause');
+  if (!listEl) return;
+
+  var MAX_EVENTS = 1000;  // ring buffer
+  var hintEl = document.getElementById('hooks-empty-hint');
+  var events = [];
+  var filterQuery = '';
+  var paused = false;
+
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    return d.toTimeString().slice(0, 8);
+  }
+
+  function summarize(input) {
+    if (!input) return '';
+    if (typeof input === 'string') return input.slice(0, 80);
+    if (input.command) return String(input.command).slice(0, 80);
+    if (input.file_path) return input.file_path;
+    if (input.path) return input.path;
+    if (input.pattern) return input.pattern;
+    return '';
+  }
+
+  function normPath(p) {
+    return typeof p === 'string' ? p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : '';
+  }
+
+  function eventMatchesActiveProject(ev) {
+    if (!activeProjectKey) return true;  // no project active — show everything
+    var evCwd = normPath(ev.cwd);
+    if (!evCwd) return false;  // no cwd on event — can't scope, hide
+    return evCwd === normPath(activeProjectKey);
+  }
+
+  function eventMatchesFilter(ev) {
+    if (!eventMatchesActiveProject(ev)) return false;
+    if (!filterQuery) return true;
+    var q = filterQuery.toLowerCase();
+    var hay = (ev.event || '') + ' ' + (ev.tool_name || '') + ' ' + (ev.session_id || '') + ' ' + JSON.stringify(ev.tool_input || {});
+    return hay.toLowerCase().indexOf(q) !== -1;
+  }
+
+  // Primary fields render full-width stacked (label above value).
+  var HOOK_PRIMARY = [
+    'last_assistant_message', 'tool_name', 'tool_input', 'tool_response', 'reason'
+  ];
+  // Metadata fields render as a compact 2-col grid at the bottom.
+  var HOOK_META = [
+    'hook_event_name', 'permission_mode', 'stop_hook_active', 'matcher',
+    'cwd', 'transcript_path', 'session_id'
+  ];
+  // Pure noise — already represented in the collapsed row.
+  var HOOK_FIELD_HIDE = { received_at: 1, event: 1 };
+
+  function shortPath(p) {
+    if (typeof p !== 'string') return p;
+    if (p.length <= 64) return p;
+    var parts = p.replace(/\\/g, '/').split('/');
+    return '…/' + parts.slice(-3).join('/');
+  }
+
+  function prettyLabel(key) {
+    return key.replace(/_/g, ' ');
+  }
+
+  function renderHookFieldValue(key, value) {
+    var el = document.createElement('div');
+    el.className = 'hook-field-value';
+    if (value == null) { el.textContent = '(null)'; el.classList.add('muted'); return el; }
+    if (typeof value === 'boolean' || typeof value === 'number') {
+      el.textContent = String(value);
+      el.classList.add('mono');
+      return el;
+    }
+    if (typeof value === 'string') {
+      if (key === 'transcript_path' || key === 'cwd') {
+        el.textContent = shortPath(value);
+        el.title = value;
+        el.classList.add('mono', 'truncate');
+        return el;
+      }
+      if (value.indexOf('\n') !== -1 || value.length > 80) {
+        var pre = document.createElement('pre');
+        pre.className = 'hook-message';
+        pre.textContent = value;
+        el.appendChild(pre);
+        return el;
+      }
+      el.textContent = value;
+      return el;
+    }
+    var pre2 = document.createElement('pre');
+    pre2.className = 'hook-json';
+    try { pre2.textContent = JSON.stringify(value, null, 2); }
+    catch { pre2.textContent = String(value); }
+    el.appendChild(pre2);
+    return el;
+  }
+
+  function renderHookDetail(container, ev) {
+    container.innerHTML = '';
+    var seen = {};
+
+    // Primary fields — stacked, full width.
+    HOOK_PRIMARY.forEach(function (k) {
+      if (!Object.prototype.hasOwnProperty.call(ev, k)) return;
+      if (HOOK_FIELD_HIDE[k]) return;
+      seen[k] = 1;
+      var row = document.createElement('div');
+      row.className = 'hook-field';
+      var label = document.createElement('div');
+      label.className = 'hook-field-label';
+      label.textContent = prettyLabel(k);
+      row.appendChild(label);
+      row.appendChild(renderHookFieldValue(k, ev[k]));
+      container.appendChild(row);
+    });
+
+    // Anything not declared primary/meta but present (custom fields) → primary.
+    Object.keys(ev).forEach(function (k) {
+      if (seen[k] || HOOK_FIELD_HIDE[k]) return;
+      if (HOOK_META.indexOf(k) !== -1) return;
+      seen[k] = 1;
+      var row = document.createElement('div');
+      row.className = 'hook-field';
+      var label = document.createElement('div');
+      label.className = 'hook-field-label';
+      label.textContent = prettyLabel(k);
+      row.appendChild(label);
+      row.appendChild(renderHookFieldValue(k, ev[k]));
+      container.appendChild(row);
+    });
+
+    // Meta — compact 2-col grid.
+    var meta = null;
+    HOOK_META.forEach(function (k) {
+      if (!Object.prototype.hasOwnProperty.call(ev, k)) return;
+      if (HOOK_FIELD_HIDE[k]) return;
+      if (!meta) {
+        meta = document.createElement('div');
+        meta.className = 'hook-meta';
+        container.appendChild(meta);
+      }
+      var lab = document.createElement('div');
+      lab.className = 'hook-meta-label';
+      lab.textContent = prettyLabel(k);
+      var val = document.createElement('div');
+      val.className = 'hook-meta-value';
+      var v = ev[k];
+      if (k === 'transcript_path' || k === 'cwd') {
+        val.textContent = shortPath(typeof v === 'string' ? v : String(v));
+        val.title = String(v);
+        val.classList.add('truncate');
+      } else if (k === 'session_id' && typeof v === 'string') {
+        val.textContent = v.slice(0, 8) + '…';
+        val.title = v;
+      } else {
+        val.textContent = String(v);
+      }
+      meta.appendChild(lab);
+      meta.appendChild(val);
+    });
+  }
+
+  function renderEvent(ev) {
+    var row = document.createElement('div');
+    row.className = 'hook-row';
+    var time = document.createElement('span');
+    time.className = 'hook-time';
+    time.textContent = fmtTime(ev.received_at || Date.now());
+    var name = document.createElement('span');
+    name.className = 'hook-event';
+    name.textContent = ev.event || '?';
+    var tool = document.createElement('span');
+    tool.className = 'hook-tool';
+    tool.textContent = ev.tool_name || '';
+    var summary = document.createElement('span');
+    summary.textContent = ev.tool_input ? summarize(ev.tool_input) : (ev.session_id ? ev.session_id.slice(0, 8) : '');
+    row.appendChild(time);
+    row.appendChild(name);
+    row.appendChild(tool);
+    row.appendChild(summary);
+
+    var detail = document.createElement('div');
+    detail.className = 'hook-detail';
+    detail.style.display = 'none';
+    renderHookDetail(detail, ev);
+    row.appendChild(detail);
+
+    row.addEventListener('click', function () {
+      row.classList.toggle('expanded');
+      detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
+    });
+    return row;
+  }
+
+  function rerender() {
+    listEl.innerHTML = '';
+    events.filter(eventMatchesFilter).slice(-200).forEach(function (ev) {
+      listEl.appendChild(renderEvent(ev));
+    });
+    listEl.scrollTop = listEl.scrollHeight;
+  }
+
+  // Re-scope the visible list when the user switches projects — same as
+  // the Files / Git / Run / Automations tabs do.
+  window.__rerenderHookList = rerender;
+
+  filterEl.addEventListener('input', function () {
+    filterQuery = filterEl.value.trim();
+    rerender();
+  });
+  clearBtn.addEventListener('click', function () {
+    events = [];
+    rerender();
+    if (hintEl) hintEl.classList.remove('hidden');
+  });
+  pauseEl.addEventListener('change', function () { paused = pauseEl.checked; });
+
+  if (window.electronAPI && window.electronAPI.onHookEvent) {
+    window.electronAPI.onHookEvent(function (ev) {
+      if (paused) return;
+      ev.received_at = Date.now();
+      events.push(ev);
+      if (events.length > MAX_EVENTS) events.shift();
+      if (hintEl && !hintEl.classList.contains('hidden')) hintEl.classList.add('hidden');
+      // Append-only when the new event passes the current filter
+      if (eventMatchesFilter(ev)) {
+        var row = renderEvent(ev);
+        listEl.appendChild(row);
+        // Trim DOM to last 200 to keep things responsive
+        while (listEl.children.length > 200) listEl.removeChild(listEl.firstChild);
+        listEl.scrollTop = listEl.scrollHeight;
+      }
+    });
+  }
+
+  // Hooks auto-config wiring
+  var connectBtn = document.getElementById('btn-hooks-connect');
+  var disconnectBtn = document.getElementById('btn-hooks-disconnect');
+  var statusEl = document.getElementById('hooks-config-status');
+
+  function refreshConfigState() {
+    if (!window.electronAPI || !window.electronAPI.isHooksConfigured) return;
+    window.electronAPI.isHooksConfigured().then(function (configured) {
+      if (configured) {
+        if (connectBtn) connectBtn.classList.add('hidden');
+        if (disconnectBtn) disconnectBtn.classList.remove('hidden');
+        if (statusEl) {
+          statusEl.textContent = 'Connected. Restart any open Claude sessions to start receiving events.';
+          statusEl.classList.remove('error');
+          statusEl.classList.add('ok');
+        }
+      } else {
+        if (connectBtn) connectBtn.classList.remove('hidden');
+        if (disconnectBtn) disconnectBtn.classList.add('hidden');
+        if (statusEl) {
+          statusEl.textContent = '';
+          statusEl.classList.remove('ok', 'error');
+        }
+      }
+    }).catch(function () {});
+  }
+
+  if (connectBtn) connectBtn.addEventListener('click', function () {
+    if (!window.electronAPI || !window.electronAPI.configureHooks) return;
+    if (statusEl) {
+      statusEl.textContent = 'Configuring…';
+      statusEl.classList.remove('ok', 'error');
+    }
+    window.electronAPI.configureHooks().then(function (result) {
+      if (result && result.ok) {
+        refreshConfigState();
+      } else {
+        if (statusEl) {
+          statusEl.textContent = (result && result.error) ? ('Failed: ' + result.error) : 'Failed to configure hooks.';
+          statusEl.classList.add('error');
+        }
+      }
+    });
+  });
+
+  if (disconnectBtn) disconnectBtn.addEventListener('click', function () {
+    if (!window.electronAPI || !window.electronAPI.disconnectHooks) return;
+    if (!confirm('Remove Claudes hook entries from your ~/.claude/settings.json?')) return;
+    window.electronAPI.disconnectHooks().then(function (result) {
+      if (result && result.ok) {
+        refreshConfigState();
+      } else {
+        if (statusEl) {
+          statusEl.textContent = (result && result.error) ? ('Failed: ' + result.error) : 'Failed to disconnect.';
+          statusEl.classList.add('error');
+        }
+      }
+    });
+  });
+
+  // Initial check
+  refreshConfigState();
+})();
+
+(function setupSnippets() {
+  var btn = document.getElementById('btn-snippets');
+  var modal = document.getElementById('snippets-modal');
+  var closeBtn = document.getElementById('snippets-close');
+  var newBtn = document.getElementById('snippets-new');
+  var listEl = document.getElementById('snippets-list');
+  var trigEl = document.getElementById('snippet-trigger');
+  var labelEl = document.getElementById('snippet-label');
+  var bodyEl = document.getElementById('snippet-body');
+  var saveBtn = document.getElementById('snippet-save');
+  var delBtn = document.getElementById('snippet-delete');
+  if (!modal) return;
+
+  var snippets = [];
+  var editing = null;
+
+  function open() { modal.classList.remove('hidden'); refresh(); }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
+
+  function refresh() {
+    if (!window.electronAPI || !window.electronAPI.listSnippets) return Promise.resolve();
+    return window.electronAPI.listSnippets().then(function (list) {
+      snippets = list || [];
+      renderList();
+      // Update the in-memory cache used by trigger expansion (Task 3.3)
+      window.__snippetsCache = snippets;
+      if (editing) {
+        var match = snippets.find(function (s) { return s.id === editing.id; });
+        if (match) editing = match;
+        else editing = snippets.length ? snippets[0] : { trigger: '', label: '', body: '' };
+      } else if (snippets.length) {
+        editing = snippets[0];
+      } else {
+        editing = { trigger: '', label: '', body: '' };
+      }
+      paintEdit(editing);
+    });
+  }
+
+  function renderList() {
+    listEl.innerHTML = '';
+    snippets.forEach(function (s) {
+      var d = document.createElement('div');
+      d.className = 'snippet-item' + (editing && editing.id === s.id ? ' active' : '');
+      var name = document.createElement('div');
+      name.textContent = s.label || '(unnamed)';
+      var trig = document.createElement('div');
+      trig.className = 'snippet-item-trigger';
+      trig.textContent = '\\' + (s.trigger || '');
+      d.appendChild(name);
+      d.appendChild(trig);
+      d.addEventListener('click', function () { editing = s; paintEdit(s); renderList(); });
+      listEl.appendChild(d);
+    });
+  }
+
+  function paintEdit(s) {
+    trigEl.value = s.trigger || '';
+    labelEl.value = s.label || '';
+    bodyEl.value = s.body || '';
+  }
+
+  if (newBtn) newBtn.addEventListener('click', function () {
+    editing = { trigger: '', label: '', body: '' };
+    paintEdit(editing);
+    renderList();
+    trigEl.focus();
+  });
+
+  if (saveBtn) saveBtn.addEventListener('click', function () {
+    var snip = Object.assign({}, editing, {
+      trigger: trigEl.value.trim(),
+      label: labelEl.value.trim(),
+      body: bodyEl.value
+    });
+    if (!snip.trigger) { alert('Trigger required'); return; }
+    if (!window.electronAPI || !window.electronAPI.saveSnippet) return;
+    window.electronAPI.saveSnippet(snip).then(function (saved) {
+      editing = saved;
+      refresh();
+    });
+  });
+
+  if (delBtn) delBtn.addEventListener('click', function () {
+    if (!editing || !editing.id) return;
+    if (!confirm('Delete snippet "' + (editing.label || editing.trigger) + '"?')) return;
+    if (!window.electronAPI || !window.electronAPI.deleteSnippet) return;
+    window.electronAPI.deleteSnippet(editing.id).then(function () {
+      editing = null;
+      refresh();
+    });
+  });
+
+  if (btn) btn.addEventListener('click', open);
+
+  // Expose for the palette command (Task 1.2's setupPalette IIFE) and for
+  // the trigger expansion layer (Task 3.3) to refresh the in-memory cache.
+  window.openSnippetsManager = open;
+  window.refreshSnippetsCache = refresh;
+
+  // Pre-warm the cache so trigger expansion works immediately on app start
+  refresh();
+})();
+
+(function setupExtensionsManager() {
+  var modal = document.getElementById('ext-modal');
+  if (!modal) return;
+  var closeBtn = document.getElementById('ext-close');
+  var pathLabel = document.getElementById('ext-project-path');
+  var currentProject = null;
+
+  function refresh() {
+    if (!currentProject || !window.electronAPI || !window.electronAPI.listExtensions) return;
+    window.electronAPI.listExtensions(currentProject).then(function (data) {
+      ['agents', 'skills', 'commands'].forEach(function (cat) {
+        var list = modal.querySelector('[data-cat-list="' + cat + '"]');
+        if (!list) return;
+        list.innerHTML = '';
+        var items = data[cat] || [];
+        if (items.length === 0) {
+          var none = document.createElement('div');
+          none.className = 'settings-hint';
+          none.style.padding = '8px';
+          none.textContent = 'None yet.';
+          list.appendChild(none);
+          return;
+        }
+        items.forEach(function (it) {
+          var row = document.createElement('div');
+          row.className = 'ext-row';
+          var label = document.createElement('span');
+          label.textContent = it.name;
+          var scope = document.createElement('span');
+          scope.className = 'ext-scope ext-scope-' + it.scope;
+          scope.textContent = it.scope;
+          var openBtn = document.createElement('button');
+          openBtn.className = 'settings-browse-btn';
+          openBtn.style.padding = '2px 8px';
+          openBtn.textContent = 'Edit';
+          openBtn.addEventListener('click', function () {
+            modal.classList.add('hidden');
+            openFileEditor(it.path);
+          });
+          var delBtn = document.createElement('button');
+          delBtn.className = 'settings-browse-btn';
+          delBtn.style.padding = '2px 8px';
+          delBtn.style.color = '#f87171';
+          delBtn.textContent = '×';
+          delBtn.addEventListener('click', function () {
+            if (!confirm('Delete ' + it.name + ' (' + it.scope + ')?')) return;
+            window.electronAPI.deleteExtension(it.path).then(function (r) {
+              if (!r || !r.ok) alert('Delete failed: ' + (r && r.error || 'unknown'));
+              refresh();
+            });
+          });
+          row.appendChild(label);
+          row.appendChild(scope);
+          row.appendChild(openBtn);
+          row.appendChild(delBtn);
+          list.appendChild(row);
+        });
+      });
+    });
+  }
+
+  modal.querySelectorAll('.ext-new').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var cat = btn.dataset.cat;
+      // Scope picker via inline confirmDialog (Cancel = global, OK = project).
+      confirmDialog(
+        'Create in PROJECT scope?\n\n' +
+        'OK = .claude/' + cat + '/  (this project only)\n' +
+        'Cancel = ~/.claude/' + cat + '/  (global, all projects)',
+        { okLabel: 'Project', cancelLabel: 'Global' }
+      ).then(function (isProject) {
+        var scope = isProject ? 'project' : 'global';
+        promptForValue('Name for new ' + cat.slice(0, -1) + ' (alphanumeric, _ . - allowed):').then(function (name) {
+          if (!name) return;
+          window.electronAPI.createExtension(currentProject, cat, name.trim(), scope).then(function (r) {
+            if (!r || !r.ok) { showToast('Create failed: ' + (r && r.error || 'unknown'), { kind: 'error' }); return; }
+            refresh();
+            modal.classList.add('hidden');
+            openFileEditor(r.path);
+            showToast('Created ' + cat.slice(0, -1) + ' "' + name + '" (' + scope + ')', { kind: 'success' });
+          });
+        });
+      });
+    });
+  });
+
+  if (closeBtn) closeBtn.addEventListener('click', function () { modal.classList.add('hidden'); });
+  modal.addEventListener('click', function (e) { if (e.target === modal) modal.classList.add('hidden'); });
+
+  window.openExtensionsModal = function (projPath) {
+    currentProject = projPath || null;
+    pathLabel.textContent = projPath ? (projPath + ' + ~/.claude/') : '~/.claude/';
+    modal.classList.remove('hidden');
+    refresh();
+  };
+})();
+
+(function setupMcpManager() {
+  var modal = document.getElementById('mcp-modal');
+  if (!modal) return;
+  var listEl = document.getElementById('mcp-list');
+  var emptyEl = document.getElementById('mcp-empty');
+  var formEl = document.getElementById('mcp-form');
+  var nameEl = document.getElementById('mcp-name');
+  var cmdEl = document.getElementById('mcp-command');
+  var argsEl = document.getElementById('mcp-args');
+  var envEl = document.getElementById('mcp-env');
+  var transportEl = document.getElementById('mcp-transport');
+  var statusEl = document.getElementById('mcp-status');
+  var closeBtn = document.getElementById('mcp-close');
+  var newBtn = document.getElementById('mcp-new');
+  var saveBtn = document.getElementById('mcp-save');
+  var delBtn = document.getElementById('mcp-delete');
+  var pathLabel = document.getElementById('mcp-project-path');
+  var projectPath = null;
+  var servers = {}; // name -> config
+  var editingName = null;
+  var isNew = false;
+
+  function showForm(show) {
+    // Use inline style instead of .hidden class — the app doesn't have a
+    // global '.hidden { display: none }' rule, only element-scoped ones, so
+    // toggling .hidden on these divs is a no-op.
+    emptyEl.style.display = show ? 'none' : '';
+    formEl.style.display = show ? '' : 'none';
+  }
+  function renderList() {
+    listEl.innerHTML = '';
+    var names = Object.keys(servers).sort();
+    if (names.length === 0) {
+      var none = document.createElement('div');
+      none.className = 'settings-hint';
+      none.style.padding = '12px';
+      none.textContent = 'No servers yet — click + to add one.';
+      listEl.appendChild(none);
+      return;
+    }
+    names.forEach(function (n) {
+      var row = document.createElement('div');
+      row.className = 'endpoints-list-item' + (n === editingName ? ' active' : '');
+      row.textContent = n;
+      row.addEventListener('click', function () { selectServer(n); });
+      listEl.appendChild(row);
+    });
+  }
+  function loadIntoForm(name) {
+    var s = servers[name] || {};
+    nameEl.value = name || '';
+    cmdEl.value = s.command || '';
+    argsEl.value = Array.isArray(s.args) ? s.args.join('\n') : '';
+    envEl.value = s.env ? Object.keys(s.env).map(function (k) { return k + '=' + s.env[k]; }).join('\n') : '';
+    transportEl.value = s.transport || '';
+    statusEl.textContent = '';
+  }
+  function selectServer(n) {
+    editingName = n;
+    isNew = false;
+    showForm(true);
+    loadIntoForm(n);
+    renderList();
+    delBtn.style.display = '';
+  }
+  function startNew() {
+    editingName = null;
+    isNew = true;
+    showForm(true);
+    nameEl.value = '';
+    cmdEl.value = '';
+    argsEl.value = '';
+    envEl.value = '';
+    transportEl.value = '';
+    statusEl.textContent = '';
+    delBtn.style.display = 'none';
+    nameEl.focus();
+  }
+  function parseEnv(text) {
+    var out = {};
+    String(text || '').split(/\r?\n/).forEach(function (line) {
+      line = line.trim();
+      if (!line || line.startsWith('#')) return;
+      var i = line.indexOf('=');
+      if (i < 0) return;
+      var k = line.slice(0, i).trim();
+      var v = line.slice(i + 1);
+      if (k) out[k] = v;
+    });
+    return out;
+  }
+  function save() {
+    var newName = nameEl.value.trim();
+    if (!/^[A-Za-z0-9_.\-]+$/.test(newName)) {
+      statusEl.textContent = 'Name must be alphanumeric (or _ . -).';
+      return;
+    }
+    var cfg = {
+      command: cmdEl.value.trim() || undefined,
+      args: argsEl.value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean),
+      env: parseEnv(envEl.value),
+      transport: transportEl.value || undefined
+    };
+    if (!cfg.command) { statusEl.textContent = 'Command is required.'; return; }
+    if (cfg.args.length === 0) delete cfg.args;
+    if (Object.keys(cfg.env).length === 0) delete cfg.env;
+    if (!cfg.transport) delete cfg.transport;
+    // Rename: drop the old key.
+    if (!isNew && editingName && editingName !== newName) delete servers[editingName];
+    servers[newName] = cfg;
+    persist();
+  }
+  function del() {
+    if (!editingName) return;
+    if (!confirm('Delete MCP server "' + editingName + '"?')) return;
+    delete servers[editingName];
+    editingName = null;
+    persist();
+    showForm(false);
+  }
+  function persist() {
+    if (!projectPath || !window.electronAPI || !window.electronAPI.writeMcp) return;
+    statusEl.textContent = 'Saving…';
+    window.electronAPI.writeMcp(projectPath, servers).then(function (r) {
+      if (r && r.ok) {
+        statusEl.textContent = 'Saved';
+        setTimeout(function () { if (statusEl.textContent === 'Saved') statusEl.textContent = ''; }, 1500);
+      } else {
+        statusEl.textContent = 'Error: ' + (r && r.error || 'unknown');
+      }
+      renderList();
+    });
+  }
+
+  if (newBtn) newBtn.addEventListener('click', startNew);
+  if (saveBtn) saveBtn.addEventListener('click', save);
+  if (delBtn) delBtn.addEventListener('click', del);
+  if (closeBtn) closeBtn.addEventListener('click', function () { modal.classList.add('hidden'); });
+  modal.addEventListener('click', function (e) { if (e.target === modal) modal.classList.add('hidden'); });
+  ['mcp-name', 'mcp-command', 'mcp-args', 'mcp-env'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  });
+
+  window.openMcpModal = function (projPath) {
+    if (!projPath || !window.electronAPI || !window.electronAPI.readMcp) return;
+    projectPath = projPath;
+    pathLabel.textContent = projPath + '/.mcp.json';
+    modal.classList.remove('hidden');
+    showForm(false);
+    statusEl.textContent = '';
+    window.electronAPI.readMcp(projPath).then(function (r) {
+      servers = (r && r.mcpServers) || {};
+      editingName = null;
+      renderList();
+    });
+  };
+})();
+
+(function setupQuickOpen() {
+  var modal = document.getElementById('quick-open-modal');
+  var input = document.getElementById('quick-open-input');
+  var resultsEl = document.getElementById('quick-open-results');
+  var closeBtn = document.getElementById('quick-open-close');
+  if (!modal || !input || !resultsEl) return;
+
+  var lastHits = [];
+  var sel = 0;
+
+  function open() {
+    if (!activeProjectKey) return;
+    modal.classList.remove('hidden');
+    input.value = '';
+    lastHits = [];
+    resultsEl.innerHTML = '';
+    setTimeout(function () { input.focus(); }, 0);
+  }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+  function render() {
+    resultsEl.innerHTML = '';
+    lastHits.slice(0, 40).forEach(function (h, i) {
+      var row = document.createElement('div');
+      row.className = 'session-search-hit' + (i === sel ? ' active' : '');
+      var meta = document.createElement('div');
+      meta.className = 'session-search-hit-meta';
+      meta.textContent = h.relativePath || h.name;
+      row.appendChild(meta);
+      row.addEventListener('click', function () { openFileEditor(h.path); close(); });
+      resultsEl.appendChild(row);
+    });
+  }
+
+  var t = null;
+  input.addEventListener('input', function () {
+    clearTimeout(t);
+    var q = input.value.trim();
+    if (!q) { lastHits = []; resultsEl.innerHTML = ''; return; }
+    t = setTimeout(function () {
+      var proj = config && config.projects && config.projects.find(function (p) {
+        return p && projectPathToKey(p.path) === activeProjectKey;
+      });
+      if (!proj || !window.electronAPI || !window.electronAPI.searchFiles) return;
+      window.electronAPI.searchFiles(proj.path, q).then(function (hits) {
+        // Files only — quick-open doesn't open directories.
+        lastHits = (hits || []).filter(function (h) { return !h.isDirectory; });
+        sel = 0;
+        render();
+      });
+    }, 120);
+  });
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(lastHits.length - 1, sel + 1); render(); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(0, sel - 1); render(); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var h = lastHits[sel];
+      if (h) { openFileEditor(h.path); close(); }
+    }
+  });
+
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (cmdOrCtrl(e) && !e.shiftKey && !e.altKey && (e.key === 'p' || e.key === 'P')) {
+      // Exclude the textarea inside our own modal so typing 'p' inside the
+      // input doesn't loop.
+      if (e.target && (e.target.id === 'quick-open-input')) return;
+      e.preventDefault();
+      open();
+    }
+  }, true);
+})();
+
+(function setupContentSearch() {
+  var modal = document.getElementById('content-search-modal');
+  var input = document.getElementById('content-search-input');
+  var resultsEl = document.getElementById('content-search-results');
+  var statusEl = document.getElementById('content-search-status');
+  var closeBtn = document.getElementById('content-search-close');
+  if (!modal || !input || !resultsEl) return;
+
+  function open() {
+    if (!activeProjectKey) { return; }
+    modal.classList.remove('hidden');
+    input.focus();
+    input.select();
+  }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+  function escapeHtmlLocal(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c];
+    });
+  }
+  function highlight(text, q) {
+    var safe = escapeHtmlLocal(text);
+    var idx = safe.toLowerCase().indexOf(q.toLowerCase());
+    if (idx === -1) return safe;
+    return safe.slice(0, idx) + '<mark>' + safe.slice(idx, idx + q.length) + '</mark>' + safe.slice(idx + q.length);
+  }
+
+  var t = null;
+  input.addEventListener('input', function () {
+    clearTimeout(t);
+    var q = input.value.trim();
+    if (q.length < 2) { resultsEl.innerHTML = ''; statusEl.textContent = ''; return; }
+    statusEl.textContent = 'Searching…';
+    t = setTimeout(function () {
+      if (!window.electronAPI || !window.electronAPI.searchProjectContent) {
+        statusEl.textContent = 'Search API not available.';
+        return;
+      }
+      // Use the project path, not its key — main resolves via assertInsideAllowedRoots.
+      var proj = config && config.projects && config.projects.find(function (p) {
+        return p && projectPathToKey(p.path) === activeProjectKey;
+      });
+      if (!proj) { statusEl.textContent = 'No active project.'; return; }
+      window.electronAPI.searchProjectContent(proj.path, q).then(function (hits) {
+        resultsEl.innerHTML = '';
+        if (!hits || !hits.length) { statusEl.textContent = 'No matches.'; return; }
+        statusEl.textContent = hits.length + ' match' + (hits.length === 1 ? '' : 'es') + (hits.length >= 300 ? ' (capped)' : '');
+        hits.forEach(function (h) {
+          var row = document.createElement('div');
+          row.className = 'session-search-hit';
+          var meta = document.createElement('div');
+          meta.className = 'session-search-hit-meta';
+          meta.textContent = h.relativePath + '  •  line ' + h.line;
+          var snip = document.createElement('div');
+          snip.className = 'session-search-hit-snippet';
+          snip.innerHTML = highlight(h.snippet || '', q);
+          row.appendChild(meta);
+          row.appendChild(snip);
+          row.addEventListener('click', function () {
+            openFileEditor(h.path, h.line);
+            close();
+          });
+          resultsEl.appendChild(row);
+        });
+      }).catch(function (e) {
+        statusEl.textContent = 'Search failed: ' + (e && e.message || e);
+      });
+    }, 200);
+  });
+
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  document.addEventListener('keydown', function (e) {
+    if (cmdOrCtrl(e) && e.shiftKey && (e.key === 'G' || e.key === 'g')) {
+      e.preventDefault();
+      open();
+    }
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
+})();
+
+(function setupShortcutsModal() {
+  var btn = document.getElementById('btn-shortcuts');
+  var modal = document.getElementById('shortcuts-modal');
+  var closeBtn = document.getElementById('shortcuts-close');
+  if (!modal) return;
+
+  function open() { modal.classList.remove('hidden'); }
+  function close() {
+    modal.classList.add('hidden');
+    if (typeof refocusActiveTerminal === 'function') refocusActiveTerminal();
+  }
+
+  if (btn) btn.addEventListener('click', open);
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+
+  // ? hotkey — only fires when no input/textarea/select has focus, so it
+  // doesn't interfere with typing a literal "?" into a form.
+  document.addEventListener('keydown', function (e) {
+    if (e.key === '?' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      var t = e.target;
+      var tag = t && t.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (t && t.classList && t.classList.contains('xterm-helper-textarea')) return;
+      e.preventDefault();
+      open();
+      return;
+    }
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  });
 })();
