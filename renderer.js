@@ -13146,7 +13146,7 @@ window.electronAPI.getVersion().then(function(v) {
   versionEl.style.cursor = 'pointer';
   versionEl.addEventListener('click', function () {
     if (window.electronAPI && window.electronAPI.openExternal) {
-      window.electronAPI.openExternal('https://github.com/paulallington/Claudes/releases');
+      window.electronAPI.openExternal('https://github.com/mdrichardson/Claudes/releases');
     }
   });
 

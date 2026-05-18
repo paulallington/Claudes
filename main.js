@@ -4131,7 +4131,7 @@ function isNewerVersion(latestTag, current) {
 let darwinCheckForUpdates = null;
 
 function setupDarwinUpdater() {
-  const REPO = 'paulallington/Claudes';
+  const REPO = 'mdrichardson/Claudes';
   const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64';
   const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1h
   const INITIAL_DELAY_MS = 30 * 1000;       // give the window a moment to render
