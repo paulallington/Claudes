@@ -1798,7 +1798,11 @@ function buildProjectItem(project, index) {
       window.electronAPI.focusPopoutWindow(project.path);
       return;
     }
-    setActiveProject(index, false);
+    // Don't auto-spawn a Claude column on sidebar click — only show the
+    // project. Accidental clicks used to leave running ptys eating memory
+    // with no way to close them without first navigating into the project.
+    // New projects added via + Add Project still auto-spawn (see addProject).
+    setActiveProject(index, false, true);
   });
 
   var sortMode = config.projectSortMode || 'manual';
@@ -1887,6 +1891,11 @@ function buildProjectItem(project, index) {
     addMenuItem('Skills / agents / commands…', 'manage-ext');
     addMenuItem('Save current layout…', 'layout-save');
     addMenuItem('Restore layout…', 'layout-restore');
+    var liveState = projectStates.get(project.path);
+    var liveCount = liveState ? liveState.columns.size : 0;
+    if (liveCount > 0) {
+      addMenuItem('Kill all instances (' + liveCount + ')', 'kill-all');
+    }
 
     // Sync entries — populated async so the labels reflect the current state.
     var syncDivider = document.createElement('div');
@@ -1960,6 +1969,8 @@ function buildProjectItem(project, index) {
         saveCurrentLayout(config.projects[projIndex].path);
       } else if (action === 'layout-restore') {
         chooseLayoutToRestore(config.projects[projIndex].path);
+      } else if (action === 'kill-all') {
+        killAllInstancesForProject(config.projects[projIndex].path);
       }
       menu.style.display = 'none';
     };
@@ -4196,6 +4207,18 @@ function removeColumn(id) {
   persistSessions(col.projectKey);
   updateProjectBadges();
   updateSidebarActivity();
+}
+
+function killAllInstancesForProject(projectPath) {
+  var state = projectStates.get(projectPath);
+  if (!state || state.columns.size === 0) return;
+  var ids = Array.from(state.columns.keys());
+  var n = ids.length;
+  var label = n === 1 ? '1 Claude instance' : (n + ' Claude instances');
+  if (!window.confirm('Kill ' + label + ' for this project? Any unsaved work in those columns will be lost.')) {
+    return;
+  }
+  ids.forEach(function (id) { removeColumn(id); });
 }
 
 function restartColumn(id) {
