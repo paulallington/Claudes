@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRecentSessions: (projectPath) => ipcRenderer.invoke('sessions:getRecent', projectPath),
   saveSessions: (projectPath, sessionIds) => ipcRenderer.invoke('sessions:save', projectPath, sessionIds),
   loadSessions: (projectPath) => ipcRenderer.invoke('sessions:load', projectPath),
+  loadStickyNotes: (projectPath) => ipcRenderer.invoke('sticky-notes:load', projectPath),
+  saveStickyNotes: (projectPath, notes) => ipcRenderer.invoke('sticky-notes:save', projectPath, notes),
   getSessionTitle: (projectPath, sessionId) => ipcRenderer.invoke('sessions:getTitle', projectPath, sessionId),
   readClaudeMd: (projectPath) => ipcRenderer.invoke('claudemd:read', projectPath),
   saveClaudeMd: (projectPath, content) => ipcRenderer.invoke('claudemd:save', projectPath, content),

@@ -212,6 +212,7 @@
           <button id="btn-automations-flyout" class="toolbar-btn" title="Automations" aria-label="Automations">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 8a6 6 0 1 1-1.8-4.3"/><path d="M14 2.5V5.5H11"/></svg>
           </button>
+          <button id="btn-sticky-notes" class="toolbar-btn" title="New sticky note" aria-label="New sticky note">&#10063;</button>
           <span class="toolbar-divider" aria-hidden="true"></span>
           <div class="toolbar-menu-wrap">
             <button id="btn-toolbar-menu" class="toolbar-btn" title="Tools &amp; settings" aria-label="Tools and settings">
@@ -318,7 +319,9 @@
           </button>
         </div>
       </div>
-      <div id="columns-container"></div>
+      <div id="columns-container">
+        <div id="sticky-notes-container"></div>
+      </div>
     </div>
     <div id="automations-flyout" class="automations-flyout hidden">
       <div class="automations-flyout-header">
