@@ -7566,29 +7566,14 @@ function autoBindColumnTarget(colId) {
       persistSessions(col.projectKey, col.workspaceId);
     }
 
-    return window.electronAPI.gitDetectSessionBranch(col.projectKey, col.sessionId).then(function (sessionBranch) {
-      if (!sessionBranch) {
-        if (col.targetBranch !== null) {
-          col.targetBranch = null;
-          persistSessions(col.projectKey, col.workspaceId);
-        }
-        return;
-      }
-      return getProjectRootBranch(col.projectKey).then(function (rootBranch) {
-        // If session's branch matches the project root's current branch, no override needed.
-        if (sessionBranch === rootBranch) {
-          if (col.targetBranch !== null) {
-            col.targetBranch = null;
-            persistSessions(col.projectKey, col.workspaceId);
-          }
-          return;
-        }
-        if (col.targetBranch !== sessionBranch) {
-          col.targetBranch = sessionBranch;
-          persistSessions(col.projectKey, col.workspaceId);
-        }
-      });
-    });
+    // Phase 2 (read-only branch tracking) is intentionally disabled here: we
+    // keep cwd/worktree following (Phase 3 above) but drop the targetBranch
+    // override. Clear any stale value so the Git tab stays on the project root.
+    if (col.targetBranch !== null) {
+      col.targetBranch = null;
+      persistSessions(col.projectKey, col.workspaceId);
+    }
+    return;
   }).catch(function () { /* best-effort */ });
 }
 
@@ -13368,7 +13353,7 @@ window.electronAPI.getVersion().then(function(v) {
   versionEl.style.cursor = 'pointer';
   versionEl.addEventListener('click', function () {
     if (window.electronAPI && window.electronAPI.openExternal) {
-      window.electronAPI.openExternal('https://github.com/mdrichardson/Claudes/releases');
+      window.electronAPI.openExternal('https://github.com/paulallington/Claudes/releases');
     }
   });
 

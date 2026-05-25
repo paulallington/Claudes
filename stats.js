@@ -7,7 +7,7 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const REPO = 'mdrichardson/Claudes';
+const REPO = 'paulallington/Claudes';
 const STATS_FILE = path.join(process.env.HOME || process.env.USERPROFILE, '.claudes', 'download-stats.json');
 
 function fetchCounts() {

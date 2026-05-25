@@ -8191,3 +8191,19 @@ body.light-theme .clawd-debug-log .ts { color: #8a8aa0; }
   min-width: 32px;
   text-align: center;
 }
+
+/* --- workspaces-only branch: mask the unshipped "meh" features (per-terminal
+   pipeline visualizer, review-comments annotations, branch-aware Git-tab hint)
+   so only the workspaces feature surfaces. The code stays dormant — this is a
+   UI mask, pending a decision on full code removal. To restore, delete this
+   block. --- */
+.col-pipeline,
+.settings-tab[data-settings-tab="pipelines"],
+.settings-pane[data-settings-pane="pipelines"],
+.review-comment-indicator,
+.review-comment-connector,
+.review-comment-box,
+.review-stale-comments,
+#git-review-comments-actions {
+  display: none !important;
+}
