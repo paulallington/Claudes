@@ -1623,12 +1623,6 @@ ipcMain.handle('sessions:load', (event, projectPath) => {
 // Sub-workspace: <project>/.claudes/sticky-notes-<workspaceId>.json — one overlay per workspace.
 // Writes are debounced per-(project, workspace), atomic (tmp + rename), and flushed on quit.
 // Malformed JSON on load is quarantined to sticky-notes.corrupt-<ts>.json so user content isn't silently overwritten.
-//
-// personal-only: workspace awareness added on the personal/main branch so the
-// mdrichardson fork ships a usable build before upstream rebases either
-// feat/workspaces or feat/sticky-notes to absorb the same fix. See
-// docs/superpowers/plans/2026-04-24-sticky-notes-workspace-aware-rebase.md
-// (on feat/workspaces) for the upstream plan.
 
 const STICKY_NOTES_WRITE_DEBOUNCE_MS = 400;
 const pendingStickyNotes = new Map(); // stickyKey -> { projectPath, workspaceId, timer, notes }
