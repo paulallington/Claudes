@@ -14,7 +14,7 @@
 
 ## Install
 
-Download the latest installer from [**GitHub Releases**](https://github.com/paulallington/Claudes/releases/latest) — grab the `.exe` and run it.
+Download the latest installer from [**GitHub Releases**](https://github.com/paulallington/Claudes/releases/latest) — Windows, macOS, and Linux builds are published for each release; grab the one for your OS and run it.
 
 Claudes **auto-updates** in the background via [electron-updater](https://www.electron.build/auto-update); you'll get a notification when a new version is ready and it'll install on next launch.
 
@@ -24,7 +24,7 @@ Claudes **auto-updates** in the background via [electron-updater](https://www.el
 
 ## What is Claudes?
 
-Claudes is a **desktop GUI for Claude Code** — a tiling terminal multiplexer purpose-built for running multiple Claude Code sessions at once, organised by project. Spawn Claudes side-by-side, broadcast a prompt to several at once, search every transcript you've ever produced, watch your plan limits and per-column context windows in real time, and run unattended automations on a schedule.
+Claudes is a **desktop GUI for Claude Code** — a tiling terminal multiplexer purpose-built for running multiple Claude Code sessions at once, organised by project and (within a project) by workspace. Spawn Claudes side-by-side, broadcast a prompt to several at once, search every transcript you've ever produced, watch your plan limits and per-column context windows in real time, and run unattended automations on a schedule.
 
 I built it because I run a lot of Claude Code sessions in parallel and got tired of juggling terminal windows. It's a personal project, but it's been polished into something I use every day. Bug reports and PRs welcome — [issues here](https://github.com/paulallington/Claudes/issues).
 
@@ -32,7 +32,8 @@ I built it because I run a lot of Claude Code sessions in parallel and got tired
 
 ## Highlights
 
-- **Multi-column terminal workspace** — resizable rows + columns, drag-to-reorder, maximise, custom titles, activity indicators, popout windows per project
+- **Multi-column terminal workspace** — resizable rows + columns, drag-to-reorder, maximise (expands its row), custom titles, activity indicators, popout windows per project; column/row sizes persist as ratios across restarts
+- **Workspaces** — split a project into a Primary workspace plus named sub-workspaces (e.g. `main`, a feature branch, a spike), each with its own column layout and live sessions; switch instantly from the sidebar, drag to reorder, right-click a column to *Send to workspace*, and get per-workspace activity alerts
 - **Endpoint presets with auto-failover** — swap between Anthropic Cloud and local LLMs (Ollama, vLLM, ngrok-tunnelled boxes…); set a fallback that takes over automatically if the primary disconnects
 - **Plan-limits awareness** — live 5-hour and weekly utilisation in the sidebar, per-column Δ pill since spawn, threshold notifications at 70 % / 90 %, optional auto-pause of background automations at 90 % weekly
 - **Context-window meter per column** — live tokens / model-max with amber at 70 %, red at 90 %, so you can compact proactively
@@ -44,7 +45,10 @@ I built it because I run a lot of Claude Code sessions in parallel and got tired
 - **Hooks inspector** — live feed of every Claude Code hook event with a one-click Connect button that wires `~/.claude/settings.json` for you
 - **Snippets** — `\trigger` text expansion with `{{var}}` placeholders, expanded inline in any column terminal
 - **Command palette** (`Ctrl+K`) — fuzzy-match projects, slash commands, and app actions
-- **Built-in file explorer + inline editor**, **full git tab** (status, branches, stage, commit, push/pull, stash, diff viewer, commit log)
+- **Built-in file explorer + inline editor**, **full git tab** (status, branches, stage, commit, push/pull, stash, diff viewer, commit log) — the git tab follows the focused column's working directory / git worktree
+- **Sticky notes** — draggable, colour-coded notes pinned over the terminal grid, scoped per workspace; anchor one to a column and it tracks that column as the layout changes
+- **Clawd** — an optional animated companion in each column that mirrors what Claude is doing (thinking, working, sweeping, waiting, idle, disconnected), driven by hook events (pixel art from [clawd-tank](https://github.com/marciogranzotto/clawd-tank))
+- **Cross-device session sync** — mirror a project's conversations through any cloud-synced folder (Google Drive, OneDrive, iCloud, Syncthing…) and resume them on another machine; no cloud API, just files
 - **CLAUDE.md editor** for the active project
 - **Run tab** — launch your app alongside Claude; auto-detects VS Code `launch.json` and .NET `launchSettings.json`; reusable env profiles
 - **Headless runs**, **session resume on restart**, **dark / light / auto theme**
