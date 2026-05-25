@@ -3801,10 +3801,9 @@ function addColumn(args, targetRow, opts) {
   var col = document.createElement('div');
   col.className = 'column';
   col.dataset.id = String(id);
-  // Also expose the DOM id as `col-<n>` (diff columns already do this). The
-  // review-comments helpers derive a column's id via element.id, so without
-  // this regular columns yield parseInt('') === NaN and migration validation
-  // fails ("invalid id segment: NaN").
+  // Also expose the DOM id as `col-<n>` (diff columns already do this) so any
+  // helper that derives a column's id via element.id parses a real number
+  // rather than parseInt('') === NaN.
   col.id = 'col-' + id;
 
   var header = createColumnHeader(id, opts.title);
@@ -4350,365 +4349,8 @@ function parseDiff(diffText) {
   return { hunks: hunks };
 }
 
-// Review comments — per-(workspace, slotKey) index for diffContent columns.
+// Per-(workspace, slotKey) index for diffContent column reuse.
 var diffSlotIndex = new Map(); // 'wsId::slotKey' -> columnId
-
-function reviewSlotIndexKey(workspaceId, slotKey) {
-  return (workspaceId || '__primary__') + '::' + slotKey;
-}
-
-function loadReviewCommentsForColumn(colData) {
-  if (!window.electronAPI || !window.electronAPI.loadReviewComments) return;
-  if (!colData.projectKey || !colData.element) return;
-  var colId = parseInt(colData.element.id.replace('col-', ''), 10);
-  var scope = colData.scope || 'working';
-  window.electronAPI.loadReviewComments(colData.projectKey, colData.workspaceId || null, colData.sessionId, scope, colId).then(function (comments) {
-    colData.reviewComments = Array.isArray(comments) ? comments : [];
-    paintReviewIndicators(colData);
-    refreshReviewCommentsButtons();
-  }).catch(function () { colData.reviewComments = []; });
-}
-
-function saveReviewCommentsForColumn(colData) {
-  if (!window.electronAPI || !window.electronAPI.saveReviewComments) return;
-  if (!colData.projectKey || !colData.element) return;
-  var colId = parseInt(colData.element.id.replace('col-', ''), 10);
-  var scope = colData.scope || 'working';
-  window.electronAPI.saveReviewComments(colData.projectKey, colData.workspaceId || null, colData.sessionId, scope, colData.reviewComments || [], colId);
-}
-
-function generateCommentId() {
-  return 'rc_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8);
-}
-
-function paintReviewIndicators(colData) {
-  if (!colData.element) return;
-  var diffBody = colData.element.querySelector('.diff-body');
-  if (!diffBody) return;
-
-  // Clear previous indicators/connectors/stale section.
-  diffBody.querySelectorAll('.review-comment-indicator, .review-comment-connector').forEach(function (el) { el.remove(); });
-  var oldStale = diffBody.querySelector('.review-stale-comments');
-  if (oldStale) oldStale.remove();
-
-  var comments = Array.isArray(colData.reviewComments) ? colData.reviewComments : [];
-  if (comments.length === 0) return;
-
-  // Build (side, line) -> row map.
-  var rowMap = { new: {}, old: {} };
-  diffBody.querySelectorAll('.diff-line[data-line-type]').forEach(function (row) {
-    var oldL = row.getAttribute('data-old-line');
-    var newL = row.getAttribute('data-new-line');
-    if (oldL !== null && oldL !== '') rowMap.old[oldL] = row;
-    if (newL !== null && newL !== '') rowMap.new[newL] = row;
-  });
-
-  var stale = [];
-  comments.forEach(function (c) {
-    var startRow = rowMap[c.side] && rowMap[c.side][String(c.startLine)];
-    if (!startRow) { stale.push(c); return; }
-    var indicator = document.createElement('span');
-    indicator.className = 'review-comment-indicator';
-    indicator.textContent = '💬';
-    indicator.setAttribute('aria-label', 'Open review comment');
-    indicator.setAttribute('role', 'button');
-    indicator.setAttribute('tabindex', '0');
-    indicator.dataset.commentId = c.id;
-    indicator.addEventListener('click', function (e) {
-      e.stopPropagation();
-      openCommentBox(colData, c.startLine, c.endLine, c.side, c.id);
-    });
-    indicator.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        e.stopPropagation();
-        openCommentBox(colData, c.startLine, c.endLine, c.side, c.id);
-      }
-    });
-    var firstNum = startRow.querySelector('.diff-line-num');
-    if (firstNum) firstNum.appendChild(indicator);
-
-    if (c.endLine > c.startLine) {
-      for (var ln = c.startLine; ln < c.endLine; ln++) {
-        var midRow = rowMap[c.side] && rowMap[c.side][String(ln)];
-        if (!midRow) continue;
-        var connector = document.createElement('span');
-        connector.className = 'review-comment-connector';
-        var firstNumMid = midRow.querySelector('.diff-line-num');
-        if (firstNumMid) firstNumMid.appendChild(connector);
-      }
-    }
-  });
-
-  // Stale section
-  if (stale.length > 0) renderStaleComments(diffBody, colData, stale);
-}
-
-function renderStaleComments(diffBody, colData, stale) {
-  var details = document.createElement('details');
-  details.className = 'review-stale-comments';
-  details.open = true;
-  var summary = document.createElement('summary');
-  summary.textContent = stale.length + ' stale comment' + (stale.length === 1 ? '' : 's') + ' (line numbers no longer in diff)';
-  details.appendChild(summary);
-
-  var totalLines = 0;
-  if (colData.diffData && colData.diffData.parsed && colData.diffData.parsed.hunks) {
-    colData.diffData.parsed.hunks.forEach(function (h) { totalLines += h.lines.length; });
-  }
-  if (totalLines > 5000) {
-    var notice = document.createElement('div');
-    notice.className = 'review-stale-truncation-notice';
-    notice.textContent = 'Diff was truncated at 5000 lines per hunk; some comments may belong to live lines past the cap.';
-    details.appendChild(notice);
-  }
-
-  var list = document.createElement('div');
-  list.className = 'review-stale-list';
-  stale.forEach(function (c) {
-    var entry = document.createElement('div');
-    entry.className = 'review-stale-entry';
-    entry.dataset.commentId = c.id;
-    var ref = document.createElement('span');
-    ref.className = 'review-stale-ref';
-    ref.textContent = (c.filePath || '?') + ':' + (c.startLine === c.endLine ? c.startLine : c.startLine + '-' + c.endLine);
-    var text = document.createElement('div');
-    text.className = 'review-stale-text';
-    text.textContent = c.text || '';
-    entry.appendChild(ref);
-    entry.appendChild(text);
-    entry.addEventListener('click', function () {
-      openCommentBox(colData, c.startLine, c.endLine, c.side, c.id, /*anchorEl*/ entry);
-    });
-    list.appendChild(entry);
-  });
-  details.appendChild(list);
-  diffBody.appendChild(details);
-}
-
-function bindGutterSelection(colData) {
-  if (!colData.element) return;
-  var diffBody = colData.element.querySelector('.diff-body');
-  if (!diffBody) return;
-
-  // Split mode: read-only — no new comments.
-  if (colData.diffMode === 'split') return;
-
-  function rowSideAndLine(rowEl) {
-    var t = rowEl.getAttribute('data-line-type');
-    if (t === 'add') return { side: 'new', line: parseInt(rowEl.getAttribute('data-new-line'), 10) };
-    if (t === 'del') return { side: 'old', line: parseInt(rowEl.getAttribute('data-old-line'), 10) };
-    return { side: 'new', line: parseInt(rowEl.getAttribute('data-new-line'), 10) };
-  }
-
-  function clearSelection() {
-    diffBody.querySelectorAll('.diff-line-num.gutter-selected').forEach(function (el) { el.classList.remove('gutter-selected'); });
-  }
-  function applySelection(side, startLine, endLine) {
-    clearSelection();
-    var lo = Math.min(startLine, endLine);
-    var hi = Math.max(startLine, endLine);
-    diffBody.querySelectorAll('.diff-line').forEach(function (row) {
-      var info = rowSideAndLine(row);
-      if (info.side !== side) return;
-      if (info.line >= lo && info.line <= hi) {
-        row.querySelectorAll('.diff-line-num').forEach(function (n) { n.classList.add('gutter-selected'); });
-      }
-    });
-  }
-
-  diffBody.addEventListener('mousedown', function (e) {
-    if (e.button !== 0) return;
-    var num = e.target.closest('.diff-line-num');
-    if (!num) return;
-    var row = num.closest('.diff-line');
-    if (!row || !row.hasAttribute('data-line-type')) return;
-    // Don't start a drag from clicking an indicator (indicator's own click handler runs).
-    if (e.target.closest('.review-comment-indicator')) return;
-    e.preventDefault();
-    var info = rowSideAndLine(row);
-    colData._drag = { side: info.side, startLine: info.line, endLine: info.line };
-    applySelection(info.side, info.line, info.line);
-  });
-
-  diffBody.addEventListener('mouseenter', function (e) {
-    if (!colData._drag) return;
-    var num = e.target && e.target.closest && e.target.closest('.diff-line-num');
-    if (!num) return;
-    var row = num.closest('.diff-line');
-    if (!row || !row.hasAttribute('data-line-type')) return;
-    var info = rowSideAndLine(row);
-    colData._drag.side = info.side;
-    colData._drag.endLine = info.line;
-    applySelection(colData._drag.side, colData._drag.startLine, colData._drag.endLine);
-  }, true);
-
-  // Mouseup on document — finalize or cancel.
-  // Bind once per column; remove the previous one if rebinding.
-  if (colData._gutterMouseUpHandler) {
-    document.removeEventListener('mouseup', colData._gutterMouseUpHandler);
-  }
-  colData._gutterMouseUpHandler = function (e) {
-    if (!colData._drag) return;
-    var drag = colData._drag;
-    colData._drag = null;
-    var insideGutter = e.target && e.target.closest && e.target.closest('.diff-line-num');
-    var insideThisCol = e.target && colData.element && colData.element.contains(e.target);
-    clearSelection();
-    if (insideGutter && insideThisCol) {
-      var startLine = Math.min(drag.startLine, drag.endLine);
-      var endLine = Math.max(drag.startLine, drag.endLine);
-      openCommentBox(colData, startLine, endLine, drag.side);
-    }
-  };
-  document.addEventListener('mouseup', colData._gutterMouseUpHandler);
-}
-
-function openCommentBox(colData, startLine, endLine, side, existingId, anchorEl) {
-  if (!colData.element) return;
-  var diffBody = colData.element.querySelector('.diff-body');
-  if (!diffBody) return;
-
-  // Locate the row to anchor the box AFTER.
-  var anchor = anchorEl || null;
-  if (!anchor) {
-    var rows = diffBody.querySelectorAll('.diff-line[data-line-type]');
-    rows.forEach(function (row) {
-      var t = row.getAttribute('data-line-type');
-      var attr = (t === 'del') ? 'data-old-line' : 'data-new-line';
-      var sideForRow = (t === 'del') ? 'old' : 'new';
-      if (sideForRow === side && parseInt(row.getAttribute(attr), 10) === endLine) {
-        anchor = row;
-      }
-    });
-  }
-
-  var box = document.createElement('div');
-  box.className = 'review-comment-box';
-  box.dataset.side = side;
-  box.dataset.start = String(startLine);
-  box.dataset.end = String(endLine);
-  if (existingId) box.dataset.commentId = existingId;
-
-  var textarea = document.createElement('textarea');
-  textarea.className = 'review-comment-textarea';
-  if (existingId) {
-    var existing = (colData.reviewComments || []).find(function (c) { return c.id === existingId; });
-    if (existing) textarea.value = existing.text || '';
-  }
-
-  var actions = document.createElement('div');
-  actions.className = 'review-comment-actions';
-  var saveBtn = document.createElement('button');
-  saveBtn.className = 'review-comment-save';
-  saveBtn.textContent = 'Save';
-  var deleteBtn = document.createElement('button');
-  deleteBtn.className = 'review-comment-delete';
-  deleteBtn.textContent = 'Delete';
-  actions.appendChild(saveBtn);
-  actions.appendChild(deleteBtn);
-
-  box.appendChild(textarea);
-  box.appendChild(actions);
-
-  if (anchor && anchor.parentNode) {
-    anchor.parentNode.insertBefore(box, anchor.nextSibling);
-  } else {
-    diffBody.insertBefore(box, diffBody.firstChild);
-  }
-
-  setTimeout(function () { textarea.focus(); }, 0);
-
-  function doSave() {
-    var id = box.dataset.commentId || generateCommentId();
-    box.dataset.commentId = id;
-    if (!Array.isArray(colData.reviewComments)) colData.reviewComments = [];
-    var idx = colData.reviewComments.findIndex(function (c) { return c.id === id; });
-    var record = {
-      id: id,
-      filePath: colData.filePath,
-      startLine: startLine,
-      endLine: endLine,
-      side: side,
-      text: textarea.value,
-      createdAt: (idx >= 0 && colData.reviewComments[idx].createdAt) || Date.now()
-    };
-    if (idx >= 0) colData.reviewComments[idx] = record;
-    else colData.reviewComments.push(record);
-    saveReviewCommentsForColumn(colData);
-    box.remove();
-    paintReviewIndicators(colData);
-    refreshReviewCommentsButtons();
-  }
-  function doDelete() {
-    var id = box.dataset.commentId;
-    if (id && Array.isArray(colData.reviewComments)) {
-      colData.reviewComments = colData.reviewComments.filter(function (c) { return c.id !== id; });
-      saveReviewCommentsForColumn(colData);
-    }
-    box.remove();
-    paintReviewIndicators(colData);
-    refreshReviewCommentsButtons();
-  }
-
-  saveBtn.addEventListener('click', doSave);
-  deleteBtn.addEventListener('click', doDelete);
-  textarea.addEventListener('keydown', function (e) {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-      e.preventDefault();
-      doSave();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      box.remove();
-    }
-  });
-}
-
-function getCommentsForFocusedSession() {
-  if (!activeProjectKey) return null;
-  var project = config.projects && config.projects.find(function (p) { return p.path === activeProjectKey; });
-  var activeWsId = project ? (project.activeWorkspaceId || null) : null;
-  var state = projectStates.get(stateKey(activeProjectKey, activeWsId));
-  if (!state || state.focusedColumnId == null) return null;
-  var focused = allColumns.get(state.focusedColumnId);
-  if (!focused) return null;
-  var sid = focused.sessionId;
-  if (!sid) return null;
-  var scope = focused.isDiff ? (focused.scope || 'working') : 'working';
-  var ws = focused.workspaceId || null;
-  var comments = [];
-  allColumns.forEach(function (col) {
-    if (!col.isDiff) return;
-    if (col.projectKey !== activeProjectKey) return;
-    if ((col.workspaceId || null) !== ws) return;
-    if (col.sessionId !== sid) return;
-    if ((col.scope || 'working') !== scope) return;
-    if (Array.isArray(col.reviewComments)) {
-      col.reviewComments.forEach(function (c) { comments.push(c); });
-    }
-  });
-  return {
-    sessionId: sid,
-    scope: scope,
-    projectKey: activeProjectKey,
-    workspaceId: ws,
-    comments: comments,
-    totalCount: comments.length
-  };
-}
-
-function refreshReviewCommentsButtons() {
-  var actionsEl = document.getElementById('git-review-comments-actions');
-  if (!actionsEl) return;
-  var info = getCommentsForFocusedSession();
-  if (!info || info.totalCount === 0) {
-    actionsEl.style.display = 'none';
-    return;
-  }
-  actionsEl.style.display = 'flex';
-  var copyBtn = document.getElementById('btn-review-copy');
-  if (copyBtn) copyBtn.textContent = 'Copy (' + info.totalCount + ')';
-}
 
 function addDiffColumn(diffData, opts) {
   opts = opts || {};
@@ -4744,10 +4386,8 @@ function addDiffColumn(diffData, opts) {
       else if (focusedCol.isDiff && focusedCol.sessionId) sessionId = focusedCol.sessionId;
       workspaceIdForSlot = focusedCol.workspaceId || null;
     }
-    slotKey = (typeof ReviewComments !== 'undefined' && ReviewComments.computeDiffSlotKey)
-      ? ReviewComments.computeDiffSlotKey(sessionId, diffData.filePath, scope)
-      : ('diffContent::' + (sessionId || '__noSession__') + '::' + scope + '::' + diffData.filePath);
-    fullKey = reviewSlotIndexKey(workspaceIdForSlot, slotKey);
+    slotKey = 'diffContent::' + (sessionId || '__noSession__') + '::' + scope + '::' + diffData.filePath;
+    fullKey = (workspaceIdForSlot || '__primary__') + '::' + slotKey;
   }
 
   // Find existing column for reuse:
@@ -4843,8 +4483,7 @@ function addDiffColumn(diffData, opts) {
     colData.filePath = diffData.filePath;
     colData.scope = scope;
     colData.workspaceId = workspaceIdForSlot;
-    colData.reviewSlotKey = slotKey;
-    colData.reviewComments = [];
+    colData.diffSlotKey = slotKey;
     if (fullKey != null) diffSlotIndex.set(fullKey, id);
   }
 
@@ -4864,11 +4503,6 @@ function addDiffColumn(diffData, opts) {
   header.querySelector('.col-close').addEventListener('click', function () {
     removeColumn(id);
   });
-
-  // Kick off load of any persisted review comments for this slot.
-  if (slotType === 'diffContent') {
-    loadReviewCommentsForColumn(colData);
-  }
 
   // Render diff content
   if (diffData.diffText) {
@@ -5060,9 +4694,6 @@ function renderDiffContent(diffBody, colData) {
     warn.textContent = 'Diff too large — showing first 5000 lines';
     diffBody.appendChild(warn);
   }
-
-  paintReviewIndicators(colData);
-  bindGutterSelection(colData);
 }
 
 function renderUnifiedDiff(container, parsed) {
@@ -5334,14 +4965,9 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
         if (!preExistingIds[sid] && !claimed[sid]) {
           var col = allColumns.get(columnId);
           if (col) {
-            var oldSid = col.sessionId;
             console.log('[detectSession] col=' + columnId + ' MATCHED sessionId=' + sid);
             col.sessionId = sid;
             col.sessionMtime = sessions[i].modified || 0;
-            if (window.electronAPI && window.electronAPI.migrateReviewCommentsForColumn && col.element) {
-              var migCid = parseInt(col.element.id.replace('col-', ''), 10);
-              window.electronAPI.migrateReviewCommentsForColumn(col.projectKey, col.workspaceId || null, oldSid, sid, migCid);
-            }
             persistSessions(col.projectKey, col.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
             ensureClawdTail(columnId);
@@ -5407,13 +5033,8 @@ function startSessionSync(columnId, projectPath) {
             var s = sessions[i];
             if (s.sessionId === col2.sessionId) break; // nothing newer than current
             if (!claimed[s.sessionId] && s.modified > (col2.sessionMtime || 0)) {
-              var oldSid2 = col2.sessionId;
               col2.sessionId = s.sessionId;
               col2.sessionMtime = s.modified;
-              if (window.electronAPI && window.electronAPI.migrateReviewCommentsForColumn && col2.element) {
-                var migCid2 = parseInt(col2.element.id.replace('col-', ''), 10);
-                window.electronAPI.migrateReviewCommentsForColumn(col2.projectKey, col2.workspaceId || null, oldSid2, s.sessionId, migCid2);
-              }
               persistSessions(col2.projectKey, col2.workspaceId);
               fetchAndSetSessionTitle(columnId, projectPath, s.sessionId);
               ensureClawdTail(columnId);
@@ -5428,13 +5049,8 @@ function startSessionSync(columnId, projectPath) {
         for (var k = 0; k < sessions.length; k++) {
           var sid = sessions[k].sessionId;
           if (!claimed[sid]) {
-            var oldSid3 = col2.sessionId;
             col2.sessionId = sid;
             col2.sessionMtime = sessions[k].modified;
-            if (window.electronAPI && window.electronAPI.migrateReviewCommentsForColumn && col2.element) {
-              var migCid3 = parseInt(col2.element.id.replace('col-', ''), 10);
-              window.electronAPI.migrateReviewCommentsForColumn(col2.projectKey, col2.workspaceId || null, oldSid3, sid, migCid3);
-            }
             persistSessions(col2.projectKey, col2.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
             ensureClawdTail(columnId);
@@ -5609,16 +5225,10 @@ function removeColumn(id) {
   // Clean up diffSlotIndex entries pointing at this id (Critical fix: addDiffColumn
   // registered it, but only the inline close-button handler was deleting it —
   // other removeColumn callers leaked the entry).
-  if (col && col.isDiff && col.reviewSlotKey) {
+  if (col && col.isDiff && col.diffSlotKey) {
     for (const [k, v] of diffSlotIndex.entries()) {
       if (v === id) diffSlotIndex.delete(k);
     }
-  }
-
-  // Drop document-level mouseup listener registered for gutter selection.
-  if (col && col._gutterMouseUpHandler) {
-    document.removeEventListener('mouseup', col._gutterMouseUpHandler);
-    col._gutterMouseUpHandler = null;
   }
 
   // If this column is maximized, restore first
@@ -5926,7 +5536,6 @@ function setFocusedColumn(id) {
       updateGitTargetIndicator();
     }
   });
-  refreshReviewCommentsButtons();
 }
 
 function navigateColumn(direction) {
@@ -7497,7 +7106,6 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
   if (graphLog.length > 0) {
     gitChangesEl.appendChild(createGitGraphSection(graphLog));
   }
-  refreshReviewCommentsButtons();
 }
 
 // Branch dropdown
@@ -9008,42 +8616,6 @@ document.getElementById('btn-reveal-explorer').addEventListener('click', functio
   if (activeProjectKey) window.electronAPI.openPath(activeProjectKey);
 });
 document.getElementById('btn-refresh-git').addEventListener('click', function () { refreshGitStatus(true); });
-
-// Review-comments Copy / Copy and Clear (one-time binding)
-(function () {
-  var copyBtn = document.getElementById('btn-review-copy');
-  var clearBtn = document.getElementById('btn-review-copy-clear');
-  if (copyBtn) {
-    copyBtn.addEventListener('click', function () {
-      var info = getCommentsForFocusedSession();
-      if (!info) return;
-      var text = ReviewComments.formatCommentsForCopy(info.comments, info.projectKey);
-      window.electronAPI.clipboardWriteText(text);
-    });
-  }
-  if (clearBtn) {
-    clearBtn.addEventListener('click', function () {
-      var info = getCommentsForFocusedSession();
-      if (!info) return;
-      var text = ReviewComments.formatCommentsForCopy(info.comments, info.projectKey);
-      window.electronAPI.clipboardWriteText(text);
-      allColumns.forEach(function (col) {
-        if (!col.isDiff) return;
-        if (col.projectKey !== info.projectKey) return;
-        if ((col.workspaceId || null) !== info.workspaceId) return;
-        if (col.sessionId !== info.sessionId) return;
-        if ((col.scope || 'working') !== info.scope) return;
-        if (col.element) {
-          col.element.querySelectorAll('.review-comment-box').forEach(function (b) { b.remove(); });
-        }
-        col.reviewComments = [];
-        saveReviewCommentsForColumn(col);
-        paintReviewIndicators(col);
-      });
-      refreshReviewCommentsButtons();
-    });
-  }
-})();
 
 document.getElementById('btn-refresh-run').addEventListener('click', refreshRunConfigs);
 document.getElementById('btn-add-run-config').addEventListener('click', function () {

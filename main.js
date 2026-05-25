@@ -9,7 +9,7 @@ const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
 const { resolveWorktreeCandidates, pathIsDirectory } = require('./lib/path-utils');
 const { detectActiveWorktree } = require('./lib/worktree-detect');
-const ReviewComments = require('./lib/review-comments');
+const WorkspaceScrub = require('./lib/workspace-scrub');
 const https = require('https');
 
 // macOS GUI launches (Dock/Finder) inherit launchd's minimal PATH —
@@ -1722,246 +1722,11 @@ ipcMain.handle('sticky-notes:save', (event, projectPath, workspaceId, notes) => 
   scheduleWriteStickyNotes(projectPath, workspaceId, notes);
 });
 
-// --- Review Comments Persistence ---
-// Per-(workspace, session, scope) JSON files under <project>/.claudes/.
-// Filename rules:
-//   wsId=null,  sid=known,    scope=working      -> review-comments-<sid>.json
-//   wsId=ws,    sid=known,    scope=working      -> review-comments-<ws>-<sid>.json
-//   wsId=null,  sid=known,    scope=commit-X     -> review-comments-<sid>-commit-<hash7>.json
-//   wsId=ws,    sid=known,    scope=commit-X     -> review-comments-<ws>-<sid>-commit-<hash7>.json
-//   wsId=null,  sid=null,     scope=working,col  -> review-comments-pending-<colId>.json
-//   wsId=ws,    sid=null,     scope=working,col  -> review-comments-<ws>-pending-<colId>.json
-//   wsId=null,  sid=no-session,scope=working     -> review-comments-no-session.json
-// Writes are debounced per-(project, ws, sid|colId, scope), atomic (tmp+rename), flushed on quit.
-// Read-modify-write merges incoming with existing on disk so popout + main editing same session
-// don't silently overwrite each other; source (incoming) wins on id conflict.
-// Malformed JSON on load is quarantined to <filename>.corrupt-<ts>.json.
-
-const REVIEW_COMMENTS_WRITE_DEBOUNCE_MS = 400;
-const pendingReviewComments = new Map();
-
-function reviewCommentsKey(projectPath, workspaceId, sessionId, scope, colId) {
-  return projectPath + '::' +
-    (workspaceId == null ? '' : workspaceId) + '::' +
-    (sessionId == null ? '' : sessionId) + '::' +
-    (scope || '') + '::' +
-    (colId == null ? '' : colId);
-}
-
-function reviewCommentsFile(projectPath, workspaceId, sessionId, scope, colId) {
-  const dir = path.join(projectPath, '.claudes');
-  const wsPrefix = (workspaceId == null) ? '' : (workspaceId + '-');
-  let basename;
-  if (sessionId == null) {
-    // Pending (no session yet) — colId required
-    basename = 'review-comments-' + wsPrefix + 'pending-' + colId + '.json';
-  } else {
-    // Known session id (or 'no-session' sentinel)
-    if (scope === 'working') {
-      basename = 'review-comments-' + wsPrefix + sessionId + '.json';
-    } else {
-      // scope is 'commit-<hash7>' — caller composed it; we suffix the basename
-      basename = 'review-comments-' + wsPrefix + sessionId + '-' + scope + '.json';
-    }
-  }
-  return path.join(dir, basename);
-}
-
-function writeReviewCommentsAtomic(projectPath, workspaceId, sessionId, scope, comments, colId) {
-  const claudesDir = path.join(projectPath, '.claudes');
-  if (!fs.existsSync(claudesDir)) {
-    fs.mkdirSync(claudesDir, { recursive: true });
-  }
-  const target = reviewCommentsFile(projectPath, workspaceId, sessionId, scope, colId);
-  // Read-modify-write merge: source (incoming) wins on id conflict.
-  const existing = ReviewComments.readReviewCommentsFromDisk(target);
-  const merged = ReviewComments.migratePendingComments(
-    Array.isArray(comments) ? comments : [],
-    existing
-  );
-  const tmp = target + '.tmp';
-  const payload = JSON.stringify({ comments: merged }, null, 2);
-  fs.writeFileSync(tmp, payload, 'utf8');
-  fs.renameSync(tmp, target);
-}
-
-function scheduleWriteReviewComments(projectPath, workspaceId, sessionId, scope, comments, colId) {
-  const key = reviewCommentsKey(projectPath, workspaceId, sessionId, scope, colId);
-  const existing = pendingReviewComments.get(key);
-  if (existing && existing.timer) {
-    clearTimeout(existing.timer);
-  }
-  const entry = { projectPath, workspaceId, sessionId, scope, colId, comments, timer: null };
-  entry.timer = setTimeout(() => {
-    pendingReviewComments.delete(key);
-    try {
-      writeReviewCommentsAtomic(projectPath, workspaceId, sessionId, scope, entry.comments, colId);
-    } catch (err) {
-      console.error('writeReviewComments failed:', err);
-    }
-  }, REVIEW_COMMENTS_WRITE_DEBOUNCE_MS);
-  pendingReviewComments.set(key, entry);
-}
-
-function flushPendingReviewComments() {
-  for (const [, entry] of pendingReviewComments.entries()) {
-    if (entry.timer) clearTimeout(entry.timer);
-    try {
-      writeReviewCommentsAtomic(entry.projectPath, entry.workspaceId, entry.sessionId, entry.scope, entry.comments, entry.colId);
-    } catch (err) {
-      console.error('writeReviewComments failed:', err);
-    }
-  }
-  pendingReviewComments.clear();
-}
-
-function validateReviewSegments(workspaceId, sessionId, scope, colId) {
-  if (workspaceId != null) ReviewComments.safeIdSegment(workspaceId);
-  if (sessionId != null) ReviewComments.safeIdSegment(sessionId);
-  if (colId != null) ReviewComments.safeIdSegment(colId);
-  if (scope != null && scope !== 'working') {
-    // Commit scope: split 'commit-<hash7>' and validate the hash segment.
-    if (typeof scope !== 'string' || scope.indexOf('commit-') !== 0) {
-      throw new Error('invalid scope: ' + scope);
-    }
-    const hash = scope.slice('commit-'.length);
-    ReviewComments.safeIdSegment(hash);
-  }
-}
-
-ipcMain.handle('review-comments:load', (event, projectPath, wsId, sessionId, scope, colId) => {
-  try {
-    validateReviewSegments(wsId, sessionId, scope, colId);
-  } catch (err) {
-    console.error('review-comments:load validation failed:', err);
-    return [];
-  }
-  const file = reviewCommentsFile(projectPath, wsId, sessionId, scope, colId);
-  return ReviewComments.readReviewCommentsFromDisk(file);
-});
-
-ipcMain.handle('review-comments:save', (event, projectPath, wsId, sessionId, scope, comments, colId) => {
-  try {
-    validateReviewSegments(wsId, sessionId, scope, colId);
-  } catch (err) {
-    console.error('review-comments:save validation failed:', err);
-    return;
-  }
-  scheduleWriteReviewComments(projectPath, wsId, sessionId, scope, comments, colId);
-});
-
-// Rename per-column review-comments files when a column transitions from
-// pending (no sessionId) -> resumed (sessionId), or oldSid -> newSid.
-function migrateReviewCommentsForColumnImpl(projectPath, wsId, oldSid, newSid, colId) {
-  if (oldSid == null && newSid == null) return { migrated: 0 };
-  if (oldSid != null && newSid != null && oldSid === newSid) return { migrated: 0 };
-
-  try {
-    if (wsId != null) ReviewComments.safeIdSegment(wsId);
-    if (oldSid != null) ReviewComments.safeIdSegment(oldSid);
-    if (newSid != null) ReviewComments.safeIdSegment(newSid);
-    if (colId != null) ReviewComments.safeIdSegment(colId);
-  } catch (err) {
-    console.error('migrateReviewCommentsForColumn validation failed:', err);
-    return { migrated: 0 };
-  }
-
-  const claudesDir = path.join(projectPath, '.claudes');
-  if (!fs.existsSync(claudesDir)) return { migrated: 0 };
-  const wsPrefix = (wsId == null) ? '' : (wsId + '-');
-  let migrated = 0;
-
-  if (oldSid == null && newSid != null) {
-    // pending -> known session
-    if (colId == null) return { migrated: 0 };
-    const pendingBase = 'review-comments-' + wsPrefix + 'pending-' + colId + '.json';
-    const pendingPath = path.join(claudesDir, pendingBase);
-    if (!fs.existsSync(pendingPath)) return { migrated: 0 };
-    const targetBase = 'review-comments-' + wsPrefix + newSid + '.json';
-    const targetPath = path.join(claudesDir, targetBase);
-    try {
-      const srcArr = ReviewComments.readReviewCommentsFromDisk(pendingPath);
-      const dstArr = ReviewComments.readReviewCommentsFromDisk(targetPath);
-      const merged = ReviewComments.migratePendingComments(srcArr, dstArr);
-      fs.writeFileSync(targetPath + '.tmp', JSON.stringify({ comments: merged }, null, 2), 'utf8');
-      fs.renameSync(targetPath + '.tmp', targetPath);
-      try { fs.unlinkSync(pendingPath); } catch (err) { console.error('migrate unlink pending failed:', err); }
-      migrated++;
-    } catch (err) {
-      console.error('migrate pending->session failed:', err);
-    }
-    return { migrated };
-  }
-
-  if (oldSid != null && newSid != null && oldSid !== newSid) {
-    // Find all files matching review-comments-<wsPrefix><oldSid>...
-    const oldBaseStart = 'review-comments-' + wsPrefix + oldSid;
-    let entries;
-    try {
-      entries = fs.readdirSync(claudesDir);
-    } catch (err) {
-      console.error('migrate readdir failed:', err);
-      return { migrated: 0 };
-    }
-    for (const entry of entries) {
-      if (!entry.startsWith(oldBaseStart)) continue;
-      // Anything after oldBaseStart should start with '.' (just .json) or '-' (commit-...)
-      // and must end in .json. Avoid e.g. matching a different sid that begins with oldSid.
-      const tail = entry.slice(oldBaseStart.length);
-      if (!tail.endsWith('.json')) continue;
-      if (tail.length > 0 && tail[0] !== '.' && tail[0] !== '-') continue;
-      const newEntry = 'review-comments-' + wsPrefix + newSid + tail;
-      const oldPath = path.join(claudesDir, entry);
-      const newPath = path.join(claudesDir, newEntry);
-      try {
-        const srcArr = ReviewComments.readReviewCommentsFromDisk(oldPath);
-        const dstArr = ReviewComments.readReviewCommentsFromDisk(newPath);
-        const merged = ReviewComments.migratePendingComments(srcArr, dstArr);
-        fs.writeFileSync(newPath + '.tmp', JSON.stringify({ comments: merged }, null, 2), 'utf8');
-        fs.renameSync(newPath + '.tmp', newPath);
-        try { fs.unlinkSync(oldPath); } catch (err) { console.error('migrate unlink old failed:', err); }
-        migrated++;
-      } catch (err) {
-        console.error('migrate oldSid->newSid failed for ' + entry + ':', err);
-      }
-    }
-    return { migrated };
-  }
-
-  return { migrated: 0 };
-}
-
-// Flush any in-flight pending save for this column under the OLD identity
-// (any scope, any colId), so we don't race the rename in migrateForColumn.
-function flushPendingForColumn(projectPath, wsId, sessionId, colId) {
-  for (const [key, entry] of Array.from(pendingReviewComments.entries())) {
-    // Match if same project + workspace, AND same column under either
-    // session id OR pending colId (covers both pending->real and real->real).
-    if (entry.projectPath !== projectPath) continue;
-    if ((entry.workspaceId || null) !== (wsId || null)) continue;
-    var matchesSession = (sessionId != null && entry.sessionId === sessionId);
-    var matchesColId = (colId != null && entry.colId === colId);
-    if (!matchesSession && !matchesColId) continue;
-    if (entry.timer) clearTimeout(entry.timer);
-    pendingReviewComments.delete(key);
-    try {
-      writeReviewCommentsAtomic(entry.projectPath, entry.workspaceId, entry.sessionId, entry.scope, entry.comments, entry.colId);
-    } catch (err) {
-      console.error('flushPendingForColumn failed:', err);
-    }
-  }
-}
-
-ipcMain.handle('review-comments:migrateForColumn', (event, projectPath, wsId, oldSid, newSid, colId) => {
-  flushPendingForColumn(projectPath, wsId, oldSid, colId);
-  return migrateReviewCommentsForColumnImpl(projectPath, wsId, oldSid, newSid, colId);
-});
-
 // Scrub all sticky-notes-<wsId>* and review-comments-<wsId>-* artifacts for a workspace.
-// Implementation lives in lib/review-comments.js so it's testable without booting Electron.
+// Implementation lives in lib/workspace-scrub.js so it's testable without booting Electron.
 ipcMain.handle('workspace:scrubArtifacts', (event, projectPath, wsId) => {
   try {
-    return ReviewComments.scrubArtifactsImpl(projectPath, wsId);
+    return WorkspaceScrub.scrubArtifactsImpl(projectPath, wsId);
   } catch (err) {
     console.error('workspace:scrubArtifacts failed:', err);
     return { removed: 0 };
@@ -7173,8 +6938,6 @@ app.on('before-quit', () => {
   flushPendingConfig();
   step('flushPendingStickyNotes');
   flushPendingStickyNotes();
-  step('flushPendingReviewComments');
-  flushPendingReviewComments();
   step('stopAutomationScheduler');
   stopAutomationScheduler();
   step('clawdTails clear: ' + clawdTails.size);

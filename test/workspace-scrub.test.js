@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { scrubArtifactsImpl } = require('../lib/review-comments');
+const { scrubArtifactsImpl } = require('../lib/workspace-scrub');
 
 function setupTmpProject() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claudes-scrub-'));
