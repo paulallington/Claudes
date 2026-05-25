@@ -8,7 +8,6 @@ const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
 const { resolveWorktreeCandidates, pathIsDirectory } = require('./lib/path-utils');
-const { findLastGitBranch } = require('./lib/session-branch');
 const { detectActiveWorktree } = require('./lib/worktree-detect');
 const ReviewComments = require('./lib/review-comments');
 const https = require('https');
@@ -1535,31 +1534,6 @@ ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId) => {
       }
     }
     return null;
-  } catch {
-    return null;
-  }
-});
-
-// Read the LAST gitBranch recorded in a session JSONL. Tail-reads the file
-// (last ~64KB) since Claude appends turns over time and the most recent
-// branch is always near the end. Returns null on missing file / no match.
-ipcMain.handle('git:detectSessionBranch', (event, projectPath, sessionId) => {
-  if (!projectPath || !sessionId) return null;
-  try {
-    const claudeKey = projectPathToClaudeKey(projectPath);
-    const jsonlPath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
-    const stat = fs.statSync(jsonlPath);
-    const tailSize = Math.min(stat.size, 64 * 1024);
-    if (tailSize === 0) return null;
-    const fd = fs.openSync(jsonlPath, 'r');
-    try {
-      const buf = Buffer.alloc(tailSize);
-      fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
-      const content = buf.toString('utf8');
-      return findLastGitBranch(content);
-    } finally {
-      fs.closeSync(fd);
-    }
   } catch {
     return null;
   }

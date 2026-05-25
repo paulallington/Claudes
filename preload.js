@@ -47,7 +47,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gitDiffCommit: (projectPath, hash, filePath) => ipcRenderer.invoke('git:diffCommit', projectPath, hash, filePath),
   gitDiffStat: (projectPath, staged, branch) => ipcRenderer.invoke('git:diffStat', projectPath, staged, branch),
   gitDiffStatVsBase: (projectPath, branch, baseRef) => ipcRenderer.invoke('git:diffStatVsBase', projectPath, branch, baseRef),
-  gitDetectSessionBranch: (projectPath, sessionId) => ipcRenderer.invoke('git:detectSessionBranch', projectPath, sessionId),
   gitDetectSessionWorktree: (projectPath, sessionId) => ipcRenderer.invoke('git:detectSessionWorktree', projectPath, sessionId),
   gitIsInsideWorkTree: (cwd) => ipcRenderer.invoke('git:isInsideWorkTree', cwd),
   resolveWorktree: (projectPath, value) => ipcRenderer.invoke('paths:resolveWorktree', projectPath, value),

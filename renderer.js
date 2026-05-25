@@ -2791,7 +2791,6 @@ function restoreSessions(projectPath, workspaceId) {
             title: lcol.title || null,
             widthRatio: (typeof lcol.widthRatio === 'number' && isFinite(lcol.widthRatio) && lcol.widthRatio > 0) ? lcol.widthRatio : null
           };
-          if (typeof lcol.targetBranch === 'string' && lcol.targetBranch) legacyEntry.targetBranch = lcol.targetBranch;
           entries.push(legacyEntry);
         }
       }
@@ -2808,12 +2807,10 @@ function restoreSessions(projectPath, workspaceId) {
         var title = (typeof entry === 'object' && entry && entry.title) ? entry.title : null;
         var cwd = (typeof entry === 'object' && entry && typeof entry.cwd === 'string' && entry.cwd) ? entry.cwd : null;
         var cwdSource = (typeof entry === 'object' && entry && typeof entry.cwdSource === 'string' && entry.cwdSource) ? entry.cwdSource : null;
-        var targetBranch = (typeof entry === 'object' && entry && typeof entry.targetBranch === 'string' && entry.targetBranch) ? entry.targetBranch : null;
         var endpointId = (typeof entry === 'object' && entry && entry.endpointId) ? entry.endpointId : null;
         var pushedEntry = { rowIdx: rowIdx, sessionId: sid, title: title, widthRatio: widthRatio };
         if (cwd) pushedEntry.cwd = cwd;
         if (cwdSource) pushedEntry.cwdSource = cwdSource;
-        if (targetBranch) pushedEntry.targetBranch = targetBranch;
         if (endpointId) pushedEntry.endpointId = endpointId;
         entries.push(pushedEntry);
       }
@@ -2870,7 +2867,6 @@ function restoreSessions(projectPath, workspaceId) {
             console.warn("Column '" + (e.title || e.sessionId) + "' had cwd " + e.cwd + " which no longer exists; restored at project root.");
           }
         }
-        if (e.targetBranch) rowOpts.targetBranch = e.targetBranch;
 
         // Endpoint-aware resume: if this column was spawned against a non-cloud
         // endpoint preset, look up the preset's env block and rewrite args. If
@@ -4216,7 +4212,6 @@ function addColumn(args, targetRow, opts) {
     headerEl: header,
     cwd: cwd,
     cwdSource: opts.cwdSource || null,
-    targetBranch: opts.targetBranch || null,
     projectKey: activeProjectKey,
     // Stamp the workspaceId so later persist/restore/focus-flow can route to
     // the right bucket. Honor explicit opts.workspaceId (popout transfers,
@@ -5562,7 +5557,6 @@ function persistSessions(projectKey, workspaceId) {
         };
         if (col2.cwd && col2.cwd !== activeProjectKey) entry.cwd = col2.cwd;
         if (col2.cwd && col2.cwd !== activeProjectKey && col2.cwdSource) entry.cwdSource = col2.cwdSource;
-        if (col2.targetBranch) entry.targetBranch = col2.targetBranch;
         // Persist endpoint association so restored columns come back on the
         // same local endpoint (LM Studio, Ollama, etc.) instead of defaulting
         // to whatever the global Spawn dropdown is currently pointing at.
@@ -7005,20 +6999,7 @@ function gitTargetCwd() {
   return window.GitTarget.getGitTargetCwd(getActiveState(), allColumns, activeProjectKey);
 }
 
-// Phase 2: per-column branch override. When the focused column's session was last
-// active on a branch other than what's currently checked out at the project root,
-// `targetBranch` makes the Git tab render branch-relative (read-only) data.
 var projectRootBranchCache = new Map();
-
-function getProjectRootBranch(projectKey) {
-  var now = Date.now();
-  var hit = projectRootBranchCache.get(projectKey);
-  if (hit && hit.expiresAt > now) return Promise.resolve(hit.branch);
-  return window.electronAPI.gitBranch(projectKey).then(function (branch) {
-    projectRootBranchCache.set(projectKey, { branch: branch || '', expiresAt: now + 30000 });
-    return branch || '';
-  });
-}
 
 function invalidateProjectRootBranch(projectKey) {
   if (projectKey) projectRootBranchCache.delete(projectKey);
@@ -7041,38 +7022,19 @@ function autoBindColumnTarget(colId) {
       var changed = false;
       if (col.cwd !== newCwd) { col.cwd = newCwd; changed = true; }
       if (col.cwdSource !== 'auto-worktree') { col.cwdSource = 'auto-worktree'; changed = true; }
-      // Phase 1 cwd binding handles branch via the worktree's HEAD —
-      // clear any Phase 2 read-only branch override.
-      if (col.targetBranch !== null) { col.targetBranch = null; changed = true; }
       if (changed) persistSessions(col.projectKey, col.workspaceId);
       return;
     }
 
-    // No dominant worktree detected. Fall back to Phase 2 branch detection.
-    // If a previous run pinned this column to an auto-worktree but evidence
-    // is now gone, release back to project root so we don't stay stuck.
+    // No dominant worktree detected. If a previous run pinned this column to
+    // an auto-worktree but evidence is now gone, release back to project root
+    // so we don't stay stuck.
     if (col.cwdSource === 'auto-worktree') {
       col.cwd = col.projectKey;
       col.cwdSource = undefined;
       persistSessions(col.projectKey, col.workspaceId);
     }
-
-    // Phase 2 (read-only branch tracking) is intentionally disabled here: we
-    // keep cwd/worktree following (Phase 3 above) but drop the targetBranch
-    // override. Clear any stale value so the Git tab stays on the project root.
-    if (col.targetBranch !== null) {
-      col.targetBranch = null;
-      persistSessions(col.projectKey, col.workspaceId);
-    }
-    return;
   }).catch(function () { /* best-effort */ });
-}
-
-function gitTabIsReadOnly() {
-  var state = getActiveState();
-  if (!state || state.focusedColumnId == null) return false;
-  var col = allColumns.get(state.focusedColumnId);
-  return !!(col && col.targetBranch);
 }
 
 function normalizePathForCompare(p) {
@@ -7106,11 +7068,6 @@ function updateGitTargetIndicator(opts) {
   var targetNorm = normalizePathForCompare(target);
   var rootNorm = normalizePathForCompare(activeProjectKey);
 
-  // Phase 2: per-column branch override on the focused column.
-  var fState = getActiveState();
-  var focusedCol = (fState && fState.focusedColumnId != null) ? allColumns.get(fState.focusedColumnId) : null;
-  var branchOverride = (focusedCol && focusedCol.targetBranch) || null;
-
   var labelText = '';
   var titleText = target || '';
 
@@ -7121,10 +7078,6 @@ function updateGitTargetIndicator(opts) {
     } else {
       labelText = '→ ' + target;
     }
-  } else if (branchOverride) {
-    // Phase 2: project-root column tracking a different branch.
-    labelText = '→ branch ' + branchOverride;
-    titleText = "Showing branch " + branchOverride + " (not currently checked out). Read-only — switch branches to commit.";
   }
 
   var suffix = '';
@@ -7165,25 +7118,15 @@ function refreshGitStatus(force) {
   // backed-up git calls piling up on the main thread when the repo or disk is slow.
   if (gitPollInFlight && !force) return;
 
-  // Fire-and-forget autoBind on the focused column. If it changes targetBranch,
-  // schedule another refresh so the next paint reflects the new override.
+  // Fire-and-forget autoBind on the focused column so cwd/worktree following
+  // stays current.
   var fState = getActiveState();
   var focusedId = fState ? fState.focusedColumnId : null;
   if (focusedId != null) {
-    var fCol = allColumns.get(focusedId);
-    var prevBranch = fCol ? fCol.targetBranch : null;
-    autoBindColumnTarget(focusedId).then(function () {
-      var newCol = allColumns.get(focusedId);
-      if (newCol && newCol.targetBranch !== prevBranch) {
-        refreshGitStatus(true);
-        updateGitTargetIndicator();
-      }
-    });
+    autoBindColumnTarget(focusedId);
   }
 
   var target = gitTargetCwd();
-  var focusedCol = focusedId != null ? allColumns.get(focusedId) : null;
-  var branchOverride = (focusedCol && focusedCol.targetBranch) || null;
 
   gitPollInFlight = true;
   var done = function () { gitPollInFlight = false; };
@@ -7199,15 +7142,15 @@ function refreshGitStatus(force) {
     }
 
     var fetchAll = [
-      window.electronAPI.gitStatus(target, branchOverride),
-      window.electronAPI.gitBranch(target, branchOverride),
-      window.electronAPI.gitAheadBehind(target, branchOverride),
+      window.electronAPI.gitStatus(target),
+      window.electronAPI.gitBranch(target),
+      window.electronAPI.gitAheadBehind(target),
       window.electronAPI.gitStashList(target),
-      window.electronAPI.gitGraphLog(target, 50, branchOverride),
-      window.electronAPI.gitDiffStat(target, false, branchOverride),
-      window.electronAPI.gitDiffStat(target, true, branchOverride),
+      window.electronAPI.gitGraphLog(target, 50),
+      window.electronAPI.gitDiffStat(target, false),
+      window.electronAPI.gitDiffStat(target, true),
       window.electronAPI.gitIsInsideWorkTree(target),
-      branchOverride ? window.electronAPI.gitDiffStatVsBase(target, branchOverride) : Promise.resolve(null)
+      Promise.resolve(null)
     ];
 
     if (!force) {
@@ -7215,7 +7158,7 @@ function refreshGitStatus(force) {
         var rawKey = JSON.stringify(results[0]) + '|' + results[1] + '|' + JSON.stringify(results[2]) + '|' + results[3].length + '|' + JSON.stringify(results[4]) + '|' + results[7] + '|' + JSON.stringify(results[8]);
         if (rawKey === lastGitRaw) return;
         lastGitRaw = rawKey;
-        renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[8], branchOverride);
+        renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[8]);
         updateGitTargetIndicator({ notARepo: !results[7] });
       }).then(done, done);
       return;
@@ -7224,7 +7167,7 @@ function refreshGitStatus(force) {
     lastGitRaw = null;
     Promise.all(fetchAll).then(function (results) {
       lastGitRaw = JSON.stringify(results[0]) + '|' + results[1] + '|' + JSON.stringify(results[2]) + '|' + results[3].length + '|' + JSON.stringify(results[4]) + '|' + results[7] + '|' + JSON.stringify(results[8]);
-      renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[8], branchOverride);
+      renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[8]);
       updateGitTargetIndicator({ notARepo: !results[7] });
     }).then(done, done);
   }, done);
@@ -7431,21 +7374,16 @@ function updateActiveProjectBranchLabels(branch) {
   }
 }
 
-function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstagedStats, stagedStats, diffVsBase, branchOverride) {
+function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstagedStats, stagedStats, diffVsBase) {
   graphLaneState = null;
-  var readOnly = !!branchOverride;
-  if (!readOnly) updateActiveProjectBranchLabels(branch);
+  updateActiveProjectBranchLabels(branch);
   while (gitHeaderEl.firstChild) gitHeaderEl.removeChild(gitHeaderEl.firstChild);
   while (gitChangesEl.firstChild) gitChangesEl.removeChild(gitChangesEl.firstChild);
   // Conflict / mid-operation banner. Fired async; the banner is inserted at
   // the top of gitChangesEl when state shows merging/rebasing/cherry-picking.
   renderGitOpBanner();
 
-  if (readOnly) {
-    gitHeaderEl.classList.add('git-readonly');
-  } else {
-    gitHeaderEl.classList.remove('git-readonly');
-  }
+  gitHeaderEl.classList.remove('git-readonly');
 
   // Branch row (clickable branch switcher + pull/push/stash buttons)
   var row = document.createElement('div');
@@ -7465,33 +7403,18 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
   var actions = document.createElement('span');
   actions.className = 'git-branch-actions';
 
-  var readOnlyTip = readOnly
-    ? "Branch " + branchOverride + " isn't checked out \u2014 switch to it in your editor (or in a terminal: git checkout " + branchOverride + ") to commit or stage changes."
-    : null;
-
-  if (readOnly) {
-    // Surface a "Check out this branch" affordance prominently in branch-relative mode.
-    var checkoutBtn = document.createElement('button');
-    checkoutBtn.className = 'git-action-btn';
-    checkoutBtn.textContent = '\u21B3 Check out';
-    checkoutBtn.title = 'Check out ' + branchOverride;
-    checkoutBtn.addEventListener('click', function () { gitCheckout(branchOverride); });
-    actions.appendChild(checkoutBtn);
-  }
-
   // Stash button
   var stashBtn = document.createElement('button');
   stashBtn.className = 'git-action-btn';
   stashBtn.textContent = '\u2691 Stash';
-  stashBtn.title = readOnlyTip || 'Stash changes';
-  if (readOnly) { stashBtn.disabled = true; stashBtn.classList.add('git-disabled'); }
+  stashBtn.title = 'Stash changes';
   stashBtn.addEventListener('click', function () { gitStashPush(); });
   actions.appendChild(stashBtn);
 
   // Pop button with badge
   var popBtn = document.createElement('button');
   popBtn.className = 'git-action-btn';
-  popBtn.title = readOnlyTip || 'Pop stash';
+  popBtn.title = 'Pop stash';
   popBtn.textContent = '\u2691 Pop';
   if (stashes.length > 0) {
     var badge = document.createElement('span');
@@ -7502,14 +7425,13 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
     popBtn.disabled = true;
     popBtn.style.opacity = '0.4';
   }
-  if (readOnly) { popBtn.disabled = true; popBtn.classList.add('git-disabled'); }
   popBtn.addEventListener('click', function () { gitStashPop(); });
   actions.appendChild(popBtn);
 
   // Pull button with behind count
   var pullBtn = document.createElement('button');
   pullBtn.className = 'git-action-btn';
-  pullBtn.title = readOnlyTip || 'Pull';
+  pullBtn.title = 'Pull';
   pullBtn.textContent = '\u2193 Pull';
   if (aheadBehind.behind > 0) {
     var pullBadge = document.createElement('span');
@@ -7517,14 +7439,13 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
     pullBadge.textContent = aheadBehind.behind;
     pullBtn.appendChild(pullBadge);
   }
-  if (readOnly) { pullBtn.disabled = true; pullBtn.classList.add('git-disabled'); }
   pullBtn.addEventListener('click', function () { gitPull(); });
   actions.appendChild(pullBtn);
 
   // Push button with ahead count
   var pushBtn = document.createElement('button');
   pushBtn.className = 'git-action-btn';
-  pushBtn.title = readOnlyTip || 'Push';
+  pushBtn.title = 'Push';
   pushBtn.textContent = '\u2191 Push';
   if (aheadBehind.ahead > 0) {
     var pushBadge = document.createElement('span');
@@ -7532,33 +7453,11 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
     pushBadge.textContent = aheadBehind.ahead;
     pushBtn.appendChild(pushBadge);
   }
-  if (readOnly) { pushBtn.disabled = true; pushBtn.classList.add('git-disabled'); }
   pushBtn.addEventListener('click', function () { gitPush(); });
   actions.appendChild(pushBtn);
 
   row.appendChild(actions);
   gitHeaderEl.appendChild(row);
-
-  if (readOnly) {
-    // Branch-relative read-only mode: render diff-vs-base instead of working/staged.
-    // gitStatus + diffStat returned empty by main; ignore them.
-    var baseList = Array.isArray(diffVsBase) ? diffVsBase : [];
-    if (baseList.length === 0 && graphLog.length === 0) {
-      var emptyR = document.createElement('div');
-      emptyR.className = 'git-empty';
-      emptyR.textContent = 'No changes vs base';
-      gitChangesEl.appendChild(emptyR);
-      return;
-    }
-    if (baseList.length > 0) {
-      var baseFiles = baseList.map(function (s) { return { status: 'M', file: s.file }; });
-      gitChangesEl.appendChild(createGitSection('Changes vs base', baseFiles, false, baseList, { readOnly: true }));
-    }
-    if (graphLog.length > 0) {
-      gitChangesEl.appendChild(createGitGraphSection(graphLog));
-    }
-    return;
-  }
 
   // Parse status into staged vs unstaged
   var staged = [];
@@ -8170,37 +8069,31 @@ function gitStatusClass(status) {
 
 function gitStageFile(filePath) {
   if (!activeProjectKey || !window.electronAPI) return;
-  if (gitTabIsReadOnly()) return;
   window.electronAPI.gitStageFile(gitTargetCwd(), filePath).then(function () { refreshGitStatus(); });
 }
 
 function gitUnstageFile(filePath) {
   if (!activeProjectKey || !window.electronAPI) return;
-  if (gitTabIsReadOnly()) return;
   window.electronAPI.gitUnstageFile(gitTargetCwd(), filePath).then(function () { refreshGitStatus(); });
 }
 
 function gitStageAll() {
   if (!activeProjectKey || !window.electronAPI) return;
-  if (gitTabIsReadOnly()) return;
   window.electronAPI.gitStageAll(gitTargetCwd()).then(function () { refreshGitStatus(); });
 }
 
 function gitUnstageAll() {
   if (!activeProjectKey || !window.electronAPI) return;
-  if (gitTabIsReadOnly()) return;
   window.electronAPI.gitUnstageAll(gitTargetCwd()).then(function () { refreshGitStatus(); });
 }
 
 function gitDiscardFile(filePath) {
   if (!activeProjectKey || !window.electronAPI) return;
-  if (gitTabIsReadOnly()) return;
   window.electronAPI.gitDiscardFile(gitTargetCwd(), filePath).then(function () { refreshGitStatus(); });
 }
 
 function gitCommit() {
   if (!activeProjectKey || !window.electronAPI) return;
-  if (gitTabIsReadOnly()) return;
   var msg = gitCommitMsg.value.trim();
   if (!msg) return;
   var amend = gitAmendCheckbox && gitAmendCheckbox.checked;
@@ -8246,7 +8139,6 @@ function gitCreateBranch(branchName) {
 
 function gitStashPush() {
   if (!activeProjectKey || !window.electronAPI) return;
-  if (gitTabIsReadOnly()) return;
   showGitStatus('Stashing...');
   window.electronAPI.gitStashPush(gitTargetCwd()).then(function (result) {
     if (result.success) {
@@ -8260,7 +8152,6 @@ function gitStashPush() {
 
 function gitStashPop() {
   if (!activeProjectKey || !window.electronAPI) return;
-  if (gitTabIsReadOnly()) return;
   showGitStatus('Popping stash...');
   window.electronAPI.gitStashPop(gitTargetCwd()).then(function (result) {
     if (result.success) {
@@ -8274,7 +8165,6 @@ function gitStashPop() {
 
 function gitPull() {
   if (!activeProjectKey || !window.electronAPI) return;
-  if (gitTabIsReadOnly()) return;
   showGitStatus('Pulling...');
   window.electronAPI.gitPull(gitTargetCwd()).then(function (result) {
     if (result.success) {
@@ -8288,7 +8178,6 @@ function gitPull() {
 
 function gitPush() {
   if (!activeProjectKey || !window.electronAPI) return;
-  if (gitTabIsReadOnly()) return;
   showGitStatus('Pushing...');
   window.electronAPI.gitPush(gitTargetCwd()).then(function (result) {
     if (result.success) {
