@@ -856,6 +856,25 @@ function renderPipeline(id) {
   }
 }
 
+// Claude's "plan mode on" footer is a sticky status line that is NOT re-emitted
+// to the stream on every repaint, so a stream-byte timeout flaps between Plan
+// and Execute during a stable plan-mode session. Scan the terminal's live
+// bottom rows for the footer instead — that reflects what's actually on screen.
+function planModeBannerOnScreen(col) {
+  try {
+    var term = col.terminal;
+    var buf = term && term.buffer && term.buffer.active;
+    if (!buf) return false;
+    var rows = term.rows || 24;
+    var bottom = buf.baseY + rows; // one past the last live row
+    for (var y = Math.max(0, bottom - 12); y < bottom; y++) {
+      var line = buf.getLine(y);
+      if (line && /plan mode on/i.test(line.translateToString(true))) return true;
+    }
+  } catch (e) { /* buffer not ready — fall back to the stream timer */ }
+  return false;
+}
+
 function startPipelineExitCheck(id) {
   var col = allColumns.get(id);
   if (!col || !col.pipeline || !PipelineMatcherAPI) return;
@@ -865,6 +884,11 @@ function startPipelineExitCheck(id) {
     if (!c || !c.pipeline) {
       // Column gone — defensive
       return;
+    }
+    // While the footer is still visible on screen, keep the plan timer alive so
+    // we never prematurely flip to Execute (and flash back on the next repaint).
+    if (planModeBannerOnScreen(c)) {
+      c.pipeline.lastBannerSeenAt = Date.now();
     }
     if (PipelineMatcherAPI.shouldExitPlanMode(c.pipeline, Date.now())) {
       PipelineMatcherAPI.applyPlanExit(c.pipeline);
@@ -4223,6 +4247,11 @@ function addColumn(args, targetRow, opts) {
   var col = document.createElement('div');
   col.className = 'column';
   col.dataset.id = String(id);
+  // Also expose the DOM id as `col-<n>` (diff columns already do this). The
+  // review-comments helpers derive a column's id via element.id, so without
+  // this regular columns yield parseInt('') === NaN and migration validation
+  // fails ("invalid id segment: NaN").
+  col.id = 'col-' + id;
 
   var header = createColumnHeader(id, opts.title);
 
