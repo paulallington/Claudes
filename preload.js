@@ -4,8 +4,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openDirectoryDialog: () => ipcRenderer.invoke('dialog:openDirectory'),
   getProjects: () => ipcRenderer.invoke('config:getProjects'),
   saveProjects: (config) => ipcRenderer.invoke('config:saveProjects', config),
-  loadPipelines: () => ipcRenderer.invoke('pipelines:get'),
-  savePipelines: (data) => ipcRenderer.invoke('pipelines:save', data),
   popOutProject: (projectKey) => ipcRenderer.invoke('project:popOut', projectKey),
   popInProject: (projectKey) => ipcRenderer.invoke('project:popIn', projectKey),
   focusPopoutWindow: (projectKey) => ipcRenderer.invoke('project:focusPopoutWindow', projectKey),

@@ -522,75 +522,6 @@ var FONT_SIZE_MAX = 28;
 var FONT_SIZE_DEFAULT = 14;
 
 // ============================================================
-// Pipeline visualizer (per-terminal)
-// ============================================================
-
-// First-run default workflow. Plan/Execute are the plan-mode anchors that
-// resolveSteps() always injects (Plan at the front, Execute right after it);
-// the steps below are appended and advance when a typed command matches one of
-// their keywords — giving the runtime order Plan › Execute › Code › Test ›
-// Review › Ship. Only used when no saved pipelines config exists; a user who
-// edits or clears their steps keeps their own config.
-var pipelinesConfig = { version: 1, pipeline: { id: 'default', name: 'Default workflow', userSteps: [
-  { id: 'step-code', label: 'Code', keywords: ['edit', 'write', 'fix', 'implement', 'add', 'refactor'] },
-  { id: 'step-test', label: 'Test', keywords: ['test', 'npm test', 'npm run test', 'pytest', 'run the tests'] },
-  { id: 'step-review', label: 'Review', keywords: ['review', '/review', 'diff', 'check'] },
-  { id: 'step-ship', label: 'Ship', keywords: ['commit', 'push', 'release', 'ship', '/release'] }
-] } };
-var PipelineMatcherAPI = (typeof window !== 'undefined' && window.PipelineMatcher) ? window.PipelineMatcher : null;
-
-function loadPipelines() {
-  if (!window.electronAPI || !window.electronAPI.loadPipelines) return;
-  window.electronAPI.loadPipelines().then(function (data) {
-    if (data && typeof data === 'object' && data.pipeline && Array.isArray(data.pipeline.userSteps)) {
-      pipelinesConfig = data;
-    }
-    bindPipelineEditor();
-  }).catch(function () { /* keep defaults */ });
-}
-
-function savePipelines() {
-  if (!window.electronAPI || !window.electronAPI.savePipelines) return;
-  window.electronAPI.savePipelines(pipelinesConfig);
-}
-
-function resolveSteps(cfg) {
-  var steps = [];
-  if (cfg && cfg.pipeline && Array.isArray(cfg.pipeline.userSteps)) {
-    for (var i = 0; i < cfg.pipeline.userSteps.length; i++) {
-      var us = cfg.pipeline.userSteps[i];
-      if (!us || !us.id || !us.label) continue;
-      steps.push({ id: us.id, label: us.label, complete: false });
-    }
-  }
-  var hasPlan = false;
-  var hasExec = false;
-  for (var j = 0; j < steps.length; j++) {
-    if (steps[j].id === 'anchor-plan') hasPlan = true;
-    if (steps[j].id === 'anchor-execute') hasExec = true;
-  }
-  if (!hasPlan) steps.unshift({ id: 'anchor-plan', label: 'Plan', complete: false });
-  if (!hasExec) {
-    var pIdx = -1;
-    for (var k = 0; k < steps.length; k++) {
-      if (steps[k].id === 'anchor-plan') { pIdx = k; break; }
-    }
-    steps.splice(pIdx + 1, 0, { id: 'anchor-execute', label: 'Execute', complete: false });
-  }
-  return steps;
-}
-
-// Trailing-debounced wrapper around persistSessions; coalesces rapid mutations.
-var pipelinePersistTimer = null;
-function persistSessionsDebounced(projectKey, workspaceId) {
-  if (pipelinePersistTimer) clearTimeout(pipelinePersistTimer);
-  pipelinePersistTimer = setTimeout(function () {
-    pipelinePersistTimer = null;
-    persistSessions(projectKey, workspaceId);
-  }, 100);
-}
-
-// ============================================================
 // WebSocket
 // ============================================================
 
@@ -609,7 +540,6 @@ function connectWS() {
       reattachAllColumns();
     } else {
       wsHasConnectedBefore = true;
-      loadPipelines();
       loadProjects();
     }
   };
@@ -620,42 +550,6 @@ function connectWS() {
       var col = allColumns.get(msg.id);
       if (col) {
         col.terminal.write(msg.data);
-        // Pipeline plan-mode banner detection (run against raw data, pre-strip)
-        if (col.pipeline && PipelineMatcherAPI && typeof msg.data === 'string') {
-          var prevTail = col.bannerTail || '';
-          var chunk = prevTail + msg.data;
-          var bannerHit = PipelineMatcherAPI.PLAN_MODE_BANNER.test(chunk);
-          if (bannerHit) {
-            col.bannerEverMatched = true;
-            if (col.pipeline.flags && col.pipeline.flags.plan === true) {
-              // Banner re-render — refresh timestamp only; no reset, render, or persist.
-              col.pipeline.lastBannerSeenAt = Date.now();
-            } else {
-              // Restored-with-progress: first banner after restart should NOT wipe progress.
-              if (col.pipeline.restoredWithProgress) {
-                col.pipeline.flags.plan = true;
-                col.pipeline.lastBannerSeenAt = Date.now();
-                col.pipeline.restoredWithProgress = false;
-                col.pipeline.visible = true;
-              } else {
-                PipelineMatcherAPI.applyPlanEnter(col.pipeline, Date.now());
-              }
-              renderPipeline(msg.id);
-              persistSessions(col.projectKey, col.workspaceId);
-              startPipelineExitCheck(msg.id);
-            }
-            col.bannerTail = '';
-          } else {
-            col.bannerTail = chunk.slice(-64);
-          }
-          // Drift diagnostic: working state + "Plan" in tail but never matched.
-          if (!col.bannerDriftWarned && col.bannerEverMatched !== true &&
-              col.activityState === 'working' &&
-              col.bannerTail && /plan/i.test(col.bannerTail)) {
-            console.warn('Pipeline visualizer: plan-mode-like activity detected but banner regex did not match. Claude Code may have changed its banner format.');
-            col.bannerDriftWarned = true;
-          }
-        }
           if (!resizeSuppressed.has(msg.id) && msg.data && col.hasUserInput) {
           // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
           var trimmed = msg.data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
@@ -796,119 +690,6 @@ function wsSend(obj) {
 // ============================================================
 // Activity Pulse Tracking
 // ============================================================
-
-// TODO: DOM rendering not unit-tested — covered by manual e2e step 10
-function renderPipeline(id) {
-  var col = allColumns.get(id);
-  if (!col || !col.pipelineEl || !col.pipeline) return;
-  var pipeEl = col.pipelineEl;
-  // Toggle visibility class
-  if (col.pipeline.visible) pipeEl.classList.add('visible');
-  else pipeEl.classList.remove('visible');
-
-  // Compact mode based on header width
-  var compact = col.headerEl && col.headerEl.offsetWidth > 0 && col.headerEl.offsetWidth < 380;
-  if (compact) pipeEl.classList.add('compact');
-  else pipeEl.classList.remove('compact');
-
-  // Rebuild children
-  while (pipeEl.firstChild) pipeEl.removeChild(pipeEl.firstChild);
-
-  var steps = col.pipeline.steps || [];
-  var currentIdx = col.pipeline.currentIdx || 0;
-  for (var i = 0; i < steps.length; i++) {
-    var step = steps[i];
-    if (i > 0) {
-      var arrow = document.createElement('span');
-      arrow.className = 'pp-arrow';
-      arrow.textContent = '›';
-      pipeEl.appendChild(arrow);
-    }
-    var btn = document.createElement('button');
-    btn.className = 'pp-step';
-    btn.type = 'button';
-    btn.title = step.label;
-    if (step.id && step.id.indexOf('anchor-') === 0) btn.classList.add('pp-anchor');
-    var isCurrent = (i === currentIdx);
-    if (step.complete) btn.classList.add('pp-done');
-    else if (isCurrent) btn.classList.add('pp-current');
-    else btn.classList.add('pp-pending');
-    var labelText = step.label || '';
-    if (compact && !isCurrent && labelText.length > 0) {
-      btn.textContent = labelText.charAt(0).toUpperCase();
-    } else if (compact && isCurrent) {
-      btn.textContent = '▸ ' + labelText;
-    } else {
-      btn.textContent = labelText;
-    }
-    (function (idx) {
-      btn.addEventListener('click', function (e) {
-        e.stopPropagation();
-        if (!PipelineMatcherAPI) return;
-        var c = allColumns.get(id);
-        if (!c || !c.pipeline) return;
-        PipelineMatcherAPI.applyManualToggle(c.pipeline, idx);
-        renderPipeline(id);
-        persistSessionsDebounced(c.projectKey, c.workspaceId);
-      });
-    })(i);
-    pipeEl.appendChild(btn);
-  }
-}
-
-// Claude's "plan mode on" footer is a sticky status line that is NOT re-emitted
-// to the stream on every repaint, so a stream-byte timeout flaps between Plan
-// and Execute during a stable plan-mode session. Scan the terminal's live
-// bottom rows for the footer instead — that reflects what's actually on screen.
-function planModeBannerOnScreen(col) {
-  try {
-    var term = col.terminal;
-    var buf = term && term.buffer && term.buffer.active;
-    if (!buf) return false;
-    var rows = term.rows || 24;
-    var bottom = buf.baseY + rows; // one past the last live row
-    for (var y = Math.max(0, bottom - 12); y < bottom; y++) {
-      var line = buf.getLine(y);
-      if (line && /plan mode on/i.test(line.translateToString(true))) return true;
-    }
-  } catch (e) { /* buffer not ready — fall back to the stream timer */ }
-  return false;
-}
-
-function startPipelineExitCheck(id) {
-  var col = allColumns.get(id);
-  if (!col || !col.pipeline || !PipelineMatcherAPI) return;
-  if (col.pipeline.exitCheckIntervalId != null) return;
-  col.pipeline.exitCheckIntervalId = setInterval(function () {
-    var c = allColumns.get(id);
-    if (!c || !c.pipeline) {
-      // Column gone — defensive
-      return;
-    }
-    // While the footer is still visible on screen, keep the plan timer alive so
-    // we never prematurely flip to Execute (and flash back on the next repaint).
-    if (planModeBannerOnScreen(c)) {
-      c.pipeline.lastBannerSeenAt = Date.now();
-    }
-    if (PipelineMatcherAPI.shouldExitPlanMode(c.pipeline, Date.now())) {
-      PipelineMatcherAPI.applyPlanExit(c.pipeline);
-      renderPipeline(id);
-      persistSessions(c.projectKey, c.workspaceId);
-      if (c.pipeline.exitCheckIntervalId != null) {
-        clearInterval(c.pipeline.exitCheckIntervalId);
-        c.pipeline.exitCheckIntervalId = null;
-      }
-    }
-  }, 500);
-}
-
-function stopPipelineExitCheck(col) {
-  if (!col || !col.pipeline) return;
-  if (col.pipeline.exitCheckIntervalId != null) {
-    clearInterval(col.pipeline.exitCheckIntervalId);
-    col.pipeline.exitCheckIntervalId = null;
-  }
-}
 
 function setColumnActivity(id, state) {
   var col = allColumns.get(id);
@@ -1084,202 +865,6 @@ function saveStartWithOS() {
   if (!window.electronAPI || !window.electronAPI.setStartWithOS) return;
   var enabled = document.getElementById('setting-start-with-os').checked;
   window.electronAPI.setStartWithOS(enabled);
-}
-
-function bindPipelineEditor() {
-  var editorEl = document.getElementById('pipeline-editor');
-  var addBtn = document.getElementById('btn-add-pipeline-step');
-  if (!editorEl || !addBtn) return;
-  if (!pipelinesConfig || !pipelinesConfig.pipeline || !Array.isArray(pipelinesConfig.pipeline.userSteps)) return;
-
-  while (editorEl.firstChild) editorEl.removeChild(editorEl.firstChild);
-  var dupErrEl = document.getElementById('pipeline-editor-error');
-
-  var userSteps = pipelinesConfig.pipeline.userSteps;
-
-  function isAnchor(step) {
-    return !!(step && typeof step.id === 'string' && step.id.indexOf('anchor-') === 0);
-  }
-
-  function checkDuplicates() {
-    if (!dupErrEl) return;
-    var seen = {};
-    var dupes = {};
-    for (var i = 0; i < userSteps.length; i++) {
-      var kws = userSteps[i].keywords || [];
-      for (var k = 0; k < kws.length; k++) {
-        var tok = kws[k];
-        if (!tok) continue;
-        if (seen[tok] != null && seen[tok] !== i) dupes[tok] = true;
-        else if (seen[tok] == null) seen[tok] = i;
-      }
-    }
-    var dupList = Object.keys(dupes);
-    if (dupList.length > 0) {
-      dupErrEl.textContent = 'Duplicate keyword(s): ' + dupList.join(', ');
-      dupErrEl.style.display = '';
-    } else {
-      dupErrEl.textContent = '';
-      dupErrEl.style.display = 'none';
-    }
-  }
-
-  function renderRows() {
-    var existing = editorEl.querySelectorAll('.pipeline-step-row');
-    for (var i = 0; i < existing.length; i++) editorEl.removeChild(existing[i]);
-    var stale = editorEl.querySelectorAll('.settings-hint.error');
-    for (var s = 0; s < stale.length; s++) {
-      if (stale[s].id !== 'pipeline-editor-error') editorEl.removeChild(stale[s]);
-    }
-
-    for (var idx = 0; idx < userSteps.length; idx++) {
-      (function (i) {
-        var step = userSteps[i];
-        var anchor = isAnchor(step);
-        var row = document.createElement('div');
-        row.className = 'pipeline-step-row' + (anchor ? ' pipeline-step-anchor' : '');
-        row.setAttribute('data-step-idx', String(i));
-
-        var upBtn = document.createElement('button');
-        upBtn.className = 'pipeline-step-up';
-        upBtn.title = 'Move up';
-        upBtn.textContent = '↑';
-        if (i === 0) upBtn.disabled = true;
-        upBtn.addEventListener('click', function () {
-          if (i === 0) return;
-          var tmp = userSteps[i - 1];
-          userSteps[i - 1] = userSteps[i];
-          userSteps[i] = tmp;
-          savePipelines();
-          renderRows();
-          checkDuplicates();
-        });
-
-        var downBtn = document.createElement('button');
-        downBtn.className = 'pipeline-step-down';
-        downBtn.title = 'Move down';
-        downBtn.textContent = '↓';
-        if (i === userSteps.length - 1) downBtn.disabled = true;
-        downBtn.addEventListener('click', function () {
-          if (i === userSteps.length - 1) return;
-          var tmp = userSteps[i + 1];
-          userSteps[i + 1] = userSteps[i];
-          userSteps[i] = tmp;
-          savePipelines();
-          renderRows();
-          checkDuplicates();
-        });
-
-        var labelInput = document.createElement('input');
-        labelInput.className = 'settings-input pipeline-step-label';
-        labelInput.placeholder = 'Step name';
-        labelInput.maxLength = 24;
-        labelInput.value = step.label || '';
-        if (anchor) labelInput.disabled = true;
-
-        var kwInput = document.createElement('input');
-        kwInput.className = 'settings-input pipeline-step-keywords';
-        if (anchor) {
-          kwInput.placeholder = step.id === 'anchor-plan'
-            ? '(auto: Plan-mode entry)'
-            : '(auto: Plan-mode exit)';
-          kwInput.value = '';
-          kwInput.disabled = true;
-        } else {
-          kwInput.placeholder = 'keyword (comma-separate for synonyms, e.g. /test, build)';
-          kwInput.maxLength = 120;
-          kwInput.value = (step.keywords || []).join(', ');
-        }
-
-        function clearRowError() {
-          labelInput.classList.remove('error');
-          kwInput.classList.remove('error');
-          var sib = row.nextSibling;
-          if (sib && sib.classList && sib.classList.contains('settings-hint') && sib.classList.contains('error') && sib.id !== 'pipeline-editor-error') {
-            row.parentNode.removeChild(sib);
-          }
-        }
-
-        function showRowError(target, msg) {
-          target.classList.add('error');
-          var hint = document.createElement('div');
-          hint.className = 'settings-hint error';
-          hint.textContent = msg;
-          if (row.nextSibling) row.parentNode.insertBefore(hint, row.nextSibling);
-          else row.parentNode.appendChild(hint);
-        }
-
-        if (!anchor) {
-          labelInput.addEventListener('change', function () {
-            clearRowError();
-            var v = labelInput.value.trim();
-            if (v.length === 0) {
-              showRowError(labelInput, 'Step name cannot be empty.');
-              labelInput.value = step.label || '';
-              return;
-            }
-            step.label = v;
-            savePipelines();
-            checkDuplicates();
-          });
-
-          kwInput.addEventListener('change', function () {
-            clearRowError();
-            var raw = kwInput.value.split(',');
-            var tokens = [];
-            for (var t = 0; t < raw.length; t++) {
-              var tok = raw[t].trim();
-              if (tok.length === 0) continue;
-              if (tok.indexOf(',') !== -1) {
-                showRowError(kwInput, 'Keywords cannot contain commas.');
-                kwInput.value = (step.keywords || []).join(', ');
-                return;
-              }
-              tokens.push(tok);
-            }
-            step.keywords = tokens;
-            savePipelines();
-            checkDuplicates();
-          });
-        }
-
-        row.appendChild(upBtn);
-        row.appendChild(downBtn);
-        row.appendChild(labelInput);
-        row.appendChild(kwInput);
-
-        if (!anchor) {
-          var delBtn = document.createElement('button');
-          delBtn.className = 'pipeline-step-delete';
-          delBtn.title = 'Delete step';
-          delBtn.textContent = '×';
-          delBtn.addEventListener('click', function () {
-            if (isAnchor(userSteps[i])) return;
-            userSteps.splice(i, 1);
-            savePipelines();
-            renderRows();
-            checkDuplicates();
-          });
-          row.appendChild(delBtn);
-        }
-
-        if (dupErrEl && dupErrEl.parentNode === editorEl) editorEl.insertBefore(row, dupErrEl);
-        else editorEl.appendChild(row);
-      })(idx);
-    }
-  }
-
-  renderRows();
-  checkDuplicates();
-
-  var newAddBtn = addBtn.cloneNode(true);
-  addBtn.parentNode.replaceChild(newAddBtn, addBtn);
-  newAddBtn.addEventListener('click', function () {
-    userSteps.push({ id: 'step-' + Date.now(), label: '', keywords: [] });
-    savePipelines();
-    renderRows();
-    checkDuplicates();
-  });
 }
 
 function notifyAttentionNeeded(columnId) {
@@ -3204,8 +2789,7 @@ function restoreSessions(projectPath, workspaceId) {
             rowIdx: r,
             sessionId: lcol.sessionId,
             title: lcol.title || null,
-            widthRatio: (typeof lcol.widthRatio === 'number' && isFinite(lcol.widthRatio) && lcol.widthRatio > 0) ? lcol.widthRatio : null,
-            pipeline: lcol.pipeline || null
+            widthRatio: (typeof lcol.widthRatio === 'number' && isFinite(lcol.widthRatio) && lcol.widthRatio > 0) ? lcol.widthRatio : null
           };
           if (typeof lcol.targetBranch === 'string' && lcol.targetBranch) legacyEntry.targetBranch = lcol.targetBranch;
           entries.push(legacyEntry);
@@ -3231,7 +2815,6 @@ function restoreSessions(projectPath, workspaceId) {
         if (cwdSource) pushedEntry.cwdSource = cwdSource;
         if (targetBranch) pushedEntry.targetBranch = targetBranch;
         if (endpointId) pushedEntry.endpointId = endpointId;
-        if (typeof entry === 'object' && entry && entry.pipeline) pushedEntry.pipeline = entry.pipeline;
         entries.push(pushedEntry);
       }
       if (rowHeightRatios) {
@@ -3250,8 +2833,7 @@ function restoreSessions(projectPath, workspaceId) {
           rowIdx: 0,
           sessionId: bsid,
           title: (typeof bentry === 'object' && bentry && bentry.title) ? bentry.title : null,
-          widthRatio: null,
-          pipeline: (typeof bentry === 'object' && bentry && bentry.pipeline) ? bentry.pipeline : null
+          widthRatio: null
         });
       }
     }
@@ -3289,7 +2871,6 @@ function restoreSessions(projectPath, workspaceId) {
           }
         }
         if (e.targetBranch) rowOpts.targetBranch = e.targetBranch;
-        if (e.pipeline) rowOpts.pipelineState = e.pipeline;
 
         // Endpoint-aware resume: if this column was spawned against a non-cloud
         // endpoint preset, look up the preset's env block and rewrite args. If
@@ -3949,12 +3530,6 @@ function createColumnHeader(id, customTitle, opts) {
   header.appendChild(title);
   header.appendChild(actions);
 
-  if (!opts.isDiff) {
-    var pipelineDiv = document.createElement('div');
-    pipelineDiv.className = 'col-pipeline';
-    header.appendChild(pipelineDiv);
-  }
-
   if (!popoutMode && !opts.isDiff) {
     header.addEventListener('contextmenu', function (e) {
       if (header.querySelector('[contenteditable="true"]')) return;
@@ -4051,23 +3626,6 @@ function showColumnContextMenu(colId, x, y) {
     e.stopPropagation();
     openSubmenu();
   });
-
-  var hasPipeProgress = !!(col.pipeline && (col.pipeline.steps.some(function (s) { return s.complete; }) || (col.pipeline.flags && col.pipeline.flags.plan)));
-  if (hasPipeProgress) {
-    var pipeItem = document.createElement('div');
-    pipeItem.className = 'project-context-item';
-    pipeItem.textContent = col.pipeline.visible ? 'Hide pipeline' : 'Show pipeline';
-    pipeItem.addEventListener('click', function (ev) {
-      ev.stopPropagation();
-      var c = allColumns.get(colId);
-      if (!c || !c.pipeline) { closeAll(); return; }
-      c.pipeline.visible = !c.pipeline.visible;
-      renderPipeline(colId);
-      persistSessions(c.projectKey, c.workspaceId);
-      closeAll();
-    });
-    menu.appendChild(pipeItem);
-  }
 
   document.body.appendChild(menu);
 
@@ -4554,37 +4112,6 @@ function addColumn(args, targetRow, opts) {
     var c = allColumns.get(id);
     if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
       c.lastInputAt = Date.now();
-      // --- Pipeline keyword steps: accumulate the typed command line so a
-      // submitted command can advance a user-configured pipeline step. The
-      // terminal only emits raw keystrokes, so this is a best-effort line
-      // buffer: printable chars append, Backspace pops, Ctrl-U/Ctrl-C clear,
-      // and Enter evaluates the line against the pipeline's keyword steps.
-      // Mid-line cursor edits (arrow keys) are escape-led and already excluded
-      // by the gate above, so they're simply ignored. The matcher is a no-op
-      // while in plan mode and only advances forward, so this never fights the
-      // banner-driven Plan/Execute anchors.
-      if (c.pipeline && PipelineMatcherAPI) {
-        for (var bi = 0; bi < data.length; bi++) {
-          var bc = data.charCodeAt(bi);
-          if (bc === 0x0d || bc === 0x0a) {
-            var pipeCmd = (c.cmdBuffer || '').trim();
-            c.cmdBuffer = '';
-            if (pipeCmd && PipelineMatcherAPI.applyKeywordMatch(c.pipeline, pipeCmd, pipelinesConfig)) {
-              // A keyword step advanced — reveal the bar so the progress is
-              // visible even when the column never entered plan mode.
-              c.pipeline.visible = true;
-              renderPipeline(id);
-              persistSessionsDebounced(c.projectKey, c.workspaceId);
-            }
-          } else if (bc === 0x7f || bc === 0x08) {
-            c.cmdBuffer = (c.cmdBuffer || '').slice(0, -1);
-          } else if (bc === 0x15 || bc === 0x03) {
-            c.cmdBuffer = '';
-          } else if (bc >= 0x20) {
-            c.cmdBuffer = (c.cmdBuffer || '') + data.charAt(bi);
-          }
-        }
-      }
       // Stop attention flash when the user types — clearly they're responding
       if (c.activityState === 'attention') {
         c.hasUserInput = false;
@@ -4714,12 +4241,6 @@ function addColumn(args, targetRow, opts) {
     lastInputAt: 0,
     hasUserInput: false,
     notified: false,
-    pipeline: PipelineMatcherAPI.buildPipelineState(opts.pipelineState || null, resolveSteps(pipelinesConfig)),
-    pipelineEl: header.querySelector('.col-pipeline'),
-    pipelineResizeObserver: null,
-    bannerTail: '',
-    bannerEverMatched: false,
-    bannerDriftWarned: false,
     spawnSessionPct: null,    // (unused) five_hour.utilization at spawn — kept for backward compat
     spawnWeeklyPct: null,     // (unused) reserved
     spawnSessionTokens: null, // context-token count at spawn — set on first ctx poll
@@ -4737,30 +4258,9 @@ function addColumn(args, targetRow, opts) {
     ctxTextEl: null,
     ctxPollTimer: null,
     snippetBuffer: '',  // accumulates printable chars to detect "\\trigger" patterns
-    cmdBuffer: '',  // best-effort typed command line, evaluated against pipeline keyword steps on Enter
     endpointId: opts.endpointId || (typeof currentEndpointId !== 'undefined' ? currentEndpointId : null) || null,
     failedOver: false  // set true after one failover so we don't ping-pong
   };
-
-  // Wire up ResizeObserver for compact-mode toggling on the pipeline strip.
-  if (colData.pipelineEl && typeof ResizeObserver === 'function') {
-    var lastCompact = null;
-    var ro = new ResizeObserver(function () {
-      var w = header.offsetWidth;
-      var nowCompact = w > 0 && w < 380;
-      if (nowCompact !== lastCompact) {
-        lastCompact = nowCompact;
-        renderPipeline(id);
-      }
-    });
-    ro.observe(header);
-    colData.pipelineResizeObserver = ro;
-  }
-
-  // If restored with progress, render immediately so pills appear before banner re-detected.
-  if (colData.pipeline && colData.pipeline.visible) {
-    setTimeout(function () { renderPipeline(id); }, 0);
-  }
 
   row.columnIds.push(id);
   state.columns.set(id, colData);
@@ -6063,10 +5563,6 @@ function persistSessions(projectKey, workspaceId) {
         if (col2.cwd && col2.cwd !== activeProjectKey) entry.cwd = col2.cwd;
         if (col2.cwd && col2.cwd !== activeProjectKey && col2.cwdSource) entry.cwdSource = col2.cwdSource;
         if (col2.targetBranch) entry.targetBranch = col2.targetBranch;
-        if (col2.pipeline) {
-          var serializedPipe = PipelineMatcherAPI.serializePipeline(col2.pipeline);
-          if (serializedPipe) entry.pipeline = serializedPipe;
-        }
         // Persist endpoint association so restored columns come back on the
         // same local endpoint (LM Studio, Ollama, etc.) instead of defaulting
         // to whatever the global Spawn dropdown is currently pointing at.
@@ -6141,11 +5637,6 @@ function removeColumn(id) {
   if (timer) clearTimeout(timer);
   activityTimers.delete(id);
   stopSessionSync(id);
-  stopPipelineExitCheck(col);
-  if (col.pipelineResizeObserver) {
-    try { col.pipelineResizeObserver.disconnect(); } catch (e) { /* ignore */ }
-    col.pipelineResizeObserver = null;
-  }
   stopContextMeterPoll(id);
 
   if (!col.isDiff) wsSend({ type: 'kill', id: id });
@@ -11056,7 +10547,6 @@ var settingsModal = document.getElementById('settings-modal');
 document.getElementById('btn-settings').addEventListener('click', function () {
   loadNotifSettings();
   loadStartWithOS();
-  bindPipelineEditor();
   var ctxSel = document.getElementById('setting-ctx-default');
   if (ctxSel) ctxSel.value = getCtxDefaultPref();
   window.electronAPI.getAutomationSettings().then(function (settings) {

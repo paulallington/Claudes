@@ -192,18 +192,6 @@ const LOOPS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'loop-runs' : 'loo
 const AUTOMATIONS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'automations.json' : 'automations-dev.json');
 const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-runs' : 'automation-runs-dev');
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
-const PIPELINES_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'pipelines.json' : 'pipelines-dev.json');
-const DEFAULT_PIPELINES = {
-  version: 1,
-  pipeline: {
-    id: 'default',
-    name: 'Default workflow',
-    userSteps: [
-      { id: 'anchor-plan', label: 'Plan', keywords: [] },
-      { id: 'anchor-execute', label: 'Execute', keywords: [] }
-    ]
-  }
-};
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
 const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
 
@@ -1363,58 +1351,6 @@ ipcMain.handle('endpoint:fetchModels', async (event, args) => {
   } catch (err) {
     const msg = err && err.name === 'AbortError' ? 'Request timed out' : (err && err.message) || 'Fetch failed';
     return { ok: false, error: msg };
-  }
-});
-
-ipcMain.handle('pipelines:get', () => {
-  ensureConfigDir();
-  try {
-    const raw = fs.readFileSync(PIPELINES_FILE, 'utf8');
-    const data = JSON.parse(raw);
-    if (data && typeof data === 'object' && data.pipeline && Array.isArray(data.pipeline.userSteps)) {
-      const steps = data.pipeline.userSteps;
-      const hasPlan = steps.some(s => s && s.id === 'anchor-plan');
-      const hasExec = steps.some(s => s && s.id === 'anchor-execute');
-      if (!hasPlan) steps.unshift({ id: 'anchor-plan', label: 'Plan', keywords: [] });
-      if (!hasExec) {
-        const planIdx = steps.findIndex(s => s && s.id === 'anchor-plan');
-        steps.splice(planIdx + 1, 0, { id: 'anchor-execute', label: 'Execute', keywords: [] });
-      }
-      return data;
-    }
-  } catch (e) { /* file missing, parse error, wrong shape */ }
-  return DEFAULT_PIPELINES;
-});
-
-ipcMain.handle('pipelines:save', (event, data) => {
-  ensureConfigDir();
-  // Pass-through unknown top-level fields (forward compat); ensure shape on key fields.
-  const incoming = (data && typeof data === 'object') ? data : {};
-  const pipeline = (incoming.pipeline && typeof incoming.pipeline === 'object')
-    ? incoming.pipeline
-    : { id: 'default', name: 'Default workflow', userSteps: [
-        { id: 'anchor-plan', label: 'Plan', keywords: [] },
-        { id: 'anchor-execute', label: 'Execute', keywords: [] }
-      ] };
-  const userSteps = Array.isArray(pipeline.userSteps) ? pipeline.userSteps : [];
-  const payload = {
-    ...incoming,
-    version: typeof incoming.version === 'number' ? incoming.version : 1,
-    pipeline: {
-      ...pipeline,
-      id: pipeline.id || 'default',
-      name: pipeline.name || 'Default workflow',
-      userSteps: userSteps
-    }
-  };
-  const tmp = PIPELINES_FILE + '.tmp';
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
-    fs.renameSync(tmp, PIPELINES_FILE);
-    return true;
-  } catch (err) {
-    console.error('pipelines:save failed:', err);
-    return false;
   }
 });
 

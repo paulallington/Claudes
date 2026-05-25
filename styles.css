@@ -3980,7 +3980,7 @@ html[data-platform="darwin"] #toolbar {
 
 /* Settings Modal */
 .settings-dialog {
-  width: 780px;       /* fits all 8 tabs (incl. Pipelines) without horizontal scroll */
+  width: 780px;       /* fits all tabs without horizontal scroll */
   max-width: 90vw;
   max-height: 85vh;   /* cap so tall panes (Clawd legend, etc) scroll instead of running off-screen */
   display: flex;
@@ -6701,159 +6701,6 @@ body.mode-popout #btn-add-project {
   text-align: center;
 }
 
-/* --- Pipeline visualizer (per-terminal) --- */
-
-.col-pipeline {
-  flex-basis: 100%;
-  display: none;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 4px 0;
-  font-size: 11px;
-  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.06));
-}
-
-.col-pipeline.visible {
-  display: flex;
-}
-
-.pp-step {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-secondary);
-  padding: 2px 8px;
-  border-radius: 10px;
-  cursor: pointer;
-  font-size: 11px;
-  font-family: inherit;
-  line-height: 1.4;
-  white-space: nowrap;
-}
-
-.pp-step:hover {
-  background: var(--bg-button, rgba(255, 255, 255, 0.05));
-}
-
-.pp-step:focus-visible {
-  outline: 1px solid var(--accent, #4a9eff);
-  outline-offset: 1px;
-}
-
-.pp-current {
-  color: var(--text-bright, #ffffff);
-  font-weight: 600;
-  background: var(--bg-button, rgba(255, 255, 255, 0.08));
-  border-color: var(--accent, #4a9eff);
-}
-
-.pp-done {
-  opacity: 0.6;
-}
-
-.pp-done::before {
-  content: "\2713\00a0";
-}
-
-.pp-pending {
-  opacity: 0.4;
-}
-
-.pp-anchor {
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.pp-arrow {
-  color: var(--text-secondary);
-  opacity: 0.5;
-  font-size: 11px;
-  user-select: none;
-}
-
-.col-pipeline.compact .pp-step {
-  padding: 2px 6px;
-}
-
-/* --- Pipeline editor (settings dialog) --- */
-
-.pipeline-editor {
-  display: flex;
-  flex-direction: column;
-  margin-bottom: 8px;
-}
-
-.pipeline-step-row {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  margin-bottom: 6px;
-}
-
-.pipeline-step-row .settings-input {
-  flex: 1;
-  min-width: 0;
-}
-
-.pipeline-step-row .pipeline-step-label {
-  flex: 0 0 120px;
-}
-
-.pipeline-step-row .pipeline-step-keywords {
-  flex: 1;
-  min-width: 0;
-}
-
-.pipeline-step-anchor .settings-input {
-  opacity: 0.7;
-}
-
-.pipeline-step-handle {
-  display: inline-block;
-  width: 16px;
-  color: var(--text-secondary);
-  opacity: 0.5;
-  cursor: default;
-  user-select: none;
-  text-align: center;
-}
-
-.pipeline-step-up,
-.pipeline-step-down,
-.pipeline-step-delete {
-  background: transparent;
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
-  color: var(--text-secondary);
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
-  border-radius: 3px;
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.pipeline-step-up:hover:not(:disabled),
-.pipeline-step-down:hover:not(:disabled),
-.pipeline-step-delete:hover {
-  background: var(--bg-button, rgba(255, 255, 255, 0.05));
-  color: var(--text-bright, #ffffff);
-}
-
-.pipeline-step-up:disabled,
-.pipeline-step-down:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
-.pipeline-step-delete:hover {
-  border-color: #d33;
-  color: #d33;
-}
-
 .settings-input.error {
   border-color: #d33;
 }
@@ -8192,14 +8039,10 @@ body.light-theme .clawd-debug-log .ts { color: #8a8aa0; }
   text-align: center;
 }
 
-/* --- workspaces-only branch: mask the unshipped "meh" features (per-terminal
-   pipeline visualizer, review-comments annotations, branch-aware Git-tab hint)
-   so only the workspaces feature surfaces. The code stays dormant — this is a
-   UI mask, pending a decision on full code removal. To restore, delete this
-   block. --- */
-.col-pipeline,
-.settings-tab[data-settings-tab="pipelines"],
-.settings-pane[data-settings-pane="pipelines"],
+/* --- workspaces-only branch: mask the unshipped "meh" features (review-comments
+   annotations, branch-aware Git-tab hint) so only the workspaces feature
+   surfaces. The code stays dormant — this is a UI mask, pending a decision on
+   full code removal. To restore, delete this block. --- */
 .review-comment-indicator,
 .review-comment-connector,
 .review-comment-box,
