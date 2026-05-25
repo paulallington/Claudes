@@ -3,7 +3,12 @@ dist/
 out/
 .env
 *.output
+.DS_Store
+.claude/scheduled_tasks.lock
 .claude/settings.local.json
+.claude/skills/
 .claudes/
 .playwright-mcp/
 .superpowers/
+test-results/
+playwright-report/

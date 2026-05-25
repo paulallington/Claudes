@@ -7,6 +7,9 @@ const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
+const { resolveWorktreeCandidates, pathIsDirectory } = require('./lib/path-utils');
+const { detectActiveWorktree } = require('./lib/worktree-detect');
+const WorkspaceScrub = require('./lib/workspace-scrub');
 const https = require('https');
 
 // macOS GUI launches (Dock/Finder) inherit launchd's minimal PATH —
@@ -805,6 +808,19 @@ function createWindow() {
     }
   });
 
+  // xterm captures these at the renderer; intercept here so F11/Esc still work.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.alt || input.control || input.meta || input.shift) return;
+    if (input.key === 'F11') {
+      mainWindow.setFullScreen(!mainWindow.isFullScreen());
+      event.preventDefault();
+    } else if (input.key === 'Escape' && mainWindow.isFullScreen()) {
+      mainWindow.setFullScreen(false);
+      event.preventDefault();
+    }
+  });
+
   lockdownWebContents(mainWindow.webContents);
   mainWindow.loadFile('index.html');
 
@@ -889,6 +905,19 @@ function createProjectWindow(projectKey) {
       // we don't use <webview> at all.
       spellcheck: false,
       webviewTag: false
+    }
+  });
+
+  // xterm captures these at the renderer; intercept here so F11/Esc still work.
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.alt || input.control || input.meta || input.shift) return;
+    if (input.key === 'F11') {
+      win.setFullScreen(!win.isFullScreen());
+      event.preventDefault();
+    } else if (input.key === 'Escape' && win.isFullScreen()) {
+      win.setFullScreen(false);
+      event.preventDefault();
     }
   });
 
@@ -1510,17 +1539,65 @@ ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId) => {
   }
 });
 
-// Save/load session state per project (which sessions were open in columns)
-ipcMain.handle('sessions:save', (event, projectPath, sessionData) => {
+// Phase 3: detect which worktree the session is actively working in by
+// scanning the JSONL tail for `cd <path>` commands and `"file_path":"..."`
+// entries. The Claude CLI's recorded gitBranch reflects ITS own cwd (project
+// root) — useless for sessions that do their work via Bash `cd worktree && ...`.
+ipcMain.handle('git:detectSessionWorktree', async (event, projectPath, sessionId) => {
+  if (!projectPath || !sessionId) return null;
   try {
-    const safeBase = assertInsideAllowedRoots(projectPath);
-    const claudesDir = path.join(safeBase, '.claudes');
-    if (!fs.existsSync(claudesDir)) {
-      fs.mkdirSync(claudesDir, { recursive: true });
+    const claudeKey = projectPathToClaudeKey(projectPath);
+    const jsonlPath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+    const stat = fs.statSync(jsonlPath);
+    const tailSize = Math.min(stat.size, 512 * 1024);
+    if (tailSize === 0) return null;
+    const fd = fs.openSync(jsonlPath, 'r');
+    let content;
+    try {
+      const buf = Buffer.alloc(tailSize);
+      fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+      content = buf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
     }
-    const sessionsFile = path.join(claudesDir, 'sessions.json');
-    fs.writeFileSync(sessionsFile, JSON.stringify({ sessions: sessionData }, null, 2), 'utf8');
-  } catch (err) { return { error: err.message }; }
+    const worktrees = await listGitWorktrees(projectPath);
+    return detectActiveWorktree(content, worktrees);
+  } catch {
+    return null;
+  }
+});
+
+// Save/load session state per project.
+//
+// Disk shape (synthesized v2): { version: 2, sessions: [...], rowHeightRatios: [...],
+//   workspaces: { "<ws-id>": { sessions: [...], rowHeightRatios: [...] } } }
+// Each session entry: { sessionId, title, rowIdx, widthRatio }
+// Legacy shapes:
+//   - HEAD-only v2 (pre-workspaces): { version: 2, rows: [{ heightRatio, columns: [...] }] }
+//   - personal/main flat: { sessions: [...], workspaces: { id: { sessions: [...] } } }
+//   - very old: bare array
+// Renderer's persistSessions/restoreSessions handle promotion; main.js just persists the blob atomically
+// (tmp+rename so a partial write can't corrupt multi-workspace state).
+ipcMain.handle('sessions:save', (event, projectPath, blob) => {
+  const safeBase = assertInsideAllowedRoots(projectPath);
+  const claudesDir = path.join(safeBase, '.claudes');
+  if (!fs.existsSync(claudesDir)) {
+    fs.mkdirSync(claudesDir, { recursive: true });
+  }
+  const target = path.join(claudesDir, 'sessions.json');
+  const tmp = target + '.tmp';
+  // Accept either the new blob shape or a bare array (legacy callers).
+  // Spread the input first so top-level fields like `version` and `rowHeightRatios`
+  // round-trip; then overwrite `sessions` and `workspaces` with defensive defaults.
+  const payload = Array.isArray(blob)
+    ? { sessions: blob, workspaces: {} }
+    : {
+        ...((blob && typeof blob === 'object') ? blob : {}),
+        sessions: Array.isArray(blob && blob.sessions) ? blob.sessions : [],
+        workspaces: (blob && blob.workspaces && typeof blob.workspaces === 'object') ? blob.workspaces : {}
+      };
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+  fs.renameSync(tmp, target);
 });
 
 ipcMain.handle('sessions:load', (event, projectPath) => {
@@ -1528,9 +1605,125 @@ ipcMain.handle('sessions:load', (event, projectPath) => {
     const safeBase = assertInsideAllowedRoots(projectPath);
     const sessionsFile = path.join(safeBase, '.claudes', 'sessions.json');
     const data = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
-    return data.sessions || [];
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      return {
+        ...data,
+        sessions: Array.isArray(data.sessions) ? data.sessions : [],
+        workspaces: (data.workspaces && typeof data.workspaces === 'object') ? data.workspaces : {}
+      };
+    }
+    return { sessions: [], workspaces: {} };
+  } catch {
+    return { sessions: [], workspaces: {} };
+  }
+});
+
+// --- Sticky Notes Persistence ---
+// Primary: <project>/.claudes/sticky-notes.json (back-compat with pre-workspaces users).
+// Sub-workspace: <project>/.claudes/sticky-notes-<workspaceId>.json — one overlay per workspace.
+// Writes are debounced per-(project, workspace), atomic (tmp + rename), and flushed on quit.
+// Malformed JSON on load is quarantined to sticky-notes.corrupt-<ts>.json so user content isn't silently overwritten.
+
+const STICKY_NOTES_WRITE_DEBOUNCE_MS = 400;
+const pendingStickyNotes = new Map(); // stickyKey -> { projectPath, workspaceId, timer, notes }
+
+function stickyKey(projectPath, workspaceId) {
+  return (workspaceId == null) ? projectPath : (projectPath + '::' + workspaceId);
+}
+
+function stickyNotesFile(projectPath, workspaceId) {
+  const dir = path.join(projectPath, '.claudes');
+  return (workspaceId == null)
+    ? path.join(dir, 'sticky-notes.json')
+    : path.join(dir, 'sticky-notes-' + workspaceId + '.json');
+}
+
+function writeStickyNotesAtomic(projectPath, workspaceId, notes) {
+  const claudesDir = path.join(projectPath, '.claudes');
+  if (!fs.existsSync(claudesDir)) {
+    fs.mkdirSync(claudesDir, { recursive: true });
+  }
+  const target = stickyNotesFile(projectPath, workspaceId);
+  const tmp = target + '.tmp';
+  const payload = JSON.stringify({ notes: Array.isArray(notes) ? notes : [] }, null, 2);
+  fs.writeFileSync(tmp, payload, 'utf8');
+  fs.renameSync(tmp, target);
+}
+
+function scheduleWriteStickyNotes(projectPath, workspaceId, notes) {
+  const key = stickyKey(projectPath, workspaceId);
+  const existing = pendingStickyNotes.get(key);
+  if (existing && existing.timer) {
+    clearTimeout(existing.timer);
+  }
+  const entry = { projectPath, workspaceId, notes, timer: null };
+  entry.timer = setTimeout(() => {
+    pendingStickyNotes.delete(key);
+    try { writeStickyNotesAtomic(projectPath, workspaceId, entry.notes); } catch (err) { console.error('writeStickyNotes failed:', err); }
+  }, STICKY_NOTES_WRITE_DEBOUNCE_MS);
+  pendingStickyNotes.set(key, entry);
+}
+
+function flushPendingStickyNotes() {
+  for (const [, entry] of pendingStickyNotes.entries()) {
+    if (entry.timer) clearTimeout(entry.timer);
+    try { writeStickyNotesAtomic(entry.projectPath, entry.workspaceId, entry.notes); } catch (err) { console.error('writeStickyNotes failed:', err); }
+  }
+  pendingStickyNotes.clear();
+}
+
+ipcMain.handle('sticky-notes:load', (event, projectPath, workspaceId) => {
+  const notesFile = stickyNotesFile(projectPath, workspaceId);
+  if (!fs.existsSync(notesFile)) return [];
+  let raw;
+  try {
+    raw = fs.readFileSync(notesFile, 'utf8');
   } catch {
     return [];
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    try {
+      const corrupt = path.join(projectPath, '.claudes',
+        'sticky-notes' + (workspaceId == null ? '' : '-' + workspaceId) + '.corrupt-' + Date.now() + '.json');
+      fs.renameSync(notesFile, corrupt);
+    } catch (err) {
+      console.error('sticky-notes quarantine failed:', err);
+    }
+    return [];
+  }
+  const notes = Array.isArray(data && data.notes) ? data.notes : [];
+  // Forward-compat defaults for v1 files that lack new keys.
+  return notes.map((n) => {
+    const out = {
+      id: n.id,
+      content: typeof n.content === 'string' ? n.content : '',
+      x: typeof n.x === 'number' ? n.x : 20,
+      y: typeof n.y === 'number' ? n.y : 20,
+      width: typeof n.width === 'number' ? n.width : 240,
+      height: typeof n.height === 'number' ? n.height : 180,
+      color: typeof n.color === 'string' ? n.color : 'yellow',
+      fontSize: typeof n.fontSize === 'number' ? n.fontSize : 15
+    };
+    if (n.anchor && typeof n.anchor === 'object') out.anchor = n.anchor;
+    return out;
+  });
+});
+
+ipcMain.handle('sticky-notes:save', (event, projectPath, workspaceId, notes) => {
+  scheduleWriteStickyNotes(projectPath, workspaceId, notes);
+});
+
+// Scrub all sticky-notes-<wsId>* and review-comments-<wsId>-* artifacts for a workspace.
+// Implementation lives in lib/workspace-scrub.js so it's testable without booting Electron.
+ipcMain.handle('workspace:scrubArtifacts', (event, projectPath, wsId) => {
+  try {
+    return WorkspaceScrub.scrubArtifactsImpl(projectPath, wsId);
+  } catch (err) {
+    console.error('workspace:scrubArtifacts failed:', err);
+    return { removed: 0 };
   }
 });
 
@@ -1710,96 +1903,6 @@ ipcMain.handle('extensions:delete', (event, targetPath) => {
     return { ok: false, error: err && err.message };
   }
   return { ok: true };
-});
-
-// --- Sticky Notes Persistence ---
-// Per-project file at <project>/.claudes/sticky-notes.json.
-// Writes are debounced per-projectPath, atomic (tmp + rename), and flushed on quit.
-// Malformed JSON on load is quarantined to sticky-notes.corrupt-<ts>.json so user content isn't silently overwritten.
-
-const STICKY_NOTES_WRITE_DEBOUNCE_MS = 400;
-const pendingStickyNotes = new Map(); // projectPath -> { timer, notes }
-
-function writeStickyNotesAtomic(projectPath, notes) {
-  const safeBase = assertInsideAllowedRoots(projectPath);
-  const claudesDir = path.join(safeBase, '.claudes');
-  if (!fs.existsSync(claudesDir)) {
-    fs.mkdirSync(claudesDir, { recursive: true });
-  }
-  const target = path.join(claudesDir, 'sticky-notes.json');
-  const tmp = target + '.tmp';
-  const payload = JSON.stringify({ notes: Array.isArray(notes) ? notes : [] }, null, 2);
-  fs.writeFileSync(tmp, payload, 'utf8');
-  fs.renameSync(tmp, target);
-}
-
-function scheduleWriteStickyNotes(projectPath, notes) {
-  const existing = pendingStickyNotes.get(projectPath);
-  if (existing && existing.timer) {
-    clearTimeout(existing.timer);
-  }
-  const entry = { notes: notes, timer: null };
-  entry.timer = setTimeout(() => {
-    pendingStickyNotes.delete(projectPath);
-    try { writeStickyNotesAtomic(projectPath, entry.notes); } catch (err) { console.error('writeStickyNotes failed:', err); }
-  }, STICKY_NOTES_WRITE_DEBOUNCE_MS);
-  pendingStickyNotes.set(projectPath, entry);
-}
-
-function flushPendingStickyNotes() {
-  for (const [projectPath, entry] of pendingStickyNotes.entries()) {
-    if (entry.timer) clearTimeout(entry.timer);
-    try { writeStickyNotesAtomic(projectPath, entry.notes); } catch (err) { console.error('writeStickyNotes failed:', err); }
-  }
-  pendingStickyNotes.clear();
-}
-
-ipcMain.handle('sticky-notes:load', (event, projectPath) => {
-  let safeBase;
-  try { safeBase = assertInsideAllowedRoots(projectPath); }
-  catch { return []; }
-  const notesFile = path.join(safeBase, '.claudes', 'sticky-notes.json');
-  if (!fs.existsSync(notesFile)) return [];
-  let raw;
-  try {
-    raw = fs.readFileSync(notesFile, 'utf8');
-  } catch {
-    return [];
-  }
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    try {
-      const corrupt = path.join(safeBase, '.claudes', 'sticky-notes.corrupt-' + Date.now() + '.json');
-      fs.renameSync(notesFile, corrupt);
-    } catch (err) {
-      console.error('sticky-notes quarantine failed:', err);
-    }
-    return [];
-  }
-  const notes = Array.isArray(data && data.notes) ? data.notes : [];
-  // Forward-compat defaults for v1 files that lack new keys.
-  return notes.map((n) => {
-    const out = {
-      id: n.id,
-      content: typeof n.content === 'string' ? n.content : '',
-      x: typeof n.x === 'number' ? n.x : 20,
-      y: typeof n.y === 'number' ? n.y : 20,
-      width: typeof n.width === 'number' ? n.width : 240,
-      height: typeof n.height === 'number' ? n.height : 180,
-      color: typeof n.color === 'string' ? n.color : 'yellow',
-      fontSize: typeof n.fontSize === 'number' ? n.fontSize : 15
-    };
-    if (n.anchor && typeof n.anchor === 'object') out.anchor = n.anchor;
-    return out;
-  });
-});
-
-ipcMain.handle('sticky-notes:save', (event, projectPath, notes) => {
-  try { assertInsideAllowedRoots(projectPath); }
-  catch { return; }
-  scheduleWriteStickyNotes(projectPath, notes);
 });
 
 // --- CLAUDE.md Management ---
@@ -2175,7 +2278,10 @@ function isSafeGitHash(hash) {
   return typeof hash === 'string' && /^[0-9a-fA-F]{4,64}$/.test(hash);
 }
 
-ipcMain.handle('git:status', async (event, projectPath) => {
+ipcMain.handle('git:status', async (event, projectPath, branch) => {
+  // Branch override: working/staged status is only meaningful for the
+  // currently checked-out branch, so report empty for any other branch.
+  if (branch) return [];
   try {
     const output = await runGit(projectPath, ['status', '--porcelain'], 5000);
     return output.replace(/\s+$/, '').split('\n').filter(Boolean).map(line => ({
@@ -2187,7 +2293,8 @@ ipcMain.handle('git:status', async (event, projectPath) => {
   }
 });
 
-ipcMain.handle('git:branch', async (event, projectPath) => {
+ipcMain.handle('git:branch', async (event, projectPath, branch) => {
+  if (branch) return branch;
   try {
     return (await runGit(projectPath, ['branch', '--show-current'], 5000)).trim();
   } catch {
@@ -2319,7 +2426,22 @@ ipcMain.handle('git:createBranch', async (event, projectPath, branchName) => {
   }
 });
 
-ipcMain.handle('git:aheadBehind', async (event, projectPath) => {
+ipcMain.handle('git:aheadBehind', async (event, projectPath, branch) => {
+  if (branch) {
+    try {
+      // ahead = local-only, behind = upstream-only, matching the shape
+      // returned by the no-branch path. left = upstream, right = branch.
+      const output = await runGit(
+        projectPath,
+        ['rev-list', '--left-right', '--count', 'refs/remotes/origin/' + branch + '...refs/heads/' + branch],
+        5000
+      );
+      const parts = output.trim().split(/\s+/);
+      return { ahead: parseInt(parts[1]) || 0, behind: parseInt(parts[0]) || 0 };
+    } catch {
+      return { ahead: 0, behind: 0 };
+    }
+  }
   try {
     const output = await runGit(projectPath, ['rev-list', '--count', '--left-right', 'HEAD...@{upstream}'], 5000);
     const parts = output.trim().split(/\s+/);
@@ -2344,9 +2466,11 @@ ipcMain.handle('git:diff', async (event, projectPath, filePath, staged) => {
   }
 });
 
-ipcMain.handle('git:graphLog', async (event, projectPath, count) => {
+ipcMain.handle('git:graphLog', async (event, projectPath, count, branch) => {
   try {
-    const output = await runGit(projectPath, ['log', '--format=%H|%h|%P|%s|%an|%ar|%D', '-' + (count || 50), '--no-color'], 10000);
+    const args = ['log', '--format=%H|%h|%P|%s|%an|%ar|%D', '-' + (count || 50), '--no-color'];
+    if (branch) args.push('refs/heads/' + branch);
+    const output = await runGit(projectPath, args, 10000);
     return output.trim().split('\n').filter(Boolean).map(line => {
       const parts = line.split('|');
       return {
@@ -2436,7 +2560,11 @@ ipcMain.handle('git:diffCommit', async (event, projectPath, hash, filePath) => {
   }
 });
 
-ipcMain.handle('git:diffStat', async (event, projectPath, staged) => {
+ipcMain.handle('git:diffStat', async (event, projectPath, staged, branch) => {
+  // Branch override: working/staged diffs only mean something for the
+  // currently checked-out branch. For a non-checked-out branch the renderer
+  // should call git:diffStatVsBase instead.
+  if (branch) return [];
   try {
     const args = staged ? ['diff', '--numstat', '--cached'] : ['diff', '--numstat'];
     const output = await runGit(projectPath, args, 5000);
@@ -2450,6 +2578,73 @@ ipcMain.handle('git:diffStat', async (event, projectPath, staged) => {
     });
   } catch {
     return [];
+  }
+});
+
+// Branch-vs-base diff: file-level numstat for `<base>...<branch>`.
+// baseRef defaults to origin/main, falling back to origin/master, then HEAD.
+ipcMain.handle('git:diffStatVsBase', async (event, projectPath, branch, baseRef) => {
+  if (!projectPath || !branch) return [];
+  const tryBases = baseRef ? [baseRef] : ['origin/main', 'origin/master', 'HEAD'];
+  for (const base of tryBases) {
+    try {
+      const output = await runGit(
+        projectPath,
+        ['diff', '--numstat', base + '...refs/heads/' + branch],
+        10000
+      );
+      return output.trim().split('\n').filter(Boolean).map(line => {
+        const parts = line.split('\t');
+        return {
+          insertions: parts[0] === '-' ? 0 : parseInt(parts[0]) || 0,
+          deletions: parts[1] === '-' ? 0 : parseInt(parts[1]) || 0,
+          file: parts[2]
+        };
+      });
+    } catch {
+      // try next base
+    }
+  }
+  return [];
+});
+
+async function listGitWorktrees(projectPath) {
+  if (!projectPath) return [];
+  try {
+    const out = await runGit(projectPath, ['worktree', 'list', '--porcelain'], 5000);
+    const entries = [];
+    let cur = {};
+    for (const rawLine of out.split(/\r?\n/)) {
+      const line = rawLine.trimEnd();
+      if (line.startsWith('worktree ')) {
+        if (cur.path) entries.push(cur);
+        cur = { path: line.slice('worktree '.length).trim() };
+      } else if (line.startsWith('branch ')) {
+        cur.branch = line.slice('branch '.length).trim();
+      } else if (line === '') {
+        if (cur.path) { entries.push(cur); cur = {}; }
+      }
+    }
+    if (cur.path) entries.push(cur);
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+ipcMain.handle('paths:resolveWorktree', (event, projectPath, value) =>
+  resolveWorktreeCandidates(projectPath, value, fs.promises.stat, listGitWorktrees));
+
+ipcMain.handle('paths:exists', (event, p) =>
+  pathIsDirectory(p, fs.promises.stat));
+
+ipcMain.handle('git:isInsideWorkTree', async (event, cwd) => {
+  if (!cwd) return false;
+  try {
+    const out = await runGit(cwd, ['rev-parse', '--is-inside-work-tree'], 5000);
+    return out.trim() === 'true';
+  } catch {
+    return false;
   }
 });
 

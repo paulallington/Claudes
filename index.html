@@ -304,7 +304,7 @@
               </div>
               <div class="spawn-divider"></div>
               <div class="spawn-option spawn-custom-row">
-                <input type="text" id="opt-worktree" placeholder="Worktree name..." title="Spawn in isolated git worktree (--worktree)">
+                <input type="text" id="opt-worktree" placeholder="Worktree name or path..." title="Worktree name (passed as --worktree) OR an absolute/relative directory path. If it resolves to an existing directory, the column spawns there.">
               </div>
               <div class="spawn-option spawn-custom-row">
                 <input type="text" id="opt-custom-args" placeholder="Custom args..." title="Additional CLI arguments">
@@ -612,6 +612,7 @@
               4. Resumed sessions show up in <code>/resume</code> on either machine.
             </div>
           </div>
+        </div>
         </div>
       </div>
     </div>
@@ -1315,6 +1316,9 @@
   <script src="./node_modules/prismjs/components/prism-go.min.js"></script>
   <script src="./node_modules/prismjs/components/prism-css.min.js"></script>
   <script src="./node_modules/prismjs/components/prism-markdown.min.js"></script>
+  <script src="./lib/git-target.js"></script>
+  <script src="./lib/maximize-layout.js"></script>
+  <script src="./lib/row-layout.js"></script>
   <div id="clawd-widget" class="clawd-widget hidden" aria-hidden="true">
     <img id="clawd-widget-img" class="clawd-widget-img" alt="" draggable="false">
     <div id="clawd-widget-bubble" class="clawd-widget-bubble hidden"></div>
