@@ -7,6 +7,10 @@ const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
+const { resolveWorktreeCandidates, pathIsDirectory } = require('./lib/path-utils');
+const { findLastGitBranch } = require('./lib/session-branch');
+const { detectActiveWorktree } = require('./lib/worktree-detect');
+const ReviewComments = require('./lib/review-comments');
 const https = require('https');
 
 // macOS GUI launches (Dock/Finder) inherit launchd's minimal PATH —
@@ -188,6 +192,18 @@ const LOOPS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'loop-runs' : 'loo
 const AUTOMATIONS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'automations.json' : 'automations-dev.json');
 const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-runs' : 'automation-runs-dev');
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
+const PIPELINES_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'pipelines.json' : 'pipelines-dev.json');
+const DEFAULT_PIPELINES = {
+  version: 1,
+  pipeline: {
+    id: 'default',
+    name: 'Default workflow',
+    userSteps: [
+      { id: 'anchor-plan', label: 'Plan', keywords: [] },
+      { id: 'anchor-execute', label: 'Execute', keywords: [] }
+    ]
+  }
+};
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
 const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
 
@@ -805,6 +821,19 @@ function createWindow() {
     }
   });
 
+  // xterm captures these at the renderer; intercept here so F11/Esc still work.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.alt || input.control || input.meta || input.shift) return;
+    if (input.key === 'F11') {
+      mainWindow.setFullScreen(!mainWindow.isFullScreen());
+      event.preventDefault();
+    } else if (input.key === 'Escape' && mainWindow.isFullScreen()) {
+      mainWindow.setFullScreen(false);
+      event.preventDefault();
+    }
+  });
+
   lockdownWebContents(mainWindow.webContents);
   mainWindow.loadFile('index.html');
 
@@ -889,6 +918,19 @@ function createProjectWindow(projectKey) {
       // we don't use <webview> at all.
       spellcheck: false,
       webviewTag: false
+    }
+  });
+
+  // xterm captures these at the renderer; intercept here so F11/Esc still work.
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.alt || input.control || input.meta || input.shift) return;
+    if (input.key === 'F11') {
+      win.setFullScreen(!win.isFullScreen());
+      event.preventDefault();
+    } else if (input.key === 'Escape' && win.isFullScreen()) {
+      win.setFullScreen(false);
+      event.preventDefault();
     }
   });
 
@@ -1324,6 +1366,58 @@ ipcMain.handle('endpoint:fetchModels', async (event, args) => {
   }
 });
 
+ipcMain.handle('pipelines:get', () => {
+  ensureConfigDir();
+  try {
+    const raw = fs.readFileSync(PIPELINES_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    if (data && typeof data === 'object' && data.pipeline && Array.isArray(data.pipeline.userSteps)) {
+      const steps = data.pipeline.userSteps;
+      const hasPlan = steps.some(s => s && s.id === 'anchor-plan');
+      const hasExec = steps.some(s => s && s.id === 'anchor-execute');
+      if (!hasPlan) steps.unshift({ id: 'anchor-plan', label: 'Plan', keywords: [] });
+      if (!hasExec) {
+        const planIdx = steps.findIndex(s => s && s.id === 'anchor-plan');
+        steps.splice(planIdx + 1, 0, { id: 'anchor-execute', label: 'Execute', keywords: [] });
+      }
+      return data;
+    }
+  } catch (e) { /* file missing, parse error, wrong shape */ }
+  return DEFAULT_PIPELINES;
+});
+
+ipcMain.handle('pipelines:save', (event, data) => {
+  ensureConfigDir();
+  // Pass-through unknown top-level fields (forward compat); ensure shape on key fields.
+  const incoming = (data && typeof data === 'object') ? data : {};
+  const pipeline = (incoming.pipeline && typeof incoming.pipeline === 'object')
+    ? incoming.pipeline
+    : { id: 'default', name: 'Default workflow', userSteps: [
+        { id: 'anchor-plan', label: 'Plan', keywords: [] },
+        { id: 'anchor-execute', label: 'Execute', keywords: [] }
+      ] };
+  const userSteps = Array.isArray(pipeline.userSteps) ? pipeline.userSteps : [];
+  const payload = {
+    ...incoming,
+    version: typeof incoming.version === 'number' ? incoming.version : 1,
+    pipeline: {
+      ...pipeline,
+      id: pipeline.id || 'default',
+      name: pipeline.name || 'Default workflow',
+      userSteps: userSteps
+    }
+  };
+  const tmp = PIPELINES_FILE + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+    fs.renameSync(tmp, PIPELINES_FILE);
+    return true;
+  } catch (err) {
+    console.error('pipelines:save failed:', err);
+    return false;
+  }
+});
+
 ipcMain.handle('popout:setTransfer', (event, projectKey, transferList) => {
   if (transferList && transferList.length > 0) {
     pendingPopoutTransfers.set(projectKey, transferList);
@@ -1510,17 +1604,90 @@ ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId) => {
   }
 });
 
-// Save/load session state per project (which sessions were open in columns)
-ipcMain.handle('sessions:save', (event, projectPath, sessionData) => {
+// Read the LAST gitBranch recorded in a session JSONL. Tail-reads the file
+// (last ~64KB) since Claude appends turns over time and the most recent
+// branch is always near the end. Returns null on missing file / no match.
+ipcMain.handle('git:detectSessionBranch', (event, projectPath, sessionId) => {
+  if (!projectPath || !sessionId) return null;
   try {
-    const safeBase = assertInsideAllowedRoots(projectPath);
-    const claudesDir = path.join(safeBase, '.claudes');
-    if (!fs.existsSync(claudesDir)) {
-      fs.mkdirSync(claudesDir, { recursive: true });
+    const claudeKey = projectPathToClaudeKey(projectPath);
+    const jsonlPath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+    const stat = fs.statSync(jsonlPath);
+    const tailSize = Math.min(stat.size, 64 * 1024);
+    if (tailSize === 0) return null;
+    const fd = fs.openSync(jsonlPath, 'r');
+    try {
+      const buf = Buffer.alloc(tailSize);
+      fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+      const content = buf.toString('utf8');
+      return findLastGitBranch(content);
+    } finally {
+      fs.closeSync(fd);
     }
-    const sessionsFile = path.join(claudesDir, 'sessions.json');
-    fs.writeFileSync(sessionsFile, JSON.stringify({ sessions: sessionData }, null, 2), 'utf8');
-  } catch (err) { return { error: err.message }; }
+  } catch {
+    return null;
+  }
+});
+
+// Phase 3: detect which worktree the session is actively working in by
+// scanning the JSONL tail for `cd <path>` commands and `"file_path":"..."`
+// entries. The Claude CLI's recorded gitBranch reflects ITS own cwd (project
+// root) — useless for sessions that do their work via Bash `cd worktree && ...`.
+ipcMain.handle('git:detectSessionWorktree', async (event, projectPath, sessionId) => {
+  if (!projectPath || !sessionId) return null;
+  try {
+    const claudeKey = projectPathToClaudeKey(projectPath);
+    const jsonlPath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+    const stat = fs.statSync(jsonlPath);
+    const tailSize = Math.min(stat.size, 512 * 1024);
+    if (tailSize === 0) return null;
+    const fd = fs.openSync(jsonlPath, 'r');
+    let content;
+    try {
+      const buf = Buffer.alloc(tailSize);
+      fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+      content = buf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+    const worktrees = await listGitWorktrees(projectPath);
+    return detectActiveWorktree(content, worktrees);
+  } catch {
+    return null;
+  }
+});
+
+// Save/load session state per project.
+//
+// Disk shape (synthesized v2): { version: 2, sessions: [...], rowHeightRatios: [...],
+//   workspaces: { "<ws-id>": { sessions: [...], rowHeightRatios: [...] } } }
+// Each session entry: { sessionId, title, rowIdx, widthRatio }
+// Legacy shapes:
+//   - HEAD-only v2 (pre-workspaces): { version: 2, rows: [{ heightRatio, columns: [...] }] }
+//   - personal/main flat: { sessions: [...], workspaces: { id: { sessions: [...] } } }
+//   - very old: bare array
+// Renderer's persistSessions/restoreSessions handle promotion; main.js just persists the blob atomically
+// (tmp+rename so a partial write can't corrupt multi-workspace state).
+ipcMain.handle('sessions:save', (event, projectPath, blob) => {
+  const safeBase = assertInsideAllowedRoots(projectPath);
+  const claudesDir = path.join(safeBase, '.claudes');
+  if (!fs.existsSync(claudesDir)) {
+    fs.mkdirSync(claudesDir, { recursive: true });
+  }
+  const target = path.join(claudesDir, 'sessions.json');
+  const tmp = target + '.tmp';
+  // Accept either the new blob shape or a bare array (legacy callers).
+  // Spread the input first so top-level fields like `version` and `rowHeightRatios`
+  // round-trip; then overwrite `sessions` and `workspaces` with defensive defaults.
+  const payload = Array.isArray(blob)
+    ? { sessions: blob, workspaces: {} }
+    : {
+        ...((blob && typeof blob === 'object') ? blob : {}),
+        sessions: Array.isArray(blob && blob.sessions) ? blob.sessions : [],
+        workspaces: (blob && blob.workspaces && typeof blob.workspaces === 'object') ? blob.workspaces : {}
+      };
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+  fs.renameSync(tmp, target);
 });
 
 ipcMain.handle('sessions:load', (event, projectPath) => {
@@ -1528,9 +1695,366 @@ ipcMain.handle('sessions:load', (event, projectPath) => {
     const safeBase = assertInsideAllowedRoots(projectPath);
     const sessionsFile = path.join(safeBase, '.claudes', 'sessions.json');
     const data = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
-    return data.sessions || [];
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      return {
+        ...data,
+        sessions: Array.isArray(data.sessions) ? data.sessions : [],
+        workspaces: (data.workspaces && typeof data.workspaces === 'object') ? data.workspaces : {}
+      };
+    }
+    return { sessions: [], workspaces: {} };
+  } catch {
+    return { sessions: [], workspaces: {} };
+  }
+});
+
+// --- Sticky Notes Persistence ---
+// Primary: <project>/.claudes/sticky-notes.json (back-compat with pre-workspaces users).
+// Sub-workspace: <project>/.claudes/sticky-notes-<workspaceId>.json — one overlay per workspace.
+// Writes are debounced per-(project, workspace), atomic (tmp + rename), and flushed on quit.
+// Malformed JSON on load is quarantined to sticky-notes.corrupt-<ts>.json so user content isn't silently overwritten.
+//
+// personal-only: workspace awareness added on the personal/main branch so the
+// mdrichardson fork ships a usable build before upstream rebases either
+// feat/workspaces or feat/sticky-notes to absorb the same fix. See
+// docs/superpowers/plans/2026-04-24-sticky-notes-workspace-aware-rebase.md
+// (on feat/workspaces) for the upstream plan.
+
+const STICKY_NOTES_WRITE_DEBOUNCE_MS = 400;
+const pendingStickyNotes = new Map(); // stickyKey -> { projectPath, workspaceId, timer, notes }
+
+function stickyKey(projectPath, workspaceId) {
+  return (workspaceId == null) ? projectPath : (projectPath + '::' + workspaceId);
+}
+
+function stickyNotesFile(projectPath, workspaceId) {
+  const dir = path.join(projectPath, '.claudes');
+  return (workspaceId == null)
+    ? path.join(dir, 'sticky-notes.json')
+    : path.join(dir, 'sticky-notes-' + workspaceId + '.json');
+}
+
+function writeStickyNotesAtomic(projectPath, workspaceId, notes) {
+  const claudesDir = path.join(projectPath, '.claudes');
+  if (!fs.existsSync(claudesDir)) {
+    fs.mkdirSync(claudesDir, { recursive: true });
+  }
+  const target = stickyNotesFile(projectPath, workspaceId);
+  const tmp = target + '.tmp';
+  const payload = JSON.stringify({ notes: Array.isArray(notes) ? notes : [] }, null, 2);
+  fs.writeFileSync(tmp, payload, 'utf8');
+  fs.renameSync(tmp, target);
+}
+
+function scheduleWriteStickyNotes(projectPath, workspaceId, notes) {
+  const key = stickyKey(projectPath, workspaceId);
+  const existing = pendingStickyNotes.get(key);
+  if (existing && existing.timer) {
+    clearTimeout(existing.timer);
+  }
+  const entry = { projectPath, workspaceId, notes, timer: null };
+  entry.timer = setTimeout(() => {
+    pendingStickyNotes.delete(key);
+    try { writeStickyNotesAtomic(projectPath, workspaceId, entry.notes); } catch (err) { console.error('writeStickyNotes failed:', err); }
+  }, STICKY_NOTES_WRITE_DEBOUNCE_MS);
+  pendingStickyNotes.set(key, entry);
+}
+
+function flushPendingStickyNotes() {
+  for (const [, entry] of pendingStickyNotes.entries()) {
+    if (entry.timer) clearTimeout(entry.timer);
+    try { writeStickyNotesAtomic(entry.projectPath, entry.workspaceId, entry.notes); } catch (err) { console.error('writeStickyNotes failed:', err); }
+  }
+  pendingStickyNotes.clear();
+}
+
+ipcMain.handle('sticky-notes:load', (event, projectPath, workspaceId) => {
+  const notesFile = stickyNotesFile(projectPath, workspaceId);
+  if (!fs.existsSync(notesFile)) return [];
+  let raw;
+  try {
+    raw = fs.readFileSync(notesFile, 'utf8');
   } catch {
     return [];
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    try {
+      const corrupt = path.join(projectPath, '.claudes',
+        'sticky-notes' + (workspaceId == null ? '' : '-' + workspaceId) + '.corrupt-' + Date.now() + '.json');
+      fs.renameSync(notesFile, corrupt);
+    } catch (err) {
+      console.error('sticky-notes quarantine failed:', err);
+    }
+    return [];
+  }
+  const notes = Array.isArray(data && data.notes) ? data.notes : [];
+  // Forward-compat defaults for v1 files that lack new keys.
+  return notes.map((n) => {
+    const out = {
+      id: n.id,
+      content: typeof n.content === 'string' ? n.content : '',
+      x: typeof n.x === 'number' ? n.x : 20,
+      y: typeof n.y === 'number' ? n.y : 20,
+      width: typeof n.width === 'number' ? n.width : 240,
+      height: typeof n.height === 'number' ? n.height : 180,
+      color: typeof n.color === 'string' ? n.color : 'yellow',
+      fontSize: typeof n.fontSize === 'number' ? n.fontSize : 15
+    };
+    if (n.anchor && typeof n.anchor === 'object') out.anchor = n.anchor;
+    return out;
+  });
+});
+
+ipcMain.handle('sticky-notes:save', (event, projectPath, workspaceId, notes) => {
+  scheduleWriteStickyNotes(projectPath, workspaceId, notes);
+});
+
+// --- Review Comments Persistence ---
+// Per-(workspace, session, scope) JSON files under <project>/.claudes/.
+// Filename rules:
+//   wsId=null,  sid=known,    scope=working      -> review-comments-<sid>.json
+//   wsId=ws,    sid=known,    scope=working      -> review-comments-<ws>-<sid>.json
+//   wsId=null,  sid=known,    scope=commit-X     -> review-comments-<sid>-commit-<hash7>.json
+//   wsId=ws,    sid=known,    scope=commit-X     -> review-comments-<ws>-<sid>-commit-<hash7>.json
+//   wsId=null,  sid=null,     scope=working,col  -> review-comments-pending-<colId>.json
+//   wsId=ws,    sid=null,     scope=working,col  -> review-comments-<ws>-pending-<colId>.json
+//   wsId=null,  sid=no-session,scope=working     -> review-comments-no-session.json
+// Writes are debounced per-(project, ws, sid|colId, scope), atomic (tmp+rename), flushed on quit.
+// Read-modify-write merges incoming with existing on disk so popout + main editing same session
+// don't silently overwrite each other; source (incoming) wins on id conflict.
+// Malformed JSON on load is quarantined to <filename>.corrupt-<ts>.json.
+
+const REVIEW_COMMENTS_WRITE_DEBOUNCE_MS = 400;
+const pendingReviewComments = new Map();
+
+function reviewCommentsKey(projectPath, workspaceId, sessionId, scope, colId) {
+  return projectPath + '::' +
+    (workspaceId == null ? '' : workspaceId) + '::' +
+    (sessionId == null ? '' : sessionId) + '::' +
+    (scope || '') + '::' +
+    (colId == null ? '' : colId);
+}
+
+function reviewCommentsFile(projectPath, workspaceId, sessionId, scope, colId) {
+  const dir = path.join(projectPath, '.claudes');
+  const wsPrefix = (workspaceId == null) ? '' : (workspaceId + '-');
+  let basename;
+  if (sessionId == null) {
+    // Pending (no session yet) — colId required
+    basename = 'review-comments-' + wsPrefix + 'pending-' + colId + '.json';
+  } else {
+    // Known session id (or 'no-session' sentinel)
+    if (scope === 'working') {
+      basename = 'review-comments-' + wsPrefix + sessionId + '.json';
+    } else {
+      // scope is 'commit-<hash7>' — caller composed it; we suffix the basename
+      basename = 'review-comments-' + wsPrefix + sessionId + '-' + scope + '.json';
+    }
+  }
+  return path.join(dir, basename);
+}
+
+function writeReviewCommentsAtomic(projectPath, workspaceId, sessionId, scope, comments, colId) {
+  const claudesDir = path.join(projectPath, '.claudes');
+  if (!fs.existsSync(claudesDir)) {
+    fs.mkdirSync(claudesDir, { recursive: true });
+  }
+  const target = reviewCommentsFile(projectPath, workspaceId, sessionId, scope, colId);
+  // Read-modify-write merge: source (incoming) wins on id conflict.
+  const existing = ReviewComments.readReviewCommentsFromDisk(target);
+  const merged = ReviewComments.migratePendingComments(
+    Array.isArray(comments) ? comments : [],
+    existing
+  );
+  const tmp = target + '.tmp';
+  const payload = JSON.stringify({ comments: merged }, null, 2);
+  fs.writeFileSync(tmp, payload, 'utf8');
+  fs.renameSync(tmp, target);
+}
+
+function scheduleWriteReviewComments(projectPath, workspaceId, sessionId, scope, comments, colId) {
+  const key = reviewCommentsKey(projectPath, workspaceId, sessionId, scope, colId);
+  const existing = pendingReviewComments.get(key);
+  if (existing && existing.timer) {
+    clearTimeout(existing.timer);
+  }
+  const entry = { projectPath, workspaceId, sessionId, scope, colId, comments, timer: null };
+  entry.timer = setTimeout(() => {
+    pendingReviewComments.delete(key);
+    try {
+      writeReviewCommentsAtomic(projectPath, workspaceId, sessionId, scope, entry.comments, colId);
+    } catch (err) {
+      console.error('writeReviewComments failed:', err);
+    }
+  }, REVIEW_COMMENTS_WRITE_DEBOUNCE_MS);
+  pendingReviewComments.set(key, entry);
+}
+
+function flushPendingReviewComments() {
+  for (const [, entry] of pendingReviewComments.entries()) {
+    if (entry.timer) clearTimeout(entry.timer);
+    try {
+      writeReviewCommentsAtomic(entry.projectPath, entry.workspaceId, entry.sessionId, entry.scope, entry.comments, entry.colId);
+    } catch (err) {
+      console.error('writeReviewComments failed:', err);
+    }
+  }
+  pendingReviewComments.clear();
+}
+
+function validateReviewSegments(workspaceId, sessionId, scope, colId) {
+  if (workspaceId != null) ReviewComments.safeIdSegment(workspaceId);
+  if (sessionId != null) ReviewComments.safeIdSegment(sessionId);
+  if (colId != null) ReviewComments.safeIdSegment(colId);
+  if (scope != null && scope !== 'working') {
+    // Commit scope: split 'commit-<hash7>' and validate the hash segment.
+    if (typeof scope !== 'string' || scope.indexOf('commit-') !== 0) {
+      throw new Error('invalid scope: ' + scope);
+    }
+    const hash = scope.slice('commit-'.length);
+    ReviewComments.safeIdSegment(hash);
+  }
+}
+
+ipcMain.handle('review-comments:load', (event, projectPath, wsId, sessionId, scope, colId) => {
+  try {
+    validateReviewSegments(wsId, sessionId, scope, colId);
+  } catch (err) {
+    console.error('review-comments:load validation failed:', err);
+    return [];
+  }
+  const file = reviewCommentsFile(projectPath, wsId, sessionId, scope, colId);
+  return ReviewComments.readReviewCommentsFromDisk(file);
+});
+
+ipcMain.handle('review-comments:save', (event, projectPath, wsId, sessionId, scope, comments, colId) => {
+  try {
+    validateReviewSegments(wsId, sessionId, scope, colId);
+  } catch (err) {
+    console.error('review-comments:save validation failed:', err);
+    return;
+  }
+  scheduleWriteReviewComments(projectPath, wsId, sessionId, scope, comments, colId);
+});
+
+// Rename per-column review-comments files when a column transitions from
+// pending (no sessionId) -> resumed (sessionId), or oldSid -> newSid.
+function migrateReviewCommentsForColumnImpl(projectPath, wsId, oldSid, newSid, colId) {
+  if (oldSid == null && newSid == null) return { migrated: 0 };
+  if (oldSid != null && newSid != null && oldSid === newSid) return { migrated: 0 };
+
+  try {
+    if (wsId != null) ReviewComments.safeIdSegment(wsId);
+    if (oldSid != null) ReviewComments.safeIdSegment(oldSid);
+    if (newSid != null) ReviewComments.safeIdSegment(newSid);
+    if (colId != null) ReviewComments.safeIdSegment(colId);
+  } catch (err) {
+    console.error('migrateReviewCommentsForColumn validation failed:', err);
+    return { migrated: 0 };
+  }
+
+  const claudesDir = path.join(projectPath, '.claudes');
+  if (!fs.existsSync(claudesDir)) return { migrated: 0 };
+  const wsPrefix = (wsId == null) ? '' : (wsId + '-');
+  let migrated = 0;
+
+  if (oldSid == null && newSid != null) {
+    // pending -> known session
+    if (colId == null) return { migrated: 0 };
+    const pendingBase = 'review-comments-' + wsPrefix + 'pending-' + colId + '.json';
+    const pendingPath = path.join(claudesDir, pendingBase);
+    if (!fs.existsSync(pendingPath)) return { migrated: 0 };
+    const targetBase = 'review-comments-' + wsPrefix + newSid + '.json';
+    const targetPath = path.join(claudesDir, targetBase);
+    try {
+      const srcArr = ReviewComments.readReviewCommentsFromDisk(pendingPath);
+      const dstArr = ReviewComments.readReviewCommentsFromDisk(targetPath);
+      const merged = ReviewComments.migratePendingComments(srcArr, dstArr);
+      fs.writeFileSync(targetPath + '.tmp', JSON.stringify({ comments: merged }, null, 2), 'utf8');
+      fs.renameSync(targetPath + '.tmp', targetPath);
+      try { fs.unlinkSync(pendingPath); } catch (err) { console.error('migrate unlink pending failed:', err); }
+      migrated++;
+    } catch (err) {
+      console.error('migrate pending->session failed:', err);
+    }
+    return { migrated };
+  }
+
+  if (oldSid != null && newSid != null && oldSid !== newSid) {
+    // Find all files matching review-comments-<wsPrefix><oldSid>...
+    const oldBaseStart = 'review-comments-' + wsPrefix + oldSid;
+    let entries;
+    try {
+      entries = fs.readdirSync(claudesDir);
+    } catch (err) {
+      console.error('migrate readdir failed:', err);
+      return { migrated: 0 };
+    }
+    for (const entry of entries) {
+      if (!entry.startsWith(oldBaseStart)) continue;
+      // Anything after oldBaseStart should start with '.' (just .json) or '-' (commit-...)
+      // and must end in .json. Avoid e.g. matching a different sid that begins with oldSid.
+      const tail = entry.slice(oldBaseStart.length);
+      if (!tail.endsWith('.json')) continue;
+      if (tail.length > 0 && tail[0] !== '.' && tail[0] !== '-') continue;
+      const newEntry = 'review-comments-' + wsPrefix + newSid + tail;
+      const oldPath = path.join(claudesDir, entry);
+      const newPath = path.join(claudesDir, newEntry);
+      try {
+        const srcArr = ReviewComments.readReviewCommentsFromDisk(oldPath);
+        const dstArr = ReviewComments.readReviewCommentsFromDisk(newPath);
+        const merged = ReviewComments.migratePendingComments(srcArr, dstArr);
+        fs.writeFileSync(newPath + '.tmp', JSON.stringify({ comments: merged }, null, 2), 'utf8');
+        fs.renameSync(newPath + '.tmp', newPath);
+        try { fs.unlinkSync(oldPath); } catch (err) { console.error('migrate unlink old failed:', err); }
+        migrated++;
+      } catch (err) {
+        console.error('migrate oldSid->newSid failed for ' + entry + ':', err);
+      }
+    }
+    return { migrated };
+  }
+
+  return { migrated: 0 };
+}
+
+// Flush any in-flight pending save for this column under the OLD identity
+// (any scope, any colId), so we don't race the rename in migrateForColumn.
+function flushPendingForColumn(projectPath, wsId, sessionId, colId) {
+  for (const [key, entry] of Array.from(pendingReviewComments.entries())) {
+    // Match if same project + workspace, AND same column under either
+    // session id OR pending colId (covers both pending->real and real->real).
+    if (entry.projectPath !== projectPath) continue;
+    if ((entry.workspaceId || null) !== (wsId || null)) continue;
+    var matchesSession = (sessionId != null && entry.sessionId === sessionId);
+    var matchesColId = (colId != null && entry.colId === colId);
+    if (!matchesSession && !matchesColId) continue;
+    if (entry.timer) clearTimeout(entry.timer);
+    pendingReviewComments.delete(key);
+    try {
+      writeReviewCommentsAtomic(entry.projectPath, entry.workspaceId, entry.sessionId, entry.scope, entry.comments, entry.colId);
+    } catch (err) {
+      console.error('flushPendingForColumn failed:', err);
+    }
+  }
+}
+
+ipcMain.handle('review-comments:migrateForColumn', (event, projectPath, wsId, oldSid, newSid, colId) => {
+  flushPendingForColumn(projectPath, wsId, oldSid, colId);
+  return migrateReviewCommentsForColumnImpl(projectPath, wsId, oldSid, newSid, colId);
+});
+
+// Scrub all sticky-notes-<wsId>* and review-comments-<wsId>-* artifacts for a workspace.
+// Implementation lives in lib/review-comments.js so it's testable without booting Electron.
+ipcMain.handle('workspace:scrubArtifacts', (event, projectPath, wsId) => {
+  try {
+    return ReviewComments.scrubArtifactsImpl(projectPath, wsId);
+  } catch (err) {
+    console.error('workspace:scrubArtifacts failed:', err);
+    return { removed: 0 };
   }
 });
 
@@ -1710,96 +2234,6 @@ ipcMain.handle('extensions:delete', (event, targetPath) => {
     return { ok: false, error: err && err.message };
   }
   return { ok: true };
-});
-
-// --- Sticky Notes Persistence ---
-// Per-project file at <project>/.claudes/sticky-notes.json.
-// Writes are debounced per-projectPath, atomic (tmp + rename), and flushed on quit.
-// Malformed JSON on load is quarantined to sticky-notes.corrupt-<ts>.json so user content isn't silently overwritten.
-
-const STICKY_NOTES_WRITE_DEBOUNCE_MS = 400;
-const pendingStickyNotes = new Map(); // projectPath -> { timer, notes }
-
-function writeStickyNotesAtomic(projectPath, notes) {
-  const safeBase = assertInsideAllowedRoots(projectPath);
-  const claudesDir = path.join(safeBase, '.claudes');
-  if (!fs.existsSync(claudesDir)) {
-    fs.mkdirSync(claudesDir, { recursive: true });
-  }
-  const target = path.join(claudesDir, 'sticky-notes.json');
-  const tmp = target + '.tmp';
-  const payload = JSON.stringify({ notes: Array.isArray(notes) ? notes : [] }, null, 2);
-  fs.writeFileSync(tmp, payload, 'utf8');
-  fs.renameSync(tmp, target);
-}
-
-function scheduleWriteStickyNotes(projectPath, notes) {
-  const existing = pendingStickyNotes.get(projectPath);
-  if (existing && existing.timer) {
-    clearTimeout(existing.timer);
-  }
-  const entry = { notes: notes, timer: null };
-  entry.timer = setTimeout(() => {
-    pendingStickyNotes.delete(projectPath);
-    try { writeStickyNotesAtomic(projectPath, entry.notes); } catch (err) { console.error('writeStickyNotes failed:', err); }
-  }, STICKY_NOTES_WRITE_DEBOUNCE_MS);
-  pendingStickyNotes.set(projectPath, entry);
-}
-
-function flushPendingStickyNotes() {
-  for (const [projectPath, entry] of pendingStickyNotes.entries()) {
-    if (entry.timer) clearTimeout(entry.timer);
-    try { writeStickyNotesAtomic(projectPath, entry.notes); } catch (err) { console.error('writeStickyNotes failed:', err); }
-  }
-  pendingStickyNotes.clear();
-}
-
-ipcMain.handle('sticky-notes:load', (event, projectPath) => {
-  let safeBase;
-  try { safeBase = assertInsideAllowedRoots(projectPath); }
-  catch { return []; }
-  const notesFile = path.join(safeBase, '.claudes', 'sticky-notes.json');
-  if (!fs.existsSync(notesFile)) return [];
-  let raw;
-  try {
-    raw = fs.readFileSync(notesFile, 'utf8');
-  } catch {
-    return [];
-  }
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    try {
-      const corrupt = path.join(safeBase, '.claudes', 'sticky-notes.corrupt-' + Date.now() + '.json');
-      fs.renameSync(notesFile, corrupt);
-    } catch (err) {
-      console.error('sticky-notes quarantine failed:', err);
-    }
-    return [];
-  }
-  const notes = Array.isArray(data && data.notes) ? data.notes : [];
-  // Forward-compat defaults for v1 files that lack new keys.
-  return notes.map((n) => {
-    const out = {
-      id: n.id,
-      content: typeof n.content === 'string' ? n.content : '',
-      x: typeof n.x === 'number' ? n.x : 20,
-      y: typeof n.y === 'number' ? n.y : 20,
-      width: typeof n.width === 'number' ? n.width : 240,
-      height: typeof n.height === 'number' ? n.height : 180,
-      color: typeof n.color === 'string' ? n.color : 'yellow',
-      fontSize: typeof n.fontSize === 'number' ? n.fontSize : 15
-    };
-    if (n.anchor && typeof n.anchor === 'object') out.anchor = n.anchor;
-    return out;
-  });
-});
-
-ipcMain.handle('sticky-notes:save', (event, projectPath, notes) => {
-  try { assertInsideAllowedRoots(projectPath); }
-  catch { return; }
-  scheduleWriteStickyNotes(projectPath, notes);
 });
 
 // --- CLAUDE.md Management ---
@@ -2175,7 +2609,10 @@ function isSafeGitHash(hash) {
   return typeof hash === 'string' && /^[0-9a-fA-F]{4,64}$/.test(hash);
 }
 
-ipcMain.handle('git:status', async (event, projectPath) => {
+ipcMain.handle('git:status', async (event, projectPath, branch) => {
+  // Branch override: working/staged status is only meaningful for the
+  // currently checked-out branch, so report empty for any other branch.
+  if (branch) return [];
   try {
     const output = await runGit(projectPath, ['status', '--porcelain'], 5000);
     return output.replace(/\s+$/, '').split('\n').filter(Boolean).map(line => ({
@@ -2187,7 +2624,8 @@ ipcMain.handle('git:status', async (event, projectPath) => {
   }
 });
 
-ipcMain.handle('git:branch', async (event, projectPath) => {
+ipcMain.handle('git:branch', async (event, projectPath, branch) => {
+  if (branch) return branch;
   try {
     return (await runGit(projectPath, ['branch', '--show-current'], 5000)).trim();
   } catch {
@@ -2319,7 +2757,22 @@ ipcMain.handle('git:createBranch', async (event, projectPath, branchName) => {
   }
 });
 
-ipcMain.handle('git:aheadBehind', async (event, projectPath) => {
+ipcMain.handle('git:aheadBehind', async (event, projectPath, branch) => {
+  if (branch) {
+    try {
+      // ahead = local-only, behind = upstream-only, matching the shape
+      // returned by the no-branch path. left = upstream, right = branch.
+      const output = await runGit(
+        projectPath,
+        ['rev-list', '--left-right', '--count', 'refs/remotes/origin/' + branch + '...refs/heads/' + branch],
+        5000
+      );
+      const parts = output.trim().split(/\s+/);
+      return { ahead: parseInt(parts[1]) || 0, behind: parseInt(parts[0]) || 0 };
+    } catch {
+      return { ahead: 0, behind: 0 };
+    }
+  }
   try {
     const output = await runGit(projectPath, ['rev-list', '--count', '--left-right', 'HEAD...@{upstream}'], 5000);
     const parts = output.trim().split(/\s+/);
@@ -2344,9 +2797,11 @@ ipcMain.handle('git:diff', async (event, projectPath, filePath, staged) => {
   }
 });
 
-ipcMain.handle('git:graphLog', async (event, projectPath, count) => {
+ipcMain.handle('git:graphLog', async (event, projectPath, count, branch) => {
   try {
-    const output = await runGit(projectPath, ['log', '--format=%H|%h|%P|%s|%an|%ar|%D', '-' + (count || 50), '--no-color'], 10000);
+    const args = ['log', '--format=%H|%h|%P|%s|%an|%ar|%D', '-' + (count || 50), '--no-color'];
+    if (branch) args.push('refs/heads/' + branch);
+    const output = await runGit(projectPath, args, 10000);
     return output.trim().split('\n').filter(Boolean).map(line => {
       const parts = line.split('|');
       return {
@@ -2436,7 +2891,11 @@ ipcMain.handle('git:diffCommit', async (event, projectPath, hash, filePath) => {
   }
 });
 
-ipcMain.handle('git:diffStat', async (event, projectPath, staged) => {
+ipcMain.handle('git:diffStat', async (event, projectPath, staged, branch) => {
+  // Branch override: working/staged diffs only mean something for the
+  // currently checked-out branch. For a non-checked-out branch the renderer
+  // should call git:diffStatVsBase instead.
+  if (branch) return [];
   try {
     const args = staged ? ['diff', '--numstat', '--cached'] : ['diff', '--numstat'];
     const output = await runGit(projectPath, args, 5000);
@@ -2450,6 +2909,73 @@ ipcMain.handle('git:diffStat', async (event, projectPath, staged) => {
     });
   } catch {
     return [];
+  }
+});
+
+// Branch-vs-base diff: file-level numstat for `<base>...<branch>`.
+// baseRef defaults to origin/main, falling back to origin/master, then HEAD.
+ipcMain.handle('git:diffStatVsBase', async (event, projectPath, branch, baseRef) => {
+  if (!projectPath || !branch) return [];
+  const tryBases = baseRef ? [baseRef] : ['origin/main', 'origin/master', 'HEAD'];
+  for (const base of tryBases) {
+    try {
+      const output = await runGit(
+        projectPath,
+        ['diff', '--numstat', base + '...refs/heads/' + branch],
+        10000
+      );
+      return output.trim().split('\n').filter(Boolean).map(line => {
+        const parts = line.split('\t');
+        return {
+          insertions: parts[0] === '-' ? 0 : parseInt(parts[0]) || 0,
+          deletions: parts[1] === '-' ? 0 : parseInt(parts[1]) || 0,
+          file: parts[2]
+        };
+      });
+    } catch {
+      // try next base
+    }
+  }
+  return [];
+});
+
+async function listGitWorktrees(projectPath) {
+  if (!projectPath) return [];
+  try {
+    const out = await runGit(projectPath, ['worktree', 'list', '--porcelain'], 5000);
+    const entries = [];
+    let cur = {};
+    for (const rawLine of out.split(/\r?\n/)) {
+      const line = rawLine.trimEnd();
+      if (line.startsWith('worktree ')) {
+        if (cur.path) entries.push(cur);
+        cur = { path: line.slice('worktree '.length).trim() };
+      } else if (line.startsWith('branch ')) {
+        cur.branch = line.slice('branch '.length).trim();
+      } else if (line === '') {
+        if (cur.path) { entries.push(cur); cur = {}; }
+      }
+    }
+    if (cur.path) entries.push(cur);
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+ipcMain.handle('paths:resolveWorktree', (event, projectPath, value) =>
+  resolveWorktreeCandidates(projectPath, value, fs.promises.stat, listGitWorktrees));
+
+ipcMain.handle('paths:exists', (event, p) =>
+  pathIsDirectory(p, fs.promises.stat));
+
+ipcMain.handle('git:isInsideWorkTree', async (event, cwd) => {
+  if (!cwd) return false;
+  try {
+    const out = await runGit(cwd, ['rev-parse', '--is-inside-work-tree'], 5000);
+    return out.trim() === 'true';
+  } catch {
+    return false;
   }
 });
 
@@ -3605,7 +4131,7 @@ function isNewerVersion(latestTag, current) {
 let darwinCheckForUpdates = null;
 
 function setupDarwinUpdater() {
-  const REPO = 'paulallington/Claudes';
+  const REPO = 'mdrichardson/Claudes';
   const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64';
   const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1h
   const INITIAL_DELAY_MS = 30 * 1000;       // give the window a moment to render
@@ -6737,6 +7263,8 @@ app.on('before-quit', () => {
   flushPendingConfig();
   step('flushPendingStickyNotes');
   flushPendingStickyNotes();
+  step('flushPendingReviewComments');
+  flushPendingReviewComments();
   step('stopAutomationScheduler');
   stopAutomationScheduler();
   step('clawdTails clear: ' + clawdTails.size);

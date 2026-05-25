@@ -361,6 +361,9 @@ html[data-platform="darwin"] .sidebar-header {
   font-size: 13px;
   color: var(--text-secondary);
   border-left: 3px solid transparent;
+  /* Anchor for the absolutely-positioned × and + hover buttons so they
+     don't take up flex space and grow the card on hover. */
+  position: relative;
 }
 
 .project-item:hover {
@@ -406,8 +409,97 @@ html[data-platform="darwin"] .sidebar-header {
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  /* × (top-right) and + (bottom-right) absolutely position over the card
+     corners — see .project-remove / .project-add-workspace below. The
+     inline container holds only the middle (badge + pin), and we reserve
+     horizontal space so its content doesn't slide under the hover buttons. */
   margin-left: 4px;
+  margin-right: 16px;
 }
+
+.project-right-middle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.project-item .project-add-workspace {
+  display: none;
+  position: absolute;
+  bottom: 4px;
+  right: 6px;
+  cursor: pointer;
+  color: var(--text-dimmer);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.project-item:hover .project-add-workspace { display: inline-block; }
+.project-item .project-add-workspace:hover { color: var(--text-primary); }
+.project-item.popped-out .project-add-workspace { display: none; }
+.project-item .project-add-workspace.disabled { pointer-events: none; opacity: 0.4; }
+
+/* Workspace sub-rows — peer entries under a project card. Each tracks its
+   own terminals, badge, and active state. Primary is the project card itself
+   (not a sub-row). */
+.workspace-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px 4px 28px;
+  margin: 0;
+  min-height: 22px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  gap: 6px;
+  user-select: none;
+  background: transparent;
+}
+.workspace-item:hover {
+  background: var(--hover-light);
+  color: var(--text-primary);
+}
+.workspace-item.active {
+  border-left-color: var(--accent);
+  color: var(--text-bright);
+  background: var(--hover-light);
+}
+.workspace-item.in-group {
+  padding-left: 40px;
+}
+.workspace-item .workspace-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.workspace-badge {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+}
+.workspace-badge .claude-icon { width: 12px; height: 12px; }
+.workspace-item .workspace-remove {
+  display: none;
+  cursor: pointer;
+  color: var(--text-dimmer);
+  font-size: 13px;
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.workspace-item:hover .workspace-remove { display: inline-block; }
+.workspace-item .workspace-remove:hover { color: var(--text-primary); }
 
 .project-badge {
   font-size: 11px;
@@ -425,10 +517,14 @@ html[data-platform="darwin"] .sidebar-header {
 
 .project-item .project-remove {
   display: none;
+  position: absolute;
+  top: 4px;
+  right: 6px;
   cursor: pointer;
   color: var(--text-dimmer);
   font-size: 14px;
-  padding: 2px 4px;
+  line-height: 1;
+  padding: 0 4px;
   border-radius: 3px;
   flex-shrink: 0;
 }
@@ -1001,6 +1097,17 @@ html[data-platform="darwin"] #toolbar {
   font-style: italic;
 }
 
+.git-target-hint {
+  padding: 4px 12px 6px;
+  padding-top: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* --- Column Layout --- */
 
 #columns-container {
@@ -1075,7 +1182,8 @@ html[data-platform="darwin"] #toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 28px;
+  flex-wrap: wrap;
+  min-height: 28px;
   padding: 0 8px;
   background: var(--bg-toolbar);
   font-size: 12px;
@@ -1132,7 +1240,8 @@ html[data-platform="darwin"] #toolbar {
 
 /* Sidebar badge activity states */
 
-.project-badge.badge-working .claude-icon {
+.project-badge.badge-working .claude-icon,
+.workspace-badge.badge-working .claude-icon {
   filter: drop-shadow(0 0 3px var(--color-green));
   animation: spin-working 2s linear infinite;
 }
@@ -1152,7 +1261,28 @@ html[data-platform="darwin"] #toolbar {
   50% { background-color: rgba(245, 166, 35, 0.2); }
 }
 
-.project-badge.badge-attention .claude-icon {
+/* Migration confirmation: orange background pulse on the moved column for one cycle.
+   Uses attention-pulse (column-scoped) — NOT pulse-attention (dot-scoped). */
+.column.migrated-flash {
+  animation: attention-pulse 1.2s ease-in-out 1;
+}
+
+/* Disabled context-menu item (used when no other workspaces exist) */
+.project-context-item.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.project-context-item.disabled:hover { background: transparent; }
+
+/* Submenu indicator on the parent item */
+.project-context-item.has-submenu::after {
+  content: ' \25B8';
+  opacity: 0.6;
+  margin-left: 6px;
+}
+
+.project-badge.badge-attention .claude-icon,
+.workspace-badge.badge-attention .claude-icon {
   animation: pulse-icon-attention 1.2s ease-in-out infinite;
 }
 
@@ -1164,15 +1294,19 @@ html[data-platform="darwin"] #toolbar {
 .column-header .col-title {
   font-weight: 500;
   cursor: default;
-  max-width: calc(100% - 72px);
+  max-width: calc(100% - 180px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
   flex-shrink: 1;
+  height: 28px;
+  line-height: 28px;
 }
 
-.column-header .col-title.editing {
+.column-header .col-title.editing,
+.project-item .project-name.editing,
+.workspace-item .workspace-name.editing {
   cursor: text;
   background: var(--bg-button);
   outline: 1px solid var(--accent);
@@ -1181,6 +1315,7 @@ html[data-platform="darwin"] #toolbar {
   color: var(--text-bright);
   overflow: visible;
   text-overflow: clip;
+  white-space: nowrap;
 }
 
 .col-actions {
@@ -3845,7 +3980,7 @@ html[data-platform="darwin"] #toolbar {
 
 /* Settings Modal */
 .settings-dialog {
-  width: 680px;       /* widened so the new Terminal / Tools tabs aren't clipped */
+  width: 780px;       /* fits all 8 tabs (incl. Pipelines) without horizontal scroll */
   max-width: 90vw;
   max-height: 85vh;   /* cap so tall panes (Clawd legend, etc) scroll instead of running off-screen */
   display: flex;
@@ -6058,11 +6193,13 @@ html[data-platform="darwin"] #toolbar {
   cursor: grab;
 }
 
-.project-item.dragging {
+.project-item.dragging,
+.workspace-item.dragging {
   opacity: 0.4;
 }
 
-.project-item.drag-over {
+.project-item.drag-over,
+.workspace-item.drag-over {
   border-top: 2px solid var(--accent);
 }
 
@@ -6563,6 +6700,283 @@ body.mode-popout #btn-add-project {
   color: var(--text-muted);
   text-align: center;
 }
+
+/* --- Pipeline visualizer (per-terminal) --- */
+
+.col-pipeline {
+  flex-basis: 100%;
+  display: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 0;
+  font-size: 11px;
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+}
+
+.col-pipeline.visible {
+  display: flex;
+}
+
+.pp-step {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.pp-step:hover {
+  background: var(--bg-button, rgba(255, 255, 255, 0.05));
+}
+
+.pp-step:focus-visible {
+  outline: 1px solid var(--accent, #4a9eff);
+  outline-offset: 1px;
+}
+
+.pp-current {
+  color: var(--text-bright, #ffffff);
+  font-weight: 600;
+  background: var(--bg-button, rgba(255, 255, 255, 0.08));
+  border-color: var(--accent, #4a9eff);
+}
+
+.pp-done {
+  opacity: 0.6;
+}
+
+.pp-done::before {
+  content: "\2713\00a0";
+}
+
+.pp-pending {
+  opacity: 0.4;
+}
+
+.pp-anchor {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.pp-arrow {
+  color: var(--text-secondary);
+  opacity: 0.5;
+  font-size: 11px;
+  user-select: none;
+}
+
+.col-pipeline.compact .pp-step {
+  padding: 2px 6px;
+}
+
+/* --- Pipeline editor (settings dialog) --- */
+
+.pipeline-editor {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 8px;
+}
+
+.pipeline-step-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.pipeline-step-row .settings-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.pipeline-step-row .pipeline-step-label {
+  flex: 0 0 120px;
+}
+
+.pipeline-step-row .pipeline-step-keywords {
+  flex: 1;
+  min-width: 0;
+}
+
+.pipeline-step-anchor .settings-input {
+  opacity: 0.7;
+}
+
+.pipeline-step-handle {
+  display: inline-block;
+  width: 16px;
+  color: var(--text-secondary);
+  opacity: 0.5;
+  cursor: default;
+  user-select: none;
+  text-align: center;
+}
+
+.pipeline-step-up,
+.pipeline-step-down,
+.pipeline-step-delete {
+  background: transparent;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  color: var(--text-secondary);
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pipeline-step-up:hover:not(:disabled),
+.pipeline-step-down:hover:not(:disabled),
+.pipeline-step-delete:hover {
+  background: var(--bg-button, rgba(255, 255, 255, 0.05));
+  color: var(--text-bright, #ffffff);
+}
+
+.pipeline-step-up:disabled,
+.pipeline-step-down:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.pipeline-step-delete:hover {
+  border-color: #d33;
+  color: #d33;
+}
+
+.settings-input.error {
+  border-color: #d33;
+}
+
+.settings-hint.error {
+  color: #d33;
+}
+
+/* Review comments — inline diff annotations */
+
+.diff-line-num.gutter-selected { background: rgba(110, 168, 254, 0.25); }
+.diff-line-num { position: relative; }
+
+.review-comment-indicator {
+  display: inline-block;
+  cursor: pointer;
+  font-size: 12px;
+  margin-left: 2px;
+  opacity: 0.85;
+  user-select: none;
+}
+.review-comment-indicator:hover { opacity: 1; }
+.review-comment-indicator:focus-visible { outline: 1px solid #6ea8fe; outline-offset: 1px; }
+
+.review-comment-connector {
+  position: absolute;
+  left: 4px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #6ea8fe;
+  pointer-events: none;
+}
+
+.review-comment-box {
+  background: #232336;
+  border: 1px solid #3a3a52;
+  border-radius: 4px;
+  padding: 8px;
+  margin: 4px 0;
+}
+.review-comment-textarea {
+  width: 100%;
+  min-height: 70px;
+  background: #1a1a2e;
+  color: #ccc;
+  border: 1px solid #3a3a52;
+  border-radius: 3px;
+  padding: 4px;
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.review-comment-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  justify-content: flex-end;
+}
+.review-comment-save, .review-comment-delete {
+  background: #3a3a52;
+  color: #ccc;
+  border: 1px solid #4a4a62;
+  padding: 4px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.review-comment-save:hover { background: #4a6a9c; border-color: #6ea8fe; }
+.review-comment-delete:hover { background: #6a3a3a; border-color: #d04a4a; }
+.review-comment-save:focus-visible, .review-comment-delete:focus-visible { outline: 1px solid #6ea8fe; outline-offset: 1px; }
+
+#git-review-comments-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #2a2a3e;
+}
+#git-review-comments-actions button {
+  background: #3a3a52;
+  color: #ccc;
+  border: 1px solid #4a4a62;
+  padding: 4px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  flex: 1;
+}
+#git-review-comments-actions button:hover { background: #4a6a9c; border-color: #6ea8fe; }
+#git-review-comments-actions button:focus-visible { outline: 1px solid #6ea8fe; outline-offset: 1px; }
+
+.review-stale-comments {
+  margin-top: 16px;
+  padding: 8px;
+  background: #1f1f30;
+  border-top: 1px solid #2a2a3e;
+}
+.review-stale-comments summary {
+  cursor: pointer;
+  color: #c79a4a;
+  font-size: 12px;
+  user-select: none;
+}
+.review-stale-truncation-notice {
+  margin: 6px 0;
+  padding: 4px 8px;
+  background: #2a2a1f;
+  color: #c79a4a;
+  font-size: 11px;
+  border-radius: 3px;
+}
+.review-stale-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.review-stale-entry {
+  cursor: pointer;
+  padding: 4px 6px;
+  background: #232336;
+  border: 1px solid #3a3a52;
+  border-radius: 3px;
+}
+.review-stale-entry:hover { background: #2a2a3e; }
+.review-stale-ref { color: #6ea8fe; font-family: monospace; font-size: 12px; }
+.review-stale-text { color: #aaa; font-size: 12px; margin-top: 2px; white-space: pre-wrap; }
 
 /* Per-agent connection tag on automation cards and headless dock */
 .automation-card-conn-tag {

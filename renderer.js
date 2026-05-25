@@ -80,6 +80,8 @@ var activeProjectKey = null;
 
 var config = { projects: [], activeProjectIndex: -1 };
 var projectDragFromIndex = -1; // For sidebar drag-to-reorder
+var workspaceDragFromIndex = -1; // Drag-reorder within a project's sub-workspaces
+var workspaceDragFromProjectPath = null; // Same-project check during drop
 
 var popoutMode = false;
 var popoutProjectKey = null;
@@ -520,6 +522,75 @@ var FONT_SIZE_MAX = 28;
 var FONT_SIZE_DEFAULT = 14;
 
 // ============================================================
+// Pipeline visualizer (per-terminal)
+// ============================================================
+
+// First-run default workflow. Plan/Execute are the plan-mode anchors that
+// resolveSteps() always injects (Plan at the front, Execute right after it);
+// the steps below are appended and advance when a typed command matches one of
+// their keywords — giving the runtime order Plan › Execute › Code › Test ›
+// Review › Ship. Only used when no saved pipelines config exists; a user who
+// edits or clears their steps keeps their own config.
+var pipelinesConfig = { version: 1, pipeline: { id: 'default', name: 'Default workflow', userSteps: [
+  { id: 'step-code', label: 'Code', keywords: ['edit', 'write', 'fix', 'implement', 'add', 'refactor'] },
+  { id: 'step-test', label: 'Test', keywords: ['test', 'npm test', 'npm run test', 'pytest', 'run the tests'] },
+  { id: 'step-review', label: 'Review', keywords: ['review', '/review', 'diff', 'check'] },
+  { id: 'step-ship', label: 'Ship', keywords: ['commit', 'push', 'release', 'ship', '/release'] }
+] } };
+var PipelineMatcherAPI = (typeof window !== 'undefined' && window.PipelineMatcher) ? window.PipelineMatcher : null;
+
+function loadPipelines() {
+  if (!window.electronAPI || !window.electronAPI.loadPipelines) return;
+  window.electronAPI.loadPipelines().then(function (data) {
+    if (data && typeof data === 'object' && data.pipeline && Array.isArray(data.pipeline.userSteps)) {
+      pipelinesConfig = data;
+    }
+    bindPipelineEditor();
+  }).catch(function () { /* keep defaults */ });
+}
+
+function savePipelines() {
+  if (!window.electronAPI || !window.electronAPI.savePipelines) return;
+  window.electronAPI.savePipelines(pipelinesConfig);
+}
+
+function resolveSteps(cfg) {
+  var steps = [];
+  if (cfg && cfg.pipeline && Array.isArray(cfg.pipeline.userSteps)) {
+    for (var i = 0; i < cfg.pipeline.userSteps.length; i++) {
+      var us = cfg.pipeline.userSteps[i];
+      if (!us || !us.id || !us.label) continue;
+      steps.push({ id: us.id, label: us.label, complete: false });
+    }
+  }
+  var hasPlan = false;
+  var hasExec = false;
+  for (var j = 0; j < steps.length; j++) {
+    if (steps[j].id === 'anchor-plan') hasPlan = true;
+    if (steps[j].id === 'anchor-execute') hasExec = true;
+  }
+  if (!hasPlan) steps.unshift({ id: 'anchor-plan', label: 'Plan', complete: false });
+  if (!hasExec) {
+    var pIdx = -1;
+    for (var k = 0; k < steps.length; k++) {
+      if (steps[k].id === 'anchor-plan') { pIdx = k; break; }
+    }
+    steps.splice(pIdx + 1, 0, { id: 'anchor-execute', label: 'Execute', complete: false });
+  }
+  return steps;
+}
+
+// Trailing-debounced wrapper around persistSessions; coalesces rapid mutations.
+var pipelinePersistTimer = null;
+function persistSessionsDebounced(projectKey, workspaceId) {
+  if (pipelinePersistTimer) clearTimeout(pipelinePersistTimer);
+  pipelinePersistTimer = setTimeout(function () {
+    pipelinePersistTimer = null;
+    persistSessions(projectKey, workspaceId);
+  }, 100);
+}
+
+// ============================================================
 // WebSocket
 // ============================================================
 
@@ -538,6 +609,7 @@ function connectWS() {
       reattachAllColumns();
     } else {
       wsHasConnectedBefore = true;
+      loadPipelines();
       loadProjects();
     }
   };
@@ -548,7 +620,44 @@ function connectWS() {
       var col = allColumns.get(msg.id);
       if (col) {
         col.terminal.write(msg.data);
-        if (!resizeSuppressed.has(msg.id) && msg.data) {
+        // Pipeline plan-mode banner detection (run against raw data, pre-strip)
+        if (col.pipeline && PipelineMatcherAPI && typeof msg.data === 'string') {
+          var prevTail = col.bannerTail || '';
+          var chunk = prevTail + msg.data;
+          var bannerHit = PipelineMatcherAPI.PLAN_MODE_BANNER.test(chunk);
+          if (bannerHit) {
+            col.bannerEverMatched = true;
+            if (col.pipeline.flags && col.pipeline.flags.plan === true) {
+              // Banner re-render — refresh timestamp only; no reset, render, or persist.
+              col.pipeline.lastBannerSeenAt = Date.now();
+            } else {
+              // Restored-with-progress: first banner after restart should NOT wipe progress.
+              if (col.pipeline.restoredWithProgress) {
+                col.pipeline.flags.plan = true;
+                col.pipeline.lastBannerSeenAt = Date.now();
+                col.pipeline.restoredWithProgress = false;
+                col.pipeline.visible = true;
+              } else {
+                PipelineMatcherAPI.applyPlanEnter(col.pipeline, Date.now());
+              }
+              renderPipeline(msg.id);
+              persistSessions(col.projectKey, col.workspaceId);
+              startPipelineExitCheck(msg.id);
+            }
+            col.bannerTail = '';
+          } else {
+            col.bannerTail = chunk.slice(-64);
+          }
+          // Drift diagnostic: working state + "Plan" in tail but never matched.
+          if (!col.bannerDriftWarned && col.bannerEverMatched !== true &&
+              col.activityState === 'working' &&
+              col.bannerTail && /plan/i.test(col.bannerTail)) {
+            console.warn('Pipeline visualizer: plan-mode-like activity detected but banner regex did not match. Claude Code may have changed its banner format.');
+            col.bannerDriftWarned = true;
+          }
+        }
+          if (!resizeSuppressed.has(msg.id) && msg.data && col.hasUserInput) {
+          // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
           var trimmed = msg.data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
           // "Interrupted" with or without the middle-dot — the chunk can
           // arrive partial, so match permissively. This must work on a
@@ -688,6 +797,95 @@ function wsSend(obj) {
 // Activity Pulse Tracking
 // ============================================================
 
+// TODO: DOM rendering not unit-tested — covered by manual e2e step 10
+function renderPipeline(id) {
+  var col = allColumns.get(id);
+  if (!col || !col.pipelineEl || !col.pipeline) return;
+  var pipeEl = col.pipelineEl;
+  // Toggle visibility class
+  if (col.pipeline.visible) pipeEl.classList.add('visible');
+  else pipeEl.classList.remove('visible');
+
+  // Compact mode based on header width
+  var compact = col.headerEl && col.headerEl.offsetWidth > 0 && col.headerEl.offsetWidth < 380;
+  if (compact) pipeEl.classList.add('compact');
+  else pipeEl.classList.remove('compact');
+
+  // Rebuild children
+  while (pipeEl.firstChild) pipeEl.removeChild(pipeEl.firstChild);
+
+  var steps = col.pipeline.steps || [];
+  var currentIdx = col.pipeline.currentIdx || 0;
+  for (var i = 0; i < steps.length; i++) {
+    var step = steps[i];
+    if (i > 0) {
+      var arrow = document.createElement('span');
+      arrow.className = 'pp-arrow';
+      arrow.textContent = '›';
+      pipeEl.appendChild(arrow);
+    }
+    var btn = document.createElement('button');
+    btn.className = 'pp-step';
+    btn.type = 'button';
+    btn.title = step.label;
+    if (step.id && step.id.indexOf('anchor-') === 0) btn.classList.add('pp-anchor');
+    var isCurrent = (i === currentIdx);
+    if (step.complete) btn.classList.add('pp-done');
+    else if (isCurrent) btn.classList.add('pp-current');
+    else btn.classList.add('pp-pending');
+    var labelText = step.label || '';
+    if (compact && !isCurrent && labelText.length > 0) {
+      btn.textContent = labelText.charAt(0).toUpperCase();
+    } else if (compact && isCurrent) {
+      btn.textContent = '▸ ' + labelText;
+    } else {
+      btn.textContent = labelText;
+    }
+    (function (idx) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (!PipelineMatcherAPI) return;
+        var c = allColumns.get(id);
+        if (!c || !c.pipeline) return;
+        PipelineMatcherAPI.applyManualToggle(c.pipeline, idx);
+        renderPipeline(id);
+        persistSessionsDebounced(c.projectKey, c.workspaceId);
+      });
+    })(i);
+    pipeEl.appendChild(btn);
+  }
+}
+
+function startPipelineExitCheck(id) {
+  var col = allColumns.get(id);
+  if (!col || !col.pipeline || !PipelineMatcherAPI) return;
+  if (col.pipeline.exitCheckIntervalId != null) return;
+  col.pipeline.exitCheckIntervalId = setInterval(function () {
+    var c = allColumns.get(id);
+    if (!c || !c.pipeline) {
+      // Column gone — defensive
+      return;
+    }
+    if (PipelineMatcherAPI.shouldExitPlanMode(c.pipeline, Date.now())) {
+      PipelineMatcherAPI.applyPlanExit(c.pipeline);
+      renderPipeline(id);
+      persistSessions(c.projectKey, c.workspaceId);
+      if (c.pipeline.exitCheckIntervalId != null) {
+        clearInterval(c.pipeline.exitCheckIntervalId);
+        c.pipeline.exitCheckIntervalId = null;
+      }
+    }
+  }, 500);
+}
+
+function stopPipelineExitCheck(col) {
+  if (!col || !col.pipeline) return;
+  if (col.pipeline.exitCheckIntervalId != null) {
+    clearInterval(col.pipeline.exitCheckIntervalId);
+    col.pipeline.exitCheckIntervalId = null;
+  }
+}
+
 function setColumnActivity(id, state) {
   var col = allColumns.get(id);
   if (!col) return;
@@ -764,31 +962,23 @@ function updateActivityIndicator(id) {
 
 function updateSidebarActivity() {
   if (popoutMode) return; // sidebar not rendered in popout windows
-  // Count activity states per project
-  var attentionByProject = {};
-  var workingByProject = {};
+  // Bucket counts by (projectKey, workspaceId) — no cross-workspace rollup.
+  // Project card badge reflects Primary-only; each workspace sub-row badge
+  // reflects only its own columns.
+  var attentionByKey = {};
+  var workingByKey = {};
   allColumns.forEach(function (col) {
-    var key = col.projectKey;
+    var k = stateKey(col.projectKey, col.workspaceId);
     if (col.activityState === 'attention') {
-      attentionByProject[key] = (attentionByProject[key] || 0) + 1;
+      attentionByKey[k] = (attentionByKey[k] || 0) + 1;
     }
     if (col.activityState === 'working') {
-      workingByProject[key] = (workingByProject[key] || 0) + 1;
+      workingByKey[k] = (workingByKey[k] || 0) + 1;
     }
   });
 
-  // Apply activity class to existing project badges
-  config.projects.forEach(function (project) {
-    var key = project.path;
-    var item = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(key) + '"]');
-    if (!item) return;
-
-    var attention = attentionByProject[key] || 0;
-    var working = workingByProject[key] || 0;
-
-    var badge = item.querySelector('.project-badge');
+  function applyBadge(badge, attention, working) {
     if (!badge) return;
-
     badge.classList.remove('badge-attention', 'badge-working');
     if (attention > 0) {
       badge.classList.add('badge-attention');
@@ -798,6 +988,30 @@ function updateSidebarActivity() {
       badge.title = working + ' working';
     } else {
       badge.title = '';
+    }
+  }
+
+  config.projects.forEach(function (project) {
+    var projKey = project.path;
+    var item = projectListEl.querySelector(
+      '.project-item[data-project-path="' + CSS.escape(projKey) + '"]');
+    if (item) {
+      var primaryK = stateKey(projKey, null);
+      applyBadge(item.querySelector('.project-badge'),
+        attentionByKey[primaryK] || 0,
+        workingByKey[primaryK] || 0);
+    }
+    if (Array.isArray(project.workspaces)) {
+      project.workspaces.forEach(function (ws) {
+        if (!ws) return;
+        var wsItem = projectListEl.querySelector(
+          '.workspace-item[data-workspace-id="' + CSS.escape(ws.id) + '"]');
+        if (!wsItem) return;
+        var wsK = stateKey(projKey, ws.id);
+        applyBadge(wsItem.querySelector('.workspace-badge'),
+          attentionByKey[wsK] || 0,
+          workingByKey[wsK] || 0);
+      });
     }
   });
 }
@@ -848,6 +1062,202 @@ function saveStartWithOS() {
   window.electronAPI.setStartWithOS(enabled);
 }
 
+function bindPipelineEditor() {
+  var editorEl = document.getElementById('pipeline-editor');
+  var addBtn = document.getElementById('btn-add-pipeline-step');
+  if (!editorEl || !addBtn) return;
+  if (!pipelinesConfig || !pipelinesConfig.pipeline || !Array.isArray(pipelinesConfig.pipeline.userSteps)) return;
+
+  while (editorEl.firstChild) editorEl.removeChild(editorEl.firstChild);
+  var dupErrEl = document.getElementById('pipeline-editor-error');
+
+  var userSteps = pipelinesConfig.pipeline.userSteps;
+
+  function isAnchor(step) {
+    return !!(step && typeof step.id === 'string' && step.id.indexOf('anchor-') === 0);
+  }
+
+  function checkDuplicates() {
+    if (!dupErrEl) return;
+    var seen = {};
+    var dupes = {};
+    for (var i = 0; i < userSteps.length; i++) {
+      var kws = userSteps[i].keywords || [];
+      for (var k = 0; k < kws.length; k++) {
+        var tok = kws[k];
+        if (!tok) continue;
+        if (seen[tok] != null && seen[tok] !== i) dupes[tok] = true;
+        else if (seen[tok] == null) seen[tok] = i;
+      }
+    }
+    var dupList = Object.keys(dupes);
+    if (dupList.length > 0) {
+      dupErrEl.textContent = 'Duplicate keyword(s): ' + dupList.join(', ');
+      dupErrEl.style.display = '';
+    } else {
+      dupErrEl.textContent = '';
+      dupErrEl.style.display = 'none';
+    }
+  }
+
+  function renderRows() {
+    var existing = editorEl.querySelectorAll('.pipeline-step-row');
+    for (var i = 0; i < existing.length; i++) editorEl.removeChild(existing[i]);
+    var stale = editorEl.querySelectorAll('.settings-hint.error');
+    for (var s = 0; s < stale.length; s++) {
+      if (stale[s].id !== 'pipeline-editor-error') editorEl.removeChild(stale[s]);
+    }
+
+    for (var idx = 0; idx < userSteps.length; idx++) {
+      (function (i) {
+        var step = userSteps[i];
+        var anchor = isAnchor(step);
+        var row = document.createElement('div');
+        row.className = 'pipeline-step-row' + (anchor ? ' pipeline-step-anchor' : '');
+        row.setAttribute('data-step-idx', String(i));
+
+        var upBtn = document.createElement('button');
+        upBtn.className = 'pipeline-step-up';
+        upBtn.title = 'Move up';
+        upBtn.textContent = '↑';
+        if (i === 0) upBtn.disabled = true;
+        upBtn.addEventListener('click', function () {
+          if (i === 0) return;
+          var tmp = userSteps[i - 1];
+          userSteps[i - 1] = userSteps[i];
+          userSteps[i] = tmp;
+          savePipelines();
+          renderRows();
+          checkDuplicates();
+        });
+
+        var downBtn = document.createElement('button');
+        downBtn.className = 'pipeline-step-down';
+        downBtn.title = 'Move down';
+        downBtn.textContent = '↓';
+        if (i === userSteps.length - 1) downBtn.disabled = true;
+        downBtn.addEventListener('click', function () {
+          if (i === userSteps.length - 1) return;
+          var tmp = userSteps[i + 1];
+          userSteps[i + 1] = userSteps[i];
+          userSteps[i] = tmp;
+          savePipelines();
+          renderRows();
+          checkDuplicates();
+        });
+
+        var labelInput = document.createElement('input');
+        labelInput.className = 'settings-input pipeline-step-label';
+        labelInput.placeholder = 'Step name';
+        labelInput.maxLength = 24;
+        labelInput.value = step.label || '';
+        if (anchor) labelInput.disabled = true;
+
+        var kwInput = document.createElement('input');
+        kwInput.className = 'settings-input pipeline-step-keywords';
+        if (anchor) {
+          kwInput.placeholder = step.id === 'anchor-plan'
+            ? '(auto: Plan-mode entry)'
+            : '(auto: Plan-mode exit)';
+          kwInput.value = '';
+          kwInput.disabled = true;
+        } else {
+          kwInput.placeholder = 'keyword (comma-separate for synonyms, e.g. /test, build)';
+          kwInput.maxLength = 120;
+          kwInput.value = (step.keywords || []).join(', ');
+        }
+
+        function clearRowError() {
+          labelInput.classList.remove('error');
+          kwInput.classList.remove('error');
+          var sib = row.nextSibling;
+          if (sib && sib.classList && sib.classList.contains('settings-hint') && sib.classList.contains('error') && sib.id !== 'pipeline-editor-error') {
+            row.parentNode.removeChild(sib);
+          }
+        }
+
+        function showRowError(target, msg) {
+          target.classList.add('error');
+          var hint = document.createElement('div');
+          hint.className = 'settings-hint error';
+          hint.textContent = msg;
+          if (row.nextSibling) row.parentNode.insertBefore(hint, row.nextSibling);
+          else row.parentNode.appendChild(hint);
+        }
+
+        if (!anchor) {
+          labelInput.addEventListener('change', function () {
+            clearRowError();
+            var v = labelInput.value.trim();
+            if (v.length === 0) {
+              showRowError(labelInput, 'Step name cannot be empty.');
+              labelInput.value = step.label || '';
+              return;
+            }
+            step.label = v;
+            savePipelines();
+            checkDuplicates();
+          });
+
+          kwInput.addEventListener('change', function () {
+            clearRowError();
+            var raw = kwInput.value.split(',');
+            var tokens = [];
+            for (var t = 0; t < raw.length; t++) {
+              var tok = raw[t].trim();
+              if (tok.length === 0) continue;
+              if (tok.indexOf(',') !== -1) {
+                showRowError(kwInput, 'Keywords cannot contain commas.');
+                kwInput.value = (step.keywords || []).join(', ');
+                return;
+              }
+              tokens.push(tok);
+            }
+            step.keywords = tokens;
+            savePipelines();
+            checkDuplicates();
+          });
+        }
+
+        row.appendChild(upBtn);
+        row.appendChild(downBtn);
+        row.appendChild(labelInput);
+        row.appendChild(kwInput);
+
+        if (!anchor) {
+          var delBtn = document.createElement('button');
+          delBtn.className = 'pipeline-step-delete';
+          delBtn.title = 'Delete step';
+          delBtn.textContent = '×';
+          delBtn.addEventListener('click', function () {
+            if (isAnchor(userSteps[i])) return;
+            userSteps.splice(i, 1);
+            savePipelines();
+            renderRows();
+            checkDuplicates();
+          });
+          row.appendChild(delBtn);
+        }
+
+        if (dupErrEl && dupErrEl.parentNode === editorEl) editorEl.insertBefore(row, dupErrEl);
+        else editorEl.appendChild(row);
+      })(idx);
+    }
+  }
+
+  renderRows();
+  checkDuplicates();
+
+  var newAddBtn = addBtn.cloneNode(true);
+  addBtn.parentNode.replaceChild(newAddBtn, addBtn);
+  newAddBtn.addEventListener('click', function () {
+    userSteps.push({ id: 'step-' + Date.now(), label: '', keywords: [] });
+    savePipelines();
+    renderRows();
+    checkDuplicates();
+  });
+}
+
 function notifyAttentionNeeded(columnId) {
   var col = allColumns.get(columnId);
   if (!col) return;
@@ -869,30 +1279,49 @@ function notifyAttentionNeeded(columnId) {
     }
   }
 
-  // Track project attention (persists across renderProjectList rebuilds)
+  // Track attention by (projectKey, workspaceId). Flash the project card when
+  // the column is Primary, the workspace sub-row when it's a sub-workspace —
+  // no cross-workspace rollup.
   if (notifSettings.sidebar) {
-    projectsNeedingAttention.add(col.projectKey);
-    // Apply to current DOM
-    var item = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(col.projectKey) + '"]');
+    var attnKey = stateKey(col.projectKey, col.workspaceId);
+    projectsNeedingAttention.add(attnKey);
+    var sel;
+    if (col.workspaceId == null) {
+      sel = '.project-item[data-project-path="' + CSS.escape(col.projectKey) + '"]';
+    } else {
+      sel = '.workspace-item[data-workspace-id="' + CSS.escape(col.workspaceId) + '"]';
+    }
+    var item = projectListEl.querySelector(sel);
     if (item) item.classList.add('attention-flash');
   }
 }
 
-function clearProjectAttention(projectKey) {
+function clearProjectAttention(projectKey, workspaceId) {
   var changed = false;
   allColumns.forEach(function (col, id) {
-    if (col.projectKey === projectKey && col.activityState === 'attention') {
+    if (col.projectKey === projectKey
+        && (col.workspaceId == null ? null : col.workspaceId) === workspaceId
+        && col.activityState === 'attention') {
       col.activityState = 'idle';
       updateActivityIndicator(id);
       changed = true;
     }
   });
+  projectsNeedingAttention.delete(stateKey(projectKey, workspaceId));
   if (changed) updateSidebarActivity();
 }
 
 // ============================================================
 // Per-project state helpers
 // ============================================================
+
+// Map key for projectStates. Primary context (workspaceId null/undefined)
+// keys on projectPath alone so existing single-project code keeps working.
+// Sub-workspace contexts append '::<workspaceId>' so each workspace owns its
+// own columns/rows/containerEl entry in projectStates.
+function stateKey(projectPath, workspaceId) {
+  return (workspaceId == null) ? projectPath : (projectPath + '::' + workspaceId);
+}
 
 function getOrCreateProjectState(projectKey) {
   if (projectStates.has(projectKey)) return projectStates.get(projectKey);
@@ -914,7 +1343,9 @@ function getOrCreateProjectState(projectKey) {
 
 function getActiveState() {
   if (!activeProjectKey) return null;
-  return projectStates.get(activeProjectKey) || null;
+  var project = config.projects[config.activeProjectIndex];
+  var wsId = project ? project.activeWorkspaceId : null;
+  return projectStates.get(stateKey(activeProjectKey, wsId)) || null;
 }
 
 // ============================================================
@@ -1289,10 +1720,11 @@ function updateProjectBadges() {
   config.projects.forEach(function (project, index) {
     if (index >= items.length) return;
     var item = items[index];
-    var rightSide = item.querySelector('.project-right');
-    if (!rightSide) return;
-    var existingBadge = rightSide.querySelector('.project-badge');
-    var state = projectStates.get(project.path);
+    var middle = item.querySelector('.project-right-middle');
+    if (!middle) return;
+    var existingBadge = middle.querySelector('.project-badge');
+    // Primary badge reflects Primary columns only (stateKey with null ws id).
+    var state = projectStates.get(stateKey(project.path, null));
     var count = state ? state.columns.size : 0;
     if (count > 0 && !existingBadge) {
       var badge = document.createElement('span');
@@ -1302,7 +1734,7 @@ function updateProjectBadges() {
       icon.src = './claude-small.png';
       icon.alt = '';
       badge.appendChild(icon);
-      rightSide.insertBefore(badge, rightSide.firstChild);
+      middle.insertBefore(badge, middle.firstChild);
     } else if (count === 0 && existingBadge) {
       existingBadge.remove();
     }
@@ -1375,6 +1807,99 @@ function removeRowIfEmpty(state, row) {
   }
 
   state.rows.splice(idx, 1);
+
+  // Surviving rows may carry stuck inline `flex: none; height: <px>` left over from a prior
+  // row-resize drag — without redistribution they stay locked at pre-collapse pixel heights.
+  if (state.rows.length > 0) {
+    var hidden = !!(state.containerEl && state.containerEl.offsetParent === null);
+    var heights = [];
+    for (var i = 0; i < state.rows.length; i++) {
+      var h;
+      if (hidden) {
+        h = (typeof state.rows[i].lastHeightRatio === 'number' && state.rows[i].lastHeightRatio > 0)
+          ? state.rows[i].lastHeightRatio
+          : 1;
+      } else {
+        h = state.rows[i].el.getBoundingClientRect().height;
+      }
+      heights.push(h);
+    }
+    var ratios = window.RowLayout.computeProportionalRowRatios(heights);
+    for (var j = 0; j < state.rows.length; j++) {
+      state.rows[j].el.style.flex = ratios[j] + ' 1 0';
+      state.rows[j].el.style.height = '';
+      state.rows[j].lastHeightRatio = ratios[j];
+    }
+  }
+}
+
+function applyLayoutRatios(state, entries, rowHeightByIdx, rowsByIdx) {
+  // Group entries by row index in spawn order so we can pair with row.columnIds[].
+  var byRow = {};
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i];
+    (byRow[e.rowIdx] = byRow[e.rowIdx] || []).push(e);
+  }
+
+  // Column widths.
+  for (var rIdx in byRow) {
+    if (!Object.prototype.hasOwnProperty.call(byRow, rIdx)) continue;
+    var row = (rowsByIdx && rowsByIdx[rIdx]) || state.rows[rIdx];
+    if (!row) continue;
+    var rowEntries = byRow[rIdx];
+    var allHaveRatio = rowEntries.every(function (e) { return e.widthRatio !== null; });
+    var persistableCount = 0;
+    for (var pc = 0; pc < row.columnIds.length; pc++) {
+      var pcCol = state.columns.get(row.columnIds[pc]);
+      if (pcCol && pcCol.sessionId) persistableCount++;
+    }
+    if (!allHaveRatio || rowEntries.length !== persistableCount) continue;
+    var sum = rowEntries.reduce(function (s, e) { return s + e.widthRatio; }, 0);
+    if (!(sum > 0)) continue;
+    var entryIdx = 0;
+    for (var c = 0; c < row.columnIds.length; c++) {
+      var col = state.columns.get(row.columnIds[c]);
+      if (!col) continue;
+      if (col.sessionId && entryIdx < rowEntries.length) {
+        var ratio = rowEntries[entryIdx].widthRatio / sum;
+        col.element.style.flex = ratio + ' 1 0';
+        col.element.style.width = '';
+        col.lastWidthRatio = ratio;
+        entryIdx++;
+      } else {
+        col.element.style.flex = '1 1 0';
+        col.element.style.width = '';
+      }
+    }
+  }
+
+  // Row heights — only apply if every actual row maps back to an original index with a heightRatio.
+  if (rowsByIdx) {
+    var ratiosForActualRows = [];
+    for (var ri = 0; ri < state.rows.length; ri++) {
+      var matched = null;
+      for (var origIdx in rowsByIdx) {
+        if (rowsByIdx[origIdx] === state.rows[ri] && typeof rowHeightByIdx[origIdx] === 'number') {
+          matched = rowHeightByIdx[origIdx];
+          break;
+        }
+      }
+      if (matched === null) { ratiosForActualRows = null; break; }
+      ratiosForActualRows.push(matched);
+    }
+    if (ratiosForActualRows && ratiosForActualRows.length > 0) {
+      var hSum = ratiosForActualRows.reduce(function (s, v) { return s + v; }, 0);
+      if (hSum > 0) {
+        for (var ri2 = 0; ri2 < state.rows.length; ri2++) {
+          var rRatio = ratiosForActualRows[ri2] / hSum;
+          state.rows[ri2].el.style.flex = rRatio + ' 1 0';
+          state.rows[ri2].el.style.height = '';
+          state.rows[ri2].lastHeightRatio = rRatio;
+        }
+      }
+    }
+  }
+  refitAll();
 }
 
 function applyLayoutRatios(state, entries, rowHeightByIdx, rowsByIdx) {
@@ -1469,6 +1994,12 @@ function loadProjects() {
       }
       if (config.projects[i].popoutBounds === undefined) {
         config.projects[i].popoutBounds = null;
+      }
+      if (!Array.isArray(config.projects[i].workspaces)) {
+        config.projects[i].workspaces = [];
+      }
+      if (config.projects[i].activeWorkspaceId === undefined) {
+        config.projects[i].activeWorkspaceId = null;
       }
     }
     if (config.fontSize) {
@@ -1601,6 +2132,7 @@ function prepareAndPopOut(projectPath) {
         cols: col.terminal ? col.terminal.cols : 120,
         rows: col.terminal ? col.terminal.rows : 30,
         cwd: col.cwd || projectPath,
+        cwdSource: col.cwdSource || null,
         cmd: col.cmd || null,
         cmdArgs: col.cmdArgs || [],
         env: col.env || null,
@@ -1637,6 +2169,7 @@ window.collectPopoutTransferForClose = function () {
       cols: col.terminal ? col.terminal.cols : 120,
       rows: col.terminal ? col.terminal.rows : 30,
       cwd: col.cwd || popoutProjectKey,
+      cwdSource: col.cwdSource || null,
       cmd: col.cmd || null,
       cmdArgs: col.cmdArgs || [],
       env: col.env || null,
@@ -1671,13 +2204,15 @@ function applyTransferredColumns(projIdx, transfer) {
       cmd: entry.cmd,
       env: entry.env,
       cwd: entry.cwd,
-      isDiff: entry.isDiff
+      cwdSource: entry.cwdSource || null,
+      isDiff: entry.isDiff,
+      workspaceId: null // popouts are Primary-only
     });
   });
 
   activeProjectKey = prevActive;
   setActiveProject(projIdx, false);
-  persistSessions(project.path);
+  persistSessions(project.path, null);
 }
 
 function disposeColumnLocalOnly(id) {
@@ -1705,7 +2240,7 @@ function disposeColumnLocalOnly(id) {
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
 
-  var state = projectStates.get(col.projectKey);
+  var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (state) {
     state.columns.delete(id);
     for (var r = 0; r < state.rows.length; r++) {
@@ -1772,16 +2307,237 @@ function computeProjectGroups() {
   return counts;
 }
 
+// Create a new sub-workspace under `config.projects[projectIndex]`, immediately
+// activate it, and enter inline-rename mode on the new row's name element.
+function addWorkspace(projectIndex) {
+  var project = config.projects[projectIndex];
+  if (!project) return;
+  if (!Array.isArray(project.workspaces)) project.workspaces = [];
+
+  // Retry on (astronomically unlikely) id collision within the same project.
+  var ws = null;
+  for (var attempt = 0; attempt < 5; attempt++) {
+    var id = 'ws_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 10);
+    if (!project.workspaces.some(function (w) { return w && w.id === id; })) {
+      ws = { id: id, name: 'New workspace', createdAt: Date.now() };
+      break;
+    }
+  }
+  if (!ws) return;
+  project.workspaces.push(ws);
+  saveConfig();
+  renderProjectList();
+  setActiveWorkspace(projectIndex, ws.id, false);
+
+  // Focus the new name element and start inline-rename so the placeholder
+  // text is selected for immediate replacement.
+  var nameEl = projectListEl.querySelector(
+    '.workspace-item[data-workspace-id="' + CSS.escape(ws.id) + '"] .workspace-name'
+  );
+  if (nameEl) {
+    startInlineRename(nameEl, {
+      onCommit: function (text) {
+        ws.name = text;
+        saveConfig();
+        renderProjectList();
+      }
+    });
+  }
+}
+
+// Delete a sub-workspace from a project. Order matters — we splice from
+// project.workspaces FIRST so persistSessions' deletion guard short-circuits
+// any in-flight column-level writes that might race, then tear down the
+// columns (which kills PTYs), then scrub the disk blob, then switch active
+// back to Primary if needed.
+function deleteWorkspace(projectIndex, workspaceId) {
+  var project = config.projects[projectIndex];
+  if (!project) return;
+  if (!Array.isArray(project.workspaces)) return;
+  var wsIdx = -1;
+  for (var i = 0; i < project.workspaces.length; i++) {
+    if (project.workspaces[i] && project.workspaces[i].id === workspaceId) {
+      wsIdx = i; break;
+    }
+  }
+  if (wsIdx === -1) return;
+
+  var wasActive = project.activeWorkspaceId === workspaceId;
+  project.workspaces.splice(wsIdx, 1); // (1) guard trips for any late persist
+
+  // (2) Collect column ids for this workspace and remove each. removeColumn
+  //     calls persistSessions, whose guard now no-ops thanks to step (1).
+  var state = projectStates.get(stateKey(project.path, workspaceId));
+  var colIds = state ? Array.from(state.columns.keys()) : [];
+  colIds.forEach(function (id) { removeColumn(id); });
+
+  // (3) Drop the workspace's state bucket entirely — its containerEl/rows are
+  //     now gone anyway, but the Map entry would otherwise leak.
+  if (state && state.containerEl) state.containerEl.remove();
+  projectStates.delete(stateKey(project.path, workspaceId));
+
+  // (4) Scrub the disk blob.
+  if (window.electronAPI) {
+    window.electronAPI.loadSessions(project.path).then(function (blob) {
+      if (!blob || typeof blob !== 'object') return;
+      if (blob.workspaces && blob.workspaces[workspaceId]) {
+        delete blob.workspaces[workspaceId];
+        window.electronAPI.saveSessions(project.path, blob);
+      }
+    });
+  }
+
+  projectsNeedingAttention.delete(stateKey(project.path, workspaceId));
+
+  // (5) Route active back to Primary if we just deleted the active ws.
+  if (wasActive) {
+    setActiveWorkspace(projectIndex, null, false);
+  }
+
+  if (window.electronAPI && window.electronAPI.scrubWorkspaceArtifacts) {
+    window.electronAPI.scrubWorkspaceArtifacts(project.path, workspaceId);
+  }
+
+  saveConfig();
+  renderProjectList();
+  updateSidebarActivity();
+}
+
+function buildWorkspaceItem(project, projectIndex, ws, wsIndex) {
+  var wsItem = document.createElement('div');
+  wsItem.className = 'workspace-item';
+  wsItem.dataset.projectPath = project.path;
+  wsItem.dataset.workspaceId = ws.id;
+  if (projectIndex === config.activeProjectIndex && project.activeWorkspaceId === ws.id) {
+    wsItem.className += ' active';
+  }
+  if (projectsNeedingAttention.has(stateKey(project.path, ws.id))) {
+    wsItem.className += ' attention-flash';
+  }
+
+  var nameEl = document.createElement('div');
+  nameEl.className = 'workspace-name';
+  nameEl.textContent = ws.name;
+  nameEl.addEventListener('dblclick', function (e) {
+    e.stopPropagation();
+    startInlineRename(nameEl, {
+      onCommit: function (text) {
+        ws.name = text;
+        saveConfig();
+        renderProjectList();
+      }
+    });
+  });
+
+  var right = document.createElement('div');
+  right.className = 'workspace-right';
+
+  var wsState = projectStates.get(stateKey(project.path, ws.id));
+  var wsCount = wsState ? wsState.columns.size : 0;
+  if (wsCount > 0) {
+    var wsBadge = document.createElement('span');
+    wsBadge.className = 'workspace-badge';
+    var wsIcon = document.createElement('img');
+    wsIcon.className = 'claude-icon';
+    wsIcon.src = './claude-small.png';
+    wsIcon.alt = '';
+    wsBadge.appendChild(wsIcon);
+    right.appendChild(wsBadge);
+  }
+
+  var wsRemove = document.createElement('span');
+  wsRemove.className = 'workspace-remove';
+  wsRemove.textContent = '×';
+  wsRemove.title = 'Delete workspace';
+  wsRemove.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (confirm('Delete workspace "' + ws.name + '"? This will kill its terminals.')) {
+      deleteWorkspace(projectIndex, ws.id);
+    }
+  });
+  right.appendChild(wsRemove);
+
+  wsItem.appendChild(nameEl);
+  wsItem.appendChild(right);
+
+  wsItem.addEventListener('click', function () {
+    setActiveWorkspace(projectIndex, ws.id, false);
+  });
+
+  // Suppress the default browser context menu (would otherwise surface inside
+  // the app chrome on right-click). A minimal Rename/Delete menu can land here
+  // in a later phase.
+  wsItem.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+  });
+
+  // Drag-reorder within the same project only. Cross-project drops are
+  // discarded (dropEffect='none') — out of scope for this feature.
+  wsItem.setAttribute('draggable', 'true');
+  wsItem.addEventListener('dragstart', function (e) {
+    workspaceDragFromIndex = wsIndex;
+    workspaceDragFromProjectPath = project.path;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', '');
+    setTimeout(function () { wsItem.classList.add('dragging'); }, 0);
+  });
+  wsItem.addEventListener('dragend', function () {
+    wsItem.classList.remove('dragging');
+    workspaceDragFromIndex = -1;
+    workspaceDragFromProjectPath = null;
+    document.querySelectorAll('.workspace-item.drag-over').forEach(function (el) {
+      el.classList.remove('drag-over');
+    });
+  });
+  wsItem.addEventListener('dragover', function (e) {
+    if (workspaceDragFromIndex === -1
+        || workspaceDragFromProjectPath !== project.path) {
+      // Wrong-project or non-workspace drag — refuse silently.
+      e.dataTransfer.dropEffect = 'none';
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (workspaceDragFromIndex !== wsIndex) {
+      wsItem.classList.add('drag-over');
+    }
+  });
+  wsItem.addEventListener('dragleave', function () {
+    wsItem.classList.remove('drag-over');
+  });
+  wsItem.addEventListener('drop', function (e) {
+    if (workspaceDragFromProjectPath !== project.path) return;
+    e.preventDefault();
+    wsItem.classList.remove('drag-over');
+    var fromIdx = workspaceDragFromIndex;
+    workspaceDragFromIndex = -1;
+    workspaceDragFromProjectPath = null;
+    if (fromIdx === -1 || fromIdx === wsIndex) return;
+    var moved = project.workspaces.splice(fromIdx, 1)[0];
+    project.workspaces.splice(wsIndex, 0, moved);
+    saveConfig();
+    renderProjectList();
+  });
+
+  return wsItem;
+}
+
 function buildProjectItem(project, index) {
   var key = project.path;
-  var state = projectStates.get(key);
-  var count = state ? state.columns.size : 0;
+  // Primary badge count = only columns in Primary's state bucket.
+  var primaryState = projectStates.get(stateKey(key, null));
+  var count = primaryState ? primaryState.columns.size : 0;
 
   var item = document.createElement('div');
   item.className = 'project-item';
   item.dataset.projectPath = key;
-  if (index === config.activeProjectIndex && !project.poppedOut) item.className += ' active';
-  if (projectsNeedingAttention.has(key)) item.className += ' attention-flash';
+  // Project card is highlighted only when Primary is the active workspace.
+  // When a sub-workspace is active, the .workspace-item gets .active instead.
+  if (index === config.activeProjectIndex && !project.poppedOut
+      && project.activeWorkspaceId == null) {
+    item.className += ' active';
+  }
+  if (projectsNeedingAttention.has(stateKey(key, null))) item.className += ' attention-flash';
   if (project.pinned) item.className += ' is-pinned';
   if (project.poppedOut) {
     item.className += ' popped-out';
@@ -1795,6 +2551,21 @@ function buildProjectItem(project, index) {
   var name = document.createElement('div');
   name.className = 'project-name';
   name.textContent = project.name;
+  name.addEventListener('dblclick', function (e) {
+    e.stopPropagation();
+    var existingBadge = name.querySelector('.project-popout-badge');
+    if (existingBadge) existingBadge.remove();
+    var trailing = name.lastChild;
+    if (trailing && trailing.nodeType === 3 && trailing.data === ' ') trailing.remove();
+    name.textContent = config.projects[index].name || '';
+    startInlineRename(name, {
+      onCommit: function (text) {
+        config.projects[index].name = text;
+        saveConfig();
+        renderProjectList();
+      }
+    });
+  });
   if (project.poppedOut) {
     var badge = document.createElement('span');
     badge.className = 'project-popout-badge';
@@ -1824,8 +2595,13 @@ function buildProjectItem(project, index) {
   info.appendChild(branchEl);
   info.appendChild(pathEl);
 
+  // Right-side zones: × (top), badge+pin (middle), + (bottom). Flex-column
+  // layout — see styles.css `.project-right`.
   var rightSide = document.createElement('div');
   rightSide.className = 'project-right';
+
+  var middleRow = document.createElement('div');
+  middleRow.className = 'project-right-middle';
 
   if (count > 0) {
     var badge = document.createElement('span');
@@ -1835,7 +2611,7 @@ function buildProjectItem(project, index) {
     claudeIcon.src = './claude-small.png';
     claudeIcon.alt = '';
     badge.appendChild(claudeIcon);
-    rightSide.appendChild(badge);
+    middleRow.appendChild(badge);
   }
 
   var pinBtn = document.createElement('span');
@@ -1846,7 +2622,20 @@ function buildProjectItem(project, index) {
     e.stopPropagation();
     togglePinProject(index);
   });
-  rightSide.appendChild(pinBtn);
+  middleRow.appendChild(pinBtn);
+
+  // Add-workspace button (bottom-right). Click creates a new sub-workspace
+  // and immediately enters inline-rename mode.
+  var addWsBtn = document.createElement('span');
+  addWsBtn.className = 'project-add-workspace';
+  addWsBtn.textContent = '+';
+  addWsBtn.title = 'New workspace';
+  addWsBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (addWsBtn.classList.contains('disabled')) return;
+    addWsBtn.classList.add('disabled');
+    addWorkspace(index);
+  });
 
   var removeBtn = document.createElement('span');
   removeBtn.className = 'project-remove';
@@ -1867,11 +2656,9 @@ function buildProjectItem(project, index) {
       window.electronAPI.focusPopoutWindow(project.path);
       return;
     }
-    // Don't auto-spawn a Claude column on sidebar click — only show the
-    // project. Accidental clicks used to leave running ptys eating memory
-    // with no way to close them without first navigating into the project.
-    // New projects added via + Add Project still auto-spawn (see addProject).
-    setActiveProject(index, false, true);
+    // Clicking the project card always routes to Primary, even if the user
+    // was previously on a sub-workspace.
+    setActiveWorkspace(index, null, false);
   });
 
   var sortMode = config.projectSortMode || 'manual';
@@ -1890,6 +2677,12 @@ function buildProjectItem(project, index) {
     });
   });
   item.addEventListener('dragover', function (e) {
+    // Don't paint the project-drop cursor over project cards while a workspace
+    // drag is in flight — workspace drags are same-parent-only.
+    if (workspaceDragFromIndex !== -1) {
+      e.dataTransfer.dropEffect = 'none';
+      return;
+    }
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     if (projectDragFromIndex !== -1 && projectDragFromIndex !== index) {
@@ -1900,6 +2693,10 @@ function buildProjectItem(project, index) {
     item.classList.remove('drag-over');
   });
   item.addEventListener('drop', function (e) {
+    // Same guard — do not accept a workspace being dropped onto a project
+    // card. The workspace's own drop handler will have fired on its row, or
+    // the drop is simply discarded.
+    if (workspaceDragFromIndex !== -1) return;
     e.preventDefault();
     item.classList.remove('drag-over');
     var fromIdx = projectDragFromIndex;
@@ -2052,7 +2849,10 @@ function buildProjectItem(project, index) {
     }, 0);
   });
 
+  // Top → middle → bottom assembly.
   rightSide.appendChild(removeBtn);
+  rightSide.appendChild(middleRow);
+  rightSide.appendChild(addWsBtn);
   item.appendChild(info);
   item.appendChild(rightSide);
   return item;
@@ -2129,13 +2929,22 @@ function renderProjectEntries(entries, parent, sectionSuffix) {
     }
 
     var item = buildProjectItem(project, index);
+    var targetParent = parent;
     if (inGroup) {
       item.classList.add('in-group');
       var container = groupContainers[groupKey];
-      if (container) container.appendChild(item);
-      else parent.appendChild(item);
-    } else {
-      parent.appendChild(item);
+      if (container) targetParent = container;
+    }
+    targetParent.appendChild(item);
+
+    // Sub-workspaces render as peer indented rows directly under the project
+    // card. Each has its own active state, badge, and name.
+    if (Array.isArray(project.workspaces) && project.workspaces.length > 0) {
+      project.workspaces.forEach(function (ws, wsIndex) {
+        var wsItem = buildWorkspaceItem(project, index, ws, wsIndex);
+        if (inGroup) wsItem.classList.add('in-group');
+        targetParent.appendChild(wsItem);
+      });
     }
   });
 }
@@ -2205,53 +3014,97 @@ function renderProjectList() {
   updateAutomationSidebarBadges();
 }
 
-function setActiveProject(index, isStartup, skipDefaultSpawn) {
+// Respect the persisted activeWorkspaceId on first route-in. If the id points
+// at a workspace that no longer exists, silently fall through to Primary (and
+// clear the stale id). Clicking the project card directly calls
+// setActiveWorkspace(index, null) explicitly \u2014 this wrapper is the startup /
+// restore-index path.
+function setActiveProject(index, isStartup) {
   var project = config.projects[index];
   if (!project) return;
+  var wsId = project.activeWorkspaceId;
+  if (wsId != null) {
+    var stillThere = Array.isArray(project.workspaces)
+      && project.workspaces.some(function (w) { return w && w.id === wsId; });
+    if (!stillThere) {
+      project.activeWorkspaceId = null;
+      wsId = null;
+    }
+  }
+  setActiveWorkspace(index, wsId, isStartup);
+}
 
-  var prevKey = activeProjectKey;
-  var newKey = project.path;
+function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
+  if (popoutMode) return;
+  var project = config.projects[projectIndex];
+  if (!project) return;
 
-  if (prevKey && prevKey !== newKey) {
-    var prevState = projectStates.get(prevKey);
+  // Compute the outgoing state key BEFORE mutating config, so we can hide
+  // its container cleanly.
+  var prevStateKey = null;
+  if (config.activeProjectIndex >= 0 && config.projects[config.activeProjectIndex]) {
+    var prevProject = config.projects[config.activeProjectIndex];
+    prevStateKey = stateKey(prevProject.path, prevProject.activeWorkspaceId);
+  }
+  var newStateKey = stateKey(project.path, workspaceId);
+
+  // If a maximized column belongs to a different (project, workspace), restore
+  // the layout first so hiding the previous container doesn't leave it stuck.
+  if (maximizedColumnId != null) {
+    var maxCol = allColumns.get(maximizedColumnId);
+    if (maxCol && (maxCol.projectKey !== project.path
+        || (maxCol.workspaceId == null ? null : maxCol.workspaceId) !== workspaceId)) {
+      toggleMaximizeColumn(maximizedColumnId);
+    }
+  }
+
+  if (prevStateKey && prevStateKey !== newStateKey) {
+    var prevState = projectStates.get(prevStateKey);
     if (prevState) prevState.containerEl.style.display = 'none';
     var commitInput = document.getElementById('git-commit-msg');
     if (commitInput) commitInput.value = '';
     if (window.electronAPI && window.electronAPI.stopFsWatch) {
-      window.electronAPI.stopFsWatch(prevKey).catch(function () {});
+      window.electronAPI.stopFsWatch(prevProject.path).catch(function () {});
     }
   }
 
-  config.activeProjectIndex = index;
-  activeProjectKey = newKey;
+  config.activeProjectIndex = projectIndex;
+  project.activeWorkspaceId = workspaceId; // null clears, restores Primary
+  activeProjectKey = project.path;
   activeProjectNameEl.textContent = project.name;
   // Start watching the new project root so the Explorer can refresh on disk
   // changes (file creation/deletion/rename from other tools).
   if (window.electronAPI && window.electronAPI.startFsWatch) {
-    window.electronAPI.startFsWatch(newKey).catch(function () {});
+    window.electronAPI.startFsWatch(project.path).catch(function () {});
   }
   if (typeof window.__rerenderHookList === 'function') window.__rerenderHookList();
 
-  // Show branch in toolbar
   if (window.electronAPI && window.electronAPI.gitBranch) {
-    window.electronAPI.gitBranch(newKey).then(function (branch) {
-      if (branch && activeProjectKey === newKey) {
+    window.electronAPI.gitBranch(project.path).then(function (branch) {
+      if (branch && activeProjectKey === project.path) {
         activeProjectNameEl.textContent = project.name + '  \u2387 ' + branch.trim();
       }
     }).catch(function () {});
   }
 
   saveConfig();
-  // Update active highlight without full re-render (avoids jitter)
+  // Active accent: project card highlighted iff Primary is active for this
+  // project; each workspace row highlighted iff it's the active workspace.
   document.querySelectorAll('.project-item').forEach(function (el) {
-    el.classList.toggle('active', el.dataset.projectPath === newKey);
+    var isThisProject = el.dataset.projectPath === project.path;
+    el.classList.toggle('active', isThisProject && workspaceId == null);
+  });
+  document.querySelectorAll('.workspace-item').forEach(function (el) {
+    var matches = el.dataset.projectPath === project.path
+      && el.dataset.workspaceId === (workspaceId == null ? '' : workspaceId);
+    el.classList.toggle('active', matches);
   });
 
   var emptyState = columnsContainer.querySelector('.empty-state');
   if (emptyState) emptyState.remove();
 
-  lastGitRaw = null; // invalidate cache on project switch
-  var state = getOrCreateProjectState(newKey);
+  lastGitRaw = null;
+  var state = getOrCreateProjectState(newStateKey);
   state.containerEl.style.display = 'flex';
   refreshExplorer();
   if (activeAutomationDetailId) closeAutomationDetail();
@@ -2259,11 +3112,18 @@ function setActiveProject(index, isStartup, skipDefaultSpawn) {
   loadSpawnOptions();
 
   if (state.columns.size === 0) {
-    if (isStartup && window.electronAPI) {
-      restoreProjectSessions(newKey, project);
-    } else if (!skipDefaultSpawn) {
+    // Always restore from disk when we have no in-memory columns for this
+    // (project, workspace) — startup OR first post-startup navigation. The
+    // old `isStartup`-gated branch spawned 1 default column on navigation,
+    // which then triggered persistSessions and OVERWROTE the saved session
+    // list for that workspace. restoreSessions internally falls back to a
+    // default spawn when no sessions are saved, so this branch is safe
+    // for both populated and empty cases.
+    if (window.electronAPI) {
+      restoreSessions(project.path, workspaceId);
+    } else {
       var spawnArgs = buildSpawnArgs();
-      addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, spawnOpts());
+      addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, { workspaceId: workspaceId });
     }
   } else {
     if (state.focusedColumnId !== null) {
@@ -2275,62 +3135,181 @@ function setActiveProject(index, isStartup, skipDefaultSpawn) {
   if (typeof window.__renderStickyNotesForActiveProject === 'function') {
     window.__renderStickyNotesForActiveProject();
   }
+  if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
+    window.__repositionStickyNotesForActiveProject();
+  }
 }
 
-function restoreProjectSessions(projectPath, project) {
-  window.electronAPI.loadSessions(projectPath).then(function (saved) {
-    var globalArgs = buildSpawnArgs();
-    var state = projectStates.get(projectPath);
+function restoreSessions(projectPath, workspaceId) {
+  window.electronAPI.loadSessions(projectPath).then(async function (blob) {
+    var spawnArgs = buildSpawnArgs();
+    var state = projectStates.get(stateKey(projectPath, workspaceId));
 
-    // Mark restore in progress so background timers (session-sync, title-edit) don't overwrite
-    // sessions.json with default-flex ratios before applyLayoutRatios runs.
-    if (state) state.restoringLayout = true;
+    // Pick the slice for the active workspace plus its row-height ratios. The
+    // synthesized v2 shape carries ratios per workspace; older shapes are
+    // promoted into the same `entries`/`rowHeightByIdx` pair below.
+    var slice = null;
+    var rowHeightRatios = null;
+    if (blob && typeof blob === 'object' && !Array.isArray(blob)) {
+      if (workspaceId == null) {
+        slice = Array.isArray(blob.sessions) ? blob.sessions : null;
+        if (Array.isArray(blob.rowHeightRatios)) rowHeightRatios = blob.rowHeightRatios;
+      } else if (blob.workspaces && blob.workspaces[workspaceId]) {
+        var wsBlob = blob.workspaces[workspaceId];
+        slice = Array.isArray(wsBlob.sessions) ? wsBlob.sessions : null;
+        if (Array.isArray(wsBlob.rowHeightRatios)) rowHeightRatios = wsBlob.rowHeightRatios;
+      }
+    }
 
     var entries = [];
     var rowHeightByIdx = {};
 
-    if (saved && saved.version === 2 && Array.isArray(saved.rows)) {
-      for (var r = 0; r < saved.rows.length; r++) {
-        var srow = saved.rows[r] || {};
+    if (blob && typeof blob === 'object' && blob.version === 2 && Array.isArray(blob.rows) && workspaceId == null) {
+      // Legacy HEAD-only v2 shape (pre-workspace): rows/columns nested. Promote
+      // to primary-workspace entries.
+      for (var r = 0; r < blob.rows.length; r++) {
+        var srow = blob.rows[r] || {};
         var srowCols = Array.isArray(srow.columns) ? srow.columns : [];
         if (typeof srow.heightRatio === 'number' && isFinite(srow.heightRatio) && srow.heightRatio > 0) {
           rowHeightByIdx[r] = srow.heightRatio;
         }
         for (var c = 0; c < srowCols.length; c++) {
-          var col = srowCols[c] || {};
-          if (!col.sessionId) continue;
-          entries.push({
+          var lcol = srowCols[c] || {};
+          if (!lcol.sessionId) continue;
+          var legacyEntry = {
             rowIdx: r,
-            sessionId: col.sessionId,
-            title: col.title || null,
-            endpointId: col.endpointId || null,
-            widthRatio: (typeof col.widthRatio === 'number' && isFinite(col.widthRatio) && col.widthRatio > 0) ? col.widthRatio : null
-          });
+            sessionId: lcol.sessionId,
+            title: lcol.title || null,
+            widthRatio: (typeof lcol.widthRatio === 'number' && isFinite(lcol.widthRatio) && lcol.widthRatio > 0) ? lcol.widthRatio : null,
+            pipeline: lcol.pipeline || null
+          };
+          if (typeof lcol.targetBranch === 'string' && lcol.targetBranch) legacyEntry.targetBranch = lcol.targetBranch;
+          entries.push(legacyEntry);
         }
       }
-    } else if (Array.isArray(saved) && saved.length > 0) {
-      for (var i = 0; i < saved.length; i++) {
-        var entry = saved[i];
+    } else if (slice && slice.length > 0) {
+      // Synthesized shape OR personal/main flat list. Each entry may carry
+      // rowIdx/widthRatio (synthesized) or be a bare string / {sessionId,title}
+      // (legacy personal/main fallback — single row, default ratios).
+      for (var i = 0; i < slice.length; i++) {
+        var entry = slice[i];
         var sid = typeof entry === 'string' ? entry : entry && entry.sessionId;
         if (!sid) continue;
+        var rowIdx = (typeof entry === 'object' && entry && typeof entry.rowIdx === 'number' && isFinite(entry.rowIdx)) ? entry.rowIdx : 0;
+        var widthRatio = (typeof entry === 'object' && entry && typeof entry.widthRatio === 'number' && isFinite(entry.widthRatio) && entry.widthRatio > 0) ? entry.widthRatio : null;
+        var title = (typeof entry === 'object' && entry && entry.title) ? entry.title : null;
+        var cwd = (typeof entry === 'object' && entry && typeof entry.cwd === 'string' && entry.cwd) ? entry.cwd : null;
+        var cwdSource = (typeof entry === 'object' && entry && typeof entry.cwdSource === 'string' && entry.cwdSource) ? entry.cwdSource : null;
+        var targetBranch = (typeof entry === 'object' && entry && typeof entry.targetBranch === 'string' && entry.targetBranch) ? entry.targetBranch : null;
+        var endpointId = (typeof entry === 'object' && entry && entry.endpointId) ? entry.endpointId : null;
+        var pushedEntry = { rowIdx: rowIdx, sessionId: sid, title: title, widthRatio: widthRatio };
+        if (cwd) pushedEntry.cwd = cwd;
+        if (cwdSource) pushedEntry.cwdSource = cwdSource;
+        if (targetBranch) pushedEntry.targetBranch = targetBranch;
+        if (endpointId) pushedEntry.endpointId = endpointId;
+        if (typeof entry === 'object' && entry && entry.pipeline) pushedEntry.pipeline = entry.pipeline;
+        entries.push(pushedEntry);
+      }
+      if (rowHeightRatios) {
+        for (var rh = 0; rh < rowHeightRatios.length; rh++) {
+          var rhv = rowHeightRatios[rh];
+          if (typeof rhv === 'number' && isFinite(rhv) && rhv > 0) rowHeightByIdx[rh] = rhv;
+        }
+      }
+    } else if (Array.isArray(blob) && blob.length > 0 && workspaceId == null) {
+      // Very old shape: bare array. Treat as primary workspace, single row, no ratios.
+      for (var bi = 0; bi < blob.length; bi++) {
+        var bentry = blob[bi];
+        var bsid = typeof bentry === 'string' ? bentry : bentry && bentry.sessionId;
+        if (!bsid) continue;
         entries.push({
           rowIdx: 0,
-          sessionId: sid,
-          title: (typeof entry === 'object' && entry && entry.title) ? entry.title : null,
-          endpointId: (typeof entry === 'object' && entry && entry.endpointId) || null,
-          widthRatio: null
+          sessionId: bsid,
+          title: (typeof bentry === 'object' && bentry && bentry.title) ? bentry.title : null,
+          widthRatio: null,
+          pipeline: (typeof bentry === 'object' && bentry && bentry.pipeline) ? bentry.pipeline : null
         });
       }
     }
 
-    if (entries.length === 0) {
-      addColumn(globalArgs.length > 0 ? globalArgs : null, null, spawnOpts());
-      if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
-        window.__repositionStickyNotesForActiveProject();
+    // Mark restore in progress so background timers (session-sync, title-edit) don't overwrite
+    // sessions.json with default-flex ratios before applyLayoutRatios runs.
+    if (state) state.restoringLayout = true;
+
+    try {
+      if (entries.length === 0) {
+        addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, { workspaceId: workspaceId });
+        return;
       }
+
+      var rowsByIdx = {};
+      for (var k = 0; k < entries.length; k++) {
+        var e = entries[k];
+        var targetRow = rowsByIdx[e.rowIdx];
+        if (!targetRow) {
+          while (state.rows.length <= e.rowIdx) {
+            var newRow = addRowToProject(state);
+            rowsByIdx[state.rows.length - 1] = newRow;
+          }
+          targetRow = rowsByIdx[e.rowIdx];
+        }
+        var rowOpts = { workspaceId: workspaceId };
+        if (e.title) rowOpts.title = e.title;
+        if (e.cwd) {
+          var stillExists = await window.electronAPI.pathExists(e.cwd);
+          if (stillExists) {
+            rowOpts.cwd = e.cwd;
+            rowOpts.cwdSource = e.cwdSource || 'manual';
+          } else {
+            console.warn("Column '" + (e.title || e.sessionId) + "' had cwd " + e.cwd + " which no longer exists; restored at project root.");
+          }
+        }
+        if (e.targetBranch) rowOpts.targetBranch = e.targetBranch;
+        if (e.pipeline) rowOpts.pipelineState = e.pipeline;
+
+        // Endpoint-aware resume: if this column was spawned against a non-cloud
+        // endpoint preset, look up the preset's env block and rewrite args. If
+        // the preset is gone (envBlock null) or no endpointId is recorded,
+        // fall back to a cloud-style resume (args stripped of any local-only
+        // flags, no env injected). Sessions saved without endpointId are
+        // treated as Cloud and explicitly do NOT inherit the dropdown's
+        // currentEndpointEnv — otherwise a cloud column would silently get a
+        // local server's URL injected.
+        var resumeArgs;
+        var resumeRowOpts = rowOpts;
+        if (e.endpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
+          var envBlock = null;
+          try { envBlock = await window.electronAPI.endpointGetEnv(e.endpointId); } catch (_) { envBlock = null; }
+          if (envBlock) {
+            resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ true);
+            resumeArgs.push('--resume', e.sessionId);
+            resumeRowOpts = Object.assign({}, rowOpts, { endpointId: e.endpointId, env: envBlock });
+          } else {
+            resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
+            resumeArgs.push('--resume', e.sessionId);
+          }
+        } else {
+          resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
+          resumeArgs.push('--resume', e.sessionId);
+        }
+        addColumn(resumeArgs, targetRow, resumeRowOpts);
+      }
+
+      for (var rr = state.rows.length - 1; rr >= 0; rr--) {
+        removeRowIfEmpty(state, state.rows[rr]);
+      }
+
+      applyLayoutRatios(state, entries, rowHeightByIdx, rowsByIdx);
+    } finally {
+      // Always clear the flag — even if a synchronous call above threw — so background
+      // persists are not silently disabled for the rest of the session. persistSessions
+      // runs after the reset so the canonicalising write actually happens.
       if (state) state.restoringLayout = false;
-      persistSessions(projectPath);
-      return;
+      persistSessions(projectPath, workspaceId);
+    }
+
+    if (typeof window.__renderStickyNotesForActiveProject === 'function') {
+      window.__renderStickyNotesForActiveProject();
     }
 
     // Pre-create rows so each entry has a stable target row even if endpoint env
@@ -2946,6 +3925,21 @@ function createColumnHeader(id, customTitle, opts) {
   header.appendChild(title);
   header.appendChild(actions);
 
+  if (!opts.isDiff) {
+    var pipelineDiv = document.createElement('div');
+    pipelineDiv.className = 'col-pipeline';
+    header.appendChild(pipelineDiv);
+  }
+
+  if (!popoutMode && !opts.isDiff) {
+    header.addEventListener('contextmenu', function (e) {
+      if (header.querySelector('[contenteditable="true"]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      showColumnContextMenu(id, e.clientX, e.clientY);
+    });
+  }
+
   header.addEventListener('dblclick', function (e) {
     if (e.target === title || title.contains(e.target)) return;
     toggleMaximizeColumn(id);
@@ -2956,36 +3950,189 @@ function createColumnHeader(id, customTitle, opts) {
   return header;
 }
 
-function startTitleEdit(id, titleEl) {
-  if (titleEl.contentEditable === 'true') return;
-  titleEl.contentEditable = 'true';
-  titleEl.classList.add('editing');
-  titleEl.focus();
+var columnContextMenuDocClick = null;
+
+function showColumnContextMenu(colId, x, y) {
+  var col = allColumns.get(colId);
+  if (!col) return;
+  var project = config.projects.find(function (p) { return p.path === col.projectKey; });
+  if (!project) return;
+
+  var candidates = [];
+  if (col.workspaceId !== null) candidates.push({ wsId: null, label: 'Primary' });
+  (project.workspaces || []).forEach(function (ws) {
+    if (ws.id !== col.workspaceId) candidates.push({ wsId: ws.id, label: ws.name });
+  });
+
+  // Tear down any prior column context menu/submenu before opening a new one.
+  if (columnContextMenuDocClick) {
+    document.removeEventListener('click', columnContextMenuDocClick);
+    columnContextMenuDocClick = null;
+  }
+  var prior = document.getElementById('column-context-menu');
+  if (prior) prior.remove();
+  var priorSub = document.getElementById('column-context-submenu');
+  if (priorSub) priorSub.remove();
+
+  var menu = document.createElement('div');
+  menu.id = 'column-context-menu';
+  menu.className = 'project-context-menu';
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  menu.style.display = 'block';
+
+  var parentItem = document.createElement('div');
+  parentItem.className = 'project-context-item has-submenu';
+  parentItem.textContent = 'Send to workspace';
+  if (candidates.length === 0) parentItem.classList.add('disabled');
+  menu.appendChild(parentItem);
+
+  function closeAll() {
+    var m = document.getElementById('column-context-menu');
+    if (m) m.remove();
+    var s = document.getElementById('column-context-submenu');
+    if (s) s.remove();
+    if (columnContextMenuDocClick) {
+      document.removeEventListener('click', columnContextMenuDocClick);
+      columnContextMenuDocClick = null;
+    }
+  }
+
+  function openSubmenu() {
+    if (candidates.length === 0) return;
+    if (document.getElementById('column-context-submenu')) return;
+    var sub = document.createElement('div');
+    sub.id = 'column-context-submenu';
+    sub.className = 'project-context-menu column-context-submenu';
+    var rect = parentItem.getBoundingClientRect();
+    sub.style.left = rect.right + 'px';
+    sub.style.top = rect.top + 'px';
+    sub.style.display = 'block';
+    candidates.forEach(function (cand) {
+      var item = document.createElement('div');
+      item.className = 'project-context-item';
+      item.textContent = cand.label;
+      item.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        closeAll();
+        migrateColumnToWorkspace(colId, cand.wsId);
+      });
+      sub.appendChild(item);
+    });
+    document.body.appendChild(sub);
+  }
+
+  parentItem.addEventListener('mouseenter', openSubmenu);
+  parentItem.addEventListener('click', function (e) {
+    e.stopPropagation();
+    openSubmenu();
+  });
+
+  var hasPipeProgress = !!(col.pipeline && (col.pipeline.steps.some(function (s) { return s.complete; }) || (col.pipeline.flags && col.pipeline.flags.plan)));
+  if (hasPipeProgress) {
+    var pipeItem = document.createElement('div');
+    pipeItem.className = 'project-context-item';
+    pipeItem.textContent = col.pipeline.visible ? 'Hide pipeline' : 'Show pipeline';
+    pipeItem.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      var c = allColumns.get(colId);
+      if (!c || !c.pipeline) { closeAll(); return; }
+      c.pipeline.visible = !c.pipeline.visible;
+      renderPipeline(colId);
+      persistSessions(c.projectKey, c.workspaceId);
+      closeAll();
+    });
+    menu.appendChild(pipeItem);
+  }
+
+  document.body.appendChild(menu);
+
+  // Defer outside-click teardown by one tick so the originating right-click
+  // doesn't immediately fire it.
+  setTimeout(function () {
+    function onDocClick(ev) {
+      var m = document.getElementById('column-context-menu');
+      var s = document.getElementById('column-context-submenu');
+      if (m && m.contains(ev.target)) return;
+      if (s && s.contains(ev.target)) return;
+      closeAll();
+    }
+    columnContextMenuDocClick = onDocClick;
+    document.addEventListener('click', onDocClick);
+  }, 0);
+}
+
+// Shared contenteditable inline-rename helper. Used by column title, project
+// name, and workspace name rename. On Enter or blur, commits with trimmed text
+// by calling onCommit(text). On Escape, reverts to the prior text (no commit).
+// If committed text is empty, the element's textContent is set to onEmpty() when
+// provided (else reverted to prior text) and onCommit is NOT called. Paste is
+// forced to plain text to prevent clipboard HTML from landing in the DOM.
+function startInlineRename(el, opts) {
+  if (!el || el.contentEditable === 'true') return;
+  opts = opts || {};
+  var onCommit = opts.onCommit || function () {};
+  var onEmpty = opts.onEmpty || null;
+  var priorText = el.textContent;
+
+  el.contentEditable = 'true';
+  el.classList.add('editing');
+  el.focus();
   var range = document.createRange();
-  range.selectNodeContents(titleEl);
+  range.selectNodeContents(el);
   var sel = window.getSelection();
   sel.removeAllRanges();
   sel.addRange(range);
 
-  function finishEdit() {
-    titleEl.contentEditable = 'false';
-    titleEl.classList.remove('editing');
-    var newTitle = titleEl.textContent.trim();
-    var col = allColumns.get(id);
-    if (col) {
-      col.customTitle = newTitle || null;
-      if (!newTitle) titleEl.textContent = 'Claude #' + id;
-      persistSessions(col.projectKey);
+  function stopClick(e) { e.stopPropagation(); }
+  function onPaste(e) {
+    e.preventDefault();
+    var text = (e.clipboardData || window.clipboardData).getData('text/plain') || '';
+    document.execCommand('insertText', false, text);
+  }
+  function onKeydown(e) {
+    if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+    else if (e.key === 'Escape') {
+      escaped = true;
+      el.textContent = priorText;
+      el.blur();
     }
   }
-  titleEl.addEventListener('blur', finishEdit, { once: true });
-  titleEl.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') { e.preventDefault(); titleEl.blur(); }
-    if (e.key === 'Escape') {
-      var col = allColumns.get(id);
-      titleEl.textContent = (col && col.customTitle) || ('Claude #' + id);
-      titleEl.blur();
+  var escaped = false;
+
+  el.addEventListener('mousedown', stopClick);
+  el.addEventListener('click', stopClick);
+  el.addEventListener('paste', onPaste);
+  el.addEventListener('keydown', onKeydown);
+
+  function finishEdit() {
+    el.contentEditable = 'false';
+    el.classList.remove('editing');
+    el.removeEventListener('mousedown', stopClick);
+    el.removeEventListener('click', stopClick);
+    el.removeEventListener('paste', onPaste);
+    el.removeEventListener('keydown', onKeydown);
+    if (escaped) return;
+    var next = el.textContent.trim();
+    if (!next) {
+      el.textContent = onEmpty ? onEmpty() : priorText;
+      return;
     }
+    el.textContent = next;
+    onCommit(next);
+  }
+  el.addEventListener('blur', finishEdit, { once: true });
+}
+
+function startTitleEdit(id, titleEl) {
+  startInlineRename(titleEl, {
+    onCommit: function (text) {
+      var col = allColumns.get(id);
+      if (!col) return;
+      col.customTitle = text;
+      persistSessions(col.projectKey, col.workspaceId);
+    },
+    onEmpty: function () { return 'Claude #' + id; }
   });
 }
 
@@ -3378,6 +4525,37 @@ function addColumn(args, targetRow, opts) {
     var c = allColumns.get(id);
     if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
       c.lastInputAt = Date.now();
+      // --- Pipeline keyword steps: accumulate the typed command line so a
+      // submitted command can advance a user-configured pipeline step. The
+      // terminal only emits raw keystrokes, so this is a best-effort line
+      // buffer: printable chars append, Backspace pops, Ctrl-U/Ctrl-C clear,
+      // and Enter evaluates the line against the pipeline's keyword steps.
+      // Mid-line cursor edits (arrow keys) are escape-led and already excluded
+      // by the gate above, so they're simply ignored. The matcher is a no-op
+      // while in plan mode and only advances forward, so this never fights the
+      // banner-driven Plan/Execute anchors.
+      if (c.pipeline && PipelineMatcherAPI) {
+        for (var bi = 0; bi < data.length; bi++) {
+          var bc = data.charCodeAt(bi);
+          if (bc === 0x0d || bc === 0x0a) {
+            var pipeCmd = (c.cmdBuffer || '').trim();
+            c.cmdBuffer = '';
+            if (pipeCmd && PipelineMatcherAPI.applyKeywordMatch(c.pipeline, pipeCmd, pipelinesConfig)) {
+              // A keyword step advanced — reveal the bar so the progress is
+              // visible even when the column never entered plan mode.
+              c.pipeline.visible = true;
+              renderPipeline(id);
+              persistSessionsDebounced(c.projectKey, c.workspaceId);
+            }
+          } else if (bc === 0x7f || bc === 0x08) {
+            c.cmdBuffer = (c.cmdBuffer || '').slice(0, -1);
+          } else if (bc === 0x15 || bc === 0x03) {
+            c.cmdBuffer = '';
+          } else if (bc >= 0x20) {
+            c.cmdBuffer = (c.cmdBuffer || '') + data.charAt(bi);
+          }
+        }
+      }
       // Stop attention flash when the user types — clearly they're responding
       if (c.activityState === 'attention') {
         c.hasUserInput = false;
@@ -3481,7 +4659,19 @@ function addColumn(args, targetRow, opts) {
     searchOverlay: searchOverlay,
     headerEl: header,
     cwd: cwd,
+    cwdSource: opts.cwdSource || null,
+    targetBranch: opts.targetBranch || null,
     projectKey: activeProjectKey,
+    // Stamp the workspaceId so later persist/restore/focus-flow can route to
+    // the right bucket. Honor explicit opts.workspaceId (popout transfers,
+    // restoreSessions, setActiveWorkspace) otherwise read the active project's
+    // currently-active workspace id. Primary columns settle on null.
+    workspaceId: (opts.workspaceId !== undefined)
+      ? opts.workspaceId
+      : (function () {
+          var p = config.projects[config.activeProjectIndex];
+          return (p && p.activeWorkspaceId != null) ? p.activeWorkspaceId : null;
+        })(),
     sessionId: resumeSessionId,
     sessionMtime: 0,
     customTitle: opts.title || null,
@@ -3495,6 +4685,12 @@ function addColumn(args, targetRow, opts) {
     lastInputAt: 0,
     hasUserInput: false,
     notified: false,
+    pipeline: PipelineMatcherAPI.buildPipelineState(opts.pipelineState || null, resolveSteps(pipelinesConfig)),
+    pipelineEl: header.querySelector('.col-pipeline'),
+    pipelineResizeObserver: null,
+    bannerTail: '',
+    bannerEverMatched: false,
+    bannerDriftWarned: false,
     spawnSessionPct: null,    // (unused) five_hour.utilization at spawn — kept for backward compat
     spawnWeeklyPct: null,     // (unused) reserved
     spawnSessionTokens: null, // context-token count at spawn — set on first ctx poll
@@ -3512,9 +4708,30 @@ function addColumn(args, targetRow, opts) {
     ctxTextEl: null,
     ctxPollTimer: null,
     snippetBuffer: '',  // accumulates printable chars to detect "\\trigger" patterns
+    cmdBuffer: '',  // best-effort typed command line, evaluated against pipeline keyword steps on Enter
     endpointId: opts.endpointId || (typeof currentEndpointId !== 'undefined' ? currentEndpointId : null) || null,
     failedOver: false  // set true after one failover so we don't ping-pong
   };
+
+  // Wire up ResizeObserver for compact-mode toggling on the pipeline strip.
+  if (colData.pipelineEl && typeof ResizeObserver === 'function') {
+    var lastCompact = null;
+    var ro = new ResizeObserver(function () {
+      var w = header.offsetWidth;
+      var nowCompact = w > 0 && w < 380;
+      if (nowCompact !== lastCompact) {
+        lastCompact = nowCompact;
+        renderPipeline(id);
+      }
+    });
+    ro.observe(header);
+    colData.pipelineResizeObserver = ro;
+  }
+
+  // If restored with progress, render immediately so pills appear before banner re-detected.
+  if (colData.pipeline && colData.pipeline.visible) {
+    setTimeout(function () { renderPipeline(id); }, 0);
+  }
 
   row.columnIds.push(id);
   state.columns.set(id, colData);
@@ -3609,6 +4826,366 @@ function parseDiff(diffText) {
   return { hunks: hunks };
 }
 
+// Review comments — per-(workspace, slotKey) index for diffContent columns.
+var diffSlotIndex = new Map(); // 'wsId::slotKey' -> columnId
+
+function reviewSlotIndexKey(workspaceId, slotKey) {
+  return (workspaceId || '__primary__') + '::' + slotKey;
+}
+
+function loadReviewCommentsForColumn(colData) {
+  if (!window.electronAPI || !window.electronAPI.loadReviewComments) return;
+  if (!colData.projectKey || !colData.element) return;
+  var colId = parseInt(colData.element.id.replace('col-', ''), 10);
+  var scope = colData.scope || 'working';
+  window.electronAPI.loadReviewComments(colData.projectKey, colData.workspaceId || null, colData.sessionId, scope, colId).then(function (comments) {
+    colData.reviewComments = Array.isArray(comments) ? comments : [];
+    paintReviewIndicators(colData);
+    refreshReviewCommentsButtons();
+  }).catch(function () { colData.reviewComments = []; });
+}
+
+function saveReviewCommentsForColumn(colData) {
+  if (!window.electronAPI || !window.electronAPI.saveReviewComments) return;
+  if (!colData.projectKey || !colData.element) return;
+  var colId = parseInt(colData.element.id.replace('col-', ''), 10);
+  var scope = colData.scope || 'working';
+  window.electronAPI.saveReviewComments(colData.projectKey, colData.workspaceId || null, colData.sessionId, scope, colData.reviewComments || [], colId);
+}
+
+function generateCommentId() {
+  return 'rc_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8);
+}
+
+function paintReviewIndicators(colData) {
+  if (!colData.element) return;
+  var diffBody = colData.element.querySelector('.diff-body');
+  if (!diffBody) return;
+
+  // Clear previous indicators/connectors/stale section.
+  diffBody.querySelectorAll('.review-comment-indicator, .review-comment-connector').forEach(function (el) { el.remove(); });
+  var oldStale = diffBody.querySelector('.review-stale-comments');
+  if (oldStale) oldStale.remove();
+
+  var comments = Array.isArray(colData.reviewComments) ? colData.reviewComments : [];
+  if (comments.length === 0) return;
+
+  // Build (side, line) -> row map.
+  var rowMap = { new: {}, old: {} };
+  diffBody.querySelectorAll('.diff-line[data-line-type]').forEach(function (row) {
+    var oldL = row.getAttribute('data-old-line');
+    var newL = row.getAttribute('data-new-line');
+    if (oldL !== null && oldL !== '') rowMap.old[oldL] = row;
+    if (newL !== null && newL !== '') rowMap.new[newL] = row;
+  });
+
+  var stale = [];
+  comments.forEach(function (c) {
+    var startRow = rowMap[c.side] && rowMap[c.side][String(c.startLine)];
+    if (!startRow) { stale.push(c); return; }
+    var indicator = document.createElement('span');
+    indicator.className = 'review-comment-indicator';
+    indicator.textContent = '💬';
+    indicator.setAttribute('aria-label', 'Open review comment');
+    indicator.setAttribute('role', 'button');
+    indicator.setAttribute('tabindex', '0');
+    indicator.dataset.commentId = c.id;
+    indicator.addEventListener('click', function (e) {
+      e.stopPropagation();
+      openCommentBox(colData, c.startLine, c.endLine, c.side, c.id);
+    });
+    indicator.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        openCommentBox(colData, c.startLine, c.endLine, c.side, c.id);
+      }
+    });
+    var firstNum = startRow.querySelector('.diff-line-num');
+    if (firstNum) firstNum.appendChild(indicator);
+
+    if (c.endLine > c.startLine) {
+      for (var ln = c.startLine; ln < c.endLine; ln++) {
+        var midRow = rowMap[c.side] && rowMap[c.side][String(ln)];
+        if (!midRow) continue;
+        var connector = document.createElement('span');
+        connector.className = 'review-comment-connector';
+        var firstNumMid = midRow.querySelector('.diff-line-num');
+        if (firstNumMid) firstNumMid.appendChild(connector);
+      }
+    }
+  });
+
+  // Stale section
+  if (stale.length > 0) renderStaleComments(diffBody, colData, stale);
+}
+
+function renderStaleComments(diffBody, colData, stale) {
+  var details = document.createElement('details');
+  details.className = 'review-stale-comments';
+  details.open = true;
+  var summary = document.createElement('summary');
+  summary.textContent = stale.length + ' stale comment' + (stale.length === 1 ? '' : 's') + ' (line numbers no longer in diff)';
+  details.appendChild(summary);
+
+  var totalLines = 0;
+  if (colData.diffData && colData.diffData.parsed && colData.diffData.parsed.hunks) {
+    colData.diffData.parsed.hunks.forEach(function (h) { totalLines += h.lines.length; });
+  }
+  if (totalLines > 5000) {
+    var notice = document.createElement('div');
+    notice.className = 'review-stale-truncation-notice';
+    notice.textContent = 'Diff was truncated at 5000 lines per hunk; some comments may belong to live lines past the cap.';
+    details.appendChild(notice);
+  }
+
+  var list = document.createElement('div');
+  list.className = 'review-stale-list';
+  stale.forEach(function (c) {
+    var entry = document.createElement('div');
+    entry.className = 'review-stale-entry';
+    entry.dataset.commentId = c.id;
+    var ref = document.createElement('span');
+    ref.className = 'review-stale-ref';
+    ref.textContent = (c.filePath || '?') + ':' + (c.startLine === c.endLine ? c.startLine : c.startLine + '-' + c.endLine);
+    var text = document.createElement('div');
+    text.className = 'review-stale-text';
+    text.textContent = c.text || '';
+    entry.appendChild(ref);
+    entry.appendChild(text);
+    entry.addEventListener('click', function () {
+      openCommentBox(colData, c.startLine, c.endLine, c.side, c.id, /*anchorEl*/ entry);
+    });
+    list.appendChild(entry);
+  });
+  details.appendChild(list);
+  diffBody.appendChild(details);
+}
+
+function bindGutterSelection(colData) {
+  if (!colData.element) return;
+  var diffBody = colData.element.querySelector('.diff-body');
+  if (!diffBody) return;
+
+  // Split mode: read-only — no new comments.
+  if (colData.diffMode === 'split') return;
+
+  function rowSideAndLine(rowEl) {
+    var t = rowEl.getAttribute('data-line-type');
+    if (t === 'add') return { side: 'new', line: parseInt(rowEl.getAttribute('data-new-line'), 10) };
+    if (t === 'del') return { side: 'old', line: parseInt(rowEl.getAttribute('data-old-line'), 10) };
+    return { side: 'new', line: parseInt(rowEl.getAttribute('data-new-line'), 10) };
+  }
+
+  function clearSelection() {
+    diffBody.querySelectorAll('.diff-line-num.gutter-selected').forEach(function (el) { el.classList.remove('gutter-selected'); });
+  }
+  function applySelection(side, startLine, endLine) {
+    clearSelection();
+    var lo = Math.min(startLine, endLine);
+    var hi = Math.max(startLine, endLine);
+    diffBody.querySelectorAll('.diff-line').forEach(function (row) {
+      var info = rowSideAndLine(row);
+      if (info.side !== side) return;
+      if (info.line >= lo && info.line <= hi) {
+        row.querySelectorAll('.diff-line-num').forEach(function (n) { n.classList.add('gutter-selected'); });
+      }
+    });
+  }
+
+  diffBody.addEventListener('mousedown', function (e) {
+    if (e.button !== 0) return;
+    var num = e.target.closest('.diff-line-num');
+    if (!num) return;
+    var row = num.closest('.diff-line');
+    if (!row || !row.hasAttribute('data-line-type')) return;
+    // Don't start a drag from clicking an indicator (indicator's own click handler runs).
+    if (e.target.closest('.review-comment-indicator')) return;
+    e.preventDefault();
+    var info = rowSideAndLine(row);
+    colData._drag = { side: info.side, startLine: info.line, endLine: info.line };
+    applySelection(info.side, info.line, info.line);
+  });
+
+  diffBody.addEventListener('mouseenter', function (e) {
+    if (!colData._drag) return;
+    var num = e.target && e.target.closest && e.target.closest('.diff-line-num');
+    if (!num) return;
+    var row = num.closest('.diff-line');
+    if (!row || !row.hasAttribute('data-line-type')) return;
+    var info = rowSideAndLine(row);
+    colData._drag.side = info.side;
+    colData._drag.endLine = info.line;
+    applySelection(colData._drag.side, colData._drag.startLine, colData._drag.endLine);
+  }, true);
+
+  // Mouseup on document — finalize or cancel.
+  // Bind once per column; remove the previous one if rebinding.
+  if (colData._gutterMouseUpHandler) {
+    document.removeEventListener('mouseup', colData._gutterMouseUpHandler);
+  }
+  colData._gutterMouseUpHandler = function (e) {
+    if (!colData._drag) return;
+    var drag = colData._drag;
+    colData._drag = null;
+    var insideGutter = e.target && e.target.closest && e.target.closest('.diff-line-num');
+    var insideThisCol = e.target && colData.element && colData.element.contains(e.target);
+    clearSelection();
+    if (insideGutter && insideThisCol) {
+      var startLine = Math.min(drag.startLine, drag.endLine);
+      var endLine = Math.max(drag.startLine, drag.endLine);
+      openCommentBox(colData, startLine, endLine, drag.side);
+    }
+  };
+  document.addEventListener('mouseup', colData._gutterMouseUpHandler);
+}
+
+function openCommentBox(colData, startLine, endLine, side, existingId, anchorEl) {
+  if (!colData.element) return;
+  var diffBody = colData.element.querySelector('.diff-body');
+  if (!diffBody) return;
+
+  // Locate the row to anchor the box AFTER.
+  var anchor = anchorEl || null;
+  if (!anchor) {
+    var rows = diffBody.querySelectorAll('.diff-line[data-line-type]');
+    rows.forEach(function (row) {
+      var t = row.getAttribute('data-line-type');
+      var attr = (t === 'del') ? 'data-old-line' : 'data-new-line';
+      var sideForRow = (t === 'del') ? 'old' : 'new';
+      if (sideForRow === side && parseInt(row.getAttribute(attr), 10) === endLine) {
+        anchor = row;
+      }
+    });
+  }
+
+  var box = document.createElement('div');
+  box.className = 'review-comment-box';
+  box.dataset.side = side;
+  box.dataset.start = String(startLine);
+  box.dataset.end = String(endLine);
+  if (existingId) box.dataset.commentId = existingId;
+
+  var textarea = document.createElement('textarea');
+  textarea.className = 'review-comment-textarea';
+  if (existingId) {
+    var existing = (colData.reviewComments || []).find(function (c) { return c.id === existingId; });
+    if (existing) textarea.value = existing.text || '';
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'review-comment-actions';
+  var saveBtn = document.createElement('button');
+  saveBtn.className = 'review-comment-save';
+  saveBtn.textContent = 'Save';
+  var deleteBtn = document.createElement('button');
+  deleteBtn.className = 'review-comment-delete';
+  deleteBtn.textContent = 'Delete';
+  actions.appendChild(saveBtn);
+  actions.appendChild(deleteBtn);
+
+  box.appendChild(textarea);
+  box.appendChild(actions);
+
+  if (anchor && anchor.parentNode) {
+    anchor.parentNode.insertBefore(box, anchor.nextSibling);
+  } else {
+    diffBody.insertBefore(box, diffBody.firstChild);
+  }
+
+  setTimeout(function () { textarea.focus(); }, 0);
+
+  function doSave() {
+    var id = box.dataset.commentId || generateCommentId();
+    box.dataset.commentId = id;
+    if (!Array.isArray(colData.reviewComments)) colData.reviewComments = [];
+    var idx = colData.reviewComments.findIndex(function (c) { return c.id === id; });
+    var record = {
+      id: id,
+      filePath: colData.filePath,
+      startLine: startLine,
+      endLine: endLine,
+      side: side,
+      text: textarea.value,
+      createdAt: (idx >= 0 && colData.reviewComments[idx].createdAt) || Date.now()
+    };
+    if (idx >= 0) colData.reviewComments[idx] = record;
+    else colData.reviewComments.push(record);
+    saveReviewCommentsForColumn(colData);
+    box.remove();
+    paintReviewIndicators(colData);
+    refreshReviewCommentsButtons();
+  }
+  function doDelete() {
+    var id = box.dataset.commentId;
+    if (id && Array.isArray(colData.reviewComments)) {
+      colData.reviewComments = colData.reviewComments.filter(function (c) { return c.id !== id; });
+      saveReviewCommentsForColumn(colData);
+    }
+    box.remove();
+    paintReviewIndicators(colData);
+    refreshReviewCommentsButtons();
+  }
+
+  saveBtn.addEventListener('click', doSave);
+  deleteBtn.addEventListener('click', doDelete);
+  textarea.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      doSave();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      box.remove();
+    }
+  });
+}
+
+function getCommentsForFocusedSession() {
+  if (!activeProjectKey) return null;
+  var project = config.projects && config.projects.find(function (p) { return p.path === activeProjectKey; });
+  var activeWsId = project ? (project.activeWorkspaceId || null) : null;
+  var state = projectStates.get(stateKey(activeProjectKey, activeWsId));
+  if (!state || state.focusedColumnId == null) return null;
+  var focused = allColumns.get(state.focusedColumnId);
+  if (!focused) return null;
+  var sid = focused.sessionId;
+  if (!sid) return null;
+  var scope = focused.isDiff ? (focused.scope || 'working') : 'working';
+  var ws = focused.workspaceId || null;
+  var comments = [];
+  allColumns.forEach(function (col) {
+    if (!col.isDiff) return;
+    if (col.projectKey !== activeProjectKey) return;
+    if ((col.workspaceId || null) !== ws) return;
+    if (col.sessionId !== sid) return;
+    if ((col.scope || 'working') !== scope) return;
+    if (Array.isArray(col.reviewComments)) {
+      col.reviewComments.forEach(function (c) { comments.push(c); });
+    }
+  });
+  return {
+    sessionId: sid,
+    scope: scope,
+    projectKey: activeProjectKey,
+    workspaceId: ws,
+    comments: comments,
+    totalCount: comments.length
+  };
+}
+
+function refreshReviewCommentsButtons() {
+  var actionsEl = document.getElementById('git-review-comments-actions');
+  if (!actionsEl) return;
+  var info = getCommentsForFocusedSession();
+  if (!info || info.totalCount === 0) {
+    actionsEl.style.display = 'none';
+    return;
+  }
+  actionsEl.style.display = 'flex';
+  var copyBtn = document.getElementById('btn-review-copy');
+  if (copyBtn) copyBtn.textContent = 'Copy (' + info.totalCount + ')';
+}
+
 function addDiffColumn(diffData, opts) {
   opts = opts || {};
   if (!activeProjectKey) return;
@@ -3623,11 +5200,45 @@ function addDiffColumn(diffData, opts) {
   var isFileList = diffData.commitHash && !diffData.filePath;
   var slotType = isFileList ? 'diffFileList' : 'diffContent';
 
-  // Find existing column of the same slot type and reuse it
+  // For diffContent, scope reuse to (session, file, scope) so each session +
+  // file gets its own column. Resolve sessionId/workspaceId from focus.
+  var scope = null;
+  var sessionId = null;
+  var workspaceIdForSlot = null;
+  var slotKey = null;
+  var fullKey = null;
+  if (slotType === 'diffContent') {
+    scope = (diffData.commitHash && diffData.filePath)
+      ? ('commit-' + String(diffData.commitHash).substring(0, 7))
+      : 'working';
+    var focusState = getOrCreateProjectState(activeProjectKey);
+    var focusedCol = (focusState && focusState.focusedColumnId != null)
+      ? allColumns.get(focusState.focusedColumnId)
+      : null;
+    if (focusedCol) {
+      if (focusedCol.sessionId) sessionId = focusedCol.sessionId;
+      else if (focusedCol.isDiff && focusedCol.sessionId) sessionId = focusedCol.sessionId;
+      workspaceIdForSlot = focusedCol.workspaceId || null;
+    }
+    slotKey = (typeof ReviewComments !== 'undefined' && ReviewComments.computeDiffSlotKey)
+      ? ReviewComments.computeDiffSlotKey(sessionId, diffData.filePath, scope)
+      : ('diffContent::' + (sessionId || '__noSession__') + '::' + scope + '::' + diffData.filePath);
+    fullKey = reviewSlotIndexKey(workspaceIdForSlot, slotKey);
+  }
+
+  // Find existing column for reuse:
+  //  - diffFileList: single slot per project state.
+  //  - diffContent: keyed by (workspaceId, slotKey) so different sessions/files
+  //    don't collide.
   var existingDiffId = null;
-  state.columns.forEach(function (col, id) {
-    if (col.isDiff && col.diffSlot === slotType) existingDiffId = id;
-  });
+  if (slotType === 'diffFileList') {
+    state.columns.forEach(function (col, id) {
+      if (col.isDiff && col.diffSlot === slotType) existingDiffId = id;
+    });
+  } else if (slotType === 'diffContent' && fullKey != null) {
+    var indexed = diffSlotIndex.get(fullKey);
+    if (indexed != null && state.columns.has(indexed)) existingDiffId = indexed;
+  }
   if (existingDiffId !== null) {
     var existingCol = allColumns.get(existingDiffId);
     if (existingCol) {
@@ -3697,11 +5308,21 @@ function addDiffColumn(diffData, opts) {
     diffData: diffData,
     diffMode: 'unified',
     headerEl: header,
-    cwd: activeProjectKey,
+    cwd: opts.cwd || gitTargetCwd(),
     projectKey: activeProjectKey,
     customTitle: title,
     createdAt: Date.now()
   };
+
+  if (slotType === 'diffContent') {
+    colData.sessionId = sessionId;
+    colData.filePath = diffData.filePath;
+    colData.scope = scope;
+    colData.workspaceId = workspaceIdForSlot;
+    colData.reviewSlotKey = slotKey;
+    colData.reviewComments = [];
+    if (fullKey != null) diffSlotIndex.set(fullKey, id);
+  }
 
   row.columnIds.push(id);
   state.columns.set(id, colData);
@@ -3714,10 +5335,16 @@ function addDiffColumn(diffData, opts) {
     renderDiffContent(diffBody, colData);
   });
 
-  // Close button handler
+  // Close button handler \u2014 diffSlotIndex cleanup is centralized in removeColumn
+  // so all column-removal paths drop the slot entry.
   header.querySelector('.col-close').addEventListener('click', function () {
     removeColumn(id);
   });
+
+  // Kick off load of any persisted review comments for this slot.
+  if (slotType === 'diffContent') {
+    loadReviewCommentsForColumn(colData);
+  }
 
   // Render diff content
   if (diffData.diffText) {
@@ -3735,7 +5362,7 @@ function addDiffColumn(diffData, opts) {
 
 function loadWorkingDiff(diffBody, colData) {
   diffBody.textContent = 'Loading...';
-  window.electronAPI.gitDiff(activeProjectKey, colData.diffData.filePath, colData.diffData.staged || false).then(function (text) {
+  window.electronAPI.gitDiff(colData.cwd, colData.diffData.filePath, colData.diffData.staged || false).then(function (text) {
     colData.diffData.diffText = text;
     colData.diffData.parsed = parseDiff(text);
     renderDiffContent(diffBody, colData);
@@ -3747,14 +5374,14 @@ function loadCommitDiff(diffBody, colData) {
   var hash = colData.diffData.commitHash;
 
   if (colData.diffData.filePath) {
-    window.electronAPI.gitDiffCommit(activeProjectKey, hash, colData.diffData.filePath).then(function (text) {
+    window.electronAPI.gitDiffCommit(colData.cwd, hash, colData.diffData.filePath).then(function (text) {
       colData.diffData.diffText = text;
       colData.diffData.parsed = parseDiff(text);
       renderDiffContent(diffBody, colData);
     });
   } else {
     // Full commit — show file list first, click to view individual diffs
-    window.electronAPI.gitCommitDetail(activeProjectKey, hash).then(function (detail) {
+    window.electronAPI.gitCommitDetail(colData.cwd, hash).then(function (detail) {
       colData.diffData.commitDetail = detail;
       colData.diffData.files = detail.files || [];
       renderCommitFileList(diffBody, colData);
@@ -3806,7 +5433,7 @@ function renderCommitFileList(diffBody, colData) {
           commitHash: colData.diffData.commitHash,
           filePath: fileInfo.file,
           status: 'M'
-        }, { title: fileInfo.file.split('/').pop() });
+        }, { title: fileInfo.file.split('/').pop(), cwd: colData.cwd });
       });
 
       var nameEl = document.createElement('span');
@@ -3838,6 +5465,7 @@ function renderCommitFileList(diffBody, colData) {
 }
 
 function renderDiffContent(diffBody, colData) {
+  colData._drag = null;
   while (diffBody.firstChild) diffBody.removeChild(diffBody.firstChild);
   var parsed = colData.diffData.parsed;
   if (!parsed || parsed.hunks.length === 0) {
@@ -3879,7 +5507,7 @@ function renderDiffContent(diffBody, colData) {
         tab.addEventListener('click', function () {
           colData.diffData.activeFile = fileInfo.file;
           diffBody.textContent = 'Loading...';
-          window.electronAPI.gitDiffCommit(activeProjectKey, colData.diffData.commitHash, fileInfo.file).then(function (text) {
+          window.electronAPI.gitDiffCommit(colData.cwd, colData.diffData.commitHash, fileInfo.file).then(function (text) {
             colData.diffData.diffText = text;
             colData.diffData.parsed = parseDiff(text);
             renderDiffContent(diffBody, colData);
@@ -3908,6 +5536,9 @@ function renderDiffContent(diffBody, colData) {
     warn.textContent = 'Diff too large — showing first 5000 lines';
     diffBody.appendChild(warn);
   }
+
+  paintReviewIndicators(colData);
+  bindGutterSelection(colData);
 }
 
 function renderUnifiedDiff(container, parsed) {
@@ -3922,6 +5553,9 @@ function renderUnifiedDiff(container, parsed) {
       var lineData = hunk.lines[i];
       var row = document.createElement('div');
       row.className = 'diff-line diff-line-' + lineData.type;
+      row.setAttribute('data-line-type', lineData.type);
+      if (lineData.oldLine !== null) row.setAttribute('data-old-line', String(lineData.oldLine));
+      if (lineData.newLine !== null) row.setAttribute('data-new-line', String(lineData.newLine));
 
       var oldNum = document.createElement('span');
       oldNum.className = 'diff-line-num';
@@ -3974,6 +5608,10 @@ function renderSplitDiff(container, parsed) {
         var la = addQueue[q];
         var leftRow = document.createElement('div');
         leftRow.className = 'diff-line ' + (ld ? 'diff-line-del' : 'diff-line-empty');
+        if (ld) {
+          leftRow.setAttribute('data-line-type', 'del');
+          if (ld.oldLine !== null) leftRow.setAttribute('data-old-line', String(ld.oldLine));
+        }
         var leftNum = document.createElement('span');
         leftNum.className = 'diff-line-num';
         leftNum.textContent = ld ? ld.oldLine : '';
@@ -3986,6 +5624,10 @@ function renderSplitDiff(container, parsed) {
 
         var rightRow = document.createElement('div');
         rightRow.className = 'diff-line ' + (la ? 'diff-line-add' : 'diff-line-empty');
+        if (la) {
+          rightRow.setAttribute('data-line-type', 'add');
+          if (la.newLine !== null) rightRow.setAttribute('data-new-line', String(la.newLine));
+        }
         var rightNum = document.createElement('span');
         rightNum.className = 'diff-line-num';
         rightNum.textContent = la ? la.newLine : '';
@@ -4010,6 +5652,8 @@ function renderSplitDiff(container, parsed) {
         flushQueues();
         var cl = document.createElement('div');
         cl.className = 'diff-line diff-line-context';
+        cl.setAttribute('data-line-type', 'context');
+        if (line.oldLine !== null) cl.setAttribute('data-old-line', String(line.oldLine));
         var cln = document.createElement('span');
         cln.className = 'diff-line-num';
         cln.textContent = line.oldLine;
@@ -4022,6 +5666,8 @@ function renderSplitDiff(container, parsed) {
 
         var cr = document.createElement('div');
         cr.className = 'diff-line diff-line-context';
+        cr.setAttribute('data-line-type', 'context');
+        if (line.newLine !== null) cr.setAttribute('data-new-line', String(line.newLine));
         var crn = document.createElement('span');
         crn.className = 'diff-line-num';
         crn.textContent = line.newLine;
@@ -4134,7 +5780,7 @@ function fetchAndSetSessionTitle(columnId, projectPath, sessionId) {
     col2.customTitle = title;
     var titleEl = col2.headerEl.querySelector('.col-title');
     if (titleEl) titleEl.textContent = title;
-    persistSessions(col2.projectKey);
+    persistSessions(col2.projectKey, col2.workspaceId);
   });
 }
 
@@ -4164,10 +5810,15 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
         if (!preExistingIds[sid] && !claimed[sid]) {
           var col = allColumns.get(columnId);
           if (col) {
+            var oldSid = col.sessionId;
             console.log('[detectSession] col=' + columnId + ' MATCHED sessionId=' + sid);
             col.sessionId = sid;
             col.sessionMtime = sessions[i].modified || 0;
-            persistSessions(col.projectKey);
+            if (window.electronAPI && window.electronAPI.migrateReviewCommentsForColumn && col.element) {
+              var migCid = parseInt(col.element.id.replace('col-', ''), 10);
+              window.electronAPI.migrateReviewCommentsForColumn(col.projectKey, col.workspaceId || null, oldSid, sid, migCid);
+            }
+            persistSessions(col.projectKey, col.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
             ensureClawdTail(columnId);
             // Effort is now set at spawn via --effort (the only non-interactive
@@ -4221,15 +5872,25 @@ function startSessionSync(columnId, projectPath) {
 
       if (currentEntry) {
         // Current session file still exists. Only consider a reassignment if
-        // THIS column has had recent input AND there's a newer unclaimed file.
-        if (hasRecentInput) {
+        // THIS column has had recent input AND its CURRENT jsonl is dormant
+        // (Claude has moved on — e.g. via /clear which started a new file).
+        // Without the dormancy guard, two concurrently-active columns can race
+        // for a newer unclaimed sessionId and end up swapping titles.
+        var currentJsonlAgeMs = now - (currentEntry.modified || 0);
+        var currentIsDormant = currentJsonlAgeMs > 10000;
+        if (hasRecentInput && currentIsDormant) {
           for (var i = 0; i < sessions.length; i++) {
             var s = sessions[i];
             if (s.sessionId === col2.sessionId) break; // nothing newer than current
             if (!claimed[s.sessionId] && s.modified > (col2.sessionMtime || 0)) {
+              var oldSid2 = col2.sessionId;
               col2.sessionId = s.sessionId;
               col2.sessionMtime = s.modified;
-              persistSessions(col2.projectKey);
+              if (window.electronAPI && window.electronAPI.migrateReviewCommentsForColumn && col2.element) {
+                var migCid2 = parseInt(col2.element.id.replace('col-', ''), 10);
+                window.electronAPI.migrateReviewCommentsForColumn(col2.projectKey, col2.workspaceId || null, oldSid2, s.sessionId, migCid2);
+              }
+              persistSessions(col2.projectKey, col2.workspaceId);
               fetchAndSetSessionTitle(columnId, projectPath, s.sessionId);
               ensureClawdTail(columnId);
               return;
@@ -4243,9 +5904,14 @@ function startSessionSync(columnId, projectPath) {
         for (var k = 0; k < sessions.length; k++) {
           var sid = sessions[k].sessionId;
           if (!claimed[sid]) {
+            var oldSid3 = col2.sessionId;
             col2.sessionId = sid;
             col2.sessionMtime = sessions[k].modified;
-            persistSessions(col2.projectKey);
+            if (window.electronAPI && window.electronAPI.migrateReviewCommentsForColumn && col2.element) {
+              var migCid3 = parseInt(col2.element.id.replace('col-', ''), 10);
+              window.electronAPI.migrateReviewCommentsForColumn(col2.projectKey, col2.workspaceId || null, oldSid3, sid, migCid3);
+            }
+            persistSessions(col2.projectKey, col2.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
             ensureClawdTail(columnId);
             return;
@@ -4266,90 +5932,175 @@ function stopSessionSync(columnId) {
   }
 }
 
-function persistSessions(projectKey) {
-  if (!window.electronAPI) return;
-  var state = projectStates.get(projectKey);
-  if (!state) return;
+// Per-projectKey promise chain so concurrent persistSessions calls for the
+// SAME file (different workspaces of the same project) serialize rather than
+// race. Without this, two quick persists each load the same stale blob,
+// mutate disjoint keys, and the later save overwrites the earlier save's
+// mutation with its own cold-read copy — data loss for whichever workspace's
+// update landed first.
+var persistChain = new Map();
 
-  // Skip while restore is mid-flight — applyLayoutRatios will persist the correct shape on completion.
-  if (state.restoringLayout) return;
-
-  // When the container is hidden (project not active), DOM measurements return 0. Use cached
-  // ratios from the row/column objects instead so background session-sync persists still flush.
-  var hidden = !!(state.containerEl && state.containerEl.offsetParent === null);
-
-  var rowHeights = [];
-  var totalRowHeight = 0;
-  for (var r = 0; r < state.rows.length; r++) {
-    var rh;
-    if (hidden) {
-      rh = (typeof state.rows[r].lastHeightRatio === 'number' && state.rows[r].lastHeightRatio > 0)
-        ? state.rows[r].lastHeightRatio
-        : (1 / state.rows.length);
-    } else {
-      rh = state.rows[r].el.getBoundingClientRect().height;
-      if (!isFinite(rh) || rh <= 0) rh = 1; // defensive
+// Persist the current column layout for (projectKey, workspaceId) into the
+// single sessions.json blob. Primary (workspaceId null) writes to
+// blob.sessions + blob.rowHeightRatios; sub-workspaces write to
+// blob.workspaces[workspaceId] = { sessions, rowHeightRatios }. Each session
+// entry carries { sessionId, title, rowIdx, widthRatio } so the row-persist
+// layout (rows + column widths) round-trips through workspace-scoped slices.
+//
+// Guard: if workspaceId refers to a workspace that's mid-delete (no longer in
+// project.workspaces), skip the write so the delete path's in-memory mutation
+// isn't overwritten by a late column-level persist.
+//
+// Returns a promise that resolves once the write lands — most callers don't
+// await, but the gate uses it for deterministic assertions.
+function persistSessions(projectKey, workspaceId) {
+  if (!window.electronAPI) return Promise.resolve();
+  if (workspaceId != null) {
+    var project = config.projects.find(function (p) { return p && p.path === projectKey; });
+    if (!project || !Array.isArray(project.workspaces) ||
+        !project.workspaces.some(function (w) { return w && w.id === workspaceId; })) {
+      return Promise.resolve(); // deletion in progress — bail
     }
-    rowHeights.push(rh);
-    totalRowHeight += rh;
   }
-  if (totalRowHeight <= 0) totalRowHeight = state.rows.length || 1;
 
-  var rowsOut = [];
-  for (var r2 = 0; r2 < state.rows.length; r2++) {
-    var row = state.rows[r2];
-    var colWidths = [];
-    var totalColWidth = 0;
-    for (var c = 0; c < row.columnIds.length; c++) {
-      var col = state.columns.get(row.columnIds[c]);
-      var cw;
-      if (!col) {
-        cw = 0;
-      } else if (hidden) {
-        cw = (typeof col.lastWidthRatio === 'number' && col.lastWidthRatio > 0)
-          ? col.lastWidthRatio
-          : (1 / row.columnIds.length);
+  // Snapshot the live row/column layout for this (projectKey, workspaceId)
+  // synchronously so each queued persist captures its invocation-time view.
+  var state = projectStates.get(stateKey(projectKey, workspaceId));
+  var sessionData = [];
+  var rowHeightRatios = [];
+  if (state) {
+    // Skip while restore is mid-flight — applyLayoutRatios will persist the correct shape on completion.
+    if (state.restoringLayout) return Promise.resolve();
+
+    // When the container is hidden (project not active), DOM measurements return 0. Use cached
+    // ratios from the row/column objects instead so background session-sync persists still flush.
+    var hidden = !!(state.containerEl && state.containerEl.offsetParent === null);
+
+    var rowHeights = [];
+    var totalRowHeight = 0;
+    for (var r = 0; r < state.rows.length; r++) {
+      var rh;
+      if (hidden) {
+        rh = (typeof state.rows[r].lastHeightRatio === 'number' && state.rows[r].lastHeightRatio > 0)
+          ? state.rows[r].lastHeightRatio
+          : (1 / state.rows.length);
       } else {
-        cw = col.element.getBoundingClientRect().width;
-        if (!isFinite(cw) || cw <= 0) cw = 1;
+        rh = state.rows[r].el.getBoundingClientRect().height;
+        if (!isFinite(rh) || rh <= 0) rh = 1; // defensive
       }
-      colWidths.push(cw);
-      totalColWidth += cw;
+      rowHeights.push(rh);
+      totalRowHeight += rh;
     }
-    if (totalColWidth <= 0) totalColWidth = row.columnIds.length || 1;
+    if (totalRowHeight <= 0) totalRowHeight = state.rows.length || 1;
 
-    var columnsOut = [];
-    for (var c2 = 0; c2 < row.columnIds.length; c2++) {
-      var col2 = state.columns.get(row.columnIds[c2]);
-      if (!col2 || !col2.sessionId) continue;
-      var widthRatio = colWidths[c2] / totalColWidth;
-      if (!hidden) col2.lastWidthRatio = widthRatio;
-      columnsOut.push({
-        sessionId: col2.sessionId,
-        title: col2.customTitle || null,
-        widthRatio: widthRatio,
+    // Track post-compaction row index: empty rows are dropped from both
+    // sessionData (via row.rowIdx) and rowHeightRatios (via positional index)
+    // so the saved indices align on restore.
+    var compactRowIdx = 0;
+    for (var r2 = 0; r2 < state.rows.length; r2++) {
+      var row = state.rows[r2];
+      var colWidths = [];
+      var totalColWidth = 0;
+      for (var c = 0; c < row.columnIds.length; c++) {
+        var col = state.columns.get(row.columnIds[c]);
+        var cw;
+        if (!col) {
+          cw = 0;
+        } else if (hidden) {
+          cw = (typeof col.lastWidthRatio === 'number' && col.lastWidthRatio > 0)
+            ? col.lastWidthRatio
+            : (1 / row.columnIds.length);
+        } else {
+          cw = col.element.getBoundingClientRect().width;
+          if (!isFinite(cw) || cw <= 0) cw = 1;
+        }
+        colWidths.push(cw);
+        totalColWidth += cw;
+      }
+      if (totalColWidth <= 0) totalColWidth = row.columnIds.length || 1;
+
+      var rowEntries = [];
+      for (var c2 = 0; c2 < row.columnIds.length; c2++) {
+        var col2 = state.columns.get(row.columnIds[c2]);
+        if (!col2 || !col2.sessionId) continue;
+        var widthRatio = colWidths[c2] / totalColWidth;
+        if (!hidden) col2.lastWidthRatio = widthRatio;
+        var entry = {
+          sessionId: col2.sessionId,
+          title: col2.customTitle || null,
+          rowIdx: compactRowIdx,
+          widthRatio: widthRatio
+        };
+        if (col2.cwd && col2.cwd !== activeProjectKey) entry.cwd = col2.cwd;
+        if (col2.cwd && col2.cwd !== activeProjectKey && col2.cwdSource) entry.cwdSource = col2.cwdSource;
+        if (col2.targetBranch) entry.targetBranch = col2.targetBranch;
+        if (col2.pipeline) {
+          var serializedPipe = PipelineMatcherAPI.serializePipeline(col2.pipeline);
+          if (serializedPipe) entry.pipeline = serializedPipe;
+        }
         // Persist endpoint association so restored columns come back on the
         // same local endpoint (LM Studio, Ollama, etc.) instead of defaulting
         // to whatever the global Spawn dropdown is currently pointing at.
-        endpointId: col2.endpointId || null
-      });
-    }
-    if (columnsOut.length === 0) continue;
+        if (col2.endpointId) entry.endpointId = col2.endpointId;
+        rowEntries.push(entry);
+      }
 
-    var heightRatio = rowHeights[r2] / totalRowHeight;
-    if (!hidden) row.lastHeightRatio = heightRatio;
-    rowsOut.push({
-      heightRatio: heightRatio,
-      columns: columnsOut
-    });
+      var heightRatio = rowHeights[r2] / totalRowHeight;
+      if (!hidden) row.lastHeightRatio = heightRatio;
+      if (rowEntries.length === 0) continue; // skip empty rows
+      for (var re = 0; re < rowEntries.length; re++) sessionData.push(rowEntries[re]);
+      rowHeightRatios.push(heightRatio);
+      compactRowIdx++;
+    }
   }
 
-  window.electronAPI.saveSessions(projectKey, { version: 2, rows: rowsOut });
+  var prev = persistChain.get(projectKey) || Promise.resolve();
+  var next = prev.then(function () {
+    return window.electronAPI.loadSessions(projectKey).then(function (blob) {
+      if (!blob || typeof blob !== 'object' || Array.isArray(blob)) blob = { version: 2, sessions: [], rowHeightRatios: [], workspaces: {} };
+      if (!Array.isArray(blob.sessions)) blob.sessions = [];
+      if (!Array.isArray(blob.rowHeightRatios)) blob.rowHeightRatios = [];
+      if (!blob.workspaces || typeof blob.workspaces !== 'object') blob.workspaces = {};
+      blob.version = 2;
+      if (workspaceId == null) {
+        blob.sessions = sessionData;
+        blob.rowHeightRatios = rowHeightRatios;
+      } else {
+        blob.workspaces[workspaceId] = { sessions: sessionData, rowHeightRatios: rowHeightRatios };
+      }
+      return window.electronAPI.saveSessions(projectKey, blob);
+    });
+  }).catch(function (err) {
+    console.error('persistSessions failed:', err);
+  });
+  persistChain.set(projectKey, next);
+  // Drop the entry once the tail of the chain resolves, so the Map doesn't
+  // grow unbounded. Only delete if we're still the tail (a later call may
+  // have extended the chain already).
+  next.finally(function () {
+    if (persistChain.get(projectKey) === next) persistChain.delete(projectKey);
+  });
+  return next;
 }
 
 function removeColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
+
+  // Clean up diffSlotIndex entries pointing at this id (Critical fix: addDiffColumn
+  // registered it, but only the inline close-button handler was deleting it —
+  // other removeColumn callers leaked the entry).
+  if (col && col.isDiff && col.reviewSlotKey) {
+    for (const [k, v] of diffSlotIndex.entries()) {
+      if (v === id) diffSlotIndex.delete(k);
+    }
+  }
+
+  // Drop document-level mouseup listener registered for gutter selection.
+  if (col && col._gutterMouseUpHandler) {
+    document.removeEventListener('mouseup', col._gutterMouseUpHandler);
+    col._gutterMouseUpHandler = null;
+  }
 
   // If this column is maximized, restore first
   if (maximizedColumnId === id) {
@@ -4361,6 +6112,11 @@ function removeColumn(id) {
   if (timer) clearTimeout(timer);
   activityTimers.delete(id);
   stopSessionSync(id);
+  stopPipelineExitCheck(col);
+  if (col.pipelineResizeObserver) {
+    try { col.pipelineResizeObserver.disconnect(); } catch (e) { /* ignore */ }
+    col.pipelineResizeObserver = null;
+  }
   stopContextMeterPoll(id);
 
   if (!col.isDiff) wsSend({ type: 'kill', id: id });
@@ -4380,7 +6136,7 @@ function removeColumn(id) {
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
 
-  var state = projectStates.get(col.projectKey);
+  var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (state) {
     state.columns.delete(id);
 
@@ -4414,7 +6170,7 @@ function removeColumn(id) {
 
   refitAll();
   saveColumnCounts();
-  persistSessions(col.projectKey);
+  persistSessions(col.projectKey, col.workspaceId);
   updateProjectBadges();
   updateSidebarActivity();
 }
@@ -4429,6 +6185,86 @@ function killAllInstancesForProject(projectPath) {
     return;
   }
   ids.forEach(function (id) { removeColumn(id); });
+}
+function migrateColumnToWorkspace(colId, targetWsId) {
+  if (popoutMode) return;
+  var col = allColumns.get(colId);
+  if (!col) return;
+  var sourceWsId = col.workspaceId;
+  if (sourceWsId === targetWsId) return;
+
+  var projIdx = config.projects.findIndex(function (p) { return p.path === col.projectKey; });
+  if (projIdx < 0) return;
+
+  if (targetWsId !== null
+      && !config.projects[projIdx].workspaces.some(function (w) { return w.id === targetWsId; })) {
+    return;
+  }
+
+  if (maximizedColumnId === colId) {
+    toggleMaximizeColumn(colId);
+  }
+
+  var srcState = projectStates.get(stateKey(col.projectKey, sourceWsId));
+  var srcRow = srcState ? findRowForColumn(srcState, colId) : null;
+  if (!srcState || !srcRow) return;
+
+  var targetState = getOrCreateProjectState(stateKey(col.projectKey, targetWsId));
+  if (targetState.restoringLayout) return;
+
+  var prev = col.element.previousElementSibling;
+  var next = col.element.nextElementSibling;
+  col.element.remove();
+  if (prev && prev.classList.contains('resize-handle')) prev.remove();
+  else if (next && next.classList.contains('resize-handle')) next.remove();
+
+  srcState.columns.delete(colId);
+  var srcIdx = srcRow.columnIds.indexOf(colId);
+  if (srcIdx >= 0) srcRow.columnIds.splice(srcIdx, 1);
+  srcRow.columnIds.forEach(function (rid) {
+    var rcol = srcState.columns.get(rid);
+    if (rcol && rcol.element) { rcol.element.style.flex = ''; rcol.element.style.width = ''; }
+  });
+  removeRowIfEmpty(srcState, srcRow);
+  if (srcState.focusedColumnId === colId) srcState.focusedColumnId = null;
+
+  var targetRow = (targetState.rows.length > 0)
+    ? targetState.rows[targetState.rows.length - 1]
+    : addRowToProject(targetState);
+
+  if (targetRow.columnIds.length > 0) {
+    var leftId = targetRow.columnIds[targetRow.columnIds.length - 1];
+    var handle = document.createElement('div');
+    handle.className = 'resize-handle';
+    handle.dataset.leftColumnId = String(leftId);
+    handle.dataset.rightColumnId = String(colId);
+    targetRow.el.appendChild(handle);
+    setupResizeHandle(handle);
+  }
+  targetRow.el.appendChild(col.element);
+
+  targetRow.columnIds.forEach(function (rid) {
+    var rcol = targetState.columns.get(rid);
+    if (rcol && rcol.element) { rcol.element.style.flex = ''; rcol.element.style.width = ''; }
+  });
+  col.element.style.flex = '';
+  col.element.style.width = '';
+
+  col.workspaceId = targetWsId;
+  targetState.columns.set(colId, col);
+  targetRow.columnIds.push(colId);
+
+  persistSessions(col.projectKey, sourceWsId);
+  persistSessions(col.projectKey, targetWsId);
+
+  setActiveWorkspace(projIdx, targetWsId, false);
+  refitAll();
+  setFocusedColumn(colId);
+
+  col.element.classList.add('migrated-flash');
+  setTimeout(function () { col.element.classList.remove('migrated-flash'); }, 1500);
+
+  saveColumnCounts();
 }
 
 function restartColumn(id) {
@@ -4521,7 +6357,7 @@ function tryEndpointFailover(colId) {
 function setFocusedColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
-  var state = projectStates.get(col.projectKey);
+  var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (!state) return;
 
   if (state.focusedColumnId !== null && state.focusedColumnId !== id) {
@@ -4538,19 +6374,45 @@ function setFocusedColumn(id) {
   // Clear attention flash on this column's header
   if (col.headerEl) col.headerEl.classList.remove('attention-flash');
 
-  // Only clear sidebar flash if no other columns in this project are still flashing
+  // Only clear the sidebar flash if no other columns in the SAME (project,
+  // workspace) bucket are still flashing — cross-workspace rollup is not
+  // allowed per the "strictly per-workspace" alerts rule.
   var otherFlashing = false;
   allColumns.forEach(function (c, cid) {
-    if (cid !== id && c.projectKey === col.projectKey && c.headerEl &&
-        c.headerEl.classList.contains('attention-flash')) {
+    if (cid !== id
+        && c.projectKey === col.projectKey
+        && (c.workspaceId == null ? null : c.workspaceId) === (col.workspaceId == null ? null : col.workspaceId)
+        && c.headerEl
+        && c.headerEl.classList.contains('attention-flash')) {
       otherFlashing = true;
     }
   });
   if (!otherFlashing) {
-    projectsNeedingAttention.delete(col.projectKey);
-    var item = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(col.projectKey) + '"]');
+    var attnKey = stateKey(col.projectKey, col.workspaceId);
+    projectsNeedingAttention.delete(attnKey);
+    var sel;
+    if (col.workspaceId == null) {
+      sel = '.project-item[data-project-path="' + CSS.escape(col.projectKey) + '"]';
+    } else {
+      sel = '.workspace-item[data-workspace-id="' + CSS.escape(col.workspaceId) + '"]';
+    }
+    var item = projectListEl.querySelector(sel);
     if (item) item.classList.remove('attention-flash');
   }
+
+  invalidatePathExists(gitTargetCwd());
+  invalidateProjectRootBranch(col.projectKey);
+  if (isGitTabActive()) {
+    refreshGitStatus(true);
+    updateGitTargetIndicator();
+  }
+  autoBindColumnTarget(id).then(function () {
+    if (isGitTabActive()) {
+      refreshGitStatus(true);
+      updateGitTargetIndicator();
+    }
+  });
+  refreshReviewCommentsButtons();
 }
 
 function navigateColumn(direction) {
@@ -4596,12 +6458,14 @@ function navigateColumn(direction) {
 // ============================================================
 
 var maximizedColumnId = null;
+var savedMaximizedRowSnapshot = null;
 
 function toggleMaximizeColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
-  var state = projectStates.get(col.projectKey);
+  var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (!state) return;
+  var MaximizeLayoutAPI = (typeof window !== 'undefined' && window.MaximizeLayout) ? window.MaximizeLayout : null;
 
   if (maximizedColumnId === id) {
     // Restore
@@ -4612,6 +6476,20 @@ function toggleMaximizeColumn(id) {
       c.element.style.flex = '';
       c.element.style.width = '';
     });
+    // Restore previously-saved row inline flex/height before un-hiding rows
+    if (MaximizeLayoutAPI && savedMaximizedRowSnapshot) {
+      var restoreOp = MaximizeLayoutAPI.computeRestoreRowOp(savedMaximizedRowSnapshot);
+      if (restoreOp) {
+        for (var rr = 0; rr < state.rows.length; rr++) {
+          if (state.rows[rr].id === restoreOp.rowId) {
+            state.rows[rr].el.style.flex = restoreOp.flex;
+            state.rows[rr].el.style.height = restoreOp.height;
+            break;
+          }
+        }
+      }
+    }
+    savedMaximizedRowSnapshot = null;
     // Show all rows and resize handles
     for (var r = 0; r < state.rows.length; r++) {
       state.rows[r].el.classList.remove('row-hidden');
@@ -4626,6 +6504,17 @@ function toggleMaximizeColumn(id) {
     maximizedColumnId = id;
     state.containerEl.classList.add('has-maximized');
     var targetRow = findRowForColumn(state, id);
+    if (MaximizeLayoutAPI && targetRow) {
+      var rowsSnap = state.rows.map(function (r) {
+        return { id: r.id, inlineFlex: r.el.style.flex, inlineHeight: r.el.style.height };
+      });
+      var maxOp = MaximizeLayoutAPI.computeMaximizeRowOp(rowsSnap, targetRow.id);
+      savedMaximizedRowSnapshot = maxOp.snapshot;
+      if (maxOp.expand) {
+        targetRow.el.style.flex = maxOp.expand.flex;
+        targetRow.el.style.height = maxOp.expand.height;
+      }
+    }
     for (var r2 = 0; r2 < state.rows.length; r2++) {
       if (state.rows[r2] !== targetRow) {
         state.rows[r2].el.classList.add('row-hidden');
@@ -4651,6 +6540,7 @@ function toggleMaximizeColumn(id) {
     setFocusedColumn(id);
   }
   refitAll();
+  window.__stickyNotesApplyMaximizeVisibility?.();
 }
 
 // ============================================================
@@ -4785,6 +6675,8 @@ function setupResizeHandle(handle) {
   handle.addEventListener('mousedown', function (e) {
     e.preventDefault();
     var persistKey = activeProjectKey;
+    var activeProj = config.projects[config.activeProjectIndex];
+    var persistWsId = activeProj ? (activeProj.activeWorkspaceId != null ? activeProj.activeWorkspaceId : null) : null;
     handle.classList.add('active');
 
     var leftId = parseInt(handle.dataset.leftColumnId);
@@ -4820,7 +6712,7 @@ function setupResizeHandle(handle) {
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
-      persistSessions(persistKey);
+      persistSessions(persistKey, persistWsId);
     }
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
@@ -4835,6 +6727,8 @@ function setupRowResizeHandle(handle) {
   handle.addEventListener('mousedown', function (e) {
     e.preventDefault();
     var persistKey = activeProjectKey;
+    var activeProj = config.projects[config.activeProjectIndex];
+    var persistWsId = activeProj ? (activeProj.activeWorkspaceId != null ? activeProj.activeWorkspaceId : null) : null;
     handle.classList.add('active');
 
     var state = getActiveState();
@@ -4876,7 +6770,7 @@ function setupRowResizeHandle(handle) {
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
-      persistSessions(persistKey);
+      persistSessions(persistKey, persistWsId);
     }
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
@@ -5020,7 +6914,9 @@ function moveColumnToPosition(columnId, targetRow, insertIndex) {
   }
 
   refitAll();
-  persistSessions(activeProjectKey);
+  var activeProj = config.projects[config.activeProjectIndex];
+  var activeWsId = activeProj ? (activeProj.activeWorkspaceId != null ? activeProj.activeWorkspaceId : null) : null;
+  persistSessions(activeProjectKey, activeWsId);
 }
 
 function rebuildRowDOM(row) {
@@ -5071,7 +6967,27 @@ function refitAll() {
 var resizeTimeout;
 window.addEventListener('resize', function () {
   clearTimeout(resizeTimeout);
-  resizeTimeout = setTimeout(refitAll, 100);
+  resizeTimeout = setTimeout(function () {
+    var state = getActiveState();
+    if (state && state.rows.length > 0 && maximizedColumnId == null &&
+        !(state.containerEl && state.containerEl.offsetParent === null) &&
+        !document.querySelector('.row-resize-handle.active')) {
+      var heights = [];
+      for (var i = 0; i < state.rows.length; i++) {
+        heights.push(state.rows[i].el.getBoundingClientRect().height);
+      }
+      var ops = window.RowLayout.computeResizeRedistribution(heights);
+      for (var j = 0; j < state.rows.length; j++) {
+        state.rows[j].el.style.flex = ops[j].flex;
+        state.rows[j].el.style.height = ops[j].height;
+        var ratio = parseFloat(ops[j].flex);
+        if (isFinite(ratio) && ratio > 0) {
+          state.rows[j].lastHeightRatio = ratio;
+        }
+      }
+    }
+    refitAll();
+  }, 100);
 });
 
 // On Windows, when the OS window loses focus mid-keypress (Alt-Tab, Win+arrow
@@ -5565,40 +7481,248 @@ var lastGitRaw = null;
 var graphLaneState = null;
 var gitPollInFlight = false;
 
+function gitTargetCwd() {
+  return window.GitTarget.getGitTargetCwd(getActiveState(), allColumns, activeProjectKey);
+}
+
+// Phase 2: per-column branch override. When the focused column's session was last
+// active on a branch other than what's currently checked out at the project root,
+// `targetBranch` makes the Git tab render branch-relative (read-only) data.
+var projectRootBranchCache = new Map();
+
+function getProjectRootBranch(projectKey) {
+  var now = Date.now();
+  var hit = projectRootBranchCache.get(projectKey);
+  if (hit && hit.expiresAt > now) return Promise.resolve(hit.branch);
+  return window.electronAPI.gitBranch(projectKey).then(function (branch) {
+    projectRootBranchCache.set(projectKey, { branch: branch || '', expiresAt: now + 30000 });
+    return branch || '';
+  });
+}
+
+function invalidateProjectRootBranch(projectKey) {
+  if (projectKey) projectRootBranchCache.delete(projectKey);
+}
+
+function autoBindColumnTarget(colId) {
+  var col = allColumns.get(colId);
+  if (!col || !col.sessionId || !col.projectKey) return Promise.resolve();
+  // Skip auto-bind only when the user explicitly bound this column's cwd via
+  // the spawn modal (Phase 1 manual). Phase 3 'auto-worktree' bindings remain
+  // eligible for re-detection so a session that switches worktrees gets retracked.
+  if (col.cwdSource === 'manual') return Promise.resolve();
+
+  // Phase 3: try worktree detection from JSONL evidence first. When found,
+  // pin col.cwd to the worktree path so the Git tab targets it directly with
+  // full read+write functionality (the worktree HAS that branch checked out).
+  return window.electronAPI.gitDetectSessionWorktree(col.projectKey, col.sessionId).then(function (worktree) {
+    if (worktree && worktree.path) {
+      var newCwd = worktree.path;
+      var changed = false;
+      if (col.cwd !== newCwd) { col.cwd = newCwd; changed = true; }
+      if (col.cwdSource !== 'auto-worktree') { col.cwdSource = 'auto-worktree'; changed = true; }
+      // Phase 1 cwd binding handles branch via the worktree's HEAD —
+      // clear any Phase 2 read-only branch override.
+      if (col.targetBranch !== null) { col.targetBranch = null; changed = true; }
+      if (changed) persistSessions(col.projectKey, col.workspaceId);
+      return;
+    }
+
+    // No dominant worktree detected. Fall back to Phase 2 branch detection.
+    // If a previous run pinned this column to an auto-worktree but evidence
+    // is now gone, release back to project root so we don't stay stuck.
+    if (col.cwdSource === 'auto-worktree') {
+      col.cwd = col.projectKey;
+      col.cwdSource = undefined;
+      persistSessions(col.projectKey, col.workspaceId);
+    }
+
+    return window.electronAPI.gitDetectSessionBranch(col.projectKey, col.sessionId).then(function (sessionBranch) {
+      if (!sessionBranch) {
+        if (col.targetBranch !== null) {
+          col.targetBranch = null;
+          persistSessions(col.projectKey, col.workspaceId);
+        }
+        return;
+      }
+      return getProjectRootBranch(col.projectKey).then(function (rootBranch) {
+        // If session's branch matches the project root's current branch, no override needed.
+        if (sessionBranch === rootBranch) {
+          if (col.targetBranch !== null) {
+            col.targetBranch = null;
+            persistSessions(col.projectKey, col.workspaceId);
+          }
+          return;
+        }
+        if (col.targetBranch !== sessionBranch) {
+          col.targetBranch = sessionBranch;
+          persistSessions(col.projectKey, col.workspaceId);
+        }
+      });
+    });
+  }).catch(function () { /* best-effort */ });
+}
+
+function gitTabIsReadOnly() {
+  var state = getActiveState();
+  if (!state || state.focusedColumnId == null) return false;
+  var col = allColumns.get(state.focusedColumnId);
+  return !!(col && col.targetBranch);
+}
+
+function normalizePathForCompare(p) {
+  if (!p) return '';
+  var s = String(p).replace(/\\/g, '/');
+  if (s.length > 1 && s.endsWith('/')) s = s.slice(0, -1);
+  if (/^[A-Za-z]:/.test(s)) s = s[0].toLowerCase() + s.slice(1);
+  return s;
+}
+
+var pathExistsCache = new Map();
+async function isTargetPresent(p) {
+  var now = Date.now();
+  var hit = pathExistsCache.get(p);
+  if (hit && hit.expiresAt > now) return hit.result;
+  var result = await window.electronAPI.pathExists(p);
+  pathExistsCache.set(p, { result: result, expiresAt: now + 30000 });
+  return result;
+}
+
+function invalidatePathExists(p) {
+  if (p) pathExistsCache.delete(p);
+}
+
+var lastGitTargetHint = { text: '', title: '' };
+
+function updateGitTargetIndicator(opts) {
+  opts = opts || {};
+  if (!gitHeaderEl) return;
+  var target = gitTargetCwd();
+  var targetNorm = normalizePathForCompare(target);
+  var rootNorm = normalizePathForCompare(activeProjectKey);
+
+  // Phase 2: per-column branch override on the focused column.
+  var fState = getActiveState();
+  var focusedCol = (fState && fState.focusedColumnId != null) ? allColumns.get(fState.focusedColumnId) : null;
+  var branchOverride = (focusedCol && focusedCol.targetBranch) || null;
+
+  var labelText = '';
+  var titleText = target || '';
+
+  if (target && targetNorm !== rootNorm) {
+    // Phase 1: explicit non-root cwd (worktree column).
+    if (rootNorm && targetNorm.indexOf(rootNorm + '/') === 0) {
+      labelText = '→ ./' + targetNorm.slice(rootNorm.length + 1);
+    } else {
+      labelText = '→ ' + target;
+    }
+  } else if (branchOverride) {
+    // Phase 2: project-root column tracking a different branch.
+    labelText = '→ branch ' + branchOverride;
+    titleText = "Showing branch " + branchOverride + " (not currently checked out). Read-only — switch branches to commit.";
+  }
+
+  var suffix = '';
+  if (opts.directoryMissing) {
+    suffix = ' · directory missing';
+  } else if (opts.notARepo) {
+    suffix = ' · not a git repo';
+  }
+
+  var existing = gitHeaderEl.querySelector('.git-target-hint');
+
+  if (!labelText && !suffix) {
+    if (existing) existing.remove();
+    lastGitTargetHint = { text: '', title: '' };
+    return;
+  }
+
+  var fullText = (labelText || (target ? '→ ' + target : '')) + suffix;
+
+  if (existing && existing.textContent === fullText && existing.getAttribute('title') === titleText) {
+    lastGitTargetHint = { text: fullText, title: titleText };
+    return;
+  }
+
+  if (existing) existing.remove();
+
+  var hint = document.createElement('div');
+  hint.className = 'git-target-hint';
+  hint.textContent = fullText;
+  if (titleText) hint.setAttribute('title', titleText);
+  gitHeaderEl.appendChild(hint);
+  lastGitTargetHint = { text: fullText, title: titleText };
+}
+
 function refreshGitStatus(force) {
   if (!activeProjectKey || !window.electronAPI) return;
   // Skip background polls if a previous batch is still running — prevents
   // backed-up git calls piling up on the main thread when the repo or disk is slow.
   if (gitPollInFlight && !force) return;
 
-  var fetchAll = [
-    window.electronAPI.gitStatus(activeProjectKey),
-    window.electronAPI.gitBranch(activeProjectKey),
-    window.electronAPI.gitAheadBehind(activeProjectKey),
-    window.electronAPI.gitStashList(activeProjectKey),
-    window.electronAPI.gitGraphLog(activeProjectKey, 50),
-    window.electronAPI.gitDiffStat(activeProjectKey, false),
-    window.electronAPI.gitDiffStat(activeProjectKey, true)
-  ];
+  // Fire-and-forget autoBind on the focused column. If it changes targetBranch,
+  // schedule another refresh so the next paint reflects the new override.
+  var fState = getActiveState();
+  var focusedId = fState ? fState.focusedColumnId : null;
+  if (focusedId != null) {
+    var fCol = allColumns.get(focusedId);
+    var prevBranch = fCol ? fCol.targetBranch : null;
+    autoBindColumnTarget(focusedId).then(function () {
+      var newCol = allColumns.get(focusedId);
+      if (newCol && newCol.targetBranch !== prevBranch) {
+        refreshGitStatus(true);
+        updateGitTargetIndicator();
+      }
+    });
+  }
+
+  var target = gitTargetCwd();
+  var focusedCol = focusedId != null ? allColumns.get(focusedId) : null;
+  var branchOverride = (focusedCol && focusedCol.targetBranch) || null;
 
   gitPollInFlight = true;
   var done = function () { gitPollInFlight = false; };
 
-  if (!force) {
-    Promise.all(fetchAll).then(function (results) {
-      var rawKey = JSON.stringify(results[0]) + '|' + results[1] + '|' + JSON.stringify(results[2]) + '|' + results[3].length + '|' + JSON.stringify(results[4]);
-      if (rawKey === lastGitRaw) return;
-      lastGitRaw = rawKey;
-      renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6]);
-    }).then(done, done);
-    return;
-  }
+  isTargetPresent(target).then(function (present) {
+    if (!present) {
+      lastGitRaw = null;
+      while (gitHeaderEl.firstChild) gitHeaderEl.removeChild(gitHeaderEl.firstChild);
+      while (gitChangesEl.firstChild) gitChangesEl.removeChild(gitChangesEl.firstChild);
+      updateGitTargetIndicator({ directoryMissing: true });
+      done();
+      return;
+    }
 
-  lastGitRaw = null;
-  Promise.all(fetchAll).then(function (results) {
-    lastGitRaw = JSON.stringify(results[0]) + '|' + results[1] + '|' + JSON.stringify(results[2]) + '|' + results[3].length + '|' + JSON.stringify(results[4]);
-    renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6]);
-  }).then(done, done);
+    var fetchAll = [
+      window.electronAPI.gitStatus(target, branchOverride),
+      window.electronAPI.gitBranch(target, branchOverride),
+      window.electronAPI.gitAheadBehind(target, branchOverride),
+      window.electronAPI.gitStashList(target),
+      window.electronAPI.gitGraphLog(target, 50, branchOverride),
+      window.electronAPI.gitDiffStat(target, false, branchOverride),
+      window.electronAPI.gitDiffStat(target, true, branchOverride),
+      window.electronAPI.gitIsInsideWorkTree(target),
+      branchOverride ? window.electronAPI.gitDiffStatVsBase(target, branchOverride) : Promise.resolve(null)
+    ];
+
+    if (!force) {
+      Promise.all(fetchAll).then(function (results) {
+        var rawKey = JSON.stringify(results[0]) + '|' + results[1] + '|' + JSON.stringify(results[2]) + '|' + results[3].length + '|' + JSON.stringify(results[4]) + '|' + results[7] + '|' + JSON.stringify(results[8]);
+        if (rawKey === lastGitRaw) return;
+        lastGitRaw = rawKey;
+        renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[8], branchOverride);
+        updateGitTargetIndicator({ notARepo: !results[7] });
+      }).then(done, done);
+      return;
+    }
+
+    lastGitRaw = null;
+    Promise.all(fetchAll).then(function (results) {
+      lastGitRaw = JSON.stringify(results[0]) + '|' + results[1] + '|' + JSON.stringify(results[2]) + '|' + results[3].length + '|' + JSON.stringify(results[4]) + '|' + results[7] + '|' + JSON.stringify(results[8]);
+      renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[8], branchOverride);
+      updateGitTargetIndicator({ notARepo: !results[7] });
+    }).then(done, done);
+  }, done);
 }
 
 function showGitFileContextMenu(e, filePath) {
@@ -5802,14 +7926,21 @@ function updateActiveProjectBranchLabels(branch) {
   }
 }
 
-function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstagedStats, stagedStats) {
+function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstagedStats, stagedStats, diffVsBase, branchOverride) {
   graphLaneState = null;
-  updateActiveProjectBranchLabels(branch);
+  var readOnly = !!branchOverride;
+  if (!readOnly) updateActiveProjectBranchLabels(branch);
   while (gitHeaderEl.firstChild) gitHeaderEl.removeChild(gitHeaderEl.firstChild);
   while (gitChangesEl.firstChild) gitChangesEl.removeChild(gitChangesEl.firstChild);
   // Conflict / mid-operation banner. Fired async; the banner is inserted at
   // the top of gitChangesEl when state shows merging/rebasing/cherry-picking.
   renderGitOpBanner();
+
+  if (readOnly) {
+    gitHeaderEl.classList.add('git-readonly');
+  } else {
+    gitHeaderEl.classList.remove('git-readonly');
+  }
 
   // Branch row (clickable branch switcher + pull/push/stash buttons)
   var row = document.createElement('div');
@@ -5829,18 +7960,33 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
   var actions = document.createElement('span');
   actions.className = 'git-branch-actions';
 
+  var readOnlyTip = readOnly
+    ? "Branch " + branchOverride + " isn't checked out \u2014 switch to it in your editor (or in a terminal: git checkout " + branchOverride + ") to commit or stage changes."
+    : null;
+
+  if (readOnly) {
+    // Surface a "Check out this branch" affordance prominently in branch-relative mode.
+    var checkoutBtn = document.createElement('button');
+    checkoutBtn.className = 'git-action-btn';
+    checkoutBtn.textContent = '\u21B3 Check out';
+    checkoutBtn.title = 'Check out ' + branchOverride;
+    checkoutBtn.addEventListener('click', function () { gitCheckout(branchOverride); });
+    actions.appendChild(checkoutBtn);
+  }
+
   // Stash button
   var stashBtn = document.createElement('button');
   stashBtn.className = 'git-action-btn';
   stashBtn.textContent = '\u2691 Stash';
-  stashBtn.title = 'Stash changes';
+  stashBtn.title = readOnlyTip || 'Stash changes';
+  if (readOnly) { stashBtn.disabled = true; stashBtn.classList.add('git-disabled'); }
   stashBtn.addEventListener('click', function () { gitStashPush(); });
   actions.appendChild(stashBtn);
 
   // Pop button with badge
   var popBtn = document.createElement('button');
   popBtn.className = 'git-action-btn';
-  popBtn.title = 'Pop stash';
+  popBtn.title = readOnlyTip || 'Pop stash';
   popBtn.textContent = '\u2691 Pop';
   if (stashes.length > 0) {
     var badge = document.createElement('span');
@@ -5851,13 +7997,14 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
     popBtn.disabled = true;
     popBtn.style.opacity = '0.4';
   }
+  if (readOnly) { popBtn.disabled = true; popBtn.classList.add('git-disabled'); }
   popBtn.addEventListener('click', function () { gitStashPop(); });
   actions.appendChild(popBtn);
 
   // Pull button with behind count
   var pullBtn = document.createElement('button');
   pullBtn.className = 'git-action-btn';
-  pullBtn.title = 'Pull';
+  pullBtn.title = readOnlyTip || 'Pull';
   pullBtn.textContent = '\u2193 Pull';
   if (aheadBehind.behind > 0) {
     var pullBadge = document.createElement('span');
@@ -5865,13 +8012,14 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
     pullBadge.textContent = aheadBehind.behind;
     pullBtn.appendChild(pullBadge);
   }
+  if (readOnly) { pullBtn.disabled = true; pullBtn.classList.add('git-disabled'); }
   pullBtn.addEventListener('click', function () { gitPull(); });
   actions.appendChild(pullBtn);
 
   // Push button with ahead count
   var pushBtn = document.createElement('button');
   pushBtn.className = 'git-action-btn';
-  pushBtn.title = 'Push';
+  pushBtn.title = readOnlyTip || 'Push';
   pushBtn.textContent = '\u2191 Push';
   if (aheadBehind.ahead > 0) {
     var pushBadge = document.createElement('span');
@@ -5879,11 +8027,33 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
     pushBadge.textContent = aheadBehind.ahead;
     pushBtn.appendChild(pushBadge);
   }
+  if (readOnly) { pushBtn.disabled = true; pushBtn.classList.add('git-disabled'); }
   pushBtn.addEventListener('click', function () { gitPush(); });
   actions.appendChild(pushBtn);
 
   row.appendChild(actions);
   gitHeaderEl.appendChild(row);
+
+  if (readOnly) {
+    // Branch-relative read-only mode: render diff-vs-base instead of working/staged.
+    // gitStatus + diffStat returned empty by main; ignore them.
+    var baseList = Array.isArray(diffVsBase) ? diffVsBase : [];
+    if (baseList.length === 0 && graphLog.length === 0) {
+      var emptyR = document.createElement('div');
+      emptyR.className = 'git-empty';
+      emptyR.textContent = 'No changes vs base';
+      gitChangesEl.appendChild(emptyR);
+      return;
+    }
+    if (baseList.length > 0) {
+      var baseFiles = baseList.map(function (s) { return { status: 'M', file: s.file }; });
+      gitChangesEl.appendChild(createGitSection('Changes vs base', baseFiles, false, baseList, { readOnly: true }));
+    }
+    if (graphLog.length > 0) {
+      gitChangesEl.appendChild(createGitGraphSection(graphLog));
+    }
+    return;
+  }
 
   // Parse status into staged vs unstaged
   var staged = [];
@@ -5923,6 +8093,7 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
   if (graphLog.length > 0) {
     gitChangesEl.appendChild(createGitGraphSection(graphLog));
   }
+  refreshReviewCommentsButtons();
 }
 
 // Branch dropdown
@@ -5943,7 +8114,7 @@ function toggleBranchDropdown(parentRow, currentBranch) {
   });
   dropdown.appendChild(newOpt);
 
-  window.electronAPI.gitBranches(activeProjectKey).then(function (branches) {
+  window.electronAPI.gitBranches(gitTargetCwd()).then(function (branches) {
     for (var i = 0; i < branches.length; i++) {
       (function (b) {
         var item = document.createElement('div');
@@ -6279,7 +8450,9 @@ function countTreeFiles(node) {
   return count;
 }
 
-function createGitSection(title, files, isStaged, stats) {
+function createGitSection(title, files, isStaged, stats, opts) {
+  opts = opts || {};
+  var readOnly = !!opts.readOnly;
   var section = document.createElement('div');
   section.className = 'git-section';
 
@@ -6297,20 +8470,22 @@ function createGitSection(title, files, isStaged, stats) {
   var actions = document.createElement('span');
   actions.className = 'git-section-actions';
 
-  if (isStaged) {
-    var unstageAllBtn = document.createElement('button');
-    unstageAllBtn.className = 'git-file-action';
-    unstageAllBtn.textContent = '\u2212';
-    unstageAllBtn.title = 'Unstage All';
-    unstageAllBtn.addEventListener('click', function (e) { e.stopPropagation(); gitUnstageAll(); });
-    actions.appendChild(unstageAllBtn);
-  } else {
-    var stageAllBtn = document.createElement('button');
-    stageAllBtn.className = 'git-file-action';
-    stageAllBtn.textContent = '+';
-    stageAllBtn.title = 'Stage All';
-    stageAllBtn.addEventListener('click', function (e) { e.stopPropagation(); gitStageAll(); });
-    actions.appendChild(stageAllBtn);
+  if (!readOnly) {
+    if (isStaged) {
+      var unstageAllBtn = document.createElement('button');
+      unstageAllBtn.className = 'git-file-action';
+      unstageAllBtn.textContent = '\u2212';
+      unstageAllBtn.title = 'Unstage All';
+      unstageAllBtn.addEventListener('click', function (e) { e.stopPropagation(); gitUnstageAll(); });
+      actions.appendChild(unstageAllBtn);
+    } else {
+      var stageAllBtn = document.createElement('button');
+      stageAllBtn.className = 'git-file-action';
+      stageAllBtn.textContent = '+';
+      stageAllBtn.title = 'Stage All';
+      stageAllBtn.addEventListener('click', function (e) { e.stopPropagation(); gitStageAll(); });
+      actions.appendChild(stageAllBtn);
+    }
   }
 
   header.appendChild(arrow);
@@ -6328,7 +8503,7 @@ function createGitSection(title, files, isStaged, stats) {
     }
   }
   var tree = buildFileTree(files);
-  renderFileTreeNode(list, tree, isStaged, statsMap, 0);
+  renderFileTreeNode(list, tree, isStaged, statsMap, 0, readOnly);
 
   section.appendChild(list);
 
@@ -6341,7 +8516,7 @@ function createGitSection(title, files, isStaged, stats) {
   return section;
 }
 
-function renderFileTreeNode(container, node, isStaged, statsMap, depth) {
+function renderFileTreeNode(container, node, isStaged, statsMap, depth, readOnly) {
   var folderNames = Object.keys(node.folders).sort();
   for (var f = 0; f < folderNames.length; f++) {
     (function (folderName) {
@@ -6372,7 +8547,7 @@ function renderFileTreeNode(container, node, isStaged, statsMap, depth) {
 
       var folderContent = document.createElement('div');
       folderContent.className = 'git-tree-folder-content';
-      renderFileTreeNode(folderContent, folder, isStaged, statsMap, depth + 1);
+      renderFileTreeNode(folderContent, folder, isStaged, statsMap, depth + 1, readOnly);
       folderEl.appendChild(folderContent);
 
       folderHeader.addEventListener('click', function () {
@@ -6386,11 +8561,11 @@ function renderFileTreeNode(container, node, isStaged, statsMap, depth) {
   }
 
   for (var i = 0; i < node.files.length; i++) {
-    container.appendChild(createGitFileRow(node.files[i], isStaged, statsMap, depth));
+    container.appendChild(createGitFileRow(node.files[i], isStaged, statsMap, depth, readOnly));
   }
 }
 
-function createGitFileRow(file, isStaged, statsMap, depth) {
+function createGitFileRow(file, isStaged, statsMap, depth, readOnly) {
   var container = document.createElement('div');
   container.className = 'git-file-container';
 
@@ -6446,28 +8621,30 @@ function createGitFileRow(file, isStaged, statsMap, depth) {
   var actions = document.createElement('span');
   actions.className = 'git-file-actions';
 
-  if (isStaged) {
-    var unstageBtn = document.createElement('button');
-    unstageBtn.className = 'git-file-action';
-    unstageBtn.textContent = '\u2212';
-    unstageBtn.title = 'Unstage';
-    unstageBtn.addEventListener('click', function (e) { e.stopPropagation(); gitUnstageFile(file.file); });
-    actions.appendChild(unstageBtn);
-  } else {
-    var stageBtn = document.createElement('button');
-    stageBtn.className = 'git-file-action';
-    stageBtn.textContent = '+';
-    stageBtn.title = 'Stage';
-    stageBtn.addEventListener('click', function (e) { e.stopPropagation(); gitStageFile(file.file); });
-    actions.appendChild(stageBtn);
+  if (!readOnly) {
+    if (isStaged) {
+      var unstageBtn = document.createElement('button');
+      unstageBtn.className = 'git-file-action';
+      unstageBtn.textContent = '\u2212';
+      unstageBtn.title = 'Unstage';
+      unstageBtn.addEventListener('click', function (e) { e.stopPropagation(); gitUnstageFile(file.file); });
+      actions.appendChild(unstageBtn);
+    } else {
+      var stageBtn = document.createElement('button');
+      stageBtn.className = 'git-file-action';
+      stageBtn.textContent = '+';
+      stageBtn.title = 'Stage';
+      stageBtn.addEventListener('click', function (e) { e.stopPropagation(); gitStageFile(file.file); });
+      actions.appendChild(stageBtn);
 
-    if (!file.untracked) {
-      var discardBtn = document.createElement('button');
-      discardBtn.className = 'git-file-action git-discard';
-      discardBtn.textContent = '\u21A9';
-      discardBtn.title = 'Discard Changes';
-      discardBtn.addEventListener('click', function (e) { e.stopPropagation(); gitDiscardFile(file.file); });
-      actions.appendChild(discardBtn);
+      if (!file.untracked) {
+        var discardBtn = document.createElement('button');
+        discardBtn.className = 'git-file-action git-discard';
+        discardBtn.textContent = '\u21A9';
+        discardBtn.title = 'Discard Changes';
+        discardBtn.addEventListener('click', function (e) { e.stopPropagation(); gitDiscardFile(file.file); });
+        actions.appendChild(discardBtn);
+      }
     }
   }
 
@@ -6488,35 +8665,41 @@ function gitStatusClass(status) {
 
 function gitStageFile(filePath) {
   if (!activeProjectKey || !window.electronAPI) return;
-  window.electronAPI.gitStageFile(activeProjectKey, filePath).then(function () { refreshGitStatus(); });
+  if (gitTabIsReadOnly()) return;
+  window.electronAPI.gitStageFile(gitTargetCwd(), filePath).then(function () { refreshGitStatus(); });
 }
 
 function gitUnstageFile(filePath) {
   if (!activeProjectKey || !window.electronAPI) return;
-  window.electronAPI.gitUnstageFile(activeProjectKey, filePath).then(function () { refreshGitStatus(); });
+  if (gitTabIsReadOnly()) return;
+  window.electronAPI.gitUnstageFile(gitTargetCwd(), filePath).then(function () { refreshGitStatus(); });
 }
 
 function gitStageAll() {
   if (!activeProjectKey || !window.electronAPI) return;
-  window.electronAPI.gitStageAll(activeProjectKey).then(function () { refreshGitStatus(); });
+  if (gitTabIsReadOnly()) return;
+  window.electronAPI.gitStageAll(gitTargetCwd()).then(function () { refreshGitStatus(); });
 }
 
 function gitUnstageAll() {
   if (!activeProjectKey || !window.electronAPI) return;
-  window.electronAPI.gitUnstageAll(activeProjectKey).then(function () { refreshGitStatus(); });
+  if (gitTabIsReadOnly()) return;
+  window.electronAPI.gitUnstageAll(gitTargetCwd()).then(function () { refreshGitStatus(); });
 }
 
 function gitDiscardFile(filePath) {
   if (!activeProjectKey || !window.electronAPI) return;
-  window.electronAPI.gitDiscardFile(activeProjectKey, filePath).then(function () { refreshGitStatus(); });
+  if (gitTabIsReadOnly()) return;
+  window.electronAPI.gitDiscardFile(gitTargetCwd(), filePath).then(function () { refreshGitStatus(); });
 }
 
 function gitCommit() {
   if (!activeProjectKey || !window.electronAPI) return;
+  if (gitTabIsReadOnly()) return;
   var msg = gitCommitMsg.value.trim();
   if (!msg) return;
   var amend = gitAmendCheckbox && gitAmendCheckbox.checked;
-  window.electronAPI.gitCommit(activeProjectKey, msg, amend).then(function (result) {
+  window.electronAPI.gitCommit(gitTargetCwd(), msg, amend).then(function (result) {
     if (result.success) {
       gitCommitMsg.value = '';
       if (gitAmendCheckbox) gitAmendCheckbox.checked = false;
@@ -6531,9 +8714,10 @@ function gitCommit() {
 function gitCheckout(branchName) {
   if (!activeProjectKey || !window.electronAPI) return;
   showGitStatus('Switching to ' + branchName + '...');
-  window.electronAPI.gitCheckout(activeProjectKey, branchName).then(function (result) {
+  window.electronAPI.gitCheckout(gitTargetCwd(), branchName).then(function (result) {
     if (result.success) {
       showGitStatus('Switched to ' + branchName);
+      invalidateProjectRootBranch(activeProjectKey);
       refreshGitStatus(true);
     } else {
       showGitStatus('Checkout failed: ' + result.error, true);
@@ -6544,9 +8728,10 @@ function gitCheckout(branchName) {
 function gitCreateBranch(branchName) {
   if (!activeProjectKey || !window.electronAPI) return;
   showGitStatus('Creating ' + branchName + '...');
-  window.electronAPI.gitCreateBranch(activeProjectKey, branchName).then(function (result) {
+  window.electronAPI.gitCreateBranch(gitTargetCwd(), branchName).then(function (result) {
     if (result.success) {
       showGitStatus('Created and switched to ' + branchName);
+      invalidateProjectRootBranch(activeProjectKey);
       refreshGitStatus(true);
     } else {
       showGitStatus('Create branch failed: ' + result.error, true);
@@ -6556,8 +8741,9 @@ function gitCreateBranch(branchName) {
 
 function gitStashPush() {
   if (!activeProjectKey || !window.electronAPI) return;
+  if (gitTabIsReadOnly()) return;
   showGitStatus('Stashing...');
-  window.electronAPI.gitStashPush(activeProjectKey).then(function (result) {
+  window.electronAPI.gitStashPush(gitTargetCwd()).then(function (result) {
     if (result.success) {
       showGitStatus('Changes stashed');
       refreshGitStatus(true);
@@ -6569,8 +8755,9 @@ function gitStashPush() {
 
 function gitStashPop() {
   if (!activeProjectKey || !window.electronAPI) return;
+  if (gitTabIsReadOnly()) return;
   showGitStatus('Popping stash...');
-  window.electronAPI.gitStashPop(activeProjectKey).then(function (result) {
+  window.electronAPI.gitStashPop(gitTargetCwd()).then(function (result) {
     if (result.success) {
       showGitStatus('Stash popped');
       refreshGitStatus(true);
@@ -6582,8 +8769,9 @@ function gitStashPop() {
 
 function gitPull() {
   if (!activeProjectKey || !window.electronAPI) return;
+  if (gitTabIsReadOnly()) return;
   showGitStatus('Pulling...');
-  window.electronAPI.gitPull(activeProjectKey).then(function (result) {
+  window.electronAPI.gitPull(gitTargetCwd()).then(function (result) {
     if (result.success) {
       showGitStatus(result.output || 'Pull complete');
       refreshGitStatus();
@@ -6595,8 +8783,9 @@ function gitPull() {
 
 function gitPush() {
   if (!activeProjectKey || !window.electronAPI) return;
+  if (gitTabIsReadOnly()) return;
   showGitStatus('Pushing...');
-  window.electronAPI.gitPush(activeProjectKey).then(function (result) {
+  window.electronAPI.gitPush(gitTargetCwd()).then(function (result) {
     if (result.success) {
       showGitStatus(result.output || 'Push complete');
     } else {
@@ -7425,6 +9614,43 @@ document.getElementById('btn-reveal-explorer').addEventListener('click', functio
   if (activeProjectKey) window.electronAPI.openPath(activeProjectKey);
 });
 document.getElementById('btn-refresh-git').addEventListener('click', function () { refreshGitStatus(true); });
+
+// Review-comments Copy / Copy and Clear (one-time binding)
+(function () {
+  var copyBtn = document.getElementById('btn-review-copy');
+  var clearBtn = document.getElementById('btn-review-copy-clear');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', function () {
+      var info = getCommentsForFocusedSession();
+      if (!info) return;
+      var text = ReviewComments.formatCommentsForCopy(info.comments, info.projectKey);
+      window.electronAPI.clipboardWriteText(text);
+    });
+  }
+  if (clearBtn) {
+    clearBtn.addEventListener('click', function () {
+      var info = getCommentsForFocusedSession();
+      if (!info) return;
+      var text = ReviewComments.formatCommentsForCopy(info.comments, info.projectKey);
+      window.electronAPI.clipboardWriteText(text);
+      allColumns.forEach(function (col) {
+        if (!col.isDiff) return;
+        if (col.projectKey !== info.projectKey) return;
+        if ((col.workspaceId || null) !== info.workspaceId) return;
+        if (col.sessionId !== info.sessionId) return;
+        if ((col.scope || 'working') !== info.scope) return;
+        if (col.element) {
+          col.element.querySelectorAll('.review-comment-box').forEach(function (b) { b.remove(); });
+        }
+        col.reviewComments = [];
+        saveReviewCommentsForColumn(col);
+        paintReviewIndicators(col);
+      });
+      refreshReviewCommentsButtons();
+    });
+  }
+})();
+
 document.getElementById('btn-refresh-run').addEventListener('click', refreshRunConfigs);
 document.getElementById('btn-add-run-config').addEventListener('click', function () {
   openConfigEditor(null, true);
@@ -7784,7 +10010,7 @@ function clawdForceRefresh() {
 // Init
 // ============================================================
 
-btnAdd.addEventListener('click', function () {
+btnAdd.addEventListener('click', async function () {
   if (optHeadless.checked) {
     // Consume the transient flag immediately — don't persist it.
     optHeadless.checked = false;
@@ -7792,8 +10018,26 @@ btnAdd.addEventListener('click', function () {
     openHeadlessDock();
     return;
   }
-  var args = buildSpawnArgs();
-  addColumn(args.length > 0 ? args : null, null, spawnOpts());
+  if (btnAdd.disabled) return;
+  btnAdd.disabled = true;
+  try {
+    var projectAtClick = activeProjectKey;
+    var raw = optWorktree.value.trim();
+    var resolved = { kind: 'none' };
+    if (raw && projectAtClick) {
+      resolved = await window.electronAPI.resolveWorktree(projectAtClick, raw);
+    }
+    if (activeProjectKey !== projectAtClick) return;
+    var spawnOpts = {};
+    if (resolved.kind === 'cwd') {
+      spawnOpts.cwd = resolved.path;
+      spawnOpts.cwdSource = 'manual';
+    }
+    var args = buildSpawnArgs(resolved);
+    addColumn(args.length > 0 ? args : null, null, spawnOpts);
+  } finally {
+    btnAdd.disabled = false;
+  }
 });
 btnAddRow.addEventListener('click', addRow);
 btnToggleSidebar.addEventListener('click', toggleSidebar);
@@ -7842,7 +10086,7 @@ function closeSpawnDropdown() {
   spawnDropdown.classList.add('hidden');
 }
 
-function buildSpawnArgs() {
+function buildSpawnArgs(resolved) {
   var args = [];
   if (optSkipPermissions.checked) {
     args.push('--dangerously-skip-permissions');
@@ -7879,7 +10123,9 @@ function buildSpawnArgs() {
   }
   var worktree = optWorktree.value.trim();
   if (worktree) {
-    args.push('--worktree', worktree);
+    if (!resolved || resolved.kind === 'flag' || resolved.kind === 'none') {
+      args.push('--worktree', worktree);
+    }
   }
   // --effort is the only non-interactive way to set reasoning effort. The
   // /effort slash command opens an interactive arrow-key picker and `/config
@@ -8796,6 +11042,7 @@ var settingsModal = document.getElementById('settings-modal');
 document.getElementById('btn-settings').addEventListener('click', function () {
   loadNotifSettings();
   loadStartWithOS();
+  bindPipelineEditor();
   var ctxSel = document.getElementById('setting-ctx-default');
   if (ctxSel) ctxSel.value = getCtxDefaultPref();
   window.electronAPI.getAutomationSettings().then(function (settings) {
@@ -11092,7 +13339,7 @@ window.electronAPI.getVersion().then(function(v) {
   versionEl.style.cursor = 'pointer';
   versionEl.addEventListener('click', function () {
     if (window.electronAPI && window.electronAPI.openExternal) {
-      window.electronAPI.openExternal('https://github.com/paulallington/Claudes/releases');
+      window.electronAPI.openExternal('https://github.com/mdrichardson/Claudes/releases');
     }
   });
 
@@ -13879,6 +16126,691 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   };
 })();
 
+// ============================================================
+// Sticky Notes
+// ============================================================
+(function setupStickyNotes() {
+  var container = document.getElementById('sticky-notes-container');
+  var columnsContainerEl = document.getElementById('columns-container');
+  var btn = document.getElementById('btn-sticky-notes');
+  if (!container || !columnsContainerEl || !btn) return;
+
+  var STICKY_COLORS = ['yellow', 'pink', 'green', 'blue', 'purple', 'gray'];
+  var DEFAULT_COLOR = 'yellow';
+  var DEFAULT_FONT_SIZE = 15;
+  var FONT_MIN = 10;
+  var FONT_MAX = 24;
+  var MIN_W = 120;
+  var MIN_H = 80;
+  var HEADER_VISIBLE = 24; // px of header that must stay within columns-container
+
+  var notesByProject = new Map();   // storeKey (stateKey) -> notes[]
+  var loadedProjects = new Set();   // storeKeys we've already fetched from disk
+  var loadingProjects = new Map();  // storeKey -> Promise (in-flight load)
+  var openPopoverNoteId = null;
+  var noteIsDragging = false;       // true while a drag or resize gesture is in progress
+
+  function genId() {
+    return 'note_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7);
+  }
+
+  // personal-only: sticky-notes now track a (projectPath, workspaceId) pair so
+  // each workspace has its own overlay. Internal Map keys are the composite
+  // stateKey; each save/load IPC passes the two components separately so main
+  // can derive the on-disk filename.
+  function currentStickyKey() {
+    if (typeof activeProjectKey !== 'string' || !activeProjectKey) return null;
+    var proj = (typeof config !== 'undefined' && config.projects) ? config.projects[config.activeProjectIndex] : null;
+    var wsId = (proj && proj.activeWorkspaceId != null) ? proj.activeWorkspaceId : null;
+    var store = (typeof stateKey === 'function') ? stateKey(activeProjectKey, wsId) : activeProjectKey;
+    return { projectPath: activeProjectKey, workspaceId: wsId, store: store };
+  }
+
+  // Retained as an alias so any existing call sites keep working — returns
+  // the composite store key (string) rather than the bare projectPath.
+  function currentProjectKey() {
+    var k = currentStickyKey();
+    return k ? k.store : null;
+  }
+
+  function getNotes(storeKey) {
+    if (!storeKey) return [];
+    var arr = notesByProject.get(storeKey);
+    if (!arr) {
+      arr = [];
+      notesByProject.set(storeKey, arr);
+    }
+    return arr;
+  }
+
+  function save(storeKey) {
+    if (!storeKey) return;
+    if (!window.electronAPI || !window.electronAPI.saveStickyNotes) return;
+    var notes = getNotes(storeKey);
+    var k = currentStickyKey();
+    if (!k || k.store !== storeKey) {
+      // Project/workspace switched between change and flush — re-decompose from storeKey.
+      var sep = storeKey.indexOf('::');
+      var p = (sep < 0) ? storeKey : storeKey.slice(0, sep);
+      var w = (sep < 0) ? null : storeKey.slice(sep + 2);
+      window.electronAPI.saveStickyNotes(p, w, notes);
+      return;
+    }
+    window.electronAPI.saveStickyNotes(k.projectPath, k.workspaceId, notes);
+  }
+
+  function ensureLoaded(storeKey) {
+    if (!storeKey) return Promise.resolve([]);
+    if (loadedProjects.has(storeKey)) return Promise.resolve(getNotes(storeKey));
+    if (loadingProjects.has(storeKey)) return loadingProjects.get(storeKey);
+    if (!window.electronAPI || !window.electronAPI.loadStickyNotes) {
+      loadedProjects.add(storeKey);
+      return Promise.resolve([]);
+    }
+    // Decompose storeKey → (projectPath, workspaceId) for the IPC call.
+    var sep = storeKey.indexOf('::');
+    var projPath = (sep < 0) ? storeKey : storeKey.slice(0, sep);
+    var wsId = (sep < 0) ? null : storeKey.slice(sep + 2);
+    var p = window.electronAPI.loadStickyNotes(projPath, wsId).then(function (notes) {
+      var arr = Array.isArray(notes) ? notes.slice() : [];
+      // Normalize defaults defensively (main.js also defaults them, but belt-and-braces).
+      for (var i = 0; i < arr.length; i++) {
+        if (!arr[i].id) arr[i].id = genId();
+        if (typeof arr[i].content !== 'string') arr[i].content = '';
+        if (typeof arr[i].x !== 'number') arr[i].x = 20;
+        if (typeof arr[i].y !== 'number') arr[i].y = 20;
+        if (typeof arr[i].width !== 'number') arr[i].width = 240;
+        if (typeof arr[i].height !== 'number') arr[i].height = 180;
+        if (STICKY_COLORS.indexOf(arr[i].color) < 0) arr[i].color = DEFAULT_COLOR;
+        if (typeof arr[i].fontSize !== 'number') arr[i].fontSize = DEFAULT_FONT_SIZE;
+      }
+      notesByProject.set(storeKey, arr);
+      loadedProjects.add(storeKey);
+      loadingProjects.delete(storeKey);
+      return arr;
+    }).catch(function (err) {
+      console.error('loadStickyNotes failed:', err);
+      notesByProject.set(storeKey, []);
+      loadedProjects.add(storeKey);
+      loadingProjects.delete(storeKey);
+      return [];
+    });
+    loadingProjects.set(storeKey, p);
+    return p;
+  }
+
+  function clampPosition(note) {
+    var rect = columnsContainerEl.getBoundingClientRect();
+    var maxX = Math.max(0, rect.width - HEADER_VISIBLE);
+    var minX = -(note.width - HEADER_VISIBLE);
+    var maxY = Math.max(0, rect.height - HEADER_VISIBLE);
+    var minY = 0; // keep above top edge of columns-container (toolbar stays clear)
+    if (note.x > maxX) note.x = maxX;
+    if (note.x < minX) note.x = minX;
+    if (note.y > maxY) note.y = maxY;
+    if (note.y < minY) note.y = minY;
+  }
+
+  function applyNoteStyle(noteEl, note) {
+    noteEl.style.left = note.x + 'px';
+    noteEl.style.top = note.y + 'px';
+    noteEl.style.width = note.width + 'px';
+    noteEl.style.height = note.height + 'px';
+    noteEl.style.fontSize = note.fontSize + 'px';
+    noteEl.setAttribute('data-color', note.color);
+  }
+
+  function findColumnAtPoint(clientX, clientY) {
+    var state = typeof getActiveState === 'function' ? getActiveState() : null;
+    if (!state || !state.rows) return null;
+    for (var rowIdx = 0; rowIdx < state.rows.length; rowIdx++) {
+      var row = state.rows[rowIdx];
+      if (!row || !row.columnIds) continue;
+      for (var colIdx = 0; colIdx < row.columnIds.length; colIdx++) {
+        var col = allColumns.get(row.columnIds[colIdx]);
+        if (!col || !col.element) continue;
+        var rect = col.element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        if (clientX >= rect.left && clientX <= rect.right &&
+            clientY >= rect.top && clientY <= rect.bottom) {
+          return { rowIdx: rowIdx, colIdx: colIdx, rect: rect };
+        }
+      }
+    }
+    return null;
+  }
+
+  function computeAbsolutePosition(note) {
+    var containerRect = columnsContainerEl.getBoundingClientRect();
+    var a = note.anchor;
+    if (a && a.type === 'column') {
+      var state = typeof getActiveState === 'function' ? getActiveState() : null;
+      var row = state && state.rows ? state.rows[a.rowIdx] : null;
+      var colId = row && row.columnIds ? row.columnIds[a.colIdx] : undefined;
+      var col = (typeof colId !== 'undefined') ? allColumns.get(colId) : null;
+      if (col && col.element) {
+        var rect = col.element.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          return {
+            x: (rect.left - containerRect.left) + a.ratioX * rect.width,
+            y: (rect.top - containerRect.top) + a.ratioY * rect.height
+          };
+        }
+        // Column exists but has zero rect (transient layout) — hold position.
+        return { x: note.x, y: note.y };
+      }
+      // Column not found (killed / row removed): degrade to container anchor in-memory.
+      var rx = containerRect.width > 0 ? (note.x / containerRect.width) : 0.05;
+      var ry = containerRect.height > 0 ? (note.y / containerRect.height) : 0.05;
+      note.anchor = { type: 'container', ratioX: rx, ratioY: ry };
+      return {
+        x: rx * containerRect.width,
+        y: ry * containerRect.height
+      };
+    }
+    if (a && a.type === 'container') {
+      return {
+        x: a.ratioX * containerRect.width,
+        y: a.ratioY * containerRect.height
+      };
+    }
+    return { x: note.x, y: note.y };
+  }
+
+  function createNoteElement(note) {
+    var el = document.createElement('div');
+    el.className = 'sticky-note';
+    el.setAttribute('data-note-id', note.id);
+    applyNoteStyle(el, note);
+
+    var header = document.createElement('div');
+    header.className = 'sticky-note-header';
+
+    var settingsBtn = document.createElement('button');
+    settingsBtn.className = 'sticky-note-settings';
+    settingsBtn.title = 'Color and size';
+    settingsBtn.innerHTML = '&#9881;';
+
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'sticky-note-close';
+    closeBtn.title = 'Delete';
+    closeBtn.innerHTML = '&times;';
+
+    header.appendChild(settingsBtn);
+    header.appendChild(closeBtn);
+
+    var body = document.createElement('textarea');
+    body.className = 'sticky-note-body';
+    body.setAttribute('spellcheck', 'false');
+    body.value = note.content || '';
+
+    el.appendChild(header);
+    el.appendChild(body);
+
+    var dirs = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
+    for (var i = 0; i < dirs.length; i++) {
+      var h = document.createElement('div');
+      h.className = 'sticky-note-resize ' + dirs[i];
+      h.setAttribute('data-dir', dirs[i]);
+      el.appendChild(h);
+    }
+
+    var popover = buildPopover(note);
+    el.appendChild(popover);
+
+    wireNote(el, note, header, settingsBtn, closeBtn, body, popover);
+    return el;
+  }
+
+  function buildPopover(note) {
+    var pop = document.createElement('div');
+    pop.className = 'sticky-note-popover';
+
+    var swatches = document.createElement('div');
+    swatches.className = 'sticky-note-swatches';
+    for (var i = 0; i < STICKY_COLORS.length; i++) {
+      var c = STICKY_COLORS[i];
+      var sw = document.createElement('button');
+      sw.className = 'sticky-swatch' + (note.color === c ? ' selected' : '');
+      sw.setAttribute('data-color', c);
+      sw.setAttribute('aria-label', c.charAt(0).toUpperCase() + c.slice(1));
+      swatches.appendChild(sw);
+    }
+
+    var fs = document.createElement('div');
+    fs.className = 'sticky-note-fontsize';
+    var dec = document.createElement('button');
+    dec.className = 'sticky-font-dec';
+    dec.title = 'Smaller';
+    dec.innerHTML = '&minus;';
+    var val = document.createElement('span');
+    val.className = 'sticky-font-value';
+    val.textContent = note.fontSize + 'px';
+    var inc = document.createElement('button');
+    inc.className = 'sticky-font-inc';
+    inc.title = 'Larger';
+    inc.textContent = '+';
+    fs.appendChild(dec);
+    fs.appendChild(val);
+    fs.appendChild(inc);
+
+    pop.appendChild(swatches);
+    pop.appendChild(fs);
+    return pop;
+  }
+
+  function closeAllPopovers() {
+    var opens = container.querySelectorAll('.sticky-note-popover.open');
+    for (var i = 0; i < opens.length; i++) opens[i].classList.remove('open');
+    openPopoverNoteId = null;
+  }
+
+  function bringToFront(note) {
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    var arr = getNotes(projectKey);
+    var idx = arr.indexOf(note);
+    if (idx < 0) return;
+    if (idx === arr.length - 1) return; // already on top
+    arr.splice(idx, 1);
+    arr.push(note);
+    var el = container.querySelector('.sticky-note[data-note-id="' + note.id + '"]');
+    if (el) container.appendChild(el); // re-append moves to end of DOM (top of stack)
+    save(projectKey);
+  }
+
+  function deleteNote(note) {
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    var arr = getNotes(projectKey);
+    var idx = arr.indexOf(note);
+    if (idx < 0) return;
+    arr.splice(idx, 1);
+    var el = container.querySelector('.sticky-note[data-note-id="' + note.id + '"]');
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+    if (openPopoverNoteId === note.id) openPopoverNoteId = null;
+    save(projectKey);
+  }
+
+  function wireNote(el, note, header, settingsBtn, closeBtn, body, popover) {
+    // Bring-to-front on any mousedown inside the note (except the gear/close buttons —
+    // they still bring to front, but drag bail-early needs to happen first).
+    el.addEventListener('mousedown', function () {
+      bringToFront(note);
+    });
+
+    // Textarea input → update + save.
+    body.addEventListener('input', function () {
+      note.content = body.value;
+      var projectKey = currentProjectKey();
+      if (projectKey) save(projectKey);
+    });
+
+    // Drag on header.
+    header.addEventListener('mousedown', function (e) {
+      if (e.target.closest('.sticky-note-settings, .sticky-note-close')) return;
+      if (e.button !== 0) return;
+      e.preventDefault();
+      var startX = e.clientX;
+      var startY = e.clientY;
+      var startLeft = note.x;
+      var startTop = note.y;
+      noteIsDragging = true;
+      document.body.style.userSelect = 'none';
+      function move(ev) {
+        note.x = startLeft + (ev.clientX - startX);
+        note.y = startTop + (ev.clientY - startY);
+        clampPosition(note);
+        el.style.left = note.x + 'px';
+        el.style.top = note.y + 'px';
+      }
+      function up(ev) {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        document.body.style.userSelect = '';
+        noteIsDragging = false;
+        var cR = columnsContainerEl.getBoundingClientRect();
+        var hit = findColumnAtPoint(ev.clientX, ev.clientY);
+        if (hit) {
+          note.anchor = {
+            type: 'column',
+            rowIdx: hit.rowIdx,
+            colIdx: hit.colIdx,
+            ratioX: (ev.clientX - hit.rect.left) / hit.rect.width,
+            ratioY: (ev.clientY - hit.rect.top) / hit.rect.height
+          };
+        } else {
+          note.anchor = {
+            type: 'container',
+            ratioX: cR.width > 0 ? (ev.clientX - cR.left) / cR.width : 0,
+            ratioY: cR.height > 0 ? (ev.clientY - cR.top) / cR.height : 0
+          };
+        }
+        note.x = parseFloat(el.style.left) || 0;
+        note.y = parseFloat(el.style.top) || 0;
+        var projectKey = currentProjectKey();
+        if (projectKey) save(projectKey);
+      }
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+
+    // Resize on each handle.
+    var handles = el.querySelectorAll('.sticky-note-resize');
+    for (var i = 0; i < handles.length; i++) {
+      (function (handle) {
+        handle.addEventListener('mousedown', function (e) {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          e.stopPropagation();
+          var dir = handle.getAttribute('data-dir');
+          var startX = e.clientX;
+          var startY = e.clientY;
+          var startLeft = note.x;
+          var startTop = note.y;
+          var startWidth = note.width;
+          var startHeight = note.height;
+          noteIsDragging = true;
+          document.body.style.userSelect = 'none';
+          function move(ev) {
+            var dx = ev.clientX - startX;
+            var dy = ev.clientY - startY;
+            var newX = startLeft, newY = startTop, newW = startWidth, newH = startHeight;
+            if (dir.indexOf('e') >= 0) newW = Math.max(MIN_W, startWidth + dx);
+            if (dir.indexOf('w') >= 0) {
+              newW = Math.max(MIN_W, startWidth - dx);
+              newX = startLeft + (startWidth - newW);
+            }
+            if (dir.indexOf('s') >= 0) newH = Math.max(MIN_H, startHeight + dy);
+            if (dir.indexOf('n') >= 0) {
+              newH = Math.max(MIN_H, startHeight - dy);
+              newY = startTop + (startHeight - newH);
+            }
+            note.x = newX; note.y = newY; note.width = newW; note.height = newH;
+            clampPosition(note);
+            applyNoteStyle(el, note);
+          }
+          function up() {
+            document.removeEventListener('mousemove', move);
+            document.removeEventListener('mouseup', up);
+            document.body.style.userSelect = '';
+            noteIsDragging = false;
+            var elRect = el.getBoundingClientRect();
+            var cR = columnsContainerEl.getBoundingClientRect();
+            var hit = findColumnAtPoint(elRect.left, elRect.top);
+            if (hit) {
+              note.anchor = {
+                type: 'column',
+                rowIdx: hit.rowIdx,
+                colIdx: hit.colIdx,
+                ratioX: (elRect.left - hit.rect.left) / hit.rect.width,
+                ratioY: (elRect.top - hit.rect.top) / hit.rect.height
+              };
+            } else {
+              note.anchor = {
+                type: 'container',
+                ratioX: cR.width > 0 ? (elRect.left - cR.left) / cR.width : 0,
+                ratioY: cR.height > 0 ? (elRect.top - cR.top) / cR.height : 0
+              };
+            }
+            note.x = parseFloat(el.style.left) || 0;
+            note.y = parseFloat(el.style.top) || 0;
+            var projectKey = currentProjectKey();
+            if (projectKey) save(projectKey);
+          }
+          document.addEventListener('mousemove', move);
+          document.addEventListener('mouseup', up);
+        });
+      })(handles[i]);
+    }
+
+    // Close button.
+    closeBtn.addEventListener('mousedown', function (e) {
+      e.stopPropagation();
+    });
+    closeBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      deleteNote(note);
+    });
+
+    // Settings button opens popover.
+    settingsBtn.addEventListener('mousedown', function (e) {
+      e.stopPropagation();
+    });
+    settingsBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var wasOpen = popover.classList.contains('open');
+      closeAllPopovers();
+      if (!wasOpen) {
+        popover.classList.add('open');
+        openPopoverNoteId = note.id;
+        // Refresh the selected swatch marker in case color changed elsewhere.
+        var swatches = popover.querySelectorAll('.sticky-swatch');
+        for (var i = 0; i < swatches.length; i++) {
+          swatches[i].classList.toggle('selected', swatches[i].getAttribute('data-color') === note.color);
+        }
+        var val = popover.querySelector('.sticky-font-value');
+        if (val) val.textContent = note.fontSize + 'px';
+      }
+    });
+
+    // Popover swatches.
+    var swatches = popover.querySelectorAll('.sticky-swatch');
+    for (var j = 0; j < swatches.length; j++) {
+      (function (sw) {
+        sw.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+        sw.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var c = sw.getAttribute('data-color');
+          if (!c || STICKY_COLORS.indexOf(c) < 0) return;
+          note.color = c;
+          el.setAttribute('data-color', c);
+          var others = popover.querySelectorAll('.sticky-swatch');
+          for (var k = 0; k < others.length; k++) {
+            others[k].classList.toggle('selected', others[k].getAttribute('data-color') === c);
+          }
+          var projectKey = currentProjectKey();
+          if (projectKey) save(projectKey);
+        });
+      })(swatches[j]);
+    }
+
+    // Font size +/-.
+    var decBtn = popover.querySelector('.sticky-font-dec');
+    var incBtn = popover.querySelector('.sticky-font-inc');
+    var valEl = popover.querySelector('.sticky-font-value');
+    function bumpFont(delta) {
+      var next = note.fontSize + delta;
+      if (next < FONT_MIN) next = FONT_MIN;
+      if (next > FONT_MAX) next = FONT_MAX;
+      if (next === note.fontSize) return;
+      note.fontSize = next;
+      el.style.fontSize = next + 'px';
+      if (valEl) valEl.textContent = next + 'px';
+      var projectKey = currentProjectKey();
+      if (projectKey) save(projectKey);
+    }
+    if (decBtn) {
+      decBtn.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+      decBtn.addEventListener('click', function (e) { e.stopPropagation(); bumpFont(-1); });
+    }
+    if (incBtn) {
+      incBtn.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+      incBtn.addEventListener('click', function (e) { e.stopPropagation(); bumpFont(1); });
+    }
+  }
+
+  // Resolve the column id a note's anchor targets in the given state, or null
+  // if the anchor doesn't resolve to a live column (container-anchored, missing
+  // row/column, or unknown anchor type).
+  function resolveAnchorColId(note, state) {
+    if (!note || !note.anchor || !state || !state.rows) return null;
+    var a = note.anchor;
+    if (a.type !== 'column') return null;
+    var row = state.rows[a.rowIdx];
+    if (!row || !row.columnIds) return null;
+    var colId = row.columnIds[a.colIdx];
+    return (typeof colId === 'undefined') ? null : colId;
+  }
+
+  // While a column is maximized, hide every sticky note whose anchor doesn't
+  // resolve to that column. On restore (maximizedColumnId === null), unhide
+  // every note.
+  function applyMaximizeVisibility() {
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    var notes = getNotes(projectKey);
+    var state = typeof getActiveState === 'function' ? getActiveState() : null;
+    for (var i = 0; i < notes.length; i++) {
+      var note = notes[i];
+      var el = container.querySelector('.sticky-note[data-note-id="' + note.id + '"]');
+      if (!el) continue;
+      if (maximizedColumnId === null) {
+        el.classList.remove('sticky-note--hidden-by-maximize');
+      } else {
+        var colId = resolveAnchorColId(note, state);
+        if (colId === maximizedColumnId) {
+          el.classList.remove('sticky-note--hidden-by-maximize');
+        } else {
+          el.classList.add('sticky-note--hidden-by-maximize');
+        }
+      }
+    }
+  }
+
+  function renderForActiveProject() {
+    while (container.firstChild) container.removeChild(container.firstChild);
+    openPopoverNoteId = null;
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    ensureLoaded(projectKey).then(function () {
+      // Re-check in case project switched during the load.
+      if (currentProjectKey() !== projectKey) return;
+      while (container.firstChild) container.removeChild(container.firstChild);
+      var notes = getNotes(projectKey);
+      for (var i = 0; i < notes.length; i++) {
+        var pos = computeAbsolutePosition(notes[i]);
+        notes[i].x = pos.x;
+        notes[i].y = pos.y;
+        var el = createNoteElement(notes[i]);
+        container.appendChild(el);
+      }
+      applyMaximizeVisibility();
+    });
+  }
+
+  function repositionStickyNotesForActiveProject() {
+    if (noteIsDragging) return;
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    var notes = getNotes(projectKey);
+    var els = container.querySelectorAll('.sticky-note[data-note-id]');
+    for (var i = 0; i < els.length; i++) {
+      var id = els[i].getAttribute('data-note-id');
+      var note = null;
+      for (var j = 0; j < notes.length; j++) {
+        if (notes[j].id === id) { note = notes[j]; break; }
+      }
+      if (!note) continue;
+      var pos = computeAbsolutePosition(note);
+      els[i].style.left = pos.x + 'px';
+      els[i].style.top = pos.y + 'px';
+    }
+    applyMaximizeVisibility();
+  }
+
+  function createNewNote() {
+    var projectKey = currentProjectKey();
+    if (!projectKey) return;
+    ensureLoaded(projectKey).then(function () {
+      if (currentProjectKey() !== projectKey) return;
+      var arr = getNotes(projectKey);
+      var state = typeof getActiveState === 'function' ? getActiveState() : null;
+
+      // Determine target column for anchor.
+      var rowIdx = -1, colIdx = -1;
+      if (state && state.focusedColumnId !== null && typeof state.focusedColumnId !== 'undefined') {
+        var focusedRow = findRowForColumn(state, state.focusedColumnId);
+        if (focusedRow) {
+          rowIdx = state.rows.indexOf(focusedRow);
+          colIdx = focusedRow.columnIds.indexOf(state.focusedColumnId);
+        }
+      }
+      if (rowIdx < 0 && state && state.rows) {
+        for (var r = 0; r < state.rows.length; r++) {
+          if (state.rows[r] && state.rows[r].columnIds && state.rows[r].columnIds.length > 0) {
+            rowIdx = r;
+            colIdx = 0;
+            break;
+          }
+        }
+      }
+
+      // Stagger against existing notes sharing the same anchor.
+      var staggerCount = 0;
+      for (var k = 0; k < arr.length; k++) {
+        var aa = arr[k].anchor;
+        if (rowIdx >= 0) {
+          if (aa && aa.type === 'column' && aa.rowIdx === rowIdx && aa.colIdx === colIdx) staggerCount++;
+        } else {
+          if (!aa || aa.type === 'container') staggerCount++;
+        }
+      }
+      var stagger = staggerCount % 10;
+      var ratio = 0.05 + stagger * 0.02;
+
+      var anchor;
+      if (rowIdx >= 0) {
+        anchor = { type: 'column', rowIdx: rowIdx, colIdx: colIdx, ratioX: ratio, ratioY: ratio };
+      } else {
+        anchor = { type: 'container', ratioX: ratio, ratioY: ratio };
+      }
+
+      var note = {
+        id: genId(),
+        content: '',
+        x: 20,
+        y: 20,
+        width: 240,
+        height: 180,
+        color: DEFAULT_COLOR,
+        fontSize: DEFAULT_FONT_SIZE,
+        anchor: anchor
+      };
+      arr.push(note);
+      var el = createNoteElement(note);
+      container.appendChild(el);
+      var pos = computeAbsolutePosition(note);
+      note.x = pos.x;
+      note.y = pos.y;
+      el.style.left = note.x + 'px';
+      el.style.top = note.y + 'px';
+      save(projectKey);
+      applyMaximizeVisibility();
+    });
+  }
+
+  btn.addEventListener('click', createNewNote);
+
+  // Document-level dismiss for the open popover. Registered once at init.
+  // Exempts both .sticky-note-popover (clicks inside the popover) and
+  // .sticky-note-settings (the gear's own click handler opens/closes it; we
+  // don't want the document listener to also fire and immediately re-close).
+  document.addEventListener('mousedown', function (e) {
+    if (!openPopoverNoteId) return;
+    if (e.target.closest('.sticky-note-popover, .sticky-note-settings')) return;
+    closeAllPopovers();
+  });
+
+  // Expose the render hook so setActiveProject can call it.
+  window.__renderStickyNotesForActiveProject = renderForActiveProject;
+  window.__repositionStickyNotesForActiveProject = repositionStickyNotesForActiveProject;
+  window.__stickyNotesApplyMaximizeVisibility = applyMaximizeVisibility;
+
+  // Initial render in case setActiveProject already fired before this IIFE executed.
+  renderForActiveProject();
+})();
+
 (function setupBroadcast() {
   var btn = document.getElementById('btn-broadcast');
   var popover = document.getElementById('broadcast-popover');
@@ -15178,620 +18110,4 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     }
     if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
   });
-})();
-
-// ============================================================
-// Sticky Notes
-// ============================================================
-(function setupStickyNotes() {
-  var container = document.getElementById('sticky-notes-container');
-  var columnsContainerEl = document.getElementById('columns-container');
-  var btn = document.getElementById('btn-sticky-notes');
-  if (!container || !columnsContainerEl || !btn) return;
-
-  var STICKY_COLORS = ['yellow', 'pink', 'green', 'blue', 'purple', 'gray'];
-  var DEFAULT_COLOR = 'yellow';
-  var DEFAULT_FONT_SIZE = 15;
-  var FONT_MIN = 10;
-  var FONT_MAX = 24;
-  var MIN_W = 120;
-  var MIN_H = 80;
-  var HEADER_VISIBLE = 24; // px of header that must stay within columns-container
-
-  var notesByProject = new Map();   // projectKey -> notes[]
-  var loadedProjects = new Set();   // projectKeys we've already fetched from disk
-  var loadingProjects = new Map();  // projectKey -> Promise (in-flight load)
-  var openPopoverNoteId = null;
-  var noteIsDragging = false;       // true while a drag or resize gesture is in progress
-
-  function genId() {
-    return 'note_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7);
-  }
-
-  function currentProjectKey() {
-    // activeProjectKey is a module-level var in renderer.js — closure-captured at call time.
-    return typeof activeProjectKey !== 'undefined' ? activeProjectKey : null;
-  }
-
-  function getNotes(projectKey) {
-    if (!projectKey) return [];
-    var arr = notesByProject.get(projectKey);
-    if (!arr) {
-      arr = [];
-      notesByProject.set(projectKey, arr);
-    }
-    return arr;
-  }
-
-  function save(projectKey) {
-    if (!projectKey) return;
-    if (!window.electronAPI || !window.electronAPI.saveStickyNotes) return;
-    var notes = getNotes(projectKey);
-    window.electronAPI.saveStickyNotes(projectKey, notes);
-  }
-
-  function ensureLoaded(projectKey) {
-    if (!projectKey) return Promise.resolve([]);
-    if (loadedProjects.has(projectKey)) return Promise.resolve(getNotes(projectKey));
-    if (loadingProjects.has(projectKey)) return loadingProjects.get(projectKey);
-    if (!window.electronAPI || !window.electronAPI.loadStickyNotes) {
-      loadedProjects.add(projectKey);
-      return Promise.resolve([]);
-    }
-    var p = window.electronAPI.loadStickyNotes(projectKey).then(function (notes) {
-      var arr = Array.isArray(notes) ? notes.slice() : [];
-      // Normalize defaults defensively (main.js also defaults them, but belt-and-braces).
-      for (var i = 0; i < arr.length; i++) {
-        if (!arr[i].id) arr[i].id = genId();
-        if (typeof arr[i].content !== 'string') arr[i].content = '';
-        if (typeof arr[i].x !== 'number') arr[i].x = 20;
-        if (typeof arr[i].y !== 'number') arr[i].y = 20;
-        if (typeof arr[i].width !== 'number') arr[i].width = 240;
-        if (typeof arr[i].height !== 'number') arr[i].height = 180;
-        if (STICKY_COLORS.indexOf(arr[i].color) < 0) arr[i].color = DEFAULT_COLOR;
-        if (typeof arr[i].fontSize !== 'number') arr[i].fontSize = DEFAULT_FONT_SIZE;
-      }
-      notesByProject.set(projectKey, arr);
-      loadedProjects.add(projectKey);
-      loadingProjects.delete(projectKey);
-      return arr;
-    }).catch(function (err) {
-      console.error('loadStickyNotes failed:', err);
-      notesByProject.set(projectKey, []);
-      loadedProjects.add(projectKey);
-      loadingProjects.delete(projectKey);
-      return [];
-    });
-    loadingProjects.set(projectKey, p);
-    return p;
-  }
-
-  function clampPosition(note) {
-    var rect = columnsContainerEl.getBoundingClientRect();
-    var maxX = Math.max(0, rect.width - HEADER_VISIBLE);
-    var minX = -(note.width - HEADER_VISIBLE);
-    var maxY = Math.max(0, rect.height - HEADER_VISIBLE);
-    var minY = 0; // keep above top edge of columns-container (toolbar stays clear)
-    if (note.x > maxX) note.x = maxX;
-    if (note.x < minX) note.x = minX;
-    if (note.y > maxY) note.y = maxY;
-    if (note.y < minY) note.y = minY;
-  }
-
-  function applyNoteStyle(noteEl, note) {
-    noteEl.style.left = note.x + 'px';
-    noteEl.style.top = note.y + 'px';
-    noteEl.style.width = note.width + 'px';
-    noteEl.style.height = note.height + 'px';
-    noteEl.style.fontSize = note.fontSize + 'px';
-    noteEl.setAttribute('data-color', note.color);
-  }
-
-  function findColumnAtPoint(clientX, clientY) {
-    var state = typeof getActiveState === 'function' ? getActiveState() : null;
-    if (!state || !state.rows) return null;
-    for (var rowIdx = 0; rowIdx < state.rows.length; rowIdx++) {
-      var row = state.rows[rowIdx];
-      if (!row || !row.columnIds) continue;
-      for (var colIdx = 0; colIdx < row.columnIds.length; colIdx++) {
-        var col = allColumns.get(row.columnIds[colIdx]);
-        if (!col || !col.element) continue;
-        var rect = col.element.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) continue;
-        if (clientX >= rect.left && clientX <= rect.right &&
-            clientY >= rect.top && clientY <= rect.bottom) {
-          return { rowIdx: rowIdx, colIdx: colIdx, rect: rect };
-        }
-      }
-    }
-    return null;
-  }
-
-  function computeAbsolutePosition(note) {
-    var containerRect = columnsContainerEl.getBoundingClientRect();
-    var a = note.anchor;
-    if (a && a.type === 'column') {
-      var state = typeof getActiveState === 'function' ? getActiveState() : null;
-      var row = state && state.rows ? state.rows[a.rowIdx] : null;
-      var colId = row && row.columnIds ? row.columnIds[a.colIdx] : undefined;
-      var col = (typeof colId !== 'undefined') ? allColumns.get(colId) : null;
-      if (col && col.element) {
-        var rect = col.element.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          return {
-            x: (rect.left - containerRect.left) + a.ratioX * rect.width,
-            y: (rect.top - containerRect.top) + a.ratioY * rect.height
-          };
-        }
-        // Column exists but has zero rect (transient layout) — hold position.
-        return { x: note.x, y: note.y };
-      }
-      // Column not found (killed / row removed): degrade to container anchor in-memory.
-      var rx = containerRect.width > 0 ? (note.x / containerRect.width) : 0.05;
-      var ry = containerRect.height > 0 ? (note.y / containerRect.height) : 0.05;
-      note.anchor = { type: 'container', ratioX: rx, ratioY: ry };
-      return {
-        x: rx * containerRect.width,
-        y: ry * containerRect.height
-      };
-    }
-    if (a && a.type === 'container') {
-      return {
-        x: a.ratioX * containerRect.width,
-        y: a.ratioY * containerRect.height
-      };
-    }
-    return { x: note.x, y: note.y };
-  }
-
-  function createNoteElement(note) {
-    var el = document.createElement('div');
-    el.className = 'sticky-note';
-    el.setAttribute('data-note-id', note.id);
-    applyNoteStyle(el, note);
-
-    var header = document.createElement('div');
-    header.className = 'sticky-note-header';
-
-    var settingsBtn = document.createElement('button');
-    settingsBtn.className = 'sticky-note-settings';
-    settingsBtn.title = 'Color and size';
-    settingsBtn.innerHTML = '&#9881;';
-
-    var closeBtn = document.createElement('button');
-    closeBtn.className = 'sticky-note-close';
-    closeBtn.title = 'Delete';
-    closeBtn.innerHTML = '&times;';
-
-    header.appendChild(settingsBtn);
-    header.appendChild(closeBtn);
-
-    var body = document.createElement('textarea');
-    body.className = 'sticky-note-body';
-    body.setAttribute('spellcheck', 'false');
-    body.value = note.content || '';
-
-    el.appendChild(header);
-    el.appendChild(body);
-
-    var dirs = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
-    for (var i = 0; i < dirs.length; i++) {
-      var h = document.createElement('div');
-      h.className = 'sticky-note-resize ' + dirs[i];
-      h.setAttribute('data-dir', dirs[i]);
-      el.appendChild(h);
-    }
-
-    var popover = buildPopover(note);
-    el.appendChild(popover);
-
-    wireNote(el, note, header, settingsBtn, closeBtn, body, popover);
-    return el;
-  }
-
-  function buildPopover(note) {
-    var pop = document.createElement('div');
-    pop.className = 'sticky-note-popover';
-
-    var swatches = document.createElement('div');
-    swatches.className = 'sticky-note-swatches';
-    for (var i = 0; i < STICKY_COLORS.length; i++) {
-      var c = STICKY_COLORS[i];
-      var sw = document.createElement('button');
-      sw.className = 'sticky-swatch' + (note.color === c ? ' selected' : '');
-      sw.setAttribute('data-color', c);
-      sw.setAttribute('aria-label', c.charAt(0).toUpperCase() + c.slice(1));
-      swatches.appendChild(sw);
-    }
-
-    var fs = document.createElement('div');
-    fs.className = 'sticky-note-fontsize';
-    var dec = document.createElement('button');
-    dec.className = 'sticky-font-dec';
-    dec.title = 'Smaller';
-    dec.innerHTML = '&minus;';
-    var val = document.createElement('span');
-    val.className = 'sticky-font-value';
-    val.textContent = note.fontSize + 'px';
-    var inc = document.createElement('button');
-    inc.className = 'sticky-font-inc';
-    inc.title = 'Larger';
-    inc.textContent = '+';
-    fs.appendChild(dec);
-    fs.appendChild(val);
-    fs.appendChild(inc);
-
-    pop.appendChild(swatches);
-    pop.appendChild(fs);
-    return pop;
-  }
-
-  function closeAllPopovers() {
-    var opens = container.querySelectorAll('.sticky-note-popover.open');
-    for (var i = 0; i < opens.length; i++) opens[i].classList.remove('open');
-    openPopoverNoteId = null;
-  }
-
-  function bringToFront(note) {
-    var projectKey = currentProjectKey();
-    if (!projectKey) return;
-    var arr = getNotes(projectKey);
-    var idx = arr.indexOf(note);
-    if (idx < 0) return;
-    if (idx === arr.length - 1) return; // already on top
-    arr.splice(idx, 1);
-    arr.push(note);
-    var el = container.querySelector('.sticky-note[data-note-id="' + note.id + '"]');
-    if (el) container.appendChild(el); // re-append moves to end of DOM (top of stack)
-    save(projectKey);
-  }
-
-  function deleteNote(note) {
-    var projectKey = currentProjectKey();
-    if (!projectKey) return;
-    var arr = getNotes(projectKey);
-    var idx = arr.indexOf(note);
-    if (idx < 0) return;
-    arr.splice(idx, 1);
-    var el = container.querySelector('.sticky-note[data-note-id="' + note.id + '"]');
-    if (el && el.parentNode) el.parentNode.removeChild(el);
-    if (openPopoverNoteId === note.id) openPopoverNoteId = null;
-    save(projectKey);
-  }
-
-  function wireNote(el, note, header, settingsBtn, closeBtn, body, popover) {
-    // Bring-to-front on any mousedown inside the note (except the gear/close buttons —
-    // they still bring to front, but drag bail-early needs to happen first).
-    el.addEventListener('mousedown', function () {
-      bringToFront(note);
-    });
-
-    // Textarea input → update + save.
-    body.addEventListener('input', function () {
-      note.content = body.value;
-      var projectKey = currentProjectKey();
-      if (projectKey) save(projectKey);
-    });
-
-    // Drag on header.
-    header.addEventListener('mousedown', function (e) {
-      if (e.target.closest('.sticky-note-settings, .sticky-note-close')) return;
-      if (e.button !== 0) return;
-      e.preventDefault();
-      var startX = e.clientX;
-      var startY = e.clientY;
-      var startLeft = note.x;
-      var startTop = note.y;
-      noteIsDragging = true;
-      document.body.style.userSelect = 'none';
-      function move(ev) {
-        note.x = startLeft + (ev.clientX - startX);
-        note.y = startTop + (ev.clientY - startY);
-        clampPosition(note);
-        el.style.left = note.x + 'px';
-        el.style.top = note.y + 'px';
-      }
-      function up(ev) {
-        document.removeEventListener('mousemove', move);
-        document.removeEventListener('mouseup', up);
-        document.body.style.userSelect = '';
-        noteIsDragging = false;
-        var cR = columnsContainerEl.getBoundingClientRect();
-        var hit = findColumnAtPoint(ev.clientX, ev.clientY);
-        if (hit) {
-          note.anchor = {
-            type: 'column',
-            rowIdx: hit.rowIdx,
-            colIdx: hit.colIdx,
-            ratioX: (ev.clientX - hit.rect.left) / hit.rect.width,
-            ratioY: (ev.clientY - hit.rect.top) / hit.rect.height
-          };
-        } else {
-          note.anchor = {
-            type: 'container',
-            ratioX: cR.width > 0 ? (ev.clientX - cR.left) / cR.width : 0,
-            ratioY: cR.height > 0 ? (ev.clientY - cR.top) / cR.height : 0
-          };
-        }
-        note.x = parseFloat(el.style.left) || 0;
-        note.y = parseFloat(el.style.top) || 0;
-        var projectKey = currentProjectKey();
-        if (projectKey) save(projectKey);
-      }
-      document.addEventListener('mousemove', move);
-      document.addEventListener('mouseup', up);
-    });
-
-    // Resize on each handle.
-    var handles = el.querySelectorAll('.sticky-note-resize');
-    for (var i = 0; i < handles.length; i++) {
-      (function (handle) {
-        handle.addEventListener('mousedown', function (e) {
-          if (e.button !== 0) return;
-          e.preventDefault();
-          e.stopPropagation();
-          var dir = handle.getAttribute('data-dir');
-          var startX = e.clientX;
-          var startY = e.clientY;
-          var startLeft = note.x;
-          var startTop = note.y;
-          var startWidth = note.width;
-          var startHeight = note.height;
-          noteIsDragging = true;
-          document.body.style.userSelect = 'none';
-          function move(ev) {
-            var dx = ev.clientX - startX;
-            var dy = ev.clientY - startY;
-            var newX = startLeft, newY = startTop, newW = startWidth, newH = startHeight;
-            if (dir.indexOf('e') >= 0) newW = Math.max(MIN_W, startWidth + dx);
-            if (dir.indexOf('w') >= 0) {
-              newW = Math.max(MIN_W, startWidth - dx);
-              newX = startLeft + (startWidth - newW);
-            }
-            if (dir.indexOf('s') >= 0) newH = Math.max(MIN_H, startHeight + dy);
-            if (dir.indexOf('n') >= 0) {
-              newH = Math.max(MIN_H, startHeight - dy);
-              newY = startTop + (startHeight - newH);
-            }
-            note.x = newX; note.y = newY; note.width = newW; note.height = newH;
-            clampPosition(note);
-            applyNoteStyle(el, note);
-          }
-          function up() {
-            document.removeEventListener('mousemove', move);
-            document.removeEventListener('mouseup', up);
-            document.body.style.userSelect = '';
-            noteIsDragging = false;
-            var elRect = el.getBoundingClientRect();
-            var cR = columnsContainerEl.getBoundingClientRect();
-            var hit = findColumnAtPoint(elRect.left, elRect.top);
-            if (hit) {
-              note.anchor = {
-                type: 'column',
-                rowIdx: hit.rowIdx,
-                colIdx: hit.colIdx,
-                ratioX: (elRect.left - hit.rect.left) / hit.rect.width,
-                ratioY: (elRect.top - hit.rect.top) / hit.rect.height
-              };
-            } else {
-              note.anchor = {
-                type: 'container',
-                ratioX: cR.width > 0 ? (elRect.left - cR.left) / cR.width : 0,
-                ratioY: cR.height > 0 ? (elRect.top - cR.top) / cR.height : 0
-              };
-            }
-            note.x = parseFloat(el.style.left) || 0;
-            note.y = parseFloat(el.style.top) || 0;
-            var projectKey = currentProjectKey();
-            if (projectKey) save(projectKey);
-          }
-          document.addEventListener('mousemove', move);
-          document.addEventListener('mouseup', up);
-        });
-      })(handles[i]);
-    }
-
-    // Close button.
-    closeBtn.addEventListener('mousedown', function (e) {
-      e.stopPropagation();
-    });
-    closeBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      deleteNote(note);
-    });
-
-    // Settings button opens popover.
-    settingsBtn.addEventListener('mousedown', function (e) {
-      e.stopPropagation();
-    });
-    settingsBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      var wasOpen = popover.classList.contains('open');
-      closeAllPopovers();
-      if (!wasOpen) {
-        popover.classList.add('open');
-        openPopoverNoteId = note.id;
-        // Refresh the selected swatch marker in case color changed elsewhere.
-        var swatches = popover.querySelectorAll('.sticky-swatch');
-        for (var i = 0; i < swatches.length; i++) {
-          swatches[i].classList.toggle('selected', swatches[i].getAttribute('data-color') === note.color);
-        }
-        var val = popover.querySelector('.sticky-font-value');
-        if (val) val.textContent = note.fontSize + 'px';
-      }
-    });
-
-    // Popover swatches.
-    var swatches = popover.querySelectorAll('.sticky-swatch');
-    for (var j = 0; j < swatches.length; j++) {
-      (function (sw) {
-        sw.addEventListener('mousedown', function (e) { e.stopPropagation(); });
-        sw.addEventListener('click', function (e) {
-          e.stopPropagation();
-          var c = sw.getAttribute('data-color');
-          if (!c || STICKY_COLORS.indexOf(c) < 0) return;
-          note.color = c;
-          el.setAttribute('data-color', c);
-          var others = popover.querySelectorAll('.sticky-swatch');
-          for (var k = 0; k < others.length; k++) {
-            others[k].classList.toggle('selected', others[k].getAttribute('data-color') === c);
-          }
-          var projectKey = currentProjectKey();
-          if (projectKey) save(projectKey);
-        });
-      })(swatches[j]);
-    }
-
-    // Font size +/-.
-    var decBtn = popover.querySelector('.sticky-font-dec');
-    var incBtn = popover.querySelector('.sticky-font-inc');
-    var valEl = popover.querySelector('.sticky-font-value');
-    function bumpFont(delta) {
-      var next = note.fontSize + delta;
-      if (next < FONT_MIN) next = FONT_MIN;
-      if (next > FONT_MAX) next = FONT_MAX;
-      if (next === note.fontSize) return;
-      note.fontSize = next;
-      el.style.fontSize = next + 'px';
-      if (valEl) valEl.textContent = next + 'px';
-      var projectKey = currentProjectKey();
-      if (projectKey) save(projectKey);
-    }
-    if (decBtn) {
-      decBtn.addEventListener('mousedown', function (e) { e.stopPropagation(); });
-      decBtn.addEventListener('click', function (e) { e.stopPropagation(); bumpFont(-1); });
-    }
-    if (incBtn) {
-      incBtn.addEventListener('mousedown', function (e) { e.stopPropagation(); });
-      incBtn.addEventListener('click', function (e) { e.stopPropagation(); bumpFont(1); });
-    }
-  }
-
-  function renderForActiveProject() {
-    while (container.firstChild) container.removeChild(container.firstChild);
-    openPopoverNoteId = null;
-    var projectKey = currentProjectKey();
-    if (!projectKey) return;
-    ensureLoaded(projectKey).then(function () {
-      // Re-check in case project switched during the load.
-      if (currentProjectKey() !== projectKey) return;
-      while (container.firstChild) container.removeChild(container.firstChild);
-      var notes = getNotes(projectKey);
-      for (var i = 0; i < notes.length; i++) {
-        var pos = computeAbsolutePosition(notes[i]);
-        notes[i].x = pos.x;
-        notes[i].y = pos.y;
-        var el = createNoteElement(notes[i]);
-        container.appendChild(el);
-      }
-    });
-  }
-
-  function repositionStickyNotesForActiveProject() {
-    if (noteIsDragging) return;
-    var projectKey = currentProjectKey();
-    if (!projectKey) return;
-    var notes = getNotes(projectKey);
-    var els = container.querySelectorAll('.sticky-note[data-note-id]');
-    for (var i = 0; i < els.length; i++) {
-      var id = els[i].getAttribute('data-note-id');
-      var note = null;
-      for (var j = 0; j < notes.length; j++) {
-        if (notes[j].id === id) { note = notes[j]; break; }
-      }
-      if (!note) continue;
-      var pos = computeAbsolutePosition(note);
-      els[i].style.left = pos.x + 'px';
-      els[i].style.top = pos.y + 'px';
-    }
-  }
-
-  function createNewNote() {
-    var projectKey = currentProjectKey();
-    if (!projectKey) return;
-    ensureLoaded(projectKey).then(function () {
-      if (currentProjectKey() !== projectKey) return;
-      var arr = getNotes(projectKey);
-      var state = typeof getActiveState === 'function' ? getActiveState() : null;
-
-      // Determine target column for anchor.
-      var rowIdx = -1, colIdx = -1;
-      if (state && state.focusedColumnId !== null && typeof state.focusedColumnId !== 'undefined') {
-        var focusedRow = findRowForColumn(state, state.focusedColumnId);
-        if (focusedRow) {
-          rowIdx = state.rows.indexOf(focusedRow);
-          colIdx = focusedRow.columnIds.indexOf(state.focusedColumnId);
-        }
-      }
-      if (rowIdx < 0 && state && state.rows) {
-        for (var r = 0; r < state.rows.length; r++) {
-          if (state.rows[r] && state.rows[r].columnIds && state.rows[r].columnIds.length > 0) {
-            rowIdx = r;
-            colIdx = 0;
-            break;
-          }
-        }
-      }
-
-      // Stagger against existing notes sharing the same anchor.
-      var staggerCount = 0;
-      for (var k = 0; k < arr.length; k++) {
-        var aa = arr[k].anchor;
-        if (rowIdx >= 0) {
-          if (aa && aa.type === 'column' && aa.rowIdx === rowIdx && aa.colIdx === colIdx) staggerCount++;
-        } else {
-          if (!aa || aa.type === 'container') staggerCount++;
-        }
-      }
-      var stagger = staggerCount % 10;
-      var ratio = 0.05 + stagger * 0.02;
-
-      var anchor;
-      if (rowIdx >= 0) {
-        anchor = { type: 'column', rowIdx: rowIdx, colIdx: colIdx, ratioX: ratio, ratioY: ratio };
-      } else {
-        anchor = { type: 'container', ratioX: ratio, ratioY: ratio };
-      }
-
-      var note = {
-        id: genId(),
-        content: '',
-        x: 20,
-        y: 20,
-        width: 240,
-        height: 180,
-        color: DEFAULT_COLOR,
-        fontSize: DEFAULT_FONT_SIZE,
-        anchor: anchor
-      };
-      arr.push(note);
-      var el = createNoteElement(note);
-      container.appendChild(el);
-      var pos = computeAbsolutePosition(note);
-      note.x = pos.x;
-      note.y = pos.y;
-      el.style.left = note.x + 'px';
-      el.style.top = note.y + 'px';
-      save(projectKey);
-    });
-  }
-
-  btn.addEventListener('click', createNewNote);
-
-  // Document-level dismiss for the open popover. Registered once at init.
-  // Exempts both .sticky-note-popover (clicks inside the popover) and
-  // .sticky-note-settings (the gear's own click handler opens/closes it; we
-  // don't want the document listener to also fire and immediately re-close).
-  document.addEventListener('mousedown', function (e) {
-    if (!openPopoverNoteId) return;
-    if (e.target.closest('.sticky-note-popover, .sticky-note-settings')) return;
-    closeAllPopovers();
-  });
-
-  // Expose the render hook so setActiveProject can call it.
-  window.__renderStickyNotesForActiveProject = renderForActiveProject;
-  window.__repositionStickyNotesForActiveProject = repositionStickyNotesForActiveProject;
-
-  // Initial render in case setActiveProject already fired before this IIFE executed.
-  renderForActiveProject();
 })();

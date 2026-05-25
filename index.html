@@ -73,6 +73,10 @@
             </div>
             <div id="git-status-msg" class="git-status-msg" role="status" aria-live="polite"></div>
           </div>
+          <div id="git-review-comments-actions" style="display:none">
+            <button id="btn-review-copy" title="Copy review comments to clipboard">Copy</button>
+            <button id="btn-review-copy-clear" title="Copy and clear all review comments">Copy and Clear</button>
+          </div>
           <div id="git-changes"></div>
         </div>
         <div id="tab-run" class="tab-content">
@@ -304,7 +308,7 @@
               </div>
               <div class="spawn-divider"></div>
               <div class="spawn-option spawn-custom-row">
-                <input type="text" id="opt-worktree" placeholder="Worktree name..." title="Spawn in isolated git worktree (--worktree)">
+                <input type="text" id="opt-worktree" placeholder="Worktree name or path..." title="Worktree name (passed as --worktree) OR an absolute/relative directory path. If it resolves to an existing directory, the column spawns there.">
               </div>
               <div class="spawn-option spawn-custom-row">
                 <input type="text" id="opt-custom-args" placeholder="Custom args..." title="Additional CLI arguments">
@@ -385,6 +389,7 @@
           <button class="settings-tab" data-settings-tab="terminal" role="tab">Terminal</button>
           <button class="settings-tab" data-settings-tab="tools" role="tab">Tools</button>
           <button class="settings-tab" data-settings-tab="clawd" role="tab">Clawd</button>
+          <button class="settings-tab" data-settings-tab="pipelines" role="tab">Pipelines</button>
         </div>
         <div class="settings-panes">
           <div class="settings-pane active" data-settings-pane="general">
@@ -612,6 +617,15 @@
               4. Resumed sessions show up in <code>/resume</code> on either machine.
             </div>
           </div>
+          <div class="settings-pane" data-settings-pane="pipelines">
+        <div class="settings-section">
+          <h3 class="settings-section-title">Workflow Pipelines</h3>
+          <p class="settings-hint">Steps shown in each terminal's title bar to track its workflow. The <strong>Plan</strong> and <strong>Execute</strong> anchors auto-detect from Claude's plan-mode entry/exit. Any steps you add advance when you type a command matching their keywords (and reveal the bar), so the pipeline works outside plan mode too. Click any step to toggle it manually.</p>
+          <div id="pipeline-editor" class="pipeline-editor"></div>
+          <div id="pipeline-editor-error" class="settings-hint error" style="display:none;"></div>
+          <button id="btn-add-pipeline-step" class="settings-browse-btn">+ Add step</button>
+        </div>
+        </div>
         </div>
       </div>
     </div>
@@ -1315,6 +1329,11 @@
   <script src="./node_modules/prismjs/components/prism-go.min.js"></script>
   <script src="./node_modules/prismjs/components/prism-css.min.js"></script>
   <script src="./node_modules/prismjs/components/prism-markdown.min.js"></script>
+  <script src="./lib/git-target.js"></script>
+  <script src="./lib/pipeline-matcher.js"></script>
+  <script src="./lib/review-comments.js"></script>
+  <script src="./lib/maximize-layout.js"></script>
+  <script src="./lib/row-layout.js"></script>
   <div id="clawd-widget" class="clawd-widget hidden" aria-hidden="true">
     <img id="clawd-widget-img" class="clawd-widget-img" alt="" draggable="false">
     <div id="clawd-widget-bubble" class="clawd-widget-bubble hidden"></div>
