@@ -69,6 +69,38 @@ var ws = null;
 // All pty columns keyed by global id (for routing WS messages)
 var allColumns = new Map();
 
+// Track which columns currently hold a live xterm WebGL context. Chromium caps
+// concurrent WebGL contexts at ~16 per process; past that the oldest get killed
+// and the terminal canvas goes blank. We log create/loss and expose
+// window.webglStatus() so users can see which columns are eating slots.
+var __webglContexts = new Set();
+var __WEBGL_SOFT_LIMIT = 14;
+function releaseWebglForColumn(id) {
+  var col = allColumns.get(id);
+  if (col && col.webglAddon) {
+    try { col.webglAddon.dispose(); } catch (e) { /* ignore */ }
+    col.webglAddon = null;
+  }
+  __webglContexts.delete(id);
+}
+window.webglStatus = function () {
+  var rows = [];
+  __webglContexts.forEach(function (cid) {
+    var c = allColumns.get(cid);
+    if (!c) return;
+    rows.push({
+      column: cid,
+      project: c.projectKey,
+      title: c.customTitle || '',
+      sessionId: c.sessionId || '',
+      cmd: c.cmd || 'claude'
+    });
+  });
+  if (console.table) console.table(rows); else console.log(rows);
+  console.log('[WebGL] ' + rows.length + ' / ~16 contexts in use');
+  return rows;
+};
+
 // Activity state tracking per column: 'working' | 'attention' | 'idle' | 'exited'
 var activityTimers = new Map(); // columnId -> setTimeout handle
 var ACTIVITY_IDLE_MS = 3000; // after 3s of no substantial data, consider Claude "waiting"
@@ -1846,6 +1878,7 @@ function disposeColumnLocalOnly(id) {
     nextSibling.remove();
   }
 
+  releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
 
@@ -2721,14 +2754,15 @@ function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
   loadSpawnOptions();
 
   if (state.columns.size === 0) {
-    // Always restore from disk when we have no in-memory columns for this
-    // (project, workspace) — startup OR first post-startup navigation. The
-    // old `isStartup`-gated branch spawned 1 default column on navigation,
-    // which then triggered persistSessions and OVERWROTE the saved session
-    // list for that workspace. restoreSessions internally falls back to a
-    // default spawn when no sessions are saved, so this branch is safe
-    // for both populated and empty cases.
-    if (window.electronAPI) {
+    if (state.suppressAutoSpawn) {
+      // User explicitly killed all instances for this project/workspace —
+      // don't surprise them by spawning a new one when they navigate back.
+      // Show a hint pointing to the Spawn button instead.
+      showProjectEmptyHint(state);
+    } else if (window.electronAPI) {
+      // Always restore from disk when we have no in-memory columns for this
+      // (project, workspace). restoreSessions internally falls back to a
+      // default spawn when no sessions are saved.
       restoreSessions(project.path, workspaceId);
     } else {
       var spawnArgs = buildSpawnArgs();
@@ -3772,6 +3806,10 @@ function addColumn(args, targetRow, opts) {
 
   var state = getActiveState();
   if (!state) return;
+  // User is spawning a column — clear the post-killAll suppression and hide
+  // the empty-state hint.
+  state.suppressAutoSpawn = false;
+  hideProjectEmptyHint(state);
 
   // Get or create the target row
   var row = targetRow || getActiveRow(state);
@@ -3955,7 +3993,35 @@ function addColumn(args, targetRow, opts) {
     }
   } catch (e) { /* addon optional */ }
   terminal.open(termWrapper);
-  try { terminal.loadAddon(new WebglAddon.WebglAddon()); } catch (e) { console.warn('WebGL addon failed, using canvas renderer:', e); }
+  // WebGL renderer is fast but Chromium caps WebGL contexts at ~16 per process.
+  // When exceeded, Chromium silently kills the oldest context and that
+  // terminal's canvas goes blank. Subscribe to onContextLoss so we dispose the
+  // addon (xterm falls back to the DOM renderer) and re-render visible content.
+  var webglAddon = null;
+  try {
+    webglAddon = new WebglAddon.WebglAddon();
+    terminal.loadAddon(webglAddon);
+    if (typeof webglAddon.onContextLoss === 'function') {
+      webglAddon.onContextLoss(function () {
+        var c = allColumns.get(id);
+        console.warn('[WebGL] context lost for column', id,
+          'project=' + (c && c.projectKey),
+          'title=' + ((c && c.customTitle) || opts.title || ''),
+          '— falling back to DOM renderer');
+        releaseWebglForColumn(id);
+        try { terminal.refresh(0, terminal.rows - 1); } catch (e) { /* ignore */ }
+      });
+    }
+    __webglContexts.add(id);
+    if (__webglContexts.size >= __WEBGL_SOFT_LIMIT) {
+      console.warn('[WebGL] ' + __webglContexts.size +
+        ' active contexts — approaching Chromium\'s ~16 limit. ' +
+        'Run window.webglStatus() to see which columns hold them.');
+    }
+  } catch (e) {
+    webglAddon = null;
+    console.warn('WebGL addon failed, using DOM renderer:', e);
+  }
 
   // File:line link provider — clicking e.g. `src/foo.js:42` (or an absolute
   // path) opens the file in the inline editor, focused on that line. Skipped
@@ -4206,6 +4272,7 @@ function addColumn(args, targetRow, opts) {
     element: col,
     terminal: terminal,
     fitAddon: fitAddon,
+    webglAddon: webglAddon,
     searchAddon: searchAddon,
     searchOverlay: searchOverlay,
     headerEl: header,
@@ -5257,6 +5324,7 @@ function removeColumn(id) {
     nextSibling.remove();
   }
 
+  releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
 
@@ -5308,7 +5376,33 @@ function killAllInstancesForProject(projectPath) {
   if (!window.confirm('Kill ' + label + ' for this project? Any unsaved work in those columns will be lost.')) {
     return;
   }
+  // Mark before removing so that if this is the active project, the empty-state
+  // branch in setActiveProject doesn't auto-spawn when the user clicks back.
+  state.suppressAutoSpawn = true;
   ids.forEach(function (id) { removeColumn(id); });
+  // updateProjectBadges runs inside removeColumn, but force a full sidebar
+  // re-render in case the badge patch missed (e.g. items index drift).
+  renderProjectList();
+  if (projectPath === activeProjectKey) {
+    showProjectEmptyHint(state);
+  }
+}
+
+function showProjectEmptyHint(state) {
+  if (!state || !state.containerEl) return;
+  if (state.containerEl.querySelector('.project-empty-hint')) return;
+  var hint = document.createElement('div');
+  hint.className = 'project-empty-hint';
+  hint.innerHTML =
+    '<div class="project-empty-hint-arrow">↑</div>' +
+    '<div class="project-empty-hint-text">Click <strong>+ Spawn Claude</strong> to start a new instance.</div>';
+  state.containerEl.appendChild(hint);
+}
+
+function hideProjectEmptyHint(state) {
+  if (!state || !state.containerEl) return;
+  var hint = state.containerEl.querySelector('.project-empty-hint');
+  if (hint) hint.remove();
 }
 function migrateColumnToWorkspace(colId, targetWsId) {
   if (popoutMode) return;

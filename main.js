@@ -279,6 +279,14 @@ let pendingConfig = null;
 let pendingConfigTimer = null;
 
 function scheduleWriteConfig(config) {
+  // Once quit has begun, late writes (e.g. a popout's debounced bounds-save
+  // firing after flushPendingConfig) must not strip the cleanShutdown marker
+  // and must go to disk immediately — the event loop may not get another tick.
+  if (isQuitting) {
+    if (config) config.cleanShutdown = true;
+    try { writeConfig(config); } catch (err) { console.error('writeConfig (quitting) failed:', err); }
+    return;
+  }
   pendingConfig = config;
   if (pendingConfigTimer) return;
   pendingConfigTimer = setTimeout(() => {
@@ -6859,6 +6867,21 @@ if (!gotLock) {
     startAutomationScheduler();
 
     const cfg = readConfig();
+    // Zombie-popout guard: `poppedOut: true` is intentionally preserved across
+    // a clean quit so popouts re-open on next launch. But if the previous run
+    // ended dirty (crash, taskkill, Windows shutdown without before-quit), the
+    // flags stay set forever and we'd resurrect popouts the user never had —
+    // appearing as duplicate windows. We mark cleanShutdown=true in before-quit;
+    // if it isn't true here, treat any popped-out flags as stale and clear them.
+    if (cfg.cleanShutdown !== true) {
+      let cleared = 0;
+      for (const p of cfg.projects) {
+        if (p && p.poppedOut) { p.poppedOut = false; cleared++; }
+      }
+      if (cleared > 0) console.log('[startup] dirty shutdown detected — cleared', cleared, 'stale poppedOut flag(s)');
+    }
+    cfg.cleanShutdown = false; // re-arm; before-quit flips it back to true
+    try { writeConfig(cfg); } catch (err) { console.error('writeConfig (shutdown marker) failed:', err); }
     // Spin up sync watchers for any project that already has sync enabled
     // from a previous session.
     try { reapplySyncFromConfig(cfg); } catch (err) { console.error('sync boot failed:', err); }
@@ -6930,6 +6953,17 @@ app.on('before-quit', () => {
   }
   step('flushPendingConfig');
   flushPendingConfig();
+  // Mark this as a clean shutdown so startup doesn't treat poppedOut flags as
+  // stale. Must happen AFTER flushPendingConfig so we don't clobber pending
+  // config writes; we read the freshly-flushed copy and write the flag.
+  try {
+    const finalCfg = readConfig();
+    finalCfg.cleanShutdown = true;
+    writeConfig(finalCfg);
+    step('cleanShutdown marker set');
+  } catch (err) {
+    diagLog('[quit] cleanShutdown marker write failed:', err && err.message);
+  }
   step('flushPendingStickyNotes');
   flushPendingStickyNotes();
   step('stopAutomationScheduler');
