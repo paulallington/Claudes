@@ -1357,10 +1357,11 @@ function saveColumnCounts() {
 
 function updateProjectBadges() {
   if (popoutMode) return; // sidebar not rendered in popout windows
-  var items = document.querySelectorAll('.project-item');
-  config.projects.forEach(function (project, index) {
-    if (index >= items.length) return;
-    var item = items[index];
+  config.projects.forEach(function (project) {
+    // Match by path, not positional index: pinned/grouped projects reorder the
+    // DOM, so items[index] would target the wrong project's row.
+    var item = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(project.path) + '"]');
+    if (!item) return;
     var middle = item.querySelector('.project-right-middle');
     if (!middle) return;
     var existingBadge = middle.querySelector('.project-badge');
@@ -14982,15 +14983,18 @@ function updateAutomationSidebarBadges() {
       if (existing) existing.remove();
     });
     if (config && config.projects) {
-      config.projects.forEach(function (project, index) {
+      config.projects.forEach(function (project) {
         var normalizedPath = project.path.replace(/\\/g, '/');
-        if (projectsWithAttention.has(normalizedPath) && items[index]) {
-          var badge = document.createElement('span');
-          badge.className = 'project-automation-badge';
-          badge.title = 'Automation needs attention';
-          var nameEl = items[index].querySelector('.project-name');
-          if (nameEl) nameEl.appendChild(badge);
-        }
+        if (!projectsWithAttention.has(normalizedPath)) return;
+        // Match by path, not positional index — pinned/grouped projects
+        // reorder the DOM relative to config.projects order.
+        var item = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(project.path) + '"]');
+        if (!item) return;
+        var badge = document.createElement('span');
+        badge.className = 'project-automation-badge';
+        badge.title = 'Automation needs attention';
+        var nameEl = item.querySelector('.project-name');
+        if (nameEl) nameEl.appendChild(badge);
       });
     }
   });
