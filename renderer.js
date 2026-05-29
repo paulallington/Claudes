@@ -5172,8 +5172,8 @@ function persistSessions(projectKey, workspaceId) {
           rowIdx: compactRowIdx,
           widthRatio: widthRatio
         };
-        if (col2.cwd && col2.cwd !== activeProjectKey) entry.cwd = col2.cwd;
-        if (col2.cwd && col2.cwd !== activeProjectKey && col2.cwdSource) entry.cwdSource = col2.cwdSource;
+        if (col2.cwd && col2.cwd !== projectKey) entry.cwd = col2.cwd;
+        if (col2.cwd && col2.cwd !== projectKey && col2.cwdSource) entry.cwdSource = col2.cwdSource;
         // Persist endpoint association so restored columns come back on the
         // same local endpoint (LM Studio, Ollama, etc.) instead of defaulting
         // to whatever the global Spawn dropdown is currently pointing at.
