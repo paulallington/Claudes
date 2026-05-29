@@ -2946,73 +2946,7 @@ function restoreSessions(projectPath, workspaceId) {
     if (typeof window.__renderStickyNotesForActiveProject === 'function') {
       window.__renderStickyNotesForActiveProject();
     }
-
-    // Pre-create rows so each entry has a stable target row even if endpoint env
-    // resolution is asynchronous.
-    var rowsByIdx = {};
-    var maxRow = 0;
-    for (var k = 0; k < entries.length; k++) {
-      if (entries[k].rowIdx > maxRow) maxRow = entries[k].rowIdx;
-    }
-    while (state.rows.length <= maxRow) {
-      addRowToProject(state);
-    }
-    for (var rr2 = 0; rr2 <= maxRow; rr2++) {
-      rowsByIdx[rr2] = state.rows[rr2];
-    }
-
-    // Spawn each session, endpoint-aware. Sequential so endpointGetEnv resolves in order
-    // and the column DOM order matches the saved layout.
-    var seq = Promise.resolve();
-    entries.forEach(function (e) {
-      seq = seq.then(function () {
-        var baseExtra = e.title ? { title: e.title } : {};
-        var targetRow = rowsByIdx[e.rowIdx];
-
-        if (e.endpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
-          return window.electronAPI.endpointGetEnv(e.endpointId).then(function (envBlock) {
-            if (!envBlock) {
-              // Preset was deleted — fall back to cloud-style restore.
-              resumeAsCloud(e.sessionId, baseExtra, targetRow);
-              return;
-            }
-            var args = rewriteArgsForEndpoint(globalArgs, /* isLocal */ true);
-            args.push('--resume', e.sessionId);
-            var extra = Object.assign({}, baseExtra, { endpointId: e.endpointId, env: envBlock });
-            addColumn(args, targetRow, extra);
-          }).catch(function () { resumeAsCloud(e.sessionId, baseExtra, targetRow); });
-        }
-        resumeAsCloud(e.sessionId, baseExtra, targetRow);
-      });
-    });
-
-    seq.then(function () {
-      try {
-        for (var rr = state.rows.length - 1; rr >= 0; rr--) {
-          removeRowIfEmpty(state, state.rows[rr]);
-        }
-        applyLayoutRatios(state, entries, rowHeightByIdx, rowsByIdx);
-        if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
-          window.__repositionStickyNotesForActiveProject();
-        }
-      } finally {
-        // Always clear the flag — even if a synchronous call above threw — so background
-        // persists are not silently disabled for the rest of the session. persistSessions
-        // runs after the reset so the canonicalising write actually happens.
-        if (state) state.restoringLayout = false;
-        persistSessions(projectPath);
-      }
-    });
   });
-
-  // Cloud restore: build cloud-safe args and pass NO env. We must not call
-  // spawnOpts() here because it would attach currentEndpointEnv if the global
-  // dropdown is currently on a local preset, which would break Anthropic auth.
-  function resumeAsCloud(sessionId, baseExtra, targetRow) {
-    var args = rewriteArgsForEndpoint(buildSpawnArgs(), /* isLocal */ false);
-    args.push('--resume', sessionId);
-    addColumn(args, targetRow || null, baseExtra || {});
-  }
 }
 
 // Strip args that don't apply to the target column's endpoint kind.
