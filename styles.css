@@ -287,10 +287,13 @@ html[data-platform="darwin"] .sidebar-header {
 
 .project-item .project-pin {
   display: none;
-  color: var(--text-dimmer);
   font-size: 11px;
   padding: 2px 4px;
   cursor: pointer;
+  /* 📌 emoji ignores `color`; use opacity for the dim/solid hierarchy and
+     desaturate the unpinned-hover affordance so it reads as "click to pin". */
+  opacity: 0.45;
+  filter: grayscale(0.5);
 }
 
 .project-item:hover .project-pin,
@@ -299,11 +302,13 @@ html[data-platform="darwin"] .sidebar-header {
 }
 
 .project-item.is-pinned .project-pin {
-  color: var(--accent);
+  opacity: 1;
+  filter: none;
 }
 
 .project-item .project-pin:hover {
-  color: var(--text-bright);
+  opacity: 0.85;
+  filter: none;
 }
 
 .project-item.is-pinned {

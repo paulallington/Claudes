@@ -2259,7 +2259,7 @@ function buildProjectItem(project, index) {
 
   var pinBtn = document.createElement('span');
   pinBtn.className = 'project-pin';
-  pinBtn.textContent = '\u272F'; // ✯ sparkle star — matches pinned accent colour
+  pinBtn.textContent = '\uD83D\uDCCC'; // pushpin glyph — distinct from the Claude starburst badge
   pinBtn.title = project.pinned ? 'Unpin' : 'Pin to top';
   pinBtn.addEventListener('click', function (e) {
     e.stopPropagation();
@@ -2615,7 +2615,7 @@ function renderProjectList() {
   if (pinnedEntries.length > 0) {
     var pinnedHeader = document.createElement('div');
     pinnedHeader.className = 'project-pinned-header';
-    pinnedHeader.textContent = '\u272F Pinned';
+    pinnedHeader.textContent = '\uD83D\uDCCC Pinned';
     projectListEl.appendChild(pinnedHeader);
     renderProjectEntries(pinnedEntries, projectListEl, '::pinned');
   }
