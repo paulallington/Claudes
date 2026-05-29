@@ -164,25 +164,59 @@ if (process.env.CLAUDES_AUTO_UPDATE_CLAUDE === '1') {
   }
 }
 
-const wss = new WebSocketServer({
-  port: PORT,
-  host: '127.0.0.1',
-  maxPayload: MAX_WS_PAYLOAD,
-  // Reject the WS handshake unless the renderer presents the per-launch
-  // token as a Sec-WebSocket-Protocol entry. A drive-by browser page won't
-  // know the token and is refused before any message is processed.
-  handleProtocols: (protocols /*, req*/) => {
-    if (!AUTH_TOKEN) return false; // misconfigured launch — fail closed
-    const wanted = AUTH_PROTOCOL_PREFIX + AUTH_TOKEN;
-    for (const p of protocols) if (p === wanted) return p;
-    return false;
-  }
-}, () => {
-  // Signal readiness to parent process
-  console.log('READY:' + PORT);
-});
+let wss;
 
-wss.on('connection', (ws, req) => {
+// Bring the WebSocket server up on `port`. If the preferred port can't be
+// bound — EADDRINUSE (a stale/older instance still holds it) or EACCES (the
+// port drifted into a Windows reserved range, à la the hook server) — fall
+// back ONCE to an OS-assigned ephemeral port (port 0), which is always
+// bindable, and announce whatever port we actually got via READY:<port>. The
+// parent parses that line and hands the real port to the renderer
+// (pty:getPort), so a fallback is transparent end-to-end. Previously a bind
+// failure surfaced as an unhandled 'error' event and crashed the whole pty
+// subsystem — the empty-window symptom — taking every terminal with it.
+function createWss(port, isFallback) {
+  const server = new WebSocketServer({
+    port,
+    host: '127.0.0.1',
+    maxPayload: MAX_WS_PAYLOAD,
+    // Reject the WS handshake unless the renderer presents the per-launch
+    // token as a Sec-WebSocket-Protocol entry. A drive-by browser page won't
+    // know the token and is refused before any message is processed.
+    handleProtocols: (protocols /*, req*/) => {
+      if (!AUTH_TOKEN) return false; // misconfigured launch — fail closed
+      const wanted = AUTH_PROTOCOL_PREFIX + AUTH_TOKEN;
+      for (const p of protocols) if (p === wanted) return p;
+      return false;
+    }
+  }, () => {
+    // Signal readiness to parent process with the ACTUAL bound port.
+    const addr = server.address();
+    const actual = (addr && typeof addr === 'object' && addr.port) || port;
+    console.log('READY:' + actual);
+  });
+
+  server.on('connection', handleConnection);
+
+  server.on('error', (err) => {
+    const code = err && err.code;
+    if ((code === 'EADDRINUSE' || code === 'EACCES') && !isFallback) {
+      console.error('[pty-server] port ' + port + ' unavailable (' + code + '); falling back to an OS-assigned port');
+      try { server.close(); } catch { /* ignore */ }
+      wss = createWss(0, true);
+    } else {
+      // Already on the fallback, or an unrecoverable error. Log and exit
+      // non-zero instead of dying on an unhandled 'error' event, so the
+      // parent's exit handler can surface it cleanly.
+      console.error('[pty-server] WebSocket server error:', err && err.message);
+      process.exit(1);
+    }
+  });
+
+  return server;
+}
+
+function handleConnection(ws, req) {
   // Belt-and-braces: if for any reason a connection lands here without the
   // authenticated subprotocol selected, drop it.
   if (!ws.protocol || ws.protocol !== AUTH_PROTOCOL_PREFIX + AUTH_TOKEN) {
@@ -411,7 +445,9 @@ wss.on('connection', (ws, req) => {
     }
     connectionPtys.clear();
   });
-});
+}
+
+wss = createWss(PORT, false);
 
 process.on('SIGINT', () => {
   for (const [id, p] of ptys) {

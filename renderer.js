@@ -45,6 +45,12 @@ var defaultEffortLocal = 'medium';
 function isValidEffort(v) {
   return v === 'low' || v === 'medium' || v === 'high' || v === 'xhigh' || v === 'max';
 }
+// 'ultracode' is selectable in the UI but is NOT a valid --effort value — it's
+// enabled via --settings (xhigh + dynamic workflows). Keep it out of
+// isValidEffort so it can never be passed as --effort; gate UI acceptance here.
+function isSelectableEffort(v) {
+  return isValidEffort(v) || v === 'ultracode';
+}
 
 // Endpoint preset state. Cached in renderer so spawn paths can attach the env
 // block synchronously without waiting on an IPC round-trip per spawn.
@@ -668,7 +674,7 @@ function connectWS() {
             cols: col3.terminal.cols,
             rows: col3.terminal.rows,
             cwd: col3.cwd,
-            args: ['--resume', col3.sessionId]
+            args: buildResumeArgs(col3)
           };
           if (col3.env) respawnMsg.env = col3.env;
           col3.terminal.clear();
@@ -2998,6 +3004,34 @@ function rewriteArgsForEndpoint(args, isLocal) {
   return out;
 }
 
+// Build the args to (re)launch a column, preserving its current effort. Claude
+// Code has no non-interactive mid-session effort setter (--effort is spawn-only,
+// /effort is an interactive TUI picker whose result the app can't observe), so
+// the effort dropdown and every respawn re-launch the session with --resume +
+// --effort. That keeps the app the source of truth for effort, so the header
+// badge stays truthful. Endpoint-aware so local presets never get an effort
+// value they'd 400 on (xhigh/max → safe local default).
+function buildResumeArgs(col) {
+  var isLocal = !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL));
+  var args = [];
+  // Emit effort before --resume to match the order the (working) startup
+  // restore path uses, in case the CLI is order-sensitive when resuming.
+  if (col.effort === 'ultracode' && !isLocal) {
+    // ultracode isn't an --effort level — it's xhigh effort plus standing
+    // dynamic-workflow orchestration, enabled as a session setting. Pass xhigh
+    // explicitly (so rewriteArgsForEndpoint doesn't append a different default)
+    // plus the ultracode/workflows settings. Cloud/Claude-Code only.
+    args.push('--effort', 'xhigh', '--settings', JSON.stringify({ ultracode: true, enableWorkflows: true }));
+  } else if (col.effort === 'ultracode') {
+    // Local endpoints don't support ultracode; degrade to the local default.
+    args.push('--effort', defaultEffortLocal);
+  } else if (col.effort) {
+    args.push('--effort', col.effort);
+  }
+  if (col.sessionId) args.push('--resume', col.sessionId);
+  return rewriteArgsForEndpoint(args, isLocal);
+}
+
 // Local Anthropic-compat servers (LM Studio etc.) accept low/medium/high/max
 // for output_config.effort — 'xhigh' is a Claude-Code-only extension that 400s.
 function isValidLocalEffort(e) {
@@ -3402,17 +3436,32 @@ function createColumnHeader(id, customTitle, opts) {
 
     var effortSelect = document.createElement('select');
     effortSelect.className = 'col-effort';
-    effortSelect.title = 'Effort level — launched with --effort. To change mid-session, click to open the interactive /effort picker (Claude Code has no non-interactive way to change effort after spawn).';
-    effortSelect.innerHTML = '<option value="">Effort</option><option value="low">Low</option><option value="medium">Med</option><option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option>';
-    // Mid-session effort changes can only be made via the interactive /effort
-    // picker — there's no non-interactive setter. Open the picker and let the
-    // user finish there. Reset the dropdown to its prior value since we can't
-    // know what the user actually picked.
-    effortSelect.addEventListener('mousedown', function (e) {
+    effortSelect.title = 'Effort level. Changing it resumes the session at the new level — Claude Code has no non-interactive mid-session setter, so the app re-launches with --resume --effort, keeping this badge truthful.';
+    effortSelect.innerHTML = '<option value="">Effort</option><option value="low">Low</option><option value="medium">Med</option><option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option><option value="ultracode">Ultra</option>';
+    // Let the native dropdown open, but don't let it steal column focus/drag.
+    effortSelect.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+    // Changing effort re-launches the session at the new level (the only way to
+    // keep the badge truthful — see buildResumeArgs). If a turn is in flight the
+    // resume interrupts it, so confirm first in that case.
+    effortSelect.addEventListener('change', function (e) {
       e.stopPropagation();
-      e.preventDefault();
-      wsSend({ type: 'write', id: id, data: '/effort\n' });
-      effortSelect.blur();
+      var col = allColumns.get(id);
+      if (!col || col.cmd) return;
+      var next = effortSelect.value;
+      if (!next || !isSelectableEffort(next)) { effortSelect.value = col.effort || ''; return; }
+      if (next === col.effort) return;
+      if (next === 'ultracode' && (col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL))) {
+        window.alert('Ultracode (xhigh + workflows) is only available on Claude Code / cloud columns, not local-endpoint columns.');
+        effortSelect.value = col.effort || '';
+        return;
+      }
+      if (col.activityState === 'working' &&
+          !window.confirm('Change effort to "' + next + '"?\n\nThis resumes the session at the new effort and interrupts the current turn.')) {
+        effortSelect.value = col.effort || '';
+        return;
+      }
+      col.effort = next;
+      restartColumn(id);
     });
 
     actions.appendChild(compactBtn);
@@ -3703,7 +3752,7 @@ function createExitOverlay(id, exitCode, col) {
       sendMsg.cmd = col.cmd;
       sendMsg.args = col.cmdArgs || [];
     } else {
-      sendMsg.args = col.sessionId ? ['--resume', col.sessionId] : [];
+      sendMsg.args = buildResumeArgs(col);
     }
     if (col.env) sendMsg.env = col.env;
     wsSend(sendMsg);
@@ -4202,6 +4251,12 @@ function addColumn(args, targetRow, opts) {
   if (!detectedModel && opts.env && opts.env.ANTHROPIC_MODEL) {
     detectedModel = opts.env.ANTHROPIC_MODEL;
   }
+  // Detect the effort this column was launched with, so the header badge and
+  // every later respawn (buildResumeArgs) reflect/preserve it.
+  var detectedEffort = null;
+  for (var efi = 0; efi < claudeArgs.length - 1; efi++) {
+    if (claudeArgs[efi] === '--effort') { detectedEffort = claudeArgs[efi + 1]; break; }
+  }
 
   var colData = {
     element: col,
@@ -4230,6 +4285,7 @@ function addColumn(args, targetRow, opts) {
     cmd: cmd,
     cmdArgs: claudeArgs,
     model: detectedModel,    // for ctx meter limit (200k vs 1M)
+    effort: detectedEffort,  // current effort; source of truth for the header badge + respawns
     env: opts.env || null,
     launchUrl: opts.launchUrl || null,
     launchUrlOpened: false,
@@ -4266,6 +4322,9 @@ function addColumn(args, targetRow, opts) {
   colData.ctxMeterEl = header.querySelector('[data-col-ctx]');
   colData.ctxFillEl = colData.ctxMeterEl ? colData.ctxMeterEl.querySelector('.col-ctx-fill') : null;
   colData.ctxTextEl = colData.ctxMeterEl ? colData.ctxMeterEl.querySelector('.col-ctx-text') : null;
+  // Make the header effort badge reflect the column's actual launch effort.
+  var effortBadgeEl = header.querySelector('.col-effort');
+  if (effortBadgeEl && colData.effort && isValidEffort(colData.effort)) effortBadgeEl.value = colData.effort;
   startContextMeterPoll(id);
   setFocusedColumn(id);
   if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
@@ -4973,16 +5032,18 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
             persistSessions(col.projectKey, col.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
             ensureClawdTail(columnId);
-            // Effort is now set at spawn via --effort (the only non-interactive
-            // mechanism — /config set effort doesn't exist and /effort opens
-            // an interactive picker). Just sync the column header dropdown
-            // visual to whatever default this column was launched with so the
-            // tab honestly reflects what claude is running on.
+            // Sync the header effort badge to the column's actual effort (set
+            // at spawn via --effort and tracked as col.effort, the source of
+            // truth). Backfill from the kind-appropriate default only if it
+            // wasn't captured, so the badge honestly reflects what claude runs on.
             if (!col.effortApplied) {
-              var isLocal = col.env && col.env.ANTHROPIC_BASE_URL;
               col.effortApplied = true;
+              if (!col.effort) {
+                var isLocal = col.env && col.env.ANTHROPIC_BASE_URL;
+                col.effort = isLocal ? defaultEffortLocal : defaultEffortCloud;
+              }
               var effortEl = col.element && col.element.querySelector('.col-effort');
-              if (effortEl) effortEl.value = isLocal ? defaultEffortLocal : defaultEffortCloud;
+              if (effortEl && isValidEffort(col.effort)) effortEl.value = col.effort;
             }
           }
           return;
@@ -5448,7 +5509,7 @@ function restartColumn(id) {
     sendMsg.cmd = col.cmd;
     sendMsg.args = col.cmdArgs || [];
   } else {
-    sendMsg.args = col.sessionId ? ['--resume', col.sessionId] : [];
+    sendMsg.args = buildResumeArgs(col);
   }
   if (col.env) sendMsg.env = col.env;
   wsSend(sendMsg);
@@ -5495,7 +5556,7 @@ function tryEndpointFailover(colId) {
         cols: col.terminal.cols,
         rows: col.terminal.rows,
         cwd: col.cwd,
-        args: col.sessionId ? ['--resume', col.sessionId] : (col.cmdArgs || [])
+        args: col.sessionId ? buildResumeArgs(col) : (col.cmdArgs || [])
       };
       respawnMsg.env = envBlock;
       wsSend(respawnMsg);

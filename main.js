@@ -177,7 +177,8 @@ let tray;
 let isQuitting = false;
 let hookServer;
 let hookServerPort;
-const ptyPort = app.isPackaged ? 3456 : 3457;
+const ptyPort = app.isPackaged ? 3456 : 3457;     // preferred pty port
+let ptyActualPort = ptyPort;                       // updated from the pty-server's READY:<port> line, which may differ if it fell back to an OS-assigned port
 const hookServerListenPort = app.isPackaged ? 53456 : 53457;
 let ptyServerProcess;
 
@@ -722,6 +723,17 @@ function startPtyServer() {
 
     ptyServerProcess.stdout.on('data', (data) => {
       const output = data.toString();
+      // The pty-server announces the port it actually bound — which differs
+      // from ptyPort if the preferred port was unavailable and it fell back to
+      // an OS-assigned one. Capture it so pty:getPort hands the renderer the
+      // real port to open its WebSocket against.
+      const m = output.match(/READY:(\d+)/);
+      if (m) {
+        ptyActualPort = parseInt(m[1], 10);
+        if (ptyActualPort !== ptyPort) {
+          diagLog('[pty-server] bound fallback port', ptyActualPort, '— preferred', ptyPort, 'was unavailable');
+        }
+      }
       if (!resolved && output.includes('READY:')) {
         resolved = true;
         resolve();
@@ -3978,75 +3990,167 @@ ipcMain.handle('claude:getConfigPath', () => {
 
 // --- Hook Server ---
 
-function startHookServer() {
-  hookServer = http.createServer((req, res) => {
-    // DNS-rebinding mitigation: only accept Host headers that name the loopback
-    // address with the right port. A browser tab that has a DNS name resolving
-    // to 127.0.0.1 would otherwise be able to POST here from a different origin.
-    const host = (req.headers.host || '').toLowerCase();
-    const expectedA = '127.0.0.1:' + hookServerListenPort;
-    const expectedB = 'localhost:' + hookServerListenPort;
-    if (host !== expectedA && host !== expectedB) {
-      res.writeHead(403);
+// Supervision state. The hook server is the local listener Claude Code's curl
+// hooks POST to (see buildHookCommand). If it stops listening while the app is
+// running — an unexpected close, an unhandled listen error, or a port held by a
+// stale instance — every subsequent hook fires into a dead port, and the only
+// historical recovery was the user manually disconnecting + reconnecting hooks.
+// We now supervise it: restart on unexpected close, retry transient listen
+// errors with a short backoff, and run a slow heartbeat that re-listens if the
+// socket is ever found down (also the EADDRINUSE recovery path — see below).
+let hookServerQuitting = false;     // true once shutdown begins — suppresses respawn
+let hookServerRestartTimer = null;  // pending backoff restart, if any
+let hookServerHeartbeat = null;     // periodic liveness-check interval
+const HOOK_SERVER_RESTART_DELAY_MS = 2000;
+const HOOK_SERVER_HEARTBEAT_MS = 15000;
+
+function handleHookRequest(req, res) {
+  // DNS-rebinding mitigation: only accept Host headers that name the loopback
+  // address with the right port. A browser tab that has a DNS name resolving
+  // to 127.0.0.1 would otherwise be able to POST here from a different origin.
+  const host = (req.headers.host || '').toLowerCase();
+  // Validate against the actual bound port (hookServerPort), not the preferred
+  // constant — we may have fallen back to an OS-assigned port (see bindHookServer).
+  const expectedA = '127.0.0.1:' + hookServerPort;
+  const expectedB = 'localhost:' + hookServerPort;
+  if (host !== expectedA && host !== expectedB) {
+    res.writeHead(403);
+    res.end();
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/hook') {
+    // Reject unauthenticated callers. The curl command we write into
+    // settings.json carries the token; anything else POST'ing here is hostile.
+    const token = req.headers['x-auth-token'];
+    let tokenOk = false;
+    if (typeof token === 'string' && token.length === HOOK_AUTH_TOKEN.length) {
+      try {
+        tokenOk = crypto.timingSafeEqual(Buffer.from(token), Buffer.from(HOOK_AUTH_TOKEN));
+      } catch { tokenOk = false; }
+    }
+    if (!tokenOk) {
+      res.writeHead(401);
       res.end();
       return;
     }
-    if (req.method === 'POST' && req.url === '/hook') {
-      // Reject unauthenticated callers. The curl command we write into
-      // settings.json carries the token; anything else POST'ing here is hostile.
-      const token = req.headers['x-auth-token'];
-      let tokenOk = false;
-      if (typeof token === 'string' && token.length === HOOK_AUTH_TOKEN.length) {
-        try {
-          tokenOk = crypto.timingSafeEqual(Buffer.from(token), Buffer.from(HOOK_AUTH_TOKEN));
-        } catch { tokenOk = false; }
-      }
-      if (!tokenOk) {
-        res.writeHead(401);
+    let body = '';
+    let aborted = false;
+    // Bound the body — a hook event payload is normally a few KB; cap at 1 MB
+    // so a malicious local process can't pin memory by streaming forever.
+    req.on('data', chunk => {
+      if (aborted) return;
+      body += chunk;
+      if (body.length > 1024 * 1024) {
+        aborted = true;
+        res.writeHead(413);
         res.end();
-        return;
+        req.destroy();
       }
-      let body = '';
-      let aborted = false;
-      // Bound the body — a hook event payload is normally a few KB; cap at 1 MB
-      // so a malicious local process can't pin memory by streaming forever.
-      req.on('data', chunk => {
-        if (aborted) return;
-        body += chunk;
-        if (body.length > 1024 * 1024) {
-          aborted = true;
-          res.writeHead(413);
-          res.end();
-          req.destroy();
-        }
-      });
-      req.on('end', () => {
-        if (aborted) return;
-        try {
-          const event = JSON.parse(body);
-          incrPerfHook();
-          mainWindow?.webContents.send('hook:event', event);
-        } catch {}
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('ok');
-      });
+    });
+    req.on('end', () => {
+      if (aborted) return;
+      try {
+        const event = JSON.parse(body);
+        incrPerfHook();
+        mainWindow?.webContents.send('hook:event', event);
+      } catch {}
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+    });
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+}
+
+function scheduleHookServerRestart(reason) {
+  if (hookServerQuitting) return;
+  if (hookServerRestartTimer) return;  // a restart is already pending
+  console.error('[hook-server] scheduling restart:', reason);
+  hookServerRestartTimer = setTimeout(() => {
+    hookServerRestartTimer = null;
+    startHookServer();
+  }, HOOK_SERVER_RESTART_DELAY_MS);
+  if (typeof hookServerRestartTimer.unref === 'function') hookServerRestartTimer.unref();
+}
+
+function startHookServerHeartbeat() {
+  if (hookServerHeartbeat) return;  // already running
+  // Slow liveness check: if the socket is ever found not listening (died without
+  // a 'close' we caught, or never bound because of EADDRINUSE), kick a restart.
+  // This is also how we take over the port if a stale instance that owned it
+  // exits. Cheap — it only inspects local server state.
+  hookServerHeartbeat = setInterval(() => {
+    if (hookServerQuitting) return;
+    if (!hookServer || !hookServer.listening) {
+      scheduleHookServerRestart('heartbeat: listener down');
+    }
+  }, HOOK_SERVER_HEARTBEAT_MS);
+  if (typeof hookServerHeartbeat.unref === 'function') hookServerHeartbeat.unref();
+}
+
+function startHookServer() {
+  if (hookServerQuitting) return;
+  // Tear down any prior instance before re-creating so a respawn can't leak a
+  // half-open server or fire a stale 'close'/'error' handler at us.
+  if (hookServer) {
+    try { hookServer.removeAllListeners(); } catch {}
+    try { hookServer.close(); } catch {}
+    hookServer = null;
+  }
+  hookServerPort = undefined;
+  bindHookServer(hookServerListenPort);
+}
+
+// Bind on `port`. If the *preferred* port can't be bound — EACCES because it has
+// drifted into a Windows reserved-port range (`netsh int ipv4 show
+// excludedportrange`, which shifts across reboots and silently killed the
+// listener), or EADDRINUSE from a stale instance — fall back to an OS-assigned
+// ephemeral port (listen 0), which is always bindable. Whatever port we land on
+// is written into settings.json so the curl hooks follow it; the port is no
+// longer assumed fixed. handleHookRequest validates Host against hookServerPort,
+// and the renderer reads the live port over IPC (hooks:getPort), so a dynamic
+// port is transparent to both.
+function bindHookServer(port) {
+  if (hookServerQuitting) return;
+  const isPreferred = port === hookServerListenPort;
+  hookServer = http.createServer(handleHookRequest);
+
+  hookServer.on('error', (err) => {
+    console.error('[hook-server] listen error on port', port, ':', err && err.message);
+    hookServerPort = undefined;
+    const recoverable = err && (err.code === 'EACCES' || err.code === 'EADDRINUSE');
+    if (recoverable && isPreferred) {
+      // Don't fast-loop on a port the OS won't give us — drop straight to an
+      // ephemeral port (a single fallback, not a retry storm).
+      try { hookServer.removeAllListeners(); } catch {}
+      hookServer = null;
+      bindHookServer(0);
     } else {
-      res.writeHead(404);
-      res.end();
+      // Ephemeral bind failed, or some other error: let the slow heartbeat
+      // re-attempt rather than hammer.
+      startHookServerHeartbeat();
     }
   });
-  hookServer.on('error', (err) => {
-    console.error('[hook-server] listen error:', err.message);
+
+  // An unexpected 'close' (i.e. not during shutdown) means we lost the listener;
+  // bring it back so hooks stop failing without a manual reconnect.
+  hookServer.on('close', () => {
+    if (hookServerQuitting) return;
+    scheduleHookServerRestart('server closed unexpectedly');
   });
-  hookServer.listen(hookServerListenPort, '127.0.0.1', () => {
-    hookServerPort = hookServerListenPort;
-    diagLog('[hook-server] listening on port', hookServerPort);
-    // Self-heal: if the user's settings.json already has our sentinel entries
-    // pointing at a different port (e.g. dev↔packaged switch), rewrite them to
-    // the current port so they don't have to disconnect+reconnect every launch.
-    try { syncHookPortInSettings(hookServerListenPort); } catch (err) {
+
+  hookServer.listen(port, '127.0.0.1', () => {
+    const addr = hookServer.address();
+    hookServerPort = (addr && addr.port) || port;
+    diagLog('[hook-server] listening on port', hookServerPort, isPreferred ? '(preferred)' : '(fallback)');
+    // Self-heal: rewrite the user's sentinel hook entries to the current
+    // command (port + auth token), so a port change or token rotation never
+    // requires a manual disconnect+reconnect.
+    try { syncHookPortInSettings(hookServerPort); } catch (err) {
       console.error('[hook-server] failed to sync port in settings.json:', err && err.message);
     }
+    startHookServerHeartbeat();
   });
 }
 
@@ -4144,9 +4248,18 @@ function buildHookCommand(port) {
   // every Linux distro this app runs on. -d @- reads stdin. The double-quoted
   // header values are parsed identically by cmd.exe and POSIX shells. The
   // auth-token header gates the local /hook endpoint — see HOOK_AUTH_TOKEN.
-  return 'curl -s -X POST http://127.0.0.1:' + port + '/hook -d @-' +
+  //
+  // --max-time bounds a wedged/slow server so it can never stall prompt
+  // submission. `|| exit 0` swallows a non-zero curl exit (notably exit 7,
+  // connection-refused, when the inspector server is offline because the app
+  // is closed, still starting, or its listener died) so Claude Code never
+  // surfaces it as a hook error. `exit 0` is used rather than `true` because it
+  // returns 0 in cmd.exe, PowerShell, and POSIX shells alike — `true` is not a
+  // cmd.exe builtin and would itself fail there.
+  return 'curl -s --max-time 2 -X POST http://127.0.0.1:' + port + '/hook -d @-' +
     ' -H "Content-Type: application/json"' +
-    ' -H "X-Auth-Token: ' + HOOK_AUTH_TOKEN + '"';
+    ' -H "X-Auth-Token: ' + HOOK_AUTH_TOKEN + '"' +
+    ' || exit 0';
 }
 
 function readClaudeSettings() {
@@ -4279,7 +4392,7 @@ ipcMain.handle('hooks:disconnect', () => {
     return { ok: false, error: String(err && err.message || err) };
   }
 });
-ipcMain.handle('pty:getPort', () => ptyPort);
+ipcMain.handle('pty:getPort', () => ptyActualPort);
 ipcMain.handle('pty:getAuthToken', () => PTY_AUTH_TOKEN);
 
 ipcMain.handle('window:flashFrame', () => {
@@ -6976,7 +7089,12 @@ app.on('before-quit', () => {
   step('killPtyServer');
   killPtyServer();
   // The hook server's listening socket keeps the event loop alive; close it
-  // so Electron can actually exit instead of hanging in 'will-quit'.
+  // so Electron can actually exit instead of hanging in 'will-quit'. Flip the
+  // quitting flag and clear the supervisor timers first so the 'close' below
+  // doesn't trigger a respawn and no heartbeat/restart keeps the loop alive.
+  hookServerQuitting = true;
+  if (hookServerRestartTimer) { try { clearTimeout(hookServerRestartTimer); } catch {} hookServerRestartTimer = null; }
+  if (hookServerHeartbeat) { try { clearInterval(hookServerHeartbeat); } catch {} hookServerHeartbeat = null; }
   if (hookServer) {
     step('hookServer.closeAllConnections + close');
     try { if (typeof hookServer.closeAllConnections === 'function') hookServer.closeAllConnections(); } catch (e) { diagLog('[quit] closeAllConnections threw:', e && e.message); }
