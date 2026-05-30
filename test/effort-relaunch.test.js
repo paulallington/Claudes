@@ -110,3 +110,10 @@ test('round-trips: prior args already had effort+resume yields exactly one of ea
   assert.strictEqual(out[idx(out, '--resume') + 1], 'new');
   assert.ok(out.indexOf('--dangerously-skip-permissions') !== -1);
 });
+
+test('a stripped flag at end-of-array (no value) does not crash or leak', () => {
+  const col = { cmdArgs: ['--dangerously-skip-permissions', '--worktree'], effort: 'high', sessionId: 'sid' };
+  const out = buildResumeArgsBase(col, false, 'medium');
+  assert.strictEqual(out.indexOf('--worktree'), -1, 'trailing --worktree stripped');
+  assert.deepStrictEqual(out, ['--dangerously-skip-permissions', '--effort', 'high', '--resume', 'sid']);
+});
