@@ -3013,22 +3013,13 @@ function rewriteArgsForEndpoint(args, isLocal) {
 // value they'd 400 on (xhigh/max → safe local default).
 function buildResumeArgs(col) {
   var isLocal = !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL));
-  var args = [];
-  // Emit effort before --resume to match the order the (working) startup
-  // restore path uses, in case the CLI is order-sensitive when resuming.
-  if (col.effort === 'ultracode' && !isLocal) {
-    // ultracode isn't an --effort level — it's xhigh effort plus standing
-    // dynamic-workflow orchestration, enabled as a session setting. Pass xhigh
-    // explicitly (so rewriteArgsForEndpoint doesn't append a different default)
-    // plus the ultracode/workflows settings. Cloud/Claude-Code only.
-    args.push('--effort', 'xhigh', '--settings', JSON.stringify({ ultracode: true, enableWorkflows: true }));
-  } else if (col.effort === 'ultracode') {
-    // Local endpoints don't support ultracode; degrade to the local default.
-    args.push('--effort', defaultEffortLocal);
-  } else if (col.effort) {
-    args.push('--effort', col.effort);
-  }
-  if (col.sessionId) args.push('--resume', col.sessionId);
+  // Preserve the flags the column was spawned with (permission mode, --bare,
+  // --strict-mcp-config, --remote-control, --model, custom args); only
+  // --effort/--resume/--worktree and the ultracode --settings are rebuilt. See
+  // the pure, unit-tested lib/effort-relaunch.js. rewriteArgsForEndpoint then
+  // enforces endpoint correctness (strips --bare/--model on the wrong endpoint
+  // kind, clamps effort to a value that kind accepts).
+  var args = EffortRelaunch.buildResumeArgsBase(col, isLocal, defaultEffortLocal);
   return rewriteArgsForEndpoint(args, isLocal);
 }
 
