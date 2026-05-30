@@ -999,6 +999,7 @@ html[data-platform="darwin"] #toolbar {
 
 .spawn-effort-row select,
 .spawn-model-row select,
+.spawn-perm-row select,
 .spawn-endpoint-row select {
   background: var(--bg-button);
   color: var(--text-primary);

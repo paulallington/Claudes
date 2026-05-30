@@ -21,7 +21,7 @@ var themeSelect = document.getElementById('theme-select');
 
 var btnAddOptions = document.getElementById('btn-add-options');
 var spawnDropdown = document.getElementById('spawn-dropdown');
-var optSkipPermissions = document.getElementById('opt-skip-permissions');
+var optPermissionMode = document.getElementById('opt-permission-mode');
 var optRemoteControl = document.getElementById('opt-remote-control');
 var optBare = document.getElementById('opt-bare');
 var optStripMcps = document.getElementById('opt-strip-mcps');
@@ -9144,9 +9144,13 @@ function closeSpawnDropdown() {
 
 function buildSpawnArgs(resolved) {
   var args = [];
-  if (optSkipPermissions.checked) {
-    args.push('--dangerously-skip-permissions');
-  }
+  // Permission mode -> flags. bypassPermissions emits the legacy
+  // --dangerously-skip-permissions (the automation de-dupe guard and the
+  // proxy-auth / --bare paths key on that exact string, and the CLI rejects
+  // bypassPermissions as a --permission-mode choice); plan/acceptEdits/dontAsk/
+  // auto emit --permission-mode <mode>; default emits nothing. Pure, unit-tested
+  // mapping in lib/permission-mode.js.
+  Array.prototype.push.apply(args, PermissionMode.permissionModeToArgs(optPermissionMode.value));
   if (optRemoteControl.checked) {
     args.push('--remote-control');
   }
@@ -9216,7 +9220,9 @@ function updateSpawnButtonLabel() {
   } else if (optModel && optModel.value) {
     tags.push(optModel.value);
   }
-  if (optSkipPermissions.checked) tags.push('yolo');
+  var permMode = optPermissionMode.value;
+  if (permMode === 'bypassPermissions') tags.push('yolo');
+  else if (permMode && permMode !== 'default') tags.push(permMode);
   if (optRemoteControl.checked) tags.push('remote');
   if (optBare.checked || (currentEndpointEnv && currentEndpointEnv.ANTHROPIC_CUSTOM_HEADERS)) tags.push('bare');
   if (optStripMcps.checked) tags.push('no-mcp');
@@ -9237,7 +9243,7 @@ function updateSpawnButtonLabel() {
 function saveSpawnOptions() {
   if (config.activeProjectIndex == null || !config.projects[config.activeProjectIndex]) return;
   config.projects[config.activeProjectIndex].spawnOptions = {
-    skipPermissions: optSkipPermissions.checked,
+    permissionMode: optPermissionMode.value,
     remoteControl: optRemoteControl.checked,
     bare: optBare.checked,
     stripMcps: optStripMcps.checked,
@@ -9255,7 +9261,7 @@ function loadSpawnOptions() {
   if (config.activeProjectIndex != null && config.projects[config.activeProjectIndex]) {
     opts = config.projects[config.activeProjectIndex].spawnOptions || {};
   }
-  optSkipPermissions.checked = !!opts.skipPermissions;
+  optPermissionMode.value = PermissionMode.migratePermissionMode(opts);
   optRemoteControl.checked = !!opts.remoteControl;
   optBare.checked = !!opts.bare;
   optStripMcps.checked = !!opts.stripMcps;
@@ -9305,7 +9311,7 @@ btnAddOptions.addEventListener('click', function (e) {
 
 // Update button label and persist when any option changes
 function onSpawnOptionChanged() { updateSpawnButtonLabel(); saveSpawnOptions(); }
-optSkipPermissions.addEventListener('change', onSpawnOptionChanged);
+optPermissionMode.addEventListener('change', onSpawnOptionChanged);
 optRemoteControl.addEventListener('change', onSpawnOptionChanged);
 optBare.addEventListener('change', onSpawnOptionChanged);
 optStripMcps.addEventListener('change', onSpawnOptionChanged);

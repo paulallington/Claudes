@@ -240,10 +240,6 @@
             <button id="btn-add-options" title="Spawn options" class="spawn-chevron">&#9662;</button>
             <div id="spawn-dropdown" class="spawn-dropdown hidden">
               <label class="spawn-option">
-                <input type="checkbox" id="opt-skip-permissions"> Skip Permissions
-                <span class="spawn-help" title="Bypass all permission prompts (--dangerously-skip-permissions). Use with caution.">?</span>
-              </label>
-              <label class="spawn-option">
                 <input type="checkbox" id="opt-remote-control"> Remote Control
                 <span class="spawn-help" title="Enable remote access from claude.ai/code or the Claude mobile app (--remote-control).">?</span>
               </label>
@@ -260,6 +256,17 @@
                 <span class="spawn-help" title="Run the prompt without a terminal column. Output streams into the headless dock at the bottom.">?</span>
               </label>
               <div class="spawn-divider"></div>
+              <div class="spawn-option spawn-perm-row">
+                <label for="opt-permission-mode">Permission:</label>
+                <select id="opt-permission-mode" title="Permission mode the column launches with. default = normal prompts; plan = read-only, proposes a plan first; acceptEdits = auto-accept file edits; dontAsk = auto-approve safe ops; auto = Claude classifies each operation; bypassPermissions = skip ALL prompts (--dangerously-skip-permissions, use with caution).">
+                  <option value="default">Default &middot; normal prompts</option>
+                  <option value="plan">Plan &middot; read-only, plans first</option>
+                  <option value="acceptEdits">Accept Edits &middot; auto-accept edits</option>
+                  <option value="dontAsk">Don&rsquo;t Ask &middot; auto-approve safe ops</option>
+                  <option value="auto">Auto &middot; classify per operation</option>
+                  <option value="bypassPermissions">Bypass &#9888; &middot; skip all (yolo)</option>
+                </select>
+              </div>
               <div class="spawn-option spawn-endpoint-row">
                 <label for="opt-endpoint">Endpoint:</label>
                 <select id="opt-endpoint">
@@ -1334,6 +1341,7 @@
     <div id="clawd-debug-log" class="clawd-debug-log"></div>
   </div>
   <script src="./lib/clawd-widget.js"></script>
+  <script src="./lib/permission-mode.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>
