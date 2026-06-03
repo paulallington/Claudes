@@ -1393,6 +1393,93 @@ html[data-platform="darwin"] #toolbar {
   color: var(--text-bright);
 }
 
+.column-header .col-minimize {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+}
+
+.column-header .col-minimize svg { display: block; }
+
+.column-header .col-minimize:hover {
+  background: var(--hover-strong);
+  color: var(--text-bright);
+}
+
+/* Minimise dock — pinned to the bottom of the flex-column columns container
+   via `order` regardless of DOM insertion order of later rows. */
+.minimize-dock {
+  order: 9999;
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-toolbar);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.minimize-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 200px;
+  padding: 3px 6px 3px 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.minimize-chip:hover {
+  background: var(--hover-strong);
+  color: var(--text-bright);
+}
+
+.minimize-chip .chip-glyph {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.minimize-chip .chip-label {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.minimize-chip .chip-close {
+  flex-shrink: 0;
+  color: var(--text-dimmer);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.minimize-chip .chip-close:hover {
+  color: var(--text-bright);
+}
+
+.minimize-chip.attention {
+  border-color: #f5a623;
+  color: var(--text-bright);
+  animation: pulse-attention 1.2s ease-in-out infinite;
+}
+
 .column-header .col-restart {
   cursor: pointer;
   color: var(--text-dim);

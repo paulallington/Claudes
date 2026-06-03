@@ -773,6 +773,9 @@ function setColumnActivity(id, state) {
       }
     }
   }
+
+  // Mirror the new activity state onto the dock chip if this column is minimised.
+  if (col.minimized) updateMinimizedChipActivity(id);
 }
 
 function updateActivityIndicator(id) {
@@ -941,6 +944,9 @@ function notifyAttentionNeeded(columnId) {
     var item = projectListEl.querySelector(sel);
     if (item) item.classList.add('attention-flash');
   }
+
+  // Surface attention on the dock chip if this column is minimised.
+  if (col.minimized) updateMinimizedChipActivity(columnId);
 }
 
 function clearProjectAttention(projectKey, workspaceId) {
@@ -982,7 +988,8 @@ function getOrCreateProjectState(projectKey) {
     containerEl: containerEl,
     rows: [],         // array of { id, el, columnIds: [] }
     columns: new Map(),
-    focusedColumnId: null
+    focusedColumnId: null,
+    minimized: []     // array of column ids currently minimised, in minimise order
   };
   projectStates.set(projectKey, state);
   return state;
@@ -3562,6 +3569,15 @@ function createColumnHeader(id, customTitle, opts) {
     actions.appendChild(sessionsBtn);
   }
 
+  var minimizeBtn = document.createElement('span');
+  minimizeBtn.className = 'col-minimize';
+  minimizeBtn.title = 'Minimise';
+  minimizeBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="9" x2="10" y2="9"/></svg>';
+  minimizeBtn.addEventListener('click', function () {
+    minimizeColumn(id);
+  });
+  actions.appendChild(minimizeBtn);
+
   var maximizeBtn = document.createElement('span');
   maximizeBtn.className = 'col-maximize';
   maximizeBtn.title = 'Maximize';
@@ -5794,6 +5810,227 @@ function toggleMaximizeColumn(id) {
 }
 
 // ============================================================
+// Minimise column → workspace dock
+// ============================================================
+
+// Lazily create the dock bar inside a state's columns container. The dock
+// always renders at the BOTTOM of the flex-column container via CSS `order`,
+// regardless of where new rows get appended.
+function ensureMinimizeDock(state) {
+  if (!state || !state.containerEl) return null;
+  var dock = state.containerEl.querySelector('.minimize-dock');
+  if (!dock) {
+    dock = document.createElement('div');
+    dock.className = 'minimize-dock';
+    state.containerEl.appendChild(dock);
+  }
+  return dock;
+}
+
+// Read the title a column's header is currently showing (custom title wins).
+function minimizedChipLabel(col) {
+  if (col && col.customTitle) return col.customTitle;
+  if (col && col.headerEl) {
+    var t = col.headerEl.querySelector('.col-title');
+    if (t) return t.textContent || '';
+  }
+  return '';
+}
+
+function renderMinimizedChip(state, id) {
+  var dock = ensureMinimizeDock(state);
+  if (!dock) return;
+  var col = allColumns.get(id);
+  if (!col) return;
+
+  var chip = document.createElement('div');
+  chip.className = 'minimize-chip';
+  chip.dataset.id = String(id);
+
+  var glyph = document.createElement('span');
+  glyph.className = 'chip-glyph';
+  glyph.textContent = '▭';
+
+  var label = document.createElement('span');
+  label.className = 'chip-label';
+  label.textContent = minimizedChipLabel(col);
+
+  var close = document.createElement('span');
+  close.className = 'chip-close';
+  close.textContent = '×';
+  close.title = 'Kill';
+  close.addEventListener('click', function (e) {
+    e.stopPropagation();
+    killMinimizedColumn(id);
+  });
+
+  chip.appendChild(glyph);
+  chip.appendChild(label);
+  chip.appendChild(close);
+  chip.addEventListener('click', function () {
+    restoreMinimizedColumn(id);
+  });
+
+  dock.appendChild(chip);
+  // Reflect any current attention state immediately.
+  if (col.activityState === 'waiting' || col.activityState === 'attention') {
+    chip.classList.add('attention');
+  }
+}
+
+function removeMinimizedChip(state, id) {
+  if (!state || !state.containerEl) return;
+  var dock = state.containerEl.querySelector('.minimize-dock');
+  if (!dock) return;
+  var chip = dock.querySelector('.minimize-chip[data-id="' + id + '"]');
+  if (chip) chip.remove();
+  if (dock.querySelectorAll('.minimize-chip').length === 0) {
+    dock.remove();
+  }
+}
+
+// Mirror the header's waiting/attention treatment onto a minimised chip.
+function updateMinimizedChipActivity(id) {
+  var col = allColumns.get(id);
+  if (!col || !col.minimized) return;
+  var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
+  if (!state || !state.containerEl) return;
+  var dock = state.containerEl.querySelector('.minimize-dock');
+  if (!dock) return;
+  var chip = dock.querySelector('.minimize-chip[data-id="' + id + '"]');
+  if (!chip) return;
+  if (col.activityState === 'waiting' || col.activityState === 'attention') {
+    chip.classList.add('attention');
+  } else {
+    chip.classList.remove('attention');
+  }
+}
+
+function minimizeColumn(id) {
+  var col = allColumns.get(id);
+  if (!col) return;
+  var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
+  if (!state) return;
+
+  // Un-maximize first so the layout is in its normal state before we detach.
+  if (maximizedColumnId === id) {
+    toggleMaximizeColumn(id);
+  }
+
+  var row = findRowForColumn(state, id);
+  col.minimizeOrigin = {
+    rowId: row ? row.id : null,
+    index: row ? row.columnIds.indexOf(id) : 0
+  };
+  col.minimized = true;
+
+  // Detach from the layout WITHOUT disposing (keep terminal + pty alive).
+  var colElement = col.element;
+  var prevSibling = colElement.previousElementSibling;
+  var nextSibling = colElement.nextElementSibling;
+  colElement.remove();
+  if (prevSibling && prevSibling.classList.contains('resize-handle')) {
+    prevSibling.remove();
+  } else if (nextSibling && nextSibling.classList.contains('resize-handle')) {
+    nextSibling.remove();
+  }
+
+  if (row) {
+    var idx = row.columnIds.indexOf(id);
+    if (idx !== -1) row.columnIds.splice(idx, 1);
+    for (var ci = 0; ci < row.columnIds.length; ci++) {
+      var sibling = allColumns.get(row.columnIds[ci]);
+      if (sibling) {
+        sibling.element.style.flex = '';
+        sibling.element.style.width = '';
+      }
+    }
+    removeRowIfEmpty(state, row);
+  }
+
+  state.minimized.push(id);
+  ensureMinimizeDock(state);
+  renderMinimizedChip(state, id);
+
+  // Move focus off the minimised column to another live (non-minimised) one.
+  if (state.focusedColumnId === id) {
+    state.focusedColumnId = null;
+    var nextFocus = null;
+    state.columns.forEach(function (c, cid) {
+      if (cid !== id && !c.minimized) nextFocus = cid;
+    });
+    if (nextFocus != null) setFocusedColumn(nextFocus);
+  }
+
+  refitAll();
+}
+
+function restoreMinimizedColumn(id) {
+  var col = allColumns.get(id);
+  if (!col || !col.minimized) return;
+  var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
+  if (!state) return;
+
+  var mi = state.minimized.indexOf(id);
+  if (mi >= 0) state.minimized.splice(mi, 1);
+  removeMinimizedChip(state, id);
+
+  var t = window.MinimizeDock.resolveRestoreTarget(
+    state.rows.map(function (r) { return { id: r.id, columnIds: r.columnIds }; }),
+    col.minimizeOrigin
+  );
+
+  var row;
+  if (t.mode === 'existing') {
+    row = state.rows.find(function (r) { return r.id === t.rowId; });
+  }
+  if (!row) {
+    row = addRowToProject(state);
+  }
+
+  // Re-attach the existing element by appending it to the target row, adding a
+  // leading resize handle when the row already has visible columns.
+  if (row.columnIds.length > 0) {
+    var lastId = row.columnIds[row.columnIds.length - 1];
+    var handle = document.createElement('div');
+    handle.className = 'resize-handle';
+    handle.dataset.leftColumnId = String(lastId);
+    handle.dataset.rightColumnId = String(id);
+    row.el.appendChild(handle);
+    setupResizeHandle(handle);
+  }
+  row.el.appendChild(col.element);
+  row.columnIds.push(id);
+
+  col.minimized = false;
+  col.minimizeOrigin = null;
+
+  for (var ci = 0; ci < row.columnIds.length; ci++) {
+    var sibling = allColumns.get(row.columnIds[ci]);
+    if (sibling) {
+      sibling.element.style.flex = '';
+      sibling.element.style.width = '';
+    }
+  }
+
+  refitAll();
+  setFocusedColumn(id);
+}
+
+function killMinimizedColumn(id) {
+  var col = allColumns.get(id);
+  if (col) {
+    var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
+    if (state) {
+      var mi = state.minimized.indexOf(id);
+      if (mi >= 0) state.minimized.splice(mi, 1);
+      removeMinimizedChip(state, id);
+    }
+  }
+  removeColumn(id);
+}
+
+// ============================================================
 // Recent sessions picker (per-column header)
 // ============================================================
 
@@ -6201,6 +6438,7 @@ function refitAll() {
   if (!state) return;
   state.columns.forEach(function (col, id) {
     if (col.isDiff) return;
+    if (col.minimized) return;
     try {
       col.fitAddon.fit();
       // Suppress activity tracking for redraw data after resize
