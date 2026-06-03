@@ -50,40 +50,52 @@ restores the column to its original row/position with its session intact.
 
 ## Behaviour
 
+**Model: keep-alive (detach DOM, keep the column object live).** A minimised
+column is NOT disposed. Its `colData` (terminal, pty, listeners, context-meter,
+session-sync) stays registered in `allColumns` and `state.columns`, flagged
+`col.minimized = true`; only its DOM element is detached from the row. This is
+required for the chip attention pulse: ws output keeps flowing into the live
+`col.terminal`, so activity/attention detection keeps running while minimised.
+
 ### Minimise `minimizeColumn(id)`
 1. If `id` is the currently maximised column, un-maximise first
    (`toggleMaximizeColumn(id)`).
-2. Build a **snapshot** of the column (same serialisable shape used by the popout
-   transfer / sessions entry): `ptyId` (= column id), `cols`, `rows`, `cwd`,
-   `cwdSource`, `cmd`, `cmdArgs`, `env`, `sessionId`, `title`, `isDiff` — **plus**
-   `minimizeOrigin: { rowId, index }` capturing the row id and the column's index
-   within that row's `columnIds` at minimise time.
-3. Soft-remove the column from the layout, keeping the pty alive: reuse the
-   existing `disposeColumnLocalOnly(id)` path (removes the column element + its
-   adjacent resize handle, reflows remaining siblings, collapses an emptied row,
-   removes it from `state.columns`/`allColumns`/`row.columnIds`) — it does **not**
-   kill the pty and does **not** rewrite sessions.
-4. Append the snapshot to a per-state `state.minimized` list and render its chip
-   in the dock; show the dock if it was hidden.
-5. `persistSessions(projectKey, workspaceId)` so the minimised entry is saved.
+2. Record origin on the column: `col.minimizeOrigin = { rowId, index }` (the row
+   id containing it and its index within that row's `columnIds`).
+3. Detach from the layout WITHOUT disposing: set `col.minimized = true`; remove
+   the column's adjacent resize handle and detach `col.element` from the row
+   (keep the element + terminal in memory via `colData`); remove `id` from
+   `row.columnIds`; reset remaining siblings' flex; `removeRowIfEmpty` if the row
+   is now empty. Do NOT kill the pty, dispose the terminal, or delete the column
+   from `allColumns`/`state.columns`; do NOT stop session-sync/context-meter.
+4. Add `id` to a per-state `state.minimized` list (order = minimise order) and
+   render its chip in the dock; show the dock if it was hidden.
+5. Guard layout iterators that fit/measure (`refitAll` and similar) to skip
+   columns with `col.minimized` (their elements are detached → zero-size).
+6. `refitAll()`; `persistSessions(projectKey, workspaceId)`.
 
 ### Restore `restoreMinimizedColumn(id)`
-1. Look up the snapshot in `state.minimized`; remove it from that list.
-2. Resolve the restore target with `resolveRestoreTarget(rows, origin)` (see
-   Testable seam): if the origin row still exists, restore into that row at the
-   clamped original index; otherwise create a new full-width row at the bottom.
-3. Recreate the column via the existing `addColumn(cmdArgs, targetRow, opts)` path
-   with `reattachPtyId: snapshot.ptyId` (and `sessionId`, `title`, `cmd`, `env`,
-   `cwd`, `cwdSource`, `isDiff`, `workspaceId`, and an `insertIndex` for position).
-   This reattaches the live pty (the same mechanism verified for popouts).
-4. Remove the chip; hide the dock if now empty; `refitAll()`; focus the restored
-   column; `persistSessions(...)`.
+1. Remove `id` from `state.minimized` and remove its chip.
+2. Resolve the restore target with `resolveRestoreTarget(state.rows, col.minimizeOrigin)`
+   (see Testable seam): `mode:'existing'` → the origin row (found by id);
+   `mode:'new'` → create a new full-width row at the bottom (`addRowToProject`).
+3. Re-insert the **existing** `col.element` by **appending** it to the target row
+   (create a leading resize handle when the row already has visible columns,
+   mirroring `addColumn`'s append logic); push `id` onto `row.columnIds`. (v1
+   appends to the origin row; restoring to the exact in-row index is deferred —
+   see Scope. The clamped `index` from `resolveRestoreTarget` is retained for that
+   future enhancement.)
+4. Clear `col.minimized` / `col.minimizeOrigin`; reset siblings' flex; hide the
+   dock if now empty; `refitAll()`; `setFocusedColumn(id)`; `persistSessions(...)`.
 
-### Kill from dock
-- Remove the snapshot from `state.minimized`, remove the chip, then kill the pty
-  and dispose any retained resources for that id; hide the dock if empty; persist.
-  (Since the column was soft-removed, this sends a `kill` for the pty id and
-  clears any per-id state.)
+No pty reattach is needed — the pty stayed bound to this window's socket and the
+terminal stayed live, so restore is just a DOM re-attach + fit (no repaint flash).
+
+### Kill from dock `killMinimizedColumn(id)`
+- Remove `id` from `state.minimized` and remove the chip, then call the normal
+  `removeColumn(id)` (kills the pty, disposes the terminal, clears per-id state;
+  its row/handle cleanup is a no-op on the already-detached element). Hide the
+  dock if empty; persist.
 
 ## Persistence
 
@@ -128,8 +140,9 @@ persistence wiring live in `renderer.js`.
 - Activity routing: where column activity/attention is set
   (`setColumnActivity` / `notifyAttentionNeeded`), also update the chip if the id
   is currently minimised.
-- `refitAll`/layout iterations operate on live columns only (minimised columns are
-  not in `state.columns`, so they are naturally skipped).
+- `refitAll`/layout iterations must skip columns flagged `col.minimized` (they
+  remain in `state.columns` under the keep-alive model but their elements are
+  detached, so fitting them is wasteful/invalid).
 
 ### styles.css
 - Dock bar (bottom of `.project-columns`, themed for light/dark, background
