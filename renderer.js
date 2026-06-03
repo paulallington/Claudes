@@ -2805,12 +2805,16 @@ function activatePopoutProject(index) {
   var project = config.projects[index];
   if (!project) return;
   config.activeProjectIndex = index;
+  // Popouts are Primary-only; align in-memory config so getActiveState()/
+  // refitAll()/persistSessions resolve to the Primary state we reveal below.
+  // In-memory only — no saveConfig(), so we don't clobber the shared config.
+  project.activeWorkspaceId = null;
   activeProjectKey = project.path;
   if (activeProjectNameEl) activeProjectNameEl.textContent = project.name;
   if (window.electronAPI && window.electronAPI.gitBranch) {
     window.electronAPI.gitBranch(project.path).then(function (branch) {
       if (branch && activeProjectKey === project.path) {
-        activeProjectNameEl.textContent = project.name + '  ⎇ ' + branch.trim();
+        activeProjectNameEl.textContent = project.name + '  \u2387 ' + branch.trim();
       }
     }).catch(function () {});
   }
