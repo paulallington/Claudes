@@ -1418,6 +1418,7 @@ html[data-platform="darwin"] #toolbar {
 .minimize-dock {
   order: 9999;
   flex: 0 0 auto;
+  margin-top: auto;
   display: flex;
   flex-wrap: wrap;
   align-items: center;

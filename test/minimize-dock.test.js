@@ -38,3 +38,29 @@ test('resolveRestoreTarget: origin missing rowId returns new', () => {
   var result = resolveRestoreTarget(makeRows(), { index: 1 });
   assert.deepEqual(result, { mode: 'new' });
 });
+
+test('resolveRestoreTarget: row with originRowId matching origin.rowId returns existing with that row\'s current id', () => {
+  var rows = [
+    { id: 'r-new', originRowId: 'r1', columnIds: ['c1'] },
+    { id: 'r2', columnIds: ['c3'] }
+  ];
+  var result = resolveRestoreTarget(rows, { rowId: 'r1', index: 1 });
+  assert.deepEqual(result, { mode: 'existing', rowId: 'r-new', index: 1 });
+});
+
+test('resolveRestoreTarget: originRowId match clamps index to columnIds.length', () => {
+  var rows = [
+    { id: 'r-new', originRowId: 'r1', columnIds: ['c1'] }
+  ];
+  var result = resolveRestoreTarget(rows, { rowId: 'r1', index: 9 });
+  assert.deepEqual(result, { mode: 'existing', rowId: 'r-new', index: 1 });
+});
+
+test('resolveRestoreTarget: exact id match wins even when a later row has matching originRowId', () => {
+  var rows = [
+    { id: 'r1', columnIds: ['c1', 'c2'] },
+    { id: 'r-late', originRowId: 'r1', columnIds: ['c9'] }
+  ];
+  var result = resolveRestoreTarget(rows, { rowId: 'r1', index: 0 });
+  assert.deepEqual(result, { mode: 'existing', rowId: 'r1', index: 0 });
+});

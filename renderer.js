@@ -6050,7 +6050,7 @@ function restoreMinimizedColumn(id) {
   removeMinimizedChip(state, id);
 
   var t = window.MinimizeDock.resolveRestoreTarget(
-    state.rows.map(function (r) { return { id: r.id, columnIds: r.columnIds }; }),
+    state.rows.map(function (r) { return { id: r.id, originRowId: r.originRowId, columnIds: r.columnIds }; }),
     col.minimizeOrigin
   );
 
@@ -6060,6 +6060,10 @@ function restoreMinimizedColumn(id) {
   }
   if (!row) {
     row = addRowToProject(state);
+    // Tag the recreated row so siblings from the same original row rejoin it.
+    if (col.minimizeOrigin && col.minimizeOrigin.rowId != null) {
+      row.originRowId = col.minimizeOrigin.rowId;
+    }
   }
 
   // Re-attach the existing element by appending it to the target row, adding a
