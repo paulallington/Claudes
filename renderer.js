@@ -2848,6 +2848,31 @@ function restoreSessions(projectPath, workspaceId) {
     var spawnArgs = buildSpawnArgs();
     var state = projectStates.get(stateKey(projectPath, workspaceId));
 
+    // Build endpoint-aware resume args + row opts for a saved entry. Shared by
+    // the grid restore loop and the minimised restore loop so the endpoint /
+    // cloud-vs-local logic lives in one place. `baseRowOpts` already carries
+    // workspaceId + (resolved) title/cwd handling from the caller.
+    async function buildResumeForEntry(e, baseRowOpts) {
+      var resumeArgs;
+      var resumeRowOpts = baseRowOpts;
+      if (e.endpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
+        var envBlock = null;
+        try { envBlock = await window.electronAPI.endpointGetEnv(e.endpointId); } catch (_) { envBlock = null; }
+        if (envBlock) {
+          resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ true);
+          resumeArgs.push('--resume', e.sessionId);
+          resumeRowOpts = Object.assign({}, baseRowOpts, { endpointId: e.endpointId, env: envBlock });
+        } else {
+          resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
+          resumeArgs.push('--resume', e.sessionId);
+        }
+      } else {
+        resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
+        resumeArgs.push('--resume', e.sessionId);
+      }
+      return { resumeArgs: resumeArgs, resumeRowOpts: resumeRowOpts };
+    }
+
     // Pick the slice for the active workspace plus its row-height ratios. The
     // synthesized v2 shape carries ratios per workspace; older shapes are
     // promoted into the same `entries`/`rowHeightByIdx` pair below.
@@ -2865,6 +2890,7 @@ function restoreSessions(projectPath, workspaceId) {
     }
 
     var entries = [];
+    var minimizedEntries = [];
     var rowHeightByIdx = {};
 
     if (blob && typeof blob === 'object' && blob.version === 2 && Array.isArray(blob.rows) && workspaceId == null) {
@@ -2902,6 +2928,17 @@ function restoreSessions(projectPath, workspaceId) {
         var cwd = (typeof entry === 'object' && entry && typeof entry.cwd === 'string' && entry.cwd) ? entry.cwd : null;
         var cwdSource = (typeof entry === 'object' && entry && typeof entry.cwdSource === 'string' && entry.cwdSource) ? entry.cwdSource : null;
         var endpointId = (typeof entry === 'object' && entry && entry.endpointId) ? entry.endpointId : null;
+        // Minimised entries are not part of the grid — route them to a separate
+        // list so they don't create rows/affect rowHeightRatios. They restore
+        // live-but-minimised into the dock after the grid is built.
+        if (typeof entry === 'object' && entry && entry.minimized === true) {
+          var minEntry = { sessionId: sid, title: title };
+          if (cwd) minEntry.cwd = cwd;
+          if (cwdSource) minEntry.cwdSource = cwdSource;
+          if (endpointId) minEntry.endpointId = endpointId;
+          minimizedEntries.push(minEntry);
+          continue;
+        }
         var pushedEntry = { rowIdx: rowIdx, sessionId: sid, title: title, widthRatio: widthRatio };
         if (cwd) pushedEntry.cwd = cwd;
         if (cwdSource) pushedEntry.cwdSource = cwdSource;
@@ -2934,7 +2971,7 @@ function restoreSessions(projectPath, workspaceId) {
     if (state) state.restoringLayout = true;
 
     try {
-      if (entries.length === 0) {
+      if (entries.length === 0 && minimizedEntries.length === 0) {
         addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, { workspaceId: workspaceId });
         return;
       }
@@ -2970,24 +3007,8 @@ function restoreSessions(projectPath, workspaceId) {
         // treated as Cloud and explicitly do NOT inherit the dropdown's
         // currentEndpointEnv — otherwise a cloud column would silently get a
         // local server's URL injected.
-        var resumeArgs;
-        var resumeRowOpts = rowOpts;
-        if (e.endpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
-          var envBlock = null;
-          try { envBlock = await window.electronAPI.endpointGetEnv(e.endpointId); } catch (_) { envBlock = null; }
-          if (envBlock) {
-            resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ true);
-            resumeArgs.push('--resume', e.sessionId);
-            resumeRowOpts = Object.assign({}, rowOpts, { endpointId: e.endpointId, env: envBlock });
-          } else {
-            resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
-            resumeArgs.push('--resume', e.sessionId);
-          }
-        } else {
-          resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
-          resumeArgs.push('--resume', e.sessionId);
-        }
-        addColumn(resumeArgs, targetRow, resumeRowOpts);
+        var built = await buildResumeForEntry(e, rowOpts);
+        addColumn(built.resumeArgs, targetRow, built.resumeRowOpts);
       }
 
       for (var rr = state.rows.length - 1; rr >= 0; rr--) {
@@ -2995,6 +3016,32 @@ function restoreSessions(projectPath, workspaceId) {
       }
 
       applyLayoutRatios(state, entries, rowHeightByIdx, rowsByIdx);
+
+      // Restore minimised columns live-but-minimised. Spawn each as a normal
+      // resume (so its pty runs), then immediately minimise it into the dock.
+      // Cross-restart origin row is intentionally dropped (v1) — a later
+      // restore lands the chip in a new bottom row when re-restored.
+      for (var me = 0; me < minimizedEntries.length; me++) {
+        var ment = minimizedEntries[me];
+        var minRowOpts = { workspaceId: workspaceId };
+        if (ment.title) minRowOpts.title = ment.title;
+        if (ment.cwd) {
+          var mExists = await window.electronAPI.pathExists(ment.cwd);
+          if (mExists) {
+            minRowOpts.cwd = ment.cwd;
+            minRowOpts.cwdSource = ment.cwdSource || 'manual';
+          } else {
+            console.warn("Minimised column '" + (ment.title || ment.sessionId) + "' had cwd " + ment.cwd + " which no longer exists; restored at project root.");
+          }
+        }
+        var mBuilt = await buildResumeForEntry(ment, minRowOpts);
+        addColumn(mBuilt.resumeArgs, null, mBuilt.resumeRowOpts);
+        // addColumn assigns id = ++globalColumnId and registers it synchronously.
+        var newId = globalColumnId;
+        minimizeColumn(newId);
+        var mc = allColumns.get(newId);
+        if (mc) mc.minimizeOrigin = null;
+      }
     } finally {
       // Always clear the flag — even if a synchronous call above threw — so background
       // persists are not silently disabled for the rest of the session. persistSessions
@@ -5302,6 +5349,24 @@ function persistSessions(projectKey, workspaceId) {
       for (var re = 0; re < rowEntries.length; re++) sessionData.push(rowEntries[re]);
       rowHeightRatios.push(heightRatio);
       compactRowIdx++;
+    }
+
+    // Minimised columns are detached from the grid (the row-walk above skips
+    // them), so persist them separately. They carry no rowIdx/widthRatio and
+    // must not influence rowHeightRatios — they restore live-but-minimised.
+    for (var mi = 0; mi < state.minimized.length; mi++) {
+      var mid = state.minimized[mi];
+      var mcol = state.columns.get(mid);
+      if (!mcol || !mcol.sessionId) continue;
+      var ment = {
+        sessionId: mcol.sessionId,
+        title: mcol.customTitle || null,
+        minimized: true
+      };
+      if (mcol.cwd && mcol.cwd !== projectKey) ment.cwd = mcol.cwd;
+      if (mcol.cwd && mcol.cwd !== projectKey && mcol.cwdSource) ment.cwdSource = mcol.cwdSource;
+      if (mcol.endpointId) ment.endpointId = mcol.endpointId;
+      sessionData.push(ment);
     }
   }
 
