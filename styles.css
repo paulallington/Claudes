@@ -1436,11 +1436,18 @@ html[data-platform="darwin"] #toolbar {
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--border-subtle);
   color: var(--text-dim);
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
   transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+/* Light theme: the dark-mode translucent white wash is invisible on the light
+   --bg-toolbar, so use a perceptible dark wash instead. */
+[data-theme="light"] .minimize-chip {
+  background: rgba(0, 0, 0, 0.05);
 }
 
 .minimize-chip:hover {
@@ -1451,7 +1458,11 @@ html[data-platform="darwin"] #toolbar {
 .minimize-chip .chip-glyph {
   flex-shrink: 0;
   opacity: 0.7;
+  display: inline-flex;
+  align-items: center;
 }
+
+.minimize-chip .chip-glyph svg { display: block; }
 
 .minimize-chip .chip-label {
   max-width: 160px;
@@ -1474,6 +1485,14 @@ html[data-platform="darwin"] #toolbar {
   color: var(--text-bright);
 }
 
+/* Working: subtle green left-border accent, no loud animation (mirrors the
+   green used by .activity-dot.activity-working). */
+.minimize-chip.working {
+  border-left-color: var(--color-green);
+}
+
+/* Attention wins over working: orange accent + gentle pulse, mirroring
+   .activity-dot.activity-attention. */
 .minimize-chip.attention {
   border-color: #f5a623;
   color: var(--text-bright);

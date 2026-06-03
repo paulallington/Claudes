@@ -5911,10 +5911,13 @@ function renderMinimizedChip(state, id) {
   var chip = document.createElement('div');
   chip.className = 'minimize-chip';
   chip.dataset.id = String(id);
+  chip.title = 'Restore';
+  chip.setAttribute('aria-label', 'Restore column');
 
   var glyph = document.createElement('span');
   glyph.className = 'chip-glyph';
-  glyph.textContent = '▭';
+  // Match the header minimise button's bottom-line SVG for brand consistency.
+  glyph.innerHTML = '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="9" x2="10" y2="9"/></svg>';
 
   var label = document.createElement('span');
   label.className = 'chip-label';
@@ -5937,10 +5940,8 @@ function renderMinimizedChip(state, id) {
   });
 
   dock.appendChild(chip);
-  // Reflect any current attention state immediately.
-  if (col.activityState === 'waiting' || col.activityState === 'attention') {
-    chip.classList.add('attention');
-  }
+  // Reflect any current activity (attention/working) state immediately.
+  updateMinimizedChipActivity(id);
 }
 
 function removeMinimizedChip(state, id) {
@@ -5964,10 +5965,17 @@ function updateMinimizedChipActivity(id) {
   if (!dock) return;
   var chip = dock.querySelector('.minimize-chip[data-id="' + id + '"]');
   if (!chip) return;
-  if (col.activityState === 'waiting' || col.activityState === 'attention') {
+  // Attention (mirrors .activity-dot.activity-attention) and working are
+  // mutually exclusive — attention wins. 'waiting' is the normal idle-at-prompt
+  // state and must NOT pulse.
+  if (col.activityState === 'attention') {
     chip.classList.add('attention');
-  } else {
+    chip.classList.remove('working');
+  } else if (col.activityState === 'working') {
+    chip.classList.add('working');
     chip.classList.remove('attention');
+  } else {
+    chip.classList.remove('attention', 'working');
   }
 }
 
@@ -6028,6 +6036,7 @@ function minimizeColumn(id) {
   }
 
   refitAll();
+  persistSessions(col.projectKey, col.workspaceId);
 }
 
 function restoreMinimizedColumn(id) {
@@ -6064,6 +6073,11 @@ function restoreMinimizedColumn(id) {
     row.el.appendChild(handle);
     setupResizeHandle(handle);
   }
+  // Clear any stale maximize/hide classes + inline sizing left over from before
+  // minimise so the re-attached element flexes normally in its new row.
+  col.element.classList.remove('col-hidden', 'col-maximized');
+  col.element.style.flex = '';
+  col.element.style.width = '';
   row.el.appendChild(col.element);
   row.columnIds.push(id);
 
@@ -6080,6 +6094,7 @@ function restoreMinimizedColumn(id) {
 
   refitAll();
   setFocusedColumn(id);
+  persistSessions(col.projectKey, col.workspaceId);
 }
 
 function killMinimizedColumn(id) {
