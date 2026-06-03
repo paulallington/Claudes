@@ -1681,11 +1681,11 @@ function loadProjects() {
           if (transfer && transfer.length > 0) {
             applyTransferredColumns(idx, transfer);
           } else {
-            setActiveProject(idx, true);
+            activatePopoutProject(idx);
           }
         });
       } else {
-        setActiveProject(idx, true);
+        activatePopoutProject(idx);
       }
       return;
     }
@@ -1859,7 +1859,11 @@ function applyTransferredColumns(projIdx, transfer) {
   });
 
   activeProjectKey = prevActive;
-  setActiveProject(projIdx, false);
+  if (popoutMode) {
+    activatePopoutProject(projIdx);
+  } else {
+    setActiveProject(projIdx, false);
+  }
   persistSessions(project.path, null);
 }
 
@@ -2788,6 +2792,44 @@ function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
   if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
     window.__repositionStickyNotesForActiveProject();
   }
+}
+
+// Popout windows display exactly one project's Primary columns. The normal
+// activation path (setActiveProject -> setActiveWorkspace) early-returns in
+// popout mode — and also persists shared config + does sidebar/workspace
+// routing we don't want here — so popouts get a dedicated, Primary-only
+// activation that reveals the container and fits the terminals. Without this
+// the columns container stays display:none and the window renders blank even
+// though the columns/ptys are live.
+function activatePopoutProject(index) {
+  var project = config.projects[index];
+  if (!project) return;
+  config.activeProjectIndex = index;
+  activeProjectKey = project.path;
+  if (activeProjectNameEl) activeProjectNameEl.textContent = project.name;
+  if (window.electronAPI && window.electronAPI.gitBranch) {
+    window.electronAPI.gitBranch(project.path).then(function (branch) {
+      if (branch && activeProjectKey === project.path) {
+        activeProjectNameEl.textContent = project.name + '  ⎇ ' + branch.trim();
+      }
+    }).catch(function () {});
+  }
+  if (window.electronAPI && window.electronAPI.startFsWatch) {
+    window.electronAPI.startFsWatch(project.path).catch(function () {});
+  }
+  var emptyState = columnsContainer.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+  var state = getOrCreateProjectState(stateKey(project.path, null));
+  state.containerEl.style.display = 'flex';
+  refreshExplorer();
+  loadSpawnOptions();
+  if (state.columns.size === 0) {
+    restoreSessions(project.path, null);
+  } else {
+    if (state.focusedColumnId !== null) setFocusedColumn(state.focusedColumnId);
+    refitAll();
+  }
+  loadHeadlessRunsForActiveProject();
 }
 
 function restoreSessions(projectPath, workspaceId) {
