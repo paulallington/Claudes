@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self' blob:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self' blob:;">
   <title>Claudes</title>
   <script src="./platform-detect.js"></script>
   <link rel="stylesheet" href="./node_modules/@xterm/xterm/css/xterm.css">
@@ -200,6 +200,12 @@
           <button id="btn-session-search" class="toolbar-btn" title="Search session transcripts (Ctrl+Shift+F)" aria-label="Search session transcripts">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
           </button>
+          <button id="btn-voice-toggle" class="toolbar-btn" title="Voice output on/off" aria-label="Voice output on/off">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 2.5L4.5 5.5H2v5h2.5l4 3z"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5"/><path d="M13 3.5a6 6 0 0 1 0 9"/></svg>
+          </button>
+          <button id="btn-voice-stop" class="toolbar-btn" title="Stop talking" aria-label="Stop talking">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>
+          </button>
           <button id="btn-broadcast" class="toolbar-btn" title="Broadcast a prompt to multiple columns" aria-label="Broadcast">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h7"/><path d="M7.5 4.5L11 8l-3.5 3.5"/><path d="M13 4v8"/></svg>
           </button>
@@ -390,6 +396,7 @@
           <button class="settings-tab" data-settings-tab="automations" role="tab">Automations</button>
           <button class="settings-tab" data-settings-tab="sync" role="tab">Sync</button>
           <button class="settings-tab" data-settings-tab="terminal" role="tab">Terminal</button>
+          <button class="settings-tab" data-settings-tab="voice" role="tab">Voice</button>
           <button class="settings-tab" data-settings-tab="tools" role="tab">Tools</button>
           <button class="settings-tab" data-settings-tab="clawd" role="tab">Clawd</button>
         </div>
@@ -487,6 +494,124 @@
             <div class="settings-field">
               <button id="setting-term-reset" class="settings-browse-btn" style="padding:6px 14px;">Reset to defaults</button>
               <span class="settings-hint">Restores font / scrollback / cursor / colours to the app defaults.</span>
+            </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="voice">
+            <label class="settings-toggle">
+              <input type="checkbox" id="setting-voice-enabled">
+              <span>Enable voice output</span>
+            </label>
+            <div id="setting-voice-encryption-warning" class="endpoints-safestorage-warning hidden">Your OS keyring is unavailable — the API key will be stored in plain text.</div>
+            <div class="settings-field">
+              <label for="setting-voice-apikey">ElevenLabs API key</label>
+              <input type="password" id="setting-voice-apikey" class="settings-input" placeholder="Paste your ElevenLabs API key" spellcheck="false">
+              <span class="settings-hint">Stored encrypted in your OS keyring; used only to call ElevenLabs.</span>
+              <span id="setting-voice-key-status" class="settings-hint" aria-live="polite" aria-atomic="true"></span>
+            </div>
+            <div class="settings-field">
+              <button id="setting-voice-clearkey" class="settings-browse-btn">Clear saved key</button>
+              <span id="setting-voice-clearkey-status" class="settings-hint" aria-live="polite"></span>
+            </div>
+            <div class="settings-field">
+              <label for="setting-voice-mode">What to speak</label>
+              <select id="setting-voice-mode" class="settings-input">
+                <option value="active">Active column only</option>
+                <option value="all">All columns</option>
+                <option value="notify">Notifications only</option>
+                <option value="active+notify">Active column + alerts</option>
+              </select>
+              <span class="settings-hint">Only the focused column speaks in 'active' modes.</span>
+            </div>
+            <label class="settings-toggle"><input type="checkbox" id="setting-voice-focuscatchup"><span>Speak a column's summary when I focus it (if it wasn't already spoken)</span></label>
+            <div class="settings-field">
+              <label for="setting-voice-voiceid">Voice</label>
+              <div class="settings-path-row">
+                <select id="setting-voice-voiceid" class="settings-input"></select>
+                <button id="setting-voice-refresh" class="settings-browse-btn" title="Refresh">Refresh</button>
+              </div>
+              <span class="settings-hint">Click Refresh after entering your key to load your voices.</span>
+            </div>
+            <div class="settings-field">
+              <label for="setting-voice-model">Model</label>
+              <select id="setting-voice-model" class="settings-input">
+                <option value="eleven_flash_v2_5">Flash v2.5 — fastest, lowest cost</option>
+                <option value="eleven_turbo_v2_5">Turbo v2.5 — balanced</option>
+                <option value="eleven_multilingual_v2">Multilingual v2 — highest quality</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="setting-voice-readingmode">Reading mode</label>
+              <select id="setting-voice-readingmode" class="settings-input">
+                <option value="auto">Summary if I add one, else full reply</option>
+                <option value="full">Always read the full reply</option>
+                <option value="summary">Only read my summary line</option>
+              </select>
+              <span class="settings-hint">Auto: a 🔊 summary line in the reply is read alone; otherwise the whole reply is read.</span>
+            </div>
+            <div class="settings-field">
+              <label for="setting-voice-maxchars">Read length</label>
+              <input type="number" id="setting-voice-maxchars" class="settings-input" min="50" max="5000" step="50">
+              <span class="settings-hint">Max characters read from a full reply (ignored when your message has a 🔊 summary line).</span>
+            </div>
+            <div class="settings-field voice-tuning-field">
+              <label>Voice tuning</label>
+              <div class="voice-tuning-row">
+                <div class="voice-tuning-head">
+                  <label for="setting-voice-stability" class="voice-tuning-label">Stability (expressive ↔ stable)</label>
+                  <span id="setting-voice-stability-val" class="voice-tuning-val"></span>
+                </div>
+                <input type="range" id="setting-voice-stability" class="settings-input" min="0" max="1" step="0.05">
+              </div>
+              <div class="voice-tuning-row">
+                <div class="voice-tuning-head">
+                  <label for="setting-voice-style" class="voice-tuning-label">Style exaggeration</label>
+                  <span id="setting-voice-style-val" class="voice-tuning-val"></span>
+                </div>
+                <input type="range" id="setting-voice-style" class="settings-input" min="0" max="1" step="0.05">
+              </div>
+              <span class="settings-hint">Higher is more characterful but adds a little latency.</span>
+              <div class="voice-tuning-row">
+                <div class="voice-tuning-head">
+                  <label for="setting-voice-speed" class="voice-tuning-label">Speed</label>
+                  <span id="setting-voice-speed-val" class="voice-tuning-val"></span>
+                </div>
+                <input type="range" id="setting-voice-speed" class="settings-input" min="0.7" max="1.2" step="0.05">
+              </div>
+              <div class="voice-tuning-row">
+                <div class="voice-tuning-head">
+                  <label for="setting-voice-similarity" class="voice-tuning-label">Similarity</label>
+                  <span id="setting-voice-similarity-val" class="voice-tuning-val"></span>
+                </div>
+                <input type="range" id="setting-voice-similarity" class="settings-input" min="0" max="1" step="0.05">
+              </div>
+              <label class="settings-toggle"><input type="checkbox" id="setting-voice-speakerboost"><span>Speaker boost</span></label>
+              <div class="settings-path-row">
+                <button id="setting-voice-tuning-reset" class="settings-browse-btn">Reset tuning to defaults</button>
+              </div>
+            </div>
+            <div class="settings-field">
+              <button id="setting-voice-test" class="settings-browse-btn" style="padding:6px 14px;">Test voice</button>
+              <span id="setting-voice-test-status" class="settings-hint" aria-live="polite" aria-atomic="true"></span>
+            </div>
+            <div class="settings-field voice-personality-field">
+              <label for="setting-voice-personality-preset">Voice personality</label>
+              <select id="setting-voice-personality-preset" class="settings-input">
+                <option value="" data-persona="">Custom…</option>
+                <option value="warm" data-persona="warm, upbeat and encouraging">Warm &amp; enthusiastic</option>
+                <option value="dry" data-persona="dry, witty and a little sardonic">Dry &amp; witty</option>
+                <option value="concise" data-persona="concise, professional and matter-of-fact">Concise &amp; professional</option>
+                <option value="calm" data-persona="calm, measured and reassuring">Calm &amp; measured</option>
+                <option value="playful" data-persona="playful and lighthearted">Playful</option>
+              </select>
+              <textarea id="setting-voice-personality-text" class="settings-input" rows="3"></textarea>
+              <div class="settings-path-row voice-personality-actions">
+                <button id="setting-voice-personality-apply" class="settings-browse-btn">Apply personality</button>
+                <span id="setting-voice-personality-status" class="settings-hint" aria-live="polite"></span>
+              </div>
+              <span class="settings-hint">Writes a persona into your global CLAUDE.md so spoken summaries take on this character.</span>
+            </div>
+            <div class="settings-field">
+              <span class="settings-hint">Voice plays in whichever window owns the active column, including popped-out windows.</span>
             </div>
           </div>
           <div class="settings-pane" data-settings-pane="tools">
@@ -1344,6 +1469,10 @@
   <script src="./lib/clawd-widget.js"></script>
   <script src="./lib/permission-mode.js"></script>
   <script src="./lib/effort-relaunch.js"></script>
+  <script src="./lib/spawn-session.js"></script>
+  <script src="./lib/session-target.js"></script>
+  <script src="./lib/voice-text.js"></script>
+  <script src="./lib/terminal-reply.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

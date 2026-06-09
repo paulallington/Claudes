@@ -808,6 +808,9 @@ html[data-platform="darwin"] #toolbar {
   border-color: var(--border-dim);
 }
 
+/* Voice output toggle reads as "off" when global voice is disabled. */
+.toolbar-btn.voice-off { opacity: 0.45; }
+
 .toolbar-divider {
   width: 1px;
   height: 18px;
@@ -1512,6 +1515,36 @@ html[data-platform="darwin"] #toolbar {
 .column-header .col-restart:hover {
   background: var(--accent);
   color: var(--text-bright);
+}
+
+.column-header .col-play-full,
+.column-header .col-play-summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.column-header .col-play-summary {
+  font-size: 11px;
+}
+
+.column-header .col-play-full:hover,
+.column-header .col-play-summary:hover {
+  background: var(--accent);
+  color: var(--text-bright);
+}
+
+.column-header .col-play-full.voice-playing,
+.column-header .col-play-summary.voice-playing {
+  color: var(--accent);
+}
+
+.column-header .col-play-full.voice-paused,
+.column-header .col-play-summary.voice-paused {
+  opacity: 0.7;
 }
 
 .column-header .col-close {
@@ -6283,6 +6316,56 @@ html[data-platform="darwin"] #toolbar {
   font-size: 12px;
 }
 .settings-input:focus { outline: none; border-color: var(--accent); }
+textarea.settings-input { resize: vertical; font-family: inherit; }
+
+.voice-personality-field > .settings-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 8px;
+}
+.voice-personality-field > textarea.settings-input {
+  min-height: 60px;
+  resize: vertical;
+}
+.voice-personality-field .voice-personality-actions {
+  align-items: center;
+  margin-bottom: 4px;
+}
+.voice-personality-field .voice-personality-actions .settings-browse-btn {
+  flex: 0 0 auto;
+}
+.voice-personality-field .voice-personality-actions .settings-hint {
+  flex: 1;
+  margin-top: 0;
+}
+
+.voice-tuning-row {
+  display: block;
+  margin-bottom: 14px;
+}
+.voice-tuning-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.voice-tuning-row .voice-tuning-label {
+  margin-bottom: 0;
+  color: var(--text-secondary, inherit);
+}
+.voice-tuning-row .voice-tuning-val {
+  margin-top: 0;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.voice-tuning-row input[type="range"].settings-input {
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+}
 
 .settings-browse-btn {
   background: var(--bg-button);

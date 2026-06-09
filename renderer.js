@@ -115,6 +115,11 @@ var resizeSuppressed = new Set(); // columnIds temporarily suppressed after resi
 // Per-project state: projectKey -> { containerEl, rows: [], columns: Map, focusedColumnId }
 var projectStates = new Map();
 var activeProjectKey = null;
+// Global (per-window) tracker of the single column the user is actually on, or
+// null. Unlike each project's own state.focusedColumnId (which is never cleared
+// when focus moves to a DIFFERENT project), this names exactly one column window-
+// wide, so voice "active" modes only auto-speak the column in view.
+var lastFocusedColumnId = null;
 
 var config = { projects: [], activeProjectIndex: -1 };
 var projectDragFromIndex = -1; // For sidebar drag-to-reorder
@@ -1912,6 +1917,7 @@ function disposeColumnLocalOnly(id) {
       }
     }
     if (state.focusedColumnId === id) state.focusedColumnId = null;
+    if (lastFocusedColumnId === id) lastFocusedColumnId = null;
     if (window.Clawd && typeof window.Clawd.forgetColumn === 'function') {
       window.Clawd.forgetColumn(id);
     }
@@ -2400,6 +2406,7 @@ function buildProjectItem(project, index) {
     }
     addMenuItem(project.pinned ? 'Unpin' : 'Pin to top', 'toggle-pin');
     addMenuItem(isHidden ? 'Show Project' : 'Hide Project', 'toggle-hide');
+    addMenuItem(config.projects[projIndex].voiceMuted ? 'Unmute voice' : 'Mute voice', 'toggle-voice-mute');
     if (inGroup) {
       addMenuItem('Remove from "' + groupKey + '" group', 'ungroup');
     } else if (project.ungrouped && groupKey) {
@@ -2497,6 +2504,9 @@ function buildProjectItem(project, index) {
         chooseLayoutToRestore(config.projects[projIndex].path);
       } else if (action === 'kill-all') {
         killAllInstancesForProject(config.projects[projIndex].path);
+      } else if (action === 'toggle-voice-mute') {
+        config.projects[projIndex].voiceMuted = !config.projects[projIndex].voiceMuted;
+        saveConfig();
       }
       menu.style.display = 'none';
     };
@@ -3614,6 +3624,23 @@ function createColumnHeader(id, customTitle, opts) {
       showColumnSessionPicker(id, e.clientX, e.clientY);
     });
     actions.appendChild(sessionsBtn);
+
+    // Voice playback — speak the column's latest reply on demand. Full reads the
+    // whole reply; summary reads a condensed version. Both work regardless of the
+    // voice enable toggle (explicit user action), needing only a configured voice.
+    var playFullBtn = document.createElement('span');
+    playFullBtn.className = 'col-play-full';
+    playFullBtn.dataset.id = String(id);
+    playFullBtn.title = 'Play reply';
+    playFullBtn.textContent = '🔊';
+    actions.appendChild(playFullBtn);
+
+    var playSummaryBtn = document.createElement('span');
+    playSummaryBtn.className = 'col-play-summary';
+    playSummaryBtn.dataset.id = String(id);
+    playSummaryBtn.title = 'Play summary';
+    playSummaryBtn.textContent = '❝';
+    actions.appendChild(playSummaryBtn);
   }
 
   var minimizeBtn = document.createElement('span');
@@ -4216,6 +4243,20 @@ function addColumn(args, targetRow, opts) {
   var claudeArgs = args || [];
   var cmd = opts.cmd || null;
 
+  // Pin a deterministic session id for fresh local Claude spawns by injecting
+  // --session-id, so voice/attribution resolves to the exact JSONL the CLI
+  // creates (no ambiguity when a project has multiple sessions/columns). Skips
+  // arbitrary-cmd, endpoint/remote, resume/continue, and already-pinned spawns.
+  // Only the wire args (sendMsg.args) carry --session-id; the column's stored
+  // cmdArgs stays ORIGINAL so respawn rebuilds as original + --resume <id>
+  // (never --session-id <existing-id>, which the CLI rejects) and popout
+  // transfer / saved-layout never see an orphan --session-id flag.
+  var __origArgs = claudeArgs;
+  var __plan = window.SpawnSession.planFreshSessionId(
+    { args: claudeArgs, cmd: cmd, hasEndpoint: !!(opts.endpointId || opts.env) },
+    window.SpawnSession.randomUuidV4);
+  claudeArgs = __plan.args;
+
   var preSpawnSessionsPromise = (!cmd && window.electronAPI)
     ? window.electronAPI.getRecentSessions(cwd)
     : Promise.resolve([]);
@@ -4237,10 +4278,11 @@ function addColumn(args, targetRow, opts) {
     var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: claudeArgs };
     if (cmd) sendMsg.cmd = cmd;
     if (opts.env) sendMsg.env = opts.env;
+    vlog('spawn', { colId: id, cwd: cwd, cmd: cmd || 'claude', args: claudeArgs });
     wsSend(sendMsg);
 
     var isResume = claudeArgs.indexOf('--resume') !== -1;
-    if (!cmd && !isResume && window.electronAPI) {
+    if (!cmd && !isResume && !__plan.sessionId && window.electronAPI) {
       preSpawnSessionsPromise.then(function (preSessions) {
         var preIds = {};
         for (var i = 0; i < preSessions.length; i++) {
@@ -4333,6 +4375,12 @@ function addColumn(args, targetRow, opts) {
   header.querySelector('.col-restart').addEventListener('click', function () {
     restartColumn(id);
   });
+  header.querySelector('.col-play-full').addEventListener('click', function () {
+    playColumnReply(id, 'full');
+  });
+  header.querySelector('.col-play-summary').addEventListener('click', function () {
+    playColumnReply(id, 'summary');
+  });
   header.querySelector('.col-close').addEventListener('click', function () {
     removeColumn(id);
   });
@@ -4383,7 +4431,7 @@ function addColumn(args, targetRow, opts) {
     sessionMtime: 0,
     customTitle: opts.title || null,
     cmd: cmd,
-    cmdArgs: claudeArgs,
+    cmdArgs: __origArgs,     // ORIGINAL args (no injected --session-id; see __plan above)
     model: detectedModel,    // for ctx meter limit (200k vs 1M)
     effort: detectedEffort,  // current effort; source of truth for the header badge + respawns
     env: opts.env || null,
@@ -4455,6 +4503,18 @@ function addColumn(args, targetRow, opts) {
   // Start periodic session sync for Claude columns (not custom commands)
   if (!cmd) {
     startSessionSync(id, cwd);
+  }
+
+  // Fresh local spawn pinned to a deterministic --session-id: bind the column
+  // to it immediately (no detectSession race). The JSONL won't exist until the
+  // CLI writes it — the tail/title helpers retry/guard, so don't block on them.
+  // Mirrors detectSession's success follow-ups.
+  if (__plan.sessionId && !resumeSessionId && !cmd) {
+    colData.sessionId = __plan.sessionId;
+    colData.voiceTranscriptPath = null; colData.voicePreTurnUuid = undefined; colData.lastSpokenUuid = undefined; colData.lastSpokenText = undefined;
+    persistSessions(colData.projectKey, colData.workspaceId);
+    fetchAndSetSessionTitle(id, cwd, __plan.sessionId);
+    ensureClawdTail(id);
   }
 }
 
@@ -5123,11 +5183,13 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
       console.log('[detectSession] col=' + columnId + ' attempt=' + attempt + ' projectPath=' + projectPath + ' got ' + sessions.length + ' sessions, ' + Object.keys(preExistingIds).length + ' preIds, ' + Object.keys(claimed).length + ' claimed');
       for (var i = 0; i < sessions.length; i++) {
         var sid = sessions[i].sessionId;
-        if (!preExistingIds[sid] && !claimed[sid]) {
+        // Never bind to a 0-byte stray session — voice would read it as silence.
+        if (!preExistingIds[sid] && !claimed[sid] && window.SessionTarget.isUsableSessionTarget(sessions[i])) {
           var col = allColumns.get(columnId);
           if (col) {
             console.log('[detectSession] col=' + columnId + ' MATCHED sessionId=' + sid);
             col.sessionId = sid;
+            col.voiceTranscriptPath = null; col.voicePreTurnUuid = undefined; col.lastSpokenUuid = undefined; col.lastSpokenText = undefined;
             col.sessionMtime = sessions[i].modified || 0;
             persistSessions(col.projectKey, col.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
@@ -5154,13 +5216,14 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
   }, 2000);
 }
 
-// Periodically re-detect session ID for a column (handles /clear, /resume inside CLI).
-// Pinning rule: each column tracks sessionMtime of its current file. A newer session
-// only replaces it if THIS column has had user input recently — so an idle column
-// can't steal a sibling's freshly-created (post-/clear) session.
+// Periodically refresh a column's sessionMtime bookkeeping (used by other
+// heuristics). This poll is READ-ONLY for sessionId — deterministic spawn-time
+// --session-id pinning makes the spawn id authoritative, and hook-driven
+// /clear-follow (clawdResolveHookColumnEx) handles session forks. The poll must
+// never reassign col.sessionId, or an idle column can steal a sibling's live
+// session and voice speaks the wrong column's reply.
 var sessionSyncTimers = new Map();
 var SESSION_SYNC_INTERVAL = 5000;
-var SESSION_REASSIGN_INPUT_WINDOW_MS = 30000;
 
 function startSessionSync(columnId, projectPath) {
   if (!window.electronAPI) return;
@@ -5174,52 +5237,14 @@ function startSessionSync(columnId, projectPath) {
       var col2 = allColumns.get(columnId);
       if (!col2 || !sessions.length) return;
 
-      var claimed = getClaimedSessionIds(columnId);
-      var now = Date.now();
-      var hasRecentInput = col2.lastInputAt && (now - col2.lastInputAt < SESSION_REASSIGN_INPUT_WINDOW_MS);
-
       var currentEntry = null;
       for (var j = 0; j < sessions.length; j++) {
         if (sessions[j].sessionId === col2.sessionId) { currentEntry = sessions[j]; break; }
       }
 
+      // Read-only bookkeeping: keep sessionMtime fresh, never reassign sessionId.
       if (currentEntry) {
-        // Current session file still exists. Only consider a reassignment if
-        // THIS column has had recent input AND its CURRENT jsonl is dormant
-        // (Claude has moved on — e.g. via /clear which started a new file).
-        // Without the dormancy guard, two concurrently-active columns can race
-        // for a newer unclaimed sessionId and end up swapping titles.
-        var currentJsonlAgeMs = now - (currentEntry.modified || 0);
-        var currentIsDormant = currentJsonlAgeMs > 10000;
-        if (hasRecentInput && currentIsDormant) {
-          for (var i = 0; i < sessions.length; i++) {
-            var s = sessions[i];
-            if (s.sessionId === col2.sessionId) break; // nothing newer than current
-            if (!claimed[s.sessionId] && s.modified > (col2.sessionMtime || 0)) {
-              col2.sessionId = s.sessionId;
-              col2.sessionMtime = s.modified;
-              persistSessions(col2.projectKey, col2.workspaceId);
-              fetchAndSetSessionTitle(columnId, projectPath, s.sessionId);
-              ensureClawdTail(columnId);
-              return;
-            }
-          }
-        }
         col2.sessionMtime = currentEntry.modified;
-      } else if (hasRecentInput) {
-        // Pinned file is gone — fall back to the most recent unclaimed session,
-        // but only if this column was actively being typed into.
-        for (var k = 0; k < sessions.length; k++) {
-          var sid = sessions[k].sessionId;
-          if (!claimed[sid]) {
-            col2.sessionId = sid;
-            col2.sessionMtime = sessions[k].modified;
-            persistSessions(col2.projectKey, col2.workspaceId);
-            fetchAndSetSessionTitle(columnId, projectPath, sid);
-            ensureClawdTail(columnId);
-            return;
-          }
-        }
       }
     });
   }, SESSION_SYNC_INTERVAL);
@@ -5470,6 +5495,7 @@ function removeColumn(id) {
         setFocusedColumn(remaining[remaining.length - 1]);
       } else {
         state.focusedColumnId = null;
+        if (lastFocusedColumnId === id) lastFocusedColumnId = null;
       }
     }
   }
@@ -5559,6 +5585,7 @@ function migrateColumnToWorkspace(colId, targetWsId) {
   });
   removeRowIfEmpty(srcState, srcRow);
   if (srcState.focusedColumnId === colId) srcState.focusedColumnId = null;
+  if (lastFocusedColumnId === colId) lastFocusedColumnId = null;
 
   var targetRow = (targetState.rows.length > 0)
     ? targetState.rows[targetState.rows.length - 1]
@@ -5697,6 +5724,7 @@ function setFocusedColumn(id) {
     if (prev) prev.element.classList.remove('focused');
   }
   state.focusedColumnId = id;
+  lastFocusedColumnId = id;
   col.element.classList.add('focused');
   if (col.terminal) col.terminal.focus();
   if (window.Clawd && typeof window.Clawd.setFocusedColumn === 'function') {
@@ -5744,6 +5772,16 @@ function setFocusedColumn(id) {
       updateGitTargetIndicator();
     }
   });
+
+  // Focus catch-up: if this column's latest reply was never spoken (e.g. it
+  // finished while another column was focused), speak its summary once on focus.
+  try {
+    var fcol = allColumns.get(id);
+    if (fcol && fcol.voiceUnspoken && voiceSettings && voiceSettings.enabled && voiceSettings.focusCatchUp !== false && !isProjectVoiceMuted(fcol.projectKey)) {
+      fcol.voiceUnspoken = false;
+      playColumnReply(id, voiceSettings.readingMode || 'auto');
+    }
+  } catch (e) {}
 }
 
 function navigateColumn(direction) {
@@ -6028,6 +6066,7 @@ function minimizeColumn(id) {
   // Move focus off the minimised column to another live (non-minimised) one.
   if (state.focusedColumnId === id) {
     state.focusedColumnId = null;
+    if (lastFocusedColumnId === id) lastFocusedColumnId = null;
     var nextFocus = null;
     state.columns.forEach(function (c, cid) {
       if (cid !== id && !c.minimized) nextFocus = cid;
@@ -9283,7 +9322,11 @@ function clearClawdPostTool(colId) {
 // We deliberately do NOT mutate col.sessionId here. Doing so caused an
 // earlier bug where adopting a subagent's sessionId orphaned every
 // subsequent parent-session hook.
-function clawdResolveHookColumn(event) {
+// Resolve a hook event to a column AND report how it matched: 'sid' (exact
+// session_id), 'cwd' (unambiguous single column for the project), or null.
+// The `via` is what lets onHookEvent self-heal a stale col.sessionId — a cwd
+// match means the event's session_id is the column's TRUE current session.
+function clawdResolveHookColumnEx(event) {
   var sid = event && event.session_id;
   var cwd = event && event.cwd;
   var match = null;
@@ -9291,26 +9334,43 @@ function clawdResolveHookColumn(event) {
     allColumns.forEach(function (col, id) {
       if (col.sessionId === sid) match = id;
     });
-    if (match != null) return match;
+    if (match != null) return { colId: match, via: 'sid' };
   }
   if (cwd) {
     var found = null;
     var ambiguous = false;
+    var cwdColumns = [];
     allColumns.forEach(function (col, id) {
       if (col.projectKey !== cwd) return;
+      cwdColumns.push({ colId: id, lastInputAt: col.lastInputAt });
       if (found != null) ambiguous = true;
       else found = id;
     });
-    if (!ambiguous && found != null) return found;
+    if (!ambiguous && found != null) return { colId: found, via: 'cwd' };
+    // Ambiguous cwd: multiple columns share this project. A /clear fork's first
+    // UserPromptSubmit carries the new session_id; disambiguate to the column
+    // that most recently received typed input (never guess on a tie).
+    if (ambiguous) {
+      var evtName = (event && (event.hook_event_name || event.event)) || '';
+      if (evtName === 'UserPromptSubmit') {
+        var picked = window.SessionTarget.resolveInputColumn(cwdColumns, Date.now(), { gapMs: 1500, windowMs: 5000 });
+        if (picked != null) return { colId: picked, via: 'input' };
+      }
+    }
   }
-  return null;
+  return { colId: null, via: null };
+}
+
+function clawdResolveHookColumn(event) {
+  return clawdResolveHookColumnEx(event).colId;
 }
 
 if (window.electronAPI && window.electronAPI.onHookEvent) {
   window.electronAPI.onHookEvent(function (event) {
     var sid = event && event.session_id;
     var evtName = (event && (event.hook_event_name || event.event)) || '';
-    var colId = clawdResolveHookColumn(event);
+    var __resolved = clawdResolveHookColumnEx(event);
+    var colId = __resolved.colId;
     if (colId == null) {
       // Truly orphan — different project, no claiming column. Log it so it
       // shows up in the debug overlay but don't act on it.
@@ -9329,6 +9389,34 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
     // tail-stop path; subagent hooks (different sid, same cwd) skip it
     // because the primary tail is still useful for the parent.
     var col = allColumns.get(colId);
+    var via = __resolved.via;
+    // Self-heal a /clear fork: a UserPromptSubmit that resolved by unambiguous
+    // cwd OR by dominant-recent-input (ambiguous cwd) carries the column's TRUE
+    // new session_id while col.sessionId is stuck on the pre-/clear id. Rebind
+    // it so later hooks and voice extraction line up. The claimed-guard blocks
+    // ever stealing a sibling's live session, and the sid/ambiguous/null cases
+    // never reach here.
+    if (col && window.SessionTarget.shouldBindHookSession({
+      via: via,
+      isUserPromptSubmit: evtName === 'UserPromptSubmit',
+      eventSessionId: sid,
+      colSessionId: col.sessionId,
+      claimedBySibling: !!getClaimedSessionIds(colId)[sid],
+    })) {
+      col.sessionId = sid;
+      col.sessionMtime = 0;
+      if (typeof event.transcript_path === 'string' && event.transcript_path) {
+        col.voiceTranscriptPath = event.transcript_path;
+      } else {
+        col.voiceTranscriptPath = null;
+      }
+      col.voicePreTurnUuid = undefined;
+      col.lastSpokenUuid = undefined;
+      col.lastSpokenText = undefined;
+      persistSessions(col.projectKey, col.workspaceId);
+      ensureClawdTail(colId);
+      fetchAndSetSessionTitle(colId, col.projectKey, sid);
+    }
     var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
     if (sidMatchesColumn && sid && !clawdHookSeenBySession[sid]) {
       clawdHookSeenBySession[sid] = true;
@@ -9386,6 +9474,554 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
     if (animId && window.Clawd && window.Clawd.setColumnAnimation) {
       window.Clawd.setColumnAnimation(colId, animId);
     }
+  });
+}
+
+// --- Voice / TTS playback ---
+//
+// Speaks finished replies aloud for this window's columns. Subscribes to the
+// `voice:hookEvent` broadcast (fired to every window, incl. popouts) so a
+// popped-out column drives its own playback. Eligibility honours the cached
+// public voice settings (`mode`/`enabled`); the API key never reaches here.
+//
+// Globals exposed for the settings panel:
+//   window.__refreshVoiceSettings() — reload the cached settings (call after save)
+//   window.__playVoiceTest(result)  — play a {ok, mime, data} synth result (test button)
+var VOICE_DEBUG = true; // dev: logs the voice pipeline to the DevTools console; set false to silence
+function vlog() { if (VOICE_DEBUG) { try { console.log.apply(console, ['[voice]'].concat([].slice.call(arguments))); } catch (e) {} } }
+var voiceSettings = null;
+var currentVoiceAudio = null;
+// Bumped to supersede an in-flight streaming auto-play (a newer Stop, or a
+// manual button press). Each streamSpeakColumn run captures its own generation
+// and bails the moment this no longer matches.
+var voiceStreamGen = 0;
+// Auto-play single-slot queue: a new eligible reply that arrives while an auto
+// stream is already speaking is queued (latest-wins) instead of interrupting it.
+var voiceAutoBusy = false;     // true ONLY while an auto stream is in progress (single writer: runAutoStream)
+var voiceAutoQueue = null;     // latest queued auto request { colId, readingMode, baselineUuid }
+
+// Wraps streamSpeakColumn so auto-play never interrupts an in-progress utterance.
+// Sets voiceAutoBusy synchronously, and on completion drains the latest queued
+// reply (if any). Not awaited by callers — the busy flag is the guard.
+async function runAutoStream(req) {
+  var col = allColumns.get(req.colId);
+  if (!col) return;
+  vlog('runAutoStream start', { colId: req.colId, busy: voiceAutoBusy, fromTerminal: !!req.spokenText });
+  voiceAutoBusy = true;
+  try {
+    if (req.spokenText) {
+      // Real-time path: speak the mode-applied, already-cleaned reply text
+      // extracted from the screen (the 🔊 summary logic was applied upstream).
+      await streamSpeakText(col, req.spokenText, req.colId);
+    } else {
+      await streamSpeakColumn(col, req.readingMode, req.baselineUuid, req.colId);
+    }
+  } finally {
+    voiceAutoBusy = false;
+    vlog('runAutoStream end; drain=' + !!voiceAutoQueue);
+    var q = voiceAutoQueue;
+    voiceAutoQueue = null;
+    if (q) Promise.resolve(runAutoStream(q)).catch(function () {});   // drain the latest queued reply once the current finishes
+  }
+}
+
+window.__refreshVoiceSettings = async function () {
+  if (window.electronAPI && window.electronAPI.getVoiceSettings) {
+    voiceSettings = await window.electronAPI.getVoiceSettings();
+  }
+  return voiceSettings;
+};
+
+// Read a column's rendered terminal buffer as an array of right-trimmed line
+// strings (what's actually on screen). Used for real-time voice: an interactive
+// Claude Code column often hasn't flushed its reply to the transcript JSONL yet,
+// but the reply IS rendered here. Guards a missing terminal -> [].
+function readColumnTerminalLines(col) {
+  try {
+    var term = col && col.terminal;
+    var buf = term && term.buffer && term.buffer.active;
+    if (!buf) return [];
+    var out = [];
+    // The reply is always at the bottom; cap to the last ~2000 lines so a huge
+    // scrollback doesn't blow up the (now bracket-capped) text cleaner downstream.
+    var start = Math.max(0, buf.length - 2000);
+    for (var i = start; i < buf.length; i++) {
+      var ln = buf.getLine(i);
+      out.push(ln ? ln.translateToString(true) : '');
+    }
+    return out;
+  } catch (e) { return []; }
+}
+
+// Clean raw terminal-extracted prose into a speakable string, applying the
+// Reading mode the same way the transcript path does (extractSpeakableText):
+//   - 'full': speak the BODY only (🔊 summary line stripped), truncated.
+//   - 'summary': speak the 🔊 line if present, else just the FIRST sentence of
+//     the body (a concise fallback — the explicit Summary button should never
+//     read the whole reply).
+//   - 'auto' (default): if a 🔊 line is present speak ONLY it, else the body.
+// A short summary line is never truncated; only a full body keeps maxChars.
+// Returns '' when nothing speakable remains (incl. non-content turns).
+function cleanTerminalSpoken(rawText, readingMode) {
+  if (!rawText || !window.VoiceText || !window.TerminalReply) return '';
+  var maxChars = (voiceSettings && voiceSettings.maxChars) || 600;
+  var parts = window.TerminalReply.splitReplySummary(rawText || '');
+  var pick;
+  if (readingMode === 'full') {
+    pick = parts.body;
+  } else if (readingMode === 'summary') {
+    // Explicit Summary: the 🔊 line, else just the first sentence of the body.
+    pick = parts.hasSummary ? parts.summary : window.TerminalReply.firstSentence(parts.body);
+  } else {
+    // auto: 🔊 line if present, else the whole body.
+    pick = parts.hasSummary ? parts.summary : parts.body;
+  }
+  // Only a full body keeps maxChars; the 🔊 line / single sentence / auto body
+  // stay whole, matching the original terminal-path behavior.
+  var cleaned = window.VoiceText.cleanSpokenText(pick, readingMode === 'full' ? maxChars : 100000);
+  // Drop non-content turns ("No response requested." etc.) the same way the
+  // transcript path does.
+  var n = String(cleaned || '').trim().toLowerCase().replace(/^["'\s]+|["'.!…\s]+$/g, '');
+  if (n === 'no response requested' || n === 'no response needed') return '';
+  return cleaned || '';
+}
+
+// Speak already-cleaned, mode-applied terminal text, mirroring streamSpeakColumn's
+// prefetch-one-ahead synth+play loop but sourcing the text from the screen
+// instead of the transcript. `voiceStreamGen` lets a newer Stop or a manual
+// press supersede us. Expects `spokenText` to be FINAL text (the caller has
+// already run cleanTerminalSpoken with the reading mode) — this only splits it
+// into sentences so the 🔊 summary line is never re-included here.
+async function streamSpeakText(col, spokenText, colId) {
+  if (!voiceSettings || !voiceSettings.voiceId) return;
+  var spoken = (spokenText || '').trim();
+  if (!spoken) return;
+  var sentences = (window.VoiceText && window.VoiceText.splitSentences(spoken)) || [];
+  if (!sentences.length) return;
+  col.voiceUnspoken = false;
+  var myGen = ++voiceStreamGen;                 // supersede any prior stream
+  var synthOne = function (t) { return window.electronAPI.synthesizeVoice({ text: t, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, auto: true }); };
+  var nextP = synthOne(sentences[0]);             // prefetch first
+  for (var i = 0; i < sentences.length; i++) {
+    if (myGen !== voiceStreamGen) return;         // superseded -> stop
+    var result;
+    try { result = await nextP; } catch (e) { return; }
+    vlog('synth chunk ' + i, { ok: result && result.ok, error: result && result.error, status: result && result.status, hasB64: !!(result && result.base64) });
+    if (i + 1 < sentences.length) nextP = synthOne(sentences[i + 1]); // prefetch next while this plays
+    if (myGen !== voiceStreamGen) return;
+    if (result && result.ok && result.base64) {
+      await new Promise(function (resolve) {
+        var settled = false;
+        var safetyTimer = null;
+        var fin = function () { if (!settled) { settled = true; if (safetyTimer) clearTimeout(safetyTimer); resolve(); } };
+        playVoiceAudio(result, fin, fin, null, colId);
+        safetyTimer = setTimeout(fin, 120000); // safety: never let a missed end-event hang the stream / busy flag
+      });
+    }
+  }
+}
+
+// Streaming auto-play: speak a finished reply sentence-by-sentence so audio
+// starts almost immediately instead of waiting for the whole reply to synth.
+// Extracts ordered sentence chunks (waiting only for a reply newer than the
+// baseline), then synthesizes one chunk ahead while the current one plays.
+// `voiceStreamGen` lets a newer Stop or a manual button press supersede us.
+async function streamSpeakColumn(col, readingMode, baselineUuid, colId) {
+  if (!voiceSettings || !voiceSettings.voiceId) return;
+  var sres = await window.electronAPI.extractColumnSentences({
+    transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId,
+    baselineUuid: baselineUuid || '', readingMode: readingMode, maxChars: voiceSettings.maxChars
+  });
+  vlog('extractSentences', { ok: sres && sres.ok, n: sres && sres.sentences && sres.sentences.length, error: sres && sres.error, uuid: sres && sres.uuid, diag: sres && sres.diag });
+  if (!sres || !sres.ok || !sres.sentences || !sres.sentences.length) return;
+  if (sres.uuid) col.lastSpokenUuid = sres.uuid;
+  col.voiceUnspoken = false;
+  var myGen = ++voiceStreamGen;                 // supersede any prior stream
+  var synthOne = function (t) { return window.electronAPI.synthesizeVoice({ text: t, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, auto: true }); };
+  var nextP = synthOne(sres.sentences[0]);        // prefetch first
+  for (var i = 0; i < sres.sentences.length; i++) {
+    if (myGen !== voiceStreamGen) return;         // superseded -> stop
+    var result;
+    try { result = await nextP; } catch (e) { return; }
+    vlog('synth chunk ' + i, { ok: result && result.ok, error: result && result.error, status: result && result.status, hasB64: !!(result && result.base64) });
+    if (i + 1 < sres.sentences.length) nextP = synthOne(sres.sentences[i + 1]); // prefetch next while this plays
+    if (myGen !== voiceStreamGen) return;
+    if (result && result.ok && result.base64) {
+      await new Promise(function (resolve) {
+        var settled = false;
+        var safetyTimer = null;
+        var fin = function () { if (!settled) { settled = true; if (safetyTimer) clearTimeout(safetyTimer); resolve(); } };
+        playVoiceAudio(result, fin, fin, null, colId);
+        safetyTimer = setTimeout(fin, 120000); // safety: never let a missed end-event hang the stream / busy flag
+      });
+    }
+  }
+}
+
+// Manual per-column playback (header speaker buttons + focus catch-up). Reads
+// the column's latest reply — `full` reads it verbatim, `summary` condenses it.
+// Allowed regardless of the voice enable toggle (explicit user action); it only
+// needs a configured voiceId.
+async function playColumnReply(colId, readingMode) {
+  var srcKey = colId + ':' + readingMode;
+  // If audio is already playing for THIS column, treat the press as a control,
+  // never a re-synth:
+  //   - exact same source (same button/mode): pause/resume toggle.
+  //   - different source for the same column (auto-play, or the OTHER mode
+  //     button): stop it outright (no restart, no API call).
+  if (currentVoiceAudio && currentVoiceAudio.__colId === colId) {
+    if (currentVoiceAudio.__src === srcKey) {
+      if (currentVoiceAudio.paused) { currentVoiceAudio.play().catch(function () {}); }
+      else { currentVoiceAudio.pause(); }
+    } else {
+      stopAllVoice();
+    }
+    refreshVoiceButtonStates();
+    return;
+  }
+  var col = allColumns.get(colId);
+  vlog('manual play', { colId: colId, readingMode: readingMode, haveSettings: !!voiceSettings, voiceId: voiceSettings && voiceSettings.voiceId, sessionId: col && col.sessionId, projectKey: col && col.projectKey, cwd: col && col.cwd, transcriptPath: col && col.voiceTranscriptPath });
+  if (!col) return;
+  col.voiceCache = col.voiceCache || {};
+  voiceStreamGen++; // a manual press supersedes any in-flight auto-play stream
+  voiceAutoQueue = null; // a manual/catch-up play cancels any queued auto reply
+  if (!voiceSettings && window.__refreshVoiceSettings) await window.__refreshVoiceSettings();
+  if (!voiceSettings || !voiceSettings.voiceId) return; // no voice configured
+  // Try the live screen first so Play works on fresh columns whose reply hasn't
+  // been flushed to the transcript yet. All modes are handled here now — the 🔊
+  // summary line IS present in the rendered prose, so cleanTerminalSpoken can
+  // extract it for 'summary'/'auto'; the transcript fallback below covers the
+  // case where the terminal yields nothing speakable.
+  {
+    var termLines = readColumnTerminalLines(col);
+    var rawReply = (window.TerminalReply && window.TerminalReply.extractLastTerminalReply(termLines)) || '';
+    var spokenTerm = cleanTerminalSpoken(rawReply, readingMode);
+    vlog('manual terminal reply', { colId: colId, len: spokenTerm.length, head: spokenTerm.slice(0, 60) });
+    if (spokenTerm) {
+      // Cache hit: same column + mode + identical text -> replay without a new
+      // ElevenLabs call. A new reply changes the text, so the comparison misses
+      // and we re-synth naturally.
+      var cachedT = col.voiceCache[srcKey];
+      if (cachedT && cachedT.text === spokenTerm && cachedT.result) {
+        vlog('manual cache hit (terminal)', { colId: colId, srcKey: srcKey });
+        col.voiceUnspoken = false; col.lastSpokenText = spokenTerm;
+        playVoiceAudio(cachedT.result, undefined, undefined, srcKey, colId); refreshVoiceButtonStates();
+        return;
+      }
+      try {
+        var tresult = await window.electronAPI.synthesizeVoice({ text: spokenTerm, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, auto: true });
+        vlog('manual synth (terminal)', { ok: tresult && tresult.ok, error: tresult && tresult.error, status: tresult && tresult.status, hasB64: !!(tresult && tresult.base64) });
+        if (tresult && tresult.ok) {
+          col.voiceCache[srcKey] = { text: spokenTerm, result: tresult };
+          col.voiceUnspoken = false; col.lastSpokenText = spokenTerm; playVoiceAudio(tresult, undefined, undefined, srcKey, colId); refreshVoiceButtonStates();
+          // Advance the transcript baseline too, so a later auto Stop that falls
+          // back to the transcript path doesn't re-speak this just-played reply.
+          if (window.electronAPI.peekColumn) {
+            window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId })
+              .then(function (r) { if (r && r.ok && r.uuid) col.lastSpokenUuid = r.uuid; }).catch(function () {});
+          }
+        }
+        return;
+      } catch (e) {}
+    }
+  }
+  // Transcript fallback: the spoken text is computed in main from the JSONL, so
+  // the renderer can't pre-compare it — and keying on col.lastSpokenUuid is
+  // unsafe (it lags: only advances after a synth/auto-play, not when a reply
+  // arrives unspoken), which could replay a stale reply's audio. So this path is
+  // intentionally NOT cached — it synthesizes and plays every time.
+  try {
+    var result = await window.electronAPI.synthesizeVoiceColumn({
+      projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId, transcriptPath: col.voiceTranscriptPath || '',
+      readingMode: readingMode, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, maxChars: voiceSettings.maxChars
+    });
+    vlog('manual synth', { ok: result && result.ok, error: result && result.error, status: result && result.status, hasB64: !!(result && result.base64), diag: result && result.diag });
+    if (result && result.ok) { col.voiceUnspoken = false; playVoiceAudio(result, undefined, undefined, srcKey, colId); refreshVoiceButtonStates(); if (result.uuid) col.lastSpokenUuid = result.uuid; }
+  } catch (e) {}
+}
+
+function playVoiceAudio(result, onEnded, onError, srcKey, colId) {
+  vlog('playVoiceAudio', { ok: result && result.ok, hasB64: !!(result && result.base64), srcKey: srcKey, colId: colId });
+  if (!result || !result.ok || !result.base64) {
+    vlog('playVoiceAudio SKIP (no audio/base64)');
+    if (typeof onEnded === 'function') { try { onEnded(); } catch (e) {} }
+    return;
+  }
+  // Single-flight per window: never overlap two utterances.
+  if (currentVoiceAudio) {
+    try { currentVoiceAudio.pause(); } catch (e) {}
+    var prevOnEnded = currentVoiceAudio.__onEnded;
+    if (prevOnEnded) { try { currentVoiceAudio.removeEventListener('ended', prevOnEnded); } catch (e) {} }
+    currentVoiceAudio = null;
+    if (typeof prevOnEnded === 'function') { try { prevOnEnded(); } catch (e) {} } // settle any awaiting stream so it can cancel cleanly
+  }
+  // Audio bytes arrive as base64 (binary over contextBridge is unreliable); play
+  // via a data: URL so Chromium decodes the MP3 directly.
+  var audio = new Audio('data:' + (result.mime || 'audio/mpeg') + ';base64,' + result.base64);
+  // Source key (colId + ':' + readingMode) lets the header buttons toggle
+  // play/pause/resume against the element. Non-button callers leave it null.
+  audio.__src = srcKey || null;
+  // Owning column id — set even for auto-play (which has no srcKey) so a manual
+  // button press on the speaking column can recognise it as "this column" and
+  // stop it rather than re-synthesizing. Falls back to the srcKey's colId.
+  audio.__colId = colId || (srcKey ? String(srcKey).split(':')[0] : null);
+  currentVoiceAudio = audio;
+  var endedHandler = function () {
+    if (currentVoiceAudio === audio) currentVoiceAudio = null;
+    refreshVoiceButtonStates();
+    if (typeof onEnded === 'function') { try { onEnded(); } catch (e) {} }
+  };
+  audio.__onEnded = endedHandler;
+  audio.addEventListener('ended', endedHandler);
+  audio.addEventListener('play', function () { refreshVoiceButtonStates(); });
+  audio.addEventListener('pause', function () { refreshVoiceButtonStates(); });
+  audio.addEventListener('error', function () {
+    if (typeof onError === 'function') { try { onError(audio.error || new Error('audio error')); } catch (e) {} }
+  });
+  vlog('audio.play() ' + (result.mime || 'audio/mpeg') + ' b64len=' + (result.base64 ? result.base64.length : 0));
+  audio.play().catch(function (err) {
+    vlog('audio.play() rejected', String(err));
+    if (typeof onError === 'function') { try { onError(err); } catch (e) {} }
+  });
+  refreshVoiceButtonStates();
+}
+
+// Reflect the current playback element's state on every column voice button.
+// A button's source is `<colId>:full` / `<colId>:summary` (derived from its
+// dataset.id). The button driving the current, non-paused element shows as
+// "playing"; the same source while paused shows "paused"; all others reset.
+function refreshVoiceButtonStates() {
+  var src = currentVoiceAudio ? currentVoiceAudio.__src : null;
+  var playingColId = currentVoiceAudio ? currentVoiceAudio.__colId : null;
+  var paused = currentVoiceAudio ? currentVoiceAudio.paused : true;
+  var btns = document.querySelectorAll('.col-play-full,.col-play-summary');
+  for (var i = 0; i < btns.length; i++) {
+    var btn = btns[i];
+    var isSummary = btn.classList.contains('col-play-summary');
+    var btnColId = btn.dataset.id || '';
+    var btnSrc = btnColId + ':' + (isSummary ? 'summary' : 'full');
+    var defaultTitle = isSummary ? 'Play summary' : 'Play reply';
+    if (src && btnSrc === src && paused) {
+      // Manual element for THIS exact button, paused -> resume affordance.
+      btn.classList.remove('voice-playing');
+      btn.classList.add('voice-paused');
+      btn.title = 'Resume';
+    } else if (playingColId != null && String(btnColId) === String(playingColId) && !paused) {
+      // Anything playing for this column (manual OR auto-play, where __src may not
+      // be a colId:mode key) -> the column's buttons act as Stop.
+      btn.classList.add('voice-playing');
+      btn.classList.remove('voice-paused');
+      btn.title = 'Stop';
+    } else {
+      btn.classList.remove('voice-playing');
+      btn.classList.remove('voice-paused');
+      btn.title = defaultTitle;
+    }
+  }
+}
+window.__playVoiceTest = playVoiceAudio;
+
+// Instantly silence current + queued speech without touching the `enabled`
+// setting. Bumps the stream generation (cancels any in-flight auto-play),
+// pauses the current element and settles its awaiting promise so the stream
+// loop unwinds cleanly.
+function stopAllVoice() {
+  voiceStreamGen++;
+  voiceAutoQueue = null;   // explicit stop clears any queued auto reply so the in-flight stream's finally drains nothing
+  if (currentVoiceAudio) {
+    try { currentVoiceAudio.pause(); } catch (e) {}
+    var pe = currentVoiceAudio.__onEnded;
+    if (pe) { try { currentVoiceAudio.removeEventListener('ended', pe); } catch (e) {} }
+    currentVoiceAudio = null;
+    if (typeof pe === 'function') { try { pe(); } catch (e) {} }
+  }
+}
+
+// Reflect the cached global `enabled` flag on the toolbar toggle button.
+function updateVoiceToggleUI() {
+  var btn = document.getElementById('btn-voice-toggle');
+  if (!btn) return;
+  var on = !!(voiceSettings && voiceSettings.enabled);
+  if (on) {
+    btn.classList.remove('voice-off');
+    btn.title = 'Voice output: on — click to disable';
+  } else {
+    btn.classList.add('voice-off');
+    btn.title = 'Voice output: off — click to enable';
+  }
+}
+
+// True when the project owning `projectKey` has its voice muted. Only gates
+// auto-play + focus catch-up — manual per-column buttons ignore this.
+function isProjectVoiceMuted(projectKey) {
+  try {
+    var p = config && config.projects && config.projects.find(function (x) { return x.path === projectKey; });
+    return !!(p && p.voiceMuted);
+  } catch (e) { return false; }
+}
+
+// When the window regains focus, replay the currently-focused column's unspoken
+// reply — same catch-up the column-click path does. Defined before the focus
+// listener references it (function declaration is hoisted regardless).
+function onVoiceWindowRefocus() {
+  try {
+    if (!voiceSettings || !voiceSettings.enabled) return;
+    // find the visible focused column (the one with the 'focused' DOM class)
+    var foundId = null;
+    allColumns.forEach(function (col, id) {
+      if (col && col.element && col.element.classList && col.element.classList.contains('focused')) foundId = id;
+    });
+    if (foundId == null) return;
+    var fcol = allColumns.get(foundId);
+    if (fcol && fcol.voiceUnspoken && voiceSettings.focusCatchUp !== false && !isProjectVoiceMuted(fcol.projectKey)) {
+      fcol.voiceUnspoken = false;
+      playColumnReply(foundId, voiceSettings.readingMode || 'auto');
+    }
+  } catch (e) {}
+}
+
+// Event-tracked window focus — more reliable than polling document.hasFocus()
+// from inside the hook handler (which can return stale values in Electron).
+var voiceWindowFocused = (typeof document !== 'undefined' && document.hasFocus && document.hasFocus());
+window.addEventListener('focus', function () { voiceWindowFocused = true; onVoiceWindowRefocus(); });
+window.addEventListener('blur', function () { voiceWindowFocused = false; });
+
+(function wireVoiceToolbar() {
+  var stopBtn = document.getElementById('btn-voice-stop');
+  if (stopBtn) stopBtn.addEventListener('click', function () { stopAllVoice(); });
+  var toggleBtn = document.getElementById('btn-voice-toggle');
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', async function () {
+      var en = !(voiceSettings && voiceSettings.enabled);
+      if (window.electronAPI && window.electronAPI.setVoiceSettings) {
+        await window.electronAPI.setVoiceSettings({ enabled: en });
+      }
+      if (window.__refreshVoiceSettings) await window.__refreshVoiceSettings();
+      if (!en) stopAllVoice();
+      updateVoiceToggleUI();
+    });
+  }
+})();
+
+if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
+  window.electronAPI.onVoiceHookEvent(async function (event) {
+    var colId = clawdResolveHookColumn(event);
+    vlog('hook recv', { evt: (event && (event.hook_event_name || event.event)), sid: event && event.session_id, cwd: event && event.cwd, colId: colId });
+    if (colId == null) return;  // not this window's column
+    if (!voiceSettings) {
+      try { await window.__refreshVoiceSettings(); } catch (e) {}
+    }
+    if (!voiceSettings || !voiceSettings.enabled) return;
+    var evtName = (event && (event.hook_event_name || event.event)) || '';
+    if (evtName === 'SubagentStop') return;  // subagent stops must never drive voice
+    var col = allColumns.get(colId);
+    if (!col) return;
+    var sid = event && event.session_id;
+    var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
+    // A column whose sessionId hasn't been detected yet (null) owns the reply that
+    // resolved to it via the unambiguous-cwd fallback (subagents fire only later,
+    // after the parent session is established). Allow recording its path + unspoken
+    // flag so focus catch-up can still speak the first reply — but keep AUTO-speak
+    // eligibility strict (sidMatchesColumn) to avoid ever auto-speaking a subagent.
+    var voiceOwnsReply = sidMatchesColumn || !col.sessionId;
+    if (isProjectVoiceMuted(col.projectKey)) return;  // muted project: no auto-speak / catch-up flag
+    var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
+    if (!state) return;
+    var isActive = lastFocusedColumnId === colId && voiceWindowFocused;
+    var eligible = false;
+    switch (voiceSettings.mode) {
+      case 'all': eligible = (evtName === 'Stop' && sidMatchesColumn); break;
+      case 'notify': eligible = (evtName === 'Notification'); break;
+      case 'active+notify': eligible = (evtName === 'Stop' && sidMatchesColumn && isActive) || evtName === 'Notification'; break;
+      case 'active':
+      default: eligible = (evtName === 'Stop' && sidMatchesColumn && isActive); break;
+    }
+    // Remember where this reply lives so manual/catch-up playback can re-read it.
+    // Only for the column's OWN session — a subagent/automation Stop shares the cwd
+    // but has a different session_id, and must not overwrite the column's transcript.
+    if (evtName === 'Stop' && event.transcript_path && voiceOwnsReply) col.voiceTranscriptPath = event.transcript_path;
+    // A Stop that we don't auto-speak leaves an unspoken reply behind — flag it so
+    // focus catch-up can speak the summary later. When we do speak it, clear the flag.
+    // Track unspoken state only for the column's own session.
+    if (evtName === 'Stop' && voiceOwnsReply) col.voiceUnspoken = !eligible;
+    // Capture the pre-turn message uuid the moment the user submits, so a later
+    // Stop can poll for the FRESH reply (uuid !== baseline) instead of racing the
+    // transcript flush and speaking the previous turn.
+    if (evtName === 'UserPromptSubmit' && sidMatchesColumn && window.electronAPI.peekColumn) {
+      window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId })
+        .then(function (r) { if (r && r.ok) col.voicePreTurnUuid = r.uuid; }).catch(function () {});
+    }
+    vlog('hook decision', { evt: evtName, colId: colId, enabled: !!(voiceSettings && voiceSettings.enabled), mode: voiceSettings && voiceSettings.mode, voiceId: voiceSettings && voiceSettings.voiceId, focusedColumnId: state && state.focusedColumnId, winFocused: voiceWindowFocused, isActive: isActive, muted: isProjectVoiceMuted(col.projectKey), eligible: eligible, autoBusy: voiceAutoBusy });
+    if (!eligible) return;
+    try {
+      var result;
+      if (evtName === 'Notification') {
+        var msg = (event.message || '').trim();
+        if (!msg) return;
+        result = await window.electronAPI.synthesizeVoice({
+          text: msg, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, auto: true,
+        });
+        if (result && result.ok) playVoiceAudio(result);
+      } else {
+        if (event.transcript_path && sidMatchesColumn) col.voiceTranscriptPath = event.transcript_path;
+        // Real-time win: try reading the reply straight off the column's screen
+        // BEFORE the transcript path. Interactive columns often haven't flushed
+        // the reply to the JSONL yet, but it's already rendered. A short settle
+        // delay lets the final line paint before we read the buffer.
+        // Capture the stream generation BEFORE the settle await: a manual Play or
+        // a newer Stop during the 250ms window must win, so bail if it advanced.
+        var settleGen = voiceStreamGen;
+        await new Promise(function (r) { setTimeout(r, 250); });
+        if (voiceStreamGen !== settleGen) return;  // superseded during settle (manual/newer Stop)
+        if (!voiceSettings || !voiceSettings.enabled) return;  // re-check after the await
+        // Re-evaluate eligibility after the await — focus/mute can change in 250ms.
+        if (isProjectVoiceMuted(col.projectKey)) return;
+        var stillActive = lastFocusedColumnId === colId && voiceWindowFocused;
+        var stillEligible = false;
+        switch (voiceSettings.mode) {
+          case 'all': stillEligible = sidMatchesColumn; break;
+          case 'active+notify': stillEligible = sidMatchesColumn && stillActive; break;
+          case 'active':
+          default: stillEligible = sidMatchesColumn && stillActive; break;
+        }
+        if (!stillEligible) return;  // user clicked away / muted during the settle
+        var termLines = readColumnTerminalLines(col);
+        var rawReply = (window.TerminalReply && window.TerminalReply.extractLastTerminalReply(termLines)) || '';
+        // Apply the Reading mode here so the dedup string AND the spoken audio
+        // are the exact same mode-applied text (in 'auto'/'summary' that's just
+        // the 🔊 line when present; in 'full' it's the body without that line).
+        var spokenTerm = cleanTerminalSpoken(rawReply, voiceSettings.readingMode);
+        vlog('terminal reply', { colId: colId, len: spokenTerm.length, head: spokenTerm.slice(0, 60) });
+        if (spokenTerm && spokenTerm !== col.lastSpokenText) {
+          col.lastSpokenText = spokenTerm;  // dedup: never auto-speak the same reply twice
+          var treq = { colId: colId, readingMode: voiceSettings.readingMode, spokenText: spokenTerm };
+          vlog('auto eligible (terminal) -> ' + (voiceAutoBusy ? 'QUEUED (busy)' : 'run'), { colId: colId });
+          if (voiceAutoBusy) { voiceAutoQueue = treq; return; }
+          // NOT awaited (sets voiceAutoBusy synchronously before returning); a
+          // stray async throw is an intended best-effort no-op, not an unhandledrejection.
+          Promise.resolve(runAutoStream(treq)).catch(function () {});
+          return;                // terminal path handled it; skip the transcript fallback
+        }
+        // Fallback: terminal yielded nothing new -> use the transcript poll so
+        // old/persisted replies still speak.
+        var req = { colId: colId, readingMode: voiceSettings.readingMode, baselineUuid: col.voicePreTurnUuid || col.lastSpokenUuid || '' };
+        vlog('auto eligible -> ' + (voiceAutoBusy ? 'QUEUED (busy)' : 'run'), req);
+        if (voiceAutoBusy) { voiceAutoQueue = req; return; }  // guard: don't interrupt an in-progress utterance; queue the latest
+        // NOT awaited (sets voiceAutoBusy synchronously before returning); swallow
+        // a stray async throw so it stays a best-effort no-op, not an unhandledrejection.
+        Promise.resolve(runAutoStream(req)).catch(function () {});
+      }
+    } catch (e) { /* best-effort playback */ }
+  });
+  window.__refreshVoiceSettings().then(updateVoiceToggleUI);
+}
+
+// Any window saving voice settings broadcasts `voice:settingsChanged`; every
+// window re-reads its cache so popouts don't keep stale mode/voice/enabled.
+if (window.electronAPI && window.electronAPI.onVoiceSettingsChanged) {
+  window.electronAPI.onVoiceSettingsChanged(async function () {
+    if (window.__refreshVoiceSettings) await window.__refreshVoiceSettings();
+    updateVoiceToggleUI();
   });
 }
 
@@ -10468,6 +11104,7 @@ document.getElementById('btn-settings').addEventListener('click', function () {
   window.electronAPI.getAutomationSettings().then(function (settings) {
     document.getElementById('setting-agent-repos-dir').value = settings.agentReposBaseDir || '';
   });
+  loadVoiceSettings();
   // Sync settings: pulled lazily so changes in main.js persist round-trip.
   if (window.electronAPI && window.electronAPI.syncGetSettings) {
     window.electronAPI.syncGetSettings().then(function (s) {
@@ -10714,6 +11351,393 @@ document.getElementById('setting-agent-repos-dir').addEventListener('keydown', f
     editorBtn.addEventListener('click', function () {
       settingsModal.classList.add('hidden');
       openClaudeMdModal({ global: true });
+    });
+  }
+})();
+
+// --- Voice tab wiring ---
+// The ElevenLabs API key is write-only from the UI: getVoiceSettings never
+// returns it, so we only show a saved/placeholder state and only send a new
+// key when the user has actually typed one (i.e. the field differs from the
+// saved placeholder).
+var VOICE_SAVED_PLACEHOLDER = '•••••••• (saved)';
+
+// Voice tuning defaults — mirror the backend defaults in getVoiceSettings().
+var VOICE_TUNING_DEFAULTS = { stability: 0.5, style: 0, speed: 1.0, similarityBoost: 0.75, speakerBoost: true };
+
+function voiceTuningReadout(id, value, isSpeed) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var n = parseFloat(value);
+  if (isNaN(n)) n = 0;
+  el.textContent = isSpeed ? (n.toFixed(2) + '×') : n.toFixed(2);
+}
+
+function updateVoiceTuningReadouts() {
+  var stab = document.getElementById('setting-voice-stability');
+  var sty = document.getElementById('setting-voice-style');
+  var spd = document.getElementById('setting-voice-speed');
+  var sim = document.getElementById('setting-voice-similarity');
+  if (stab) voiceTuningReadout('setting-voice-stability-val', stab.value);
+  if (sty) voiceTuningReadout('setting-voice-style-val', sty.value);
+  if (spd) voiceTuningReadout('setting-voice-speed-val', spd.value, true);
+  if (sim) voiceTuningReadout('setting-voice-similarity-val', sim.value);
+}
+
+function voiceTypedApiKey() {
+  // Returns the freshly-typed key, or '' when the field is empty. The saved
+  // placeholder never lives in .value, so a simple read suffices.
+  var el = document.getElementById('setting-voice-apikey');
+  return el ? el.value.trim() : '';
+}
+
+function voiceFriendlyError(err) {
+  var s = String(err == null ? '' : err).toLowerCase();
+  if (s.indexOf('no_api_key') !== -1 || s.indexOf('no api key') !== -1) {
+    return 'Enter your API key first.';
+  }
+  if (s.indexOf('subscription') !== -1 ||
+      s.indexOf('not available on your current plan') !== -1 ||
+      s.indexOf('ivc_not_permitted') !== -1 ||
+      s.indexOf('subscription_required') !== -1) {
+    return 'This voice needs a paid ElevenLabs plan — pick a premade voice or upgrade.';
+  }
+  if (s.indexOf('key') !== -1 || s.indexOf('auth') !== -1 ||
+      s.indexOf('401') !== -1 || s.indexOf('unauthor') !== -1) {
+    return 'Invalid API key — check your ElevenLabs account.';
+  }
+  return 'Voice request failed. Check your key and try again.';
+}
+
+function voiceKeyStatus(msg) {
+  var el = document.getElementById('setting-voice-key-status');
+  if (el) el.textContent = msg || '';
+}
+
+function loadVoiceSettings() {
+  if (!window.electronAPI || !window.electronAPI.getVoiceSettings) return;
+  var enabledEl = document.getElementById('setting-voice-enabled');
+  var keyEl = document.getElementById('setting-voice-apikey');
+  var modeEl = document.getElementById('setting-voice-mode');
+  var voiceEl = document.getElementById('setting-voice-voiceid');
+  var modelEl = document.getElementById('setting-voice-model');
+  var readingModeEl = document.getElementById('setting-voice-readingmode');
+  var maxEl = document.getElementById('setting-voice-maxchars');
+  var warnEl = document.getElementById('setting-voice-encryption-warning');
+  var statusEl = document.getElementById('setting-voice-test-status');
+  if (!enabledEl) return;
+  if (statusEl) statusEl.textContent = '';
+  window.electronAPI.getVoiceSettings().then(function (v) {
+    v = v || {};
+    enabledEl.checked = !!v.enabled;
+    if (modeEl) modeEl.value = v.mode || 'active';
+    if (modelEl) modelEl.value = v.modelId || 'eleven_flash_v2_5';
+    if (readingModeEl) readingModeEl.value = v.readingMode || 'auto';
+    if (maxEl) maxEl.value = (v.maxChars != null ? v.maxChars : 600);
+    var stabEl = document.getElementById('setting-voice-stability');
+    var styEl = document.getElementById('setting-voice-style');
+    var spdEl = document.getElementById('setting-voice-speed');
+    var simEl = document.getElementById('setting-voice-similarity');
+    var spkEl = document.getElementById('setting-voice-speakerboost');
+    if (stabEl) stabEl.value = (v.stability != null ? v.stability : VOICE_TUNING_DEFAULTS.stability);
+    if (styEl) styEl.value = (v.style != null ? v.style : VOICE_TUNING_DEFAULTS.style);
+    if (spdEl) spdEl.value = (v.speed != null ? v.speed : VOICE_TUNING_DEFAULTS.speed);
+    if (simEl) simEl.value = (v.similarityBoost != null ? v.similarityBoost : VOICE_TUNING_DEFAULTS.similarityBoost);
+    if (spkEl) spkEl.checked = v.speakerBoost !== false;
+    updateVoiceTuningReadouts();
+    if (keyEl) {
+      keyEl.value = '';
+      keyEl.placeholder = v.hasApiKey ? VOICE_SAVED_PLACEHOLDER : 'Paste your ElevenLabs API key';
+    }
+    if (warnEl) warnEl.classList.toggle('hidden', v.encryptionAvailable !== false);
+    var fcEl = document.getElementById('setting-voice-focuscatchup'); if (fcEl) fcEl.checked = v.focusCatchUp !== false;
+    var presetEl = document.getElementById('setting-voice-personality-preset');
+    if (presetEl) presetEl.value = v.personalityPreset || '';
+    var personaTextEl = document.getElementById('setting-voice-personality-text');
+    if (personaTextEl) {
+      if (window.electronAPI && window.electronAPI.getPersonality) {
+        window.electronAPI.getPersonality().then(function (res) {
+          personaTextEl.value = (res && res.ok ? res.personality : '') || v.personality || '';
+        }).catch(function () { personaTextEl.value = v.personality || ''; });
+      } else {
+        personaTextEl.value = v.personality || '';
+      }
+    }
+    // Voice dropdown: show the saved choice immediately, then try to load the
+    // full list if we have a stored key.
+    if (voiceEl) {
+      while (voiceEl.firstChild) voiceEl.removeChild(voiceEl.firstChild);
+      if (v.voiceId) {
+        var saved = document.createElement('option');
+        saved.value = v.voiceId;
+        saved.textContent = v.voiceName || v.voiceId;
+        saved.selected = true;
+        voiceEl.appendChild(saved);
+      } else {
+        var none = document.createElement('option');
+        none.value = '';
+        none.textContent = v.hasApiKey ? 'Click Refresh to load voices' : 'Enter API key first';
+        voiceEl.appendChild(none);
+      }
+      if (v.hasApiKey) {
+        while (voiceEl.firstChild) voiceEl.removeChild(voiceEl.firstChild);
+        var loading = document.createElement('option');
+        loading.value = v.voiceId || '';
+        loading.textContent = 'Loading…';
+        loading.selected = true;
+        voiceEl.appendChild(loading);
+        window.electronAPI.listVoices().then(function (res) {
+          if (res && res.ok) {
+            populateVoiceOptions(res.voices, v.voiceId);
+            var ve = document.getElementById('setting-voice-voiceid');
+            if (ve && ve.value && ve.value !== v.voiceId) {
+              saveVoiceSettings(); // persist the auto-selected voice so auto-play has a voiceId
+            }
+          }
+        }).catch(function () { /* leave saved-name fallback */ });
+      }
+    }
+  }).catch(function () { /* IPC missing in dev — leave defaults */ });
+}
+
+function populateVoiceOptions(voices, selectedId) {
+  var voiceEl = document.getElementById('setting-voice-voiceid');
+  if (!voiceEl || !voices) return;
+  while (voiceEl.firstChild) voiceEl.removeChild(voiceEl.firstChild);
+  voices.forEach(function (vo) {
+    var opt = document.createElement('option');
+    opt.value = vo.id;
+    opt.textContent = (vo.category && vo.category !== 'premade')
+      ? (vo.name || vo.id) + ' — ' + vo.category
+      : (vo.name || vo.id);
+    if (vo.id === selectedId) opt.selected = true;
+    voiceEl.appendChild(opt);
+  });
+}
+
+function saveVoiceSettings() {
+  if (!window.electronAPI || !window.electronAPI.setVoiceSettings) return Promise.resolve();
+  var enabledEl = document.getElementById('setting-voice-enabled');
+  var keyEl = document.getElementById('setting-voice-apikey');
+  var modeEl = document.getElementById('setting-voice-mode');
+  var voiceEl = document.getElementById('setting-voice-voiceid');
+  var modelEl = document.getElementById('setting-voice-model');
+  var readingModeEl = document.getElementById('setting-voice-readingmode');
+  var maxEl = document.getElementById('setting-voice-maxchars');
+  var opt = voiceEl && voiceEl.options[voiceEl.selectedIndex];
+  var payload = {
+    enabled: enabledEl ? enabledEl.checked : false,
+    mode: modeEl ? modeEl.value : 'active',
+    voiceId: opt ? opt.value : '',
+    voiceName: opt ? opt.textContent : '',
+    modelId: modelEl ? modelEl.value : 'eleven_flash_v2_5',
+    readingMode: readingModeEl ? readingModeEl.value : 'auto',
+    maxChars: maxEl ? parseInt(maxEl.value, 10) || 600 : 600,
+    focusCatchUp: (document.getElementById('setting-voice-focuscatchup') || {}).checked !== false
+  };
+  var stabEl = document.getElementById('setting-voice-stability');
+  var styEl = document.getElementById('setting-voice-style');
+  var spdEl = document.getElementById('setting-voice-speed');
+  var simEl = document.getElementById('setting-voice-similarity');
+  var spkEl = document.getElementById('setting-voice-speakerboost');
+  payload.stability = stabEl ? (parseFloat(stabEl.value)) : VOICE_TUNING_DEFAULTS.stability;
+  if (isNaN(payload.stability)) payload.stability = VOICE_TUNING_DEFAULTS.stability;
+  payload.style = styEl ? (parseFloat(styEl.value)) : VOICE_TUNING_DEFAULTS.style;
+  if (isNaN(payload.style)) payload.style = VOICE_TUNING_DEFAULTS.style;
+  payload.speed = spdEl ? (parseFloat(spdEl.value)) : VOICE_TUNING_DEFAULTS.speed;
+  if (isNaN(payload.speed)) payload.speed = VOICE_TUNING_DEFAULTS.speed;
+  payload.similarityBoost = simEl ? (parseFloat(simEl.value)) : VOICE_TUNING_DEFAULTS.similarityBoost;
+  if (isNaN(payload.similarityBoost)) payload.similarityBoost = VOICE_TUNING_DEFAULTS.similarityBoost;
+  payload.speakerBoost = spkEl ? spkEl.checked : VOICE_TUNING_DEFAULTS.speakerBoost;
+  var typed = voiceTypedApiKey();
+  if (typed) payload.apiKey = typed;
+  var sentKey = !!typed;
+  return window.electronAPI.setVoiceSettings(payload).then(function () {
+    if (keyEl && sentKey) { keyEl.value = ''; keyEl.placeholder = VOICE_SAVED_PLACEHOLDER; }
+    if (sentKey) voiceKeyStatus('API key saved.');
+    return window.__refreshVoiceSettings && window.__refreshVoiceSettings();
+  }).catch(function (err) {
+    // Surface key-save failures so a first-time user isn't left guessing.
+    if (sentKey) voiceKeyStatus(voiceFriendlyError(err && err.message || err));
+  });
+}
+
+(function wireVoiceTab() {
+  var enabledEl = document.getElementById('setting-voice-enabled');
+  var keyEl = document.getElementById('setting-voice-apikey');
+  var clearKeyEl = document.getElementById('setting-voice-clearkey');
+  var modeEl = document.getElementById('setting-voice-mode');
+  var voiceEl = document.getElementById('setting-voice-voiceid');
+  var modelEl = document.getElementById('setting-voice-model');
+  var readingModeEl = document.getElementById('setting-voice-readingmode');
+  var maxEl = document.getElementById('setting-voice-maxchars');
+  var refreshBtn = document.getElementById('setting-voice-refresh');
+  var testBtn = document.getElementById('setting-voice-test');
+  var statusEl = document.getElementById('setting-voice-test-status');
+  var clearStatusEl = document.getElementById('setting-voice-clearkey-status');
+  if (!enabledEl) return;
+
+  if (enabledEl) enabledEl.addEventListener('change', function () {
+    saveVoiceSettings();
+  });
+  if (modeEl) modeEl.addEventListener('change', saveVoiceSettings);
+  if (modelEl) modelEl.addEventListener('change', saveVoiceSettings);
+  if (readingModeEl) readingModeEl.addEventListener('change', saveVoiceSettings);
+  if (maxEl) {
+    maxEl.addEventListener('change', saveVoiceSettings);
+    maxEl.addEventListener('keydown', function (e) { e.stopPropagation(); });
+  }
+  if (voiceEl) voiceEl.addEventListener('change', saveVoiceSettings);
+
+  // Voice tuning sliders: update the live readout on input, persist on change
+  // (merge-safe backend). Reset restores the documented defaults and saves.
+  ['setting-voice-stability', 'setting-voice-style', 'setting-voice-speed', 'setting-voice-similarity'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', updateVoiceTuningReadouts);
+    el.addEventListener('change', saveVoiceSettings);
+  });
+  var speakerBoostEl = document.getElementById('setting-voice-speakerboost');
+  if (speakerBoostEl) speakerBoostEl.addEventListener('change', saveVoiceSettings);
+  var tuningResetEl = document.getElementById('setting-voice-tuning-reset');
+  if (tuningResetEl) {
+    tuningResetEl.addEventListener('click', function () {
+      var stabEl = document.getElementById('setting-voice-stability');
+      var styEl = document.getElementById('setting-voice-style');
+      var spdEl = document.getElementById('setting-voice-speed');
+      var simEl = document.getElementById('setting-voice-similarity');
+      var spkEl = document.getElementById('setting-voice-speakerboost');
+      if (stabEl) stabEl.value = VOICE_TUNING_DEFAULTS.stability;
+      if (styEl) styEl.value = VOICE_TUNING_DEFAULTS.style;
+      if (spdEl) spdEl.value = VOICE_TUNING_DEFAULTS.speed;
+      if (simEl) simEl.value = VOICE_TUNING_DEFAULTS.similarityBoost;
+      if (spkEl) spkEl.checked = VOICE_TUNING_DEFAULTS.speakerBoost;
+      updateVoiceTuningReadouts();
+      saveVoiceSettings();
+    });
+  }
+
+  var focusCatchUpEl = document.getElementById('setting-voice-focuscatchup');
+  if (focusCatchUpEl) focusCatchUpEl.addEventListener('change', saveVoiceSettings);
+
+  var personaPresetEl = document.getElementById('setting-voice-personality-preset');
+  var personaTextEl = document.getElementById('setting-voice-personality-text');
+  var personaApplyEl = document.getElementById('setting-voice-personality-apply');
+  var personaStatusEl = document.getElementById('setting-voice-personality-status');
+  function selectedPersonaText() {
+    if (!personaPresetEl) return '';
+    var opt = personaPresetEl.options[personaPresetEl.selectedIndex];
+    return opt ? (opt.getAttribute('data-persona') || '') : '';
+  }
+  if (personaPresetEl) {
+    personaPresetEl.addEventListener('change', function () {
+      if (personaPresetEl.value && personaTextEl) personaTextEl.value = selectedPersonaText();
+    });
+  }
+  if (personaTextEl) {
+    personaTextEl.addEventListener('keydown', function (e) { e.stopPropagation(); });
+    personaTextEl.addEventListener('input', function () {
+      if (personaPresetEl && personaPresetEl.value && personaTextEl.value !== selectedPersonaText()) {
+        personaPresetEl.value = '';
+      }
+    });
+  }
+  if (personaApplyEl) {
+    personaApplyEl.addEventListener('click', function () {
+      if (!window.electronAPI || !window.electronAPI.setPersonality) return;
+      var text = (document.getElementById('setting-voice-personality-text') || {}).value || '';
+      var preset = (document.getElementById('setting-voice-personality-preset') || {}).value || '';
+      var statusEl2 = document.getElementById('setting-voice-personality-status');
+      window.electronAPI.setPersonality(text).then(function (res) {
+        if (res && res.ok) {
+          if (statusEl2) statusEl2.textContent = text.trim() ? 'Personality applied.' : 'Personality cleared.';
+          return window.electronAPI.setVoiceSettings({ personality: text, personalityPreset: preset }).then(function () { if (window.__refreshVoiceSettings) return window.__refreshVoiceSettings(); });
+        }
+        if (statusEl2) statusEl2.textContent = 'Could not update CLAUDE.md.';
+      }).catch(function () { if (statusEl2) statusEl2.textContent = 'Could not update CLAUDE.md.'; });
+    });
+  }
+
+  if (keyEl) {
+    keyEl.addEventListener('keydown', function (e) { e.stopPropagation(); });
+    // Persist a freshly-typed key on commit (change) or focus-loss (blur) —
+    // only when text is present, so closing the tab with an empty field is a no-op.
+    var saveTypedKey = function () { if (voiceTypedApiKey()) saveVoiceSettings(); };
+    keyEl.addEventListener('change', saveTypedKey);
+    keyEl.addEventListener('blur', saveTypedKey);
+  }
+
+  if (clearKeyEl) {
+    clearKeyEl.addEventListener('click', function () {
+      if (!window.electronAPI || !window.electronAPI.setVoiceSettings) return;
+      window.electronAPI.setVoiceSettings({ apiKey: '', clearApiKey: true }).then(function () {
+        if (keyEl) { keyEl.value = ''; keyEl.placeholder = 'Paste your ElevenLabs API key'; }
+        if (clearStatusEl) clearStatusEl.textContent = 'Key cleared.';
+        return window.__refreshVoiceSettings && window.__refreshVoiceSettings();
+      }).catch(function (err) {
+        if (clearStatusEl) clearStatusEl.textContent = voiceFriendlyError(err && err.message || err);
+      });
+    });
+  }
+
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', function () {
+      if (!window.electronAPI || !window.electronAPI.listVoices) return;
+      if (statusEl) statusEl.textContent = 'Loading voices…';
+      var typed = voiceTypedApiKey();
+      window.electronAPI.listVoices(typed ? { apiKeyOverride: typed } : {}).then(function (res) {
+        if (res && res.ok) {
+          var cur = voiceEl && voiceEl.value;
+          populateVoiceOptions(res.voices, cur);
+          if (statusEl) statusEl.textContent = '';
+          return;
+        }
+        if (statusEl) statusEl.textContent = voiceFriendlyError(res && res.error);
+      }).catch(function (err) {
+        if (statusEl) statusEl.textContent = voiceFriendlyError(err && err.message || err);
+      });
+    });
+  }
+
+  if (testBtn) {
+    testBtn.addEventListener('click', function () {
+      if (!window.electronAPI || !window.electronAPI.synthesizeVoice) return;
+      var apikeyEl = document.getElementById('setting-voice-apikey');
+      var hasKey = voiceTypedApiKey() || (apikeyEl && apikeyEl.placeholder === VOICE_SAVED_PLACEHOLDER);
+      if (!hasKey) {
+        if (statusEl) statusEl.textContent = 'Enter an API key first.';
+        return;
+      }
+      var opt = voiceEl && voiceEl.options[voiceEl.selectedIndex];
+      if (!opt || !opt.value) {
+        if (statusEl) statusEl.textContent = 'Choose a voice first — click Refresh.';
+        return;
+      }
+      var typed = voiceTypedApiKey();
+      var req = {
+        text: 'Hello from Claudes. Your voice output is working correctly.',
+        voiceId: opt ? opt.value : '',
+        modelId: modelEl ? modelEl.value : 'eleven_flash_v2_5'
+      };
+      if (typed) req.apiKeyOverride = typed;
+      if (statusEl) statusEl.textContent = 'Synthesizing…';
+      window.electronAPI.synthesizeVoice(req).then(function (result) {
+        if (result && result.ok) {
+          if (statusEl) statusEl.textContent = 'Playing…';
+          if (window.__playVoiceTest) {
+            window.__playVoiceTest(result, function () {
+              if (statusEl && statusEl.textContent === 'Playing…') statusEl.textContent = '';
+            }, function (err) {
+              var name = (err && (err.name || err.message)) ? (err.name || err.message) : 'playback failed';
+              if (statusEl) statusEl.textContent = 'Could not play audio (' + name + ').';
+            });
+          }
+        } else {
+          if (statusEl) statusEl.textContent = voiceFriendlyError(result && result.error);
+        }
+      }).catch(function (err) {
+        if (statusEl) statusEl.textContent = voiceFriendlyError(err && err.message || err);
+      });
     });
   }
 })();

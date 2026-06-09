@@ -395,7 +395,7 @@ function handleConnection(ws, req) {
         if (!p) break;
         const data = typeof msg.data === 'string' ? msg.data : '';
         if (Buffer.byteLength(data, 'utf8') > MAX_WRITE_BYTES) break;
-        p.write(data);
+        try { p.write(data); } catch (err) { console.warn('[pty-server] write on exited pty ignored:', err && err.message); }
         break;
       }
 
@@ -404,14 +404,16 @@ function handleConnection(ws, req) {
         if (!p) break;
         const safeCols = Math.max(1, Math.min(MAX_COLS, parseInt(msg.cols, 10) || 0));
         const safeRows = Math.max(1, Math.min(MAX_ROWS, parseInt(msg.rows, 10) || 0));
-        if (safeCols && safeRows) p.resize(safeCols, safeRows);
+        if (safeCols && safeRows) {
+          try { p.resize(safeCols, safeRows); } catch (err) { console.warn('[pty-server] resize on exited pty ignored:', err && err.message); }
+        }
         break;
       }
 
       case 'kill': {
         const p = ptys.get(msg.id);
         if (p) {
-          p.kill();
+          try { p.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
           ptys.delete(msg.id);
           connectionPtys.delete(msg.id);
           clearOrphanTimer(msg.id);
@@ -435,7 +437,7 @@ function handleConnection(ws, req) {
           const pty = ptys.get(id);
           if (pty) {
             console.log(`Orphan grace expired for pty ${id}, killing`);
-            pty.kill();
+            try { pty.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
             ptys.delete(id);
           }
           orphanTimers.delete(id);
@@ -451,14 +453,14 @@ wss = createWss(PORT, false);
 
 process.on('SIGINT', () => {
   for (const [id, p] of ptys) {
-    p.kill();
+    try { p.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
   }
   process.exit();
 });
 
 process.on('SIGTERM', () => {
   for (const [id, p] of ptys) {
-    p.kill();
+    try { p.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
   }
   process.exit();
 });

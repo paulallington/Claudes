@@ -111,6 +111,29 @@ test('round-trips: prior args already had effort+resume yields exactly one of ea
   assert.ok(out.indexOf('--dangerously-skip-permissions') !== -1);
 });
 
+test('strips a leaked --session-id <uuid> from prior args (flag + value)', () => {
+  const col = {
+    cmdArgs: ['--dangerously-skip-permissions', '--session-id', 'abcd-1234-uuid', '--effort', 'high'],
+    effort: 'max', sessionId: 'abcd-1234-uuid'
+  };
+  const out = buildResumeArgsBase(col, false, 'medium');
+  assert.strictEqual(out.indexOf('--session-id'), -1, 'no --session-id flag');
+  assert.strictEqual(out.indexOf('abcd-1234-uuid'), idx(out, '--resume') + 1, 'uuid only appears as --resume value');
+  assert.ok(out.indexOf('--dangerously-skip-permissions') !== -1, 'permission preserved');
+});
+
+test('a combined --session-id + --resume input yields only the rebuilt --resume', () => {
+  const col = {
+    cmdArgs: ['--session-id', 'sid', '--resume', 'sid', '--bare'],
+    effort: 'high', sessionId: 'sid'
+  };
+  const out = buildResumeArgsBase(col, false, 'medium');
+  assert.strictEqual(out.indexOf('--session-id'), -1, 'no --session-id');
+  assert.strictEqual(count(out, '--resume'), 1, 'exactly one --resume');
+  assert.strictEqual(out[idx(out, '--resume') + 1], 'sid');
+  assert.ok(out.indexOf('--bare') !== -1, 'bare preserved');
+});
+
 test('a stripped flag at end-of-array (no value) does not crash or leak', () => {
   const col = { cmdArgs: ['--dangerously-skip-permissions', '--worktree'], effort: 'high', sessionId: 'sid' };
   const out = buildResumeArgsBase(col, false, 'medium');

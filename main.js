@@ -1,4 +1,12 @@
 const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray, Menu, nativeImage, Notification, powerMonitor, safeStorage } = require('electron');
+// Allow programmatic audio playback (voice feature) without a user gesture.
+// Chromium's default autoplay policy blocks Audio.play() invoked from hook
+// events, silently rejecting the play() promise. Must run at require-time,
+// before app is ready.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+// Avoid GPU shader disk cache, which can corrupt/lock and blank the window after
+// an abrupt restart (we hit exactly that). Keeps hardware acceleration on.
+app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -10,6 +18,11 @@ const http = require('http');
 const { resolveWorktreeCandidates, pathIsDirectory } = require('./lib/path-utils');
 const { detectActiveWorktree } = require('./lib/worktree-detect');
 const WorkspaceScrub = require('./lib/workspace-scrub');
+const { buildTtsRequest, buildVoicesRequest } = require('./lib/voice-request');
+const { normalizeVoiceSettings, redactVoiceSettings } = require('./lib/voice-settings');
+const { extractSpeakableText, lastAssistantUuid, splitSentences } = require('./lib/voice-text');
+const { columnTranscriptPath, resolveTranscriptPath, isUnderProjectsRoot } = require('./lib/voice-transcript-path');
+const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice-personality');
 const https = require('https');
 
 // macOS GUI launches (Dock/Finder) inherit launchd's minimal PATH —
@@ -279,13 +292,28 @@ const CONFIG_WRITE_DEBOUNCE_MS = 400;
 let pendingConfig = null;
 let pendingConfigTimer = null;
 
+// voice + terminal are written immediately by their own IPC handlers; the renderer's
+// projects config holds a stale copy, so a debounced projects/layout save would clobber
+// them. Re-read the authoritative on-disk values just before persisting.
+function preserveManagedSettings(cfg) {
+  if (!cfg) return cfg;
+  try {
+    const onDisk = readConfig();
+    if (onDisk) {
+      if (onDisk.voice !== undefined) cfg.voice = onDisk.voice;
+      if (onDisk.terminal !== undefined) cfg.terminal = onDisk.terminal;
+    }
+  } catch (e) {}
+  return cfg;
+}
+
 function scheduleWriteConfig(config) {
   // Once quit has begun, late writes (e.g. a popout's debounced bounds-save
   // firing after flushPendingConfig) must not strip the cleanShutdown marker
   // and must go to disk immediately — the event loop may not get another tick.
   if (isQuitting) {
     if (config) config.cleanShutdown = true;
-    try { writeConfig(config); } catch (err) { console.error('writeConfig (quitting) failed:', err); }
+    try { writeConfig(preserveManagedSettings(config)); } catch (err) { console.error('writeConfig (quitting) failed:', err); }
     return;
   }
   pendingConfig = config;
@@ -295,7 +323,7 @@ function scheduleWriteConfig(config) {
     const cfg = pendingConfig;
     pendingConfig = null;
     if (cfg) {
-      try { writeConfig(cfg); } catch (err) { console.error('writeConfig failed:', err); }
+      try { writeConfig(preserveManagedSettings(cfg)); } catch (err) { console.error('writeConfig failed:', err); }
     }
   }, CONFIG_WRITE_DEBOUNCE_MS);
 }
@@ -305,7 +333,7 @@ function flushPendingConfig() {
   if (pendingConfig) {
     const cfg = pendingConfig;
     pendingConfig = null;
-    try { writeConfig(cfg); } catch (err) { console.error('writeConfig failed:', err); }
+    try { writeConfig(preserveManagedSettings(cfg)); } catch (err) { console.error('writeConfig failed:', err); }
   }
 }
 
@@ -1042,7 +1070,15 @@ ipcMain.handle('dialog:openDirectory', async () => {
 });
 
 ipcMain.handle('config:getProjects', () => {
-  return readConfig();
+  // The renderer must never receive the ElevenLabs API key. Redact voice before
+  // returning (clone shallowly so the on-disk cfg is untouched). This is safe to
+  // round-trip: config:saveProjects -> scheduleWriteConfig -> preserveManagedSettings
+  // re-reads the authoritative `voice` from disk before writing, so the keyless
+  // object the renderer sends back never clobbers the stored key.
+  const cfg = readConfig();
+  return (cfg && cfg.voice)
+    ? Object.assign({}, cfg, { voice: redactVoiceSettings(cfg.voice) })
+    : cfg;
 });
 
 ipcMain.handle('config:saveProjects', (event, config) => {
@@ -1513,9 +1549,12 @@ ipcMain.handle('sessions:getRecent', (event, projectPath) => {
       .map(f => {
         const filePath = path.join(claudeProjectDir, f);
         const stat = fs.statSync(filePath);
+        let size = 0;
+        try { size = stat.size; } catch { size = 0; }
         return {
           sessionId: f.replace('.jsonl', ''),
-          modified: stat.mtimeMs
+          modified: stat.mtimeMs,
+          size
         };
       })
       .sort((a, b) => b.modified - a.modified);
@@ -4053,6 +4092,9 @@ function handleHookRequest(req, res) {
         const event = JSON.parse(body);
         incrPerfHook();
         mainWindow?.webContents.send('hook:event', event);
+        // Also broadcast to every window (incl. popouts) on a dedicated channel
+        // so popped-out columns can drive voice playback locally.
+        BrowserWindow.getAllWindows().forEach(w => { try { w.webContents.send('voice:hookEvent', event); } catch {} });
       } catch {}
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('ok');
@@ -4564,6 +4606,370 @@ ipcMain.handle('config:setTerminalSettings', (event, settings) => {
   cfg.terminal = Object.assign({}, cfg.terminal || {}, settings && typeof settings === 'object' ? settings : {});
   writeConfig(cfg);
   return { ok: true, settings: cfg.terminal };
+});
+
+// --- Voice / TTS IPC Handlers ---
+//
+// Voice config is a global top-level `cfg.voice` object (like cfg.terminal).
+// The ElevenLabs API key is stored encrypted via safeStorage and NEVER returned
+// to the renderer — getSettings hands back redacted public fields + hasApiKey.
+// Outbound network calls are proxied through main so the key stays in-process.
+
+
+ipcMain.handle('voice:getSettings', () => {
+  const cfg = readConfig();
+  const redacted = redactVoiceSettings(cfg.voice || {});
+  let encryptionAvailable = false;
+  try { encryptionAvailable = safeStorage.isEncryptionAvailable(); } catch { encryptionAvailable = false; }
+  return Object.assign({}, redacted, { encryptionAvailable });
+});
+
+ipcMain.handle('voice:setSettings', (event, incoming) => {
+  const cfg = readConfig();
+  const existing = cfg.voice || {};
+  const inc = incoming || {};
+  // Start from the existing normalized public values, then override ONLY the
+  // keys the renderer actually sent. Prevents partial saves (e.g. Apply
+  // personality) from resetting enabled/mode/readingMode/etc. to defaults.
+  const merged = Object.assign({}, normalizeVoiceSettings(existing));
+  ['enabled','mode','voiceId','voiceName','modelId','readingMode','maxChars','focusCatchUp','personality','personalityPreset','stability','style','speed','similarityBoost','speakerBoost']
+    .forEach((k) => { if (Object.prototype.hasOwnProperty.call(inc, k)) merged[k] = inc[k]; });
+  const next = normalizeVoiceSettings(merged);
+  // API key: set when a non-empty string is sent, clear on explicit clearApiKey, else preserve.
+  if (typeof inc.apiKey === 'string' && inc.apiKey.length > 0) next.apiKey = encryptToken(String(inc.apiKey));
+  else if (inc.apiKey === '' && inc.clearApiKey === true) { /* drop stored key */ }
+  else if (existing.apiKey != null) next.apiKey = existing.apiKey;
+  cfg.voice = next;
+  writeConfig(cfg);
+  // Broadcast to every window (incl. popouts) so each refreshes its cached
+  // voice settings — otherwise non-saving windows keep speaking with stale
+  // mode/voice or after a disable.
+  try { BrowserWindow.getAllWindows().forEach(w => { try { w.webContents.send('voice:settingsChanged'); } catch {} }); } catch {}
+  return redactVoiceSettings(cfg.voice);
+});
+
+// fetch() with an 8s abort timeout — a hung ElevenLabs connection must not
+// leave the IPC promise pending forever. Mirrors the AbortController pattern
+// used elsewhere in this file.
+async function voiceFetch(url, options) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 8000);
+  try {
+    return await fetch(url, Object.assign({}, options, { signal: ac.signal }));
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+ipcMain.handle('voice:listVoices', async (event, opts) => {
+  try {
+    const cfg = readConfig();
+    const o = opts || {};
+    const apiKey = (typeof o.apiKeyOverride === 'string' && o.apiKeyOverride.length > 0)
+      ? o.apiKeyOverride
+      : decryptToken(cfg.voice && cfg.voice.apiKey || {});
+    if (!apiKey) return { ok: false, error: 'no_api_key' };
+    const req = buildVoicesRequest({ apiKey });
+    let res;
+    try {
+      res = await voiceFetch(req.url, { method: req.method, headers: req.headers });
+    } catch (fetchErr) {
+      return { ok: false, error: (fetchErr && fetchErr.name === 'AbortError') ? 'timeout' : 'network' };
+    }
+    if (!res.ok) {
+      let body = '';
+      try { body = (await res.text()).slice(0, 300); } catch { body = ''; }
+      return { ok: false, status: res.status, error: body || ('HTTP ' + res.status) };
+    }
+    const data = await res.json();
+    const voices = Array.isArray(data.voices)
+      ? data.voices.map((v) => ({ id: v.voice_id, name: v.name, category: v.category }))
+      : [];
+    return { ok: true, voices };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+});
+
+// Synthesize the given text to MP3 via the ElevenLabs proxy. Resolves the API
+// key from the override or the encrypted store; the key never leaves main.
+async function synthesizeVoiceText({ text, voiceId, modelId, apiKeyOverride, auto }) {
+  // Bound the text before the paid ElevenLabs call: reject non-string/empty and
+  // clamp to the voice-settings max-chars ceiling (5000) so a huge payload can't
+  // run up cost or stall the request.
+  text = String(text || '').slice(0, 5000);
+  if (!text.trim()) return { ok: false, error: 'no_text' };
+  const cfg = readConfig();
+  if (auto && !(cfg.voice && cfg.voice.enabled)) return { ok: false, error: 'voice_disabled' };
+  const apiKey = (typeof apiKeyOverride === 'string' && apiKeyOverride.length > 0)
+    ? apiKeyOverride
+    : decryptToken(cfg.voice && cfg.voice.apiKey || {});
+  if (!apiKey) return { ok: false, error: 'no_api_key' };
+  const v = normalizeVoiceSettings(cfg.voice || {});
+  const voiceSettings = { stability: v.stability, style: v.style, speed: v.speed, similarityBoost: v.similarityBoost, speakerBoost: v.speakerBoost };
+  let req;
+  try {
+    req = buildTtsRequest({ apiKey, voiceId, modelId, text, voiceSettings });
+  } catch (buildErr) {
+    return { ok: false, error: String(buildErr.message || buildErr) };
+  }
+  let res;
+  try {
+    res = await voiceFetch(req.url, { method: req.method, headers: req.headers, body: req.body });
+  } catch (fetchErr) {
+    return { ok: false, error: (fetchErr && fetchErr.name === 'AbortError') ? 'timeout' : 'network' };
+  }
+  if (!res.ok) {
+    let body = '';
+    try { body = (await res.text()).slice(0, 300); } catch { body = ''; }
+    return { ok: false, status: res.status, error: body || ('HTTP ' + res.status) };
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  return { ok: true, mime: 'audio/mpeg', base64: buf.toString('base64') };
+}
+
+ipcMain.handle('voice:synthesize', async (event, args) => {
+  try {
+    const a = args || {};
+    return await synthesizeVoiceText({ text: a.text, voiceId: a.voiceId, modelId: a.modelId, apiKeyOverride: a.apiKeyOverride, auto: a.auto });
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+});
+
+ipcMain.handle('voice:synthesizeFromTranscript', async (event, args) => {
+  try {
+    const a = args || {};
+    if (!a.transcriptPath) {
+      return { ok: false, error: 'no_transcript' };
+    }
+    let content;
+    try {
+      content = await readVoiceTranscript(a.transcriptPath);
+    } catch {
+      return { ok: false, error: 'no_transcript' };
+    }
+    const text = extractSpeakableText(content, { maxChars: a.maxChars || 600, readingMode: a.readingMode });
+    if (!text) return { ok: false, error: 'no_text' };
+    const r = await synthesizeVoiceText({ text, voiceId: a.voiceId, modelId: a.modelId, apiKeyOverride: a.apiKeyOverride });
+    if (r && r.ok) r.uuid = lastAssistantUuid(content);
+    return r;
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+});
+
+ipcMain.handle('voice:synthesizeColumn', async (event, args) => {
+  const a = args || {};
+  try {
+    const thePath = resolveColumnTranscriptPath(a);
+    if (!thePath) {
+      return { ok: false, error: 'no_transcript', diag: buildVoiceDiag(a, { resolvedPath: null }) };
+    }
+    let content;
+    try {
+      content = await readVoiceTranscript(thePath);
+    } catch {
+      return { ok: false, error: 'no_transcript', diag: buildVoiceDiag(a, { resolvedPath: thePath }) };
+    }
+    const text = extractSpeakableText(content, { maxChars: a.maxChars || 600, readingMode: a.readingMode });
+    if (!text) return { ok: false, error: 'no_text', diag: buildVoiceDiag(a, { resolvedPath: thePath, contentLen: content.length, textLen: 0 }) };
+    const r = await synthesizeVoiceText({ text, voiceId: a.voiceId, modelId: a.modelId, apiKeyOverride: a.apiKeyOverride });
+    if (r && r.ok) r.uuid = lastAssistantUuid(content);
+    r.diag = buildVoiceDiag(a, { resolvedPath: thePath, contentLen: content.length, textLen: text.length });
+    return r;
+  } catch (err) {
+    return { ok: false, error: String(err), diag: buildVoiceDiag(a, {}) };
+  }
+});
+
+// Resolve a column's transcript path: prefer the given path when it exists,
+// then try the path derived from the column's ACTUAL cwd (the Claude CLI keys
+// its transcript dir by the cwd it ran in, which may be a project subdirectory
+// whose sanitized key differs from the project root), then fall back to the
+// project-key path. Returns null if none resolves to an existing file.
+function resolveColumnTranscriptPath(a) {
+  const { resolvedPath } = resolveTranscriptPath({
+    homeDir: os.homedir(),
+    transcriptPath: a.transcriptPath,
+    cwd: a.cwd,
+    projectKey: a.projectKey,
+    sessionId: a.sessionId,
+    exists: fs.existsSync,
+  });
+  return resolvedPath;
+}
+
+// Build a self-diagnosing object attached to EVERY voice handler return so each
+// Play press logs exactly which file was looked for and why it failed. All fs
+// calls are guarded; `content`/`text` are optional (filled by handlers that read
+// the transcript and extract speakable text).
+function buildVoiceDiag(a, opts) {
+  const o = opts || {};
+  let resolvedPath = null, triedCwdPath = null, triedProjectPath = null;
+  try {
+    const r = resolveTranscriptPath({
+      homeDir: os.homedir(),
+      transcriptPath: a.transcriptPath,
+      cwd: a.cwd,
+      projectKey: a.projectKey,
+      sessionId: a.sessionId,
+      exists: fs.existsSync,
+    });
+    resolvedPath = r.resolvedPath;
+    triedCwdPath = r.triedCwdPath;
+    triedProjectPath = r.triedProjectPath;
+  } catch (e) {}
+  // Caller may override the resolved path (e.g. it polled / already read it).
+  const usedPath = (o.resolvedPath !== undefined) ? o.resolvedPath : resolvedPath;
+  let resolvedExists = false, resolvedSize = -1;
+  try {
+    // Defense-in-depth: only stat a path that is contained under the projects
+    // root, so this diag oracle can never report on an out-of-root file even if
+    // an unsanitized path ever reached here.
+    if (usedPath && isUnderProjectsRoot(os.homedir(), usedPath) && fs.existsSync(usedPath)) {
+      resolvedExists = true;
+      resolvedSize = fs.statSync(usedPath).size;
+    }
+  } catch (e) {}
+  return {
+    sessionId: a.sessionId || null,
+    projectKey: a.projectKey || null,
+    cwd: a.cwd || null,
+    transcriptPathArg: a.transcriptPath || null,
+    triedCwdPath: triedCwdPath || null,
+    triedProjectPath: triedProjectPath || null,
+    resolvedPath: usedPath || null,
+    resolvedExists,
+    resolvedSize,
+    contentLen: typeof o.contentLen === 'number' ? o.contentLen : 0,
+    textLen: typeof o.textLen === 'number' ? o.textLen : 0,
+  };
+}
+
+// Read a transcript for voice: keep a generous tail but drop the partial leading
+// line so the NEWEST (possibly large) JSONL record is never cut mid-parse.
+async function readVoiceTranscript(p) {
+  let content = await fs.promises.readFile(p, 'utf8');
+  if (content.length > 1048576) {
+    content = content.slice(-1048576);
+    const nl = content.indexOf('\n');
+    if (nl > 0) content = content.slice(nl + 1); // drop the partial first line
+  }
+  return content;
+}
+
+// Cheap peek: report the last assistant message uuid and whether there is any
+// speakable text, without synthesizing. Lets the renderer record a baseline
+// uuid before a turn starts so it can poll for a newer message afterwards.
+ipcMain.handle('voice:peekColumn', async (event, args) => {
+  const a = args || {};
+  try {
+    const thePath = resolveColumnTranscriptPath(a);
+    if (!thePath) return { ok: false, diag: buildVoiceDiag(a, { resolvedPath: null }) };
+    let content = await readVoiceTranscript(thePath);
+    const text = extractSpeakableText(content, { maxChars: 600 });
+    return {
+      ok: true,
+      uuid: lastAssistantUuid(content),
+      hasText: !!text,
+      diag: buildVoiceDiag(a, { resolvedPath: thePath, contentLen: content.length, textLen: text ? text.length : 0 }),
+    };
+  } catch (err) {
+    return { ok: false, diag: buildVoiceDiag(a, {}) };
+  }
+});
+
+// Poll the transcript until a NEWER assistant message than baselineUuid appears
+// (auto-play fires at Stop before the just-finished message is flushed to the
+// JSONL, causing a one-message lag), then synthesize it. Returns the spoken
+// message's uuid so the renderer can avoid re-speaking it.
+ipcMain.handle('voice:synthesizeFreshFromColumn', async (event, args) => {
+  const a = args || {};
+  try {
+    const thePath = resolveColumnTranscriptPath(a);
+    if (!thePath) return { ok: false, error: 'no_transcript', diag: buildVoiceDiag(a, { resolvedPath: null }) };
+    let content = '';
+    let uuid = null;
+    let fresh = false;
+    for (let i = 0; i < 30; i++) {
+      try {
+        content = await readVoiceTranscript(thePath);
+        uuid = lastAssistantUuid(content);
+        if (uuid && uuid !== a.baselineUuid) { fresh = true; break; }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!fresh) return { ok: false, error: 'no_fresh', diag: buildVoiceDiag(a, { resolvedPath: thePath, contentLen: content.length }) };
+    const text = extractSpeakableText(content, { maxChars: a.maxChars || 600, readingMode: a.readingMode });
+    if (!text) return { ok: false, error: 'no_text', diag: buildVoiceDiag(a, { resolvedPath: thePath, contentLen: content.length, textLen: 0 }) };
+    const r = await synthesizeVoiceText({ text, voiceId: a.voiceId, modelId: a.modelId, apiKeyOverride: a.apiKeyOverride });
+    if (r && r.ok) r.uuid = uuid;
+    r.diag = buildVoiceDiag(a, { resolvedPath: thePath, contentLen: content.length, textLen: text.length });
+    return r;
+  } catch (err) {
+    return { ok: false, error: String(err), diag: buildVoiceDiag(a, {}) };
+  }
+});
+
+// Same poll-for-fresh logic as voice:synthesizeFreshFromColumn, but returns the
+// sentence chunks instead of synthesizing — lets the renderer drive streaming
+// playback and record which message it spoke.
+ipcMain.handle('voice:extractColumnSentences', async (event, args) => {
+  const a = args || {};
+  try {
+    if (!(readConfig().voice && readConfig().voice.enabled)) return { ok: false, error: 'voice_disabled', diag: buildVoiceDiag(a, {}) };
+    const thePath = resolveColumnTranscriptPath(a);
+    if (!thePath) return { ok: false, error: 'no_transcript', diag: buildVoiceDiag(a, { resolvedPath: null }) };
+    let content = '';
+    let uuid = null;
+    let fresh = false;
+    for (let i = 0; i < 30; i++) {
+      try {
+        content = await readVoiceTranscript(thePath);
+        uuid = lastAssistantUuid(content);
+        if (uuid && uuid !== a.baselineUuid) { fresh = true; break; }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!fresh) return { ok: false, error: 'no_fresh', diag: buildVoiceDiag(a, { resolvedPath: thePath, contentLen: content.length }) };
+    const text = extractSpeakableText(content, { maxChars: a.maxChars || 600, readingMode: a.readingMode });
+    if (!text) return { ok: false, error: 'no_text', diag: buildVoiceDiag(a, { resolvedPath: thePath, contentLen: content.length, textLen: 0 }) };
+    const sentences = splitSentences(text);
+    return { ok: true, sentences, uuid, diag: buildVoiceDiag(a, { resolvedPath: thePath, contentLen: content.length, textLen: text.length }) };
+  } catch (err) {
+    return { ok: false, error: String(err), diag: buildVoiceDiag(a, {}) };
+  }
+});
+
+ipcMain.handle('voice:getPersonality', () => {
+  try {
+    const p = path.join(os.homedir(), '.claude', 'CLAUDE.md');
+    if (!fs.existsSync(p)) {
+      return { ok: true, personality: '' };
+    }
+    const content = fs.readFileSync(p, 'utf8');
+    return { ok: true, personality: extractPersonalityBlock(content) };
+  } catch (err) {
+    return { ok: false, error: String(err), personality: '' };
+  }
+});
+
+ipcMain.handle('voice:setPersonality', (event, personaArg) => {
+  try {
+    const persona = String(personaArg == null ? '' : personaArg);
+    const dir = path.join(os.homedir(), '.claude');
+    const p = path.join(dir, 'CLAUDE.md');
+    const existing = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+    const next = upsertPersonalityBlock(existing, persona);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = p + '.tmp';
+    fs.writeFileSync(tmp, next, 'utf8');
+    fs.renameSync(tmp, p);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
 });
 
 // --- Automations IPC Handlers ---

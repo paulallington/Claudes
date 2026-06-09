@@ -60,6 +60,16 @@ Can also be run manually: `./release.sh [major|minor|patch|x.y.z]`
 - Each per-column session entry also optionally carries a `targetBranch` field — auto-detected by the Git tab from the Claude CLI session JSONL's last `gitBranch` value. When set, the Git tab renders branch-relative read-only data (commits, ahead/behind, diff vs base) for `targetBranch` rather than the project root's currently-checked-out branch. Mutation actions (stage/commit/push) disable until the user checks out that branch. Persisted only as a hint — `autoBindColumnTarget` re-derives it on focus regardless.
 - Claude sessions detected by scanning `~/.claude/projects/<path-key>/` for `.jsonl` files
 
+## Voice (TTS)
+
+Reads Claude's replies aloud via ElevenLabs. **Before touching anything voice-related, read [`docs/voice.md`](docs/voice.md)** — it covers the full architecture, IPC surface, and the bugs that keep recurring. The non-obvious essentials:
+
+- **Voice reads the LIVE TERMINAL buffer first, transcript only as fallback.** Interactive `claude` columns often DON'T persist their reply to `~/.claude/projects/<key>/<id>.jsonl` in real time (only a ~110-byte `ai-title` stub), so the disk transcript is unreliable for live playback. The terminal parser (`lib/terminal-reply.js`) is **TUI scraping** — fragile to Claude Code UI restyles; re-capture fixtures via headless xterm if it breaks (see docs §11).
+- **Reading modes** use the optional `🔊` (U+1F50A) summary line: `auto`/`summary` speak just that line (summary falls back to `firstSentence` when absent); `full` strips it and reads the body to `maxChars`.
+- **Don't regress session attribution:** the session-sync poll is read-only for `sessionId` (it once stole sibling columns' sessions); `detectSession` is acquire-only; fresh local spawns get a deterministic `--session-id` kept out of persisted `cmdArgs`.
+- **`config:saveProjects` must preserve on-disk `voice`/`terminal`** (`preserveManagedSettings`) or it clobbers settings the user just changed.
+- Pure libs: `voice-text.js`, `terminal-reply.js`, `voice-transcript-path.js`, `voice-settings.js`, `voice-request.js`, `voice-personality.js`, `session-target.js`, `spawn-session.js` (each `npm`-tested).
+
 <!-- aidp-orchestrator-start -->
 ## AI-Driven Project Orchestrator
 
