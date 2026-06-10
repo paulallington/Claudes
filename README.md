@@ -48,6 +48,7 @@ I built it because I run a lot of Claude Code sessions in parallel and got tired
 - **Built-in file explorer + inline editor**, **full git tab** (status, branches, stage, commit, push/pull, stash, diff viewer, commit log) — the git tab follows the focused column's working directory / git worktree
 - **Sticky notes** — draggable, colour-coded notes pinned over the terminal grid, scoped per workspace; anchor one to a column and it tracks that column as the layout changes
 - **Clawd** — an optional animated companion in each column that mirrors what Claude is doing (thinking, working, sweeping, waiting, idle, disconnected), driven by hook events (pixel art from [clawd-tank](https://github.com/marciogranzotto/clawd-tank))
+- **Voice** — Claude's replies read aloud per column via [ElevenLabs](https://elevenlabs.io/) TTS; it scrapes the live terminal so it speaks in real time (before the transcript even flushes), and by default voices only the column you're actively working in — configurable to all columns, notifications only, or active + notifications. Full or summary reading modes (honouring an optional 🔊 summary line), a customisable voice + spoken personality, and *focus catch-up* that replays a reply that finished while you were away. Automations and headless runs never speak; mute per project; your API key is stored encrypted and never reaches the renderer
 - **Cross-device session sync** — mirror a project's conversations through any cloud-synced folder (Google Drive, OneDrive, iCloud, Syncthing…) and resume them on another machine; no cloud API, just files
 - **CLAUDE.md editor** for the active project
 - **Run tab** — launch your app alongside Claude; auto-detects VS Code `launch.json` and .NET `launchSettings.json`; reusable env profiles
@@ -88,6 +89,16 @@ Schedule recurring Claude Code agents per project. Each automation has:
 - **Optional database** — wire a Mongo connection so multiple agents can coordinate (or share state with a "manager" agent)
 - **Run history** — every run logged with output, duration, cost, and status
 - **Open in Claude** — pull a run's findings into a fresh interactive Claude session for follow-up
+
+### Voice
+
+Have Claude *read its replies aloud*. Voice uses [ElevenLabs](https://elevenlabs.io/) and scrapes each column's live terminal, so it speaks the moment a reply finishes rendering — it doesn't wait for the session transcript to flush to disk. Configure it in the Voice panel:
+
+- **When it speaks** — *Active* (only the column you're attending right now), *All columns*, *Notifications only*, or *Active + notifications*
+- **How much** — *Full* reads the whole reply (up to a character cap); *Summary* / *Auto* read a single line, honouring an optional 🔊 summary line a message can end with
+- **Voice & personality** — pick any ElevenLabs voice, tune stability / style / speed, and set a spoken "personality" that shapes how summaries are phrased
+- **Focus catch-up** — a reply that finished while you were in another column or app replays the moment you click or refocus that column, plus a per-column play button for manual replay
+- **Stays out of the way** — automations, headless, and manager runs never speak; mute voice per project; your ElevenLabs API key is encrypted at rest and never exposed to the renderer
 
 ### Usage analytics
 
