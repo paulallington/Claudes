@@ -808,8 +808,16 @@ html[data-platform="darwin"] #toolbar {
   border-color: var(--border-dim);
 }
 
-/* Voice output toggle reads as "off" when global voice is disabled. */
-.toolbar-btn.voice-off { opacity: 0.45; }
+/* Voice toggle: unmistakable on/off. ON = accent-tinted speaker; OFF = dim muted-speaker. */
+#btn-voice-toggle .vt-off { display: none; }
+#btn-voice-toggle.voice-off .vt-on { display: none; }
+#btn-voice-toggle.voice-off .vt-off { display: block; }
+#btn-voice-toggle:not(.voice-off) { color: var(--accent, #e94560); }          /* ON: accent colour */
+#btn-voice-toggle.voice-off { opacity: 0.5; }                                 /* OFF: dim + muted icon */
+
+/* Voice stop button: prominent only while audio is actually playing. */
+#btn-voice-stop { opacity: 0.4; }                          /* idle: clearly inactive */
+#btn-voice-stop.speaking { opacity: 1; color: #ff6b6b; }   /* speaking: lit + stop-red */
 
 .toolbar-divider {
   width: 1px;

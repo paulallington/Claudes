@@ -9866,6 +9866,12 @@ function refreshVoiceButtonStates() {
   var src = currentVoiceAudio ? currentVoiceAudio.__src : null;
   var playingColId = currentVoiceAudio ? currentVoiceAudio.__colId : null;
   var paused = currentVoiceAudio ? currentVoiceAudio.paused : true;
+  // Toolbar Stop button lights up only while audio is actually playing.
+  var stopBtn = document.getElementById('btn-voice-stop');
+  if (stopBtn) {
+    var speaking = !!(currentVoiceAudio && !currentVoiceAudio.paused && !currentVoiceAudio.ended);
+    stopBtn.classList.toggle('speaking', speaking);
+  }
   var btns = document.querySelectorAll('.col-play-full,.col-play-summary');
   for (var i = 0; i < btns.length; i++) {
     var btn = btns[i];
