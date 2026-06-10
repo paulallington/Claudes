@@ -9980,6 +9980,8 @@ window.addEventListener('blur', function () { voiceWindowFocused = false; });
       if (window.electronAPI && window.electronAPI.setVoiceSettings) {
         await window.electronAPI.setVoiceSettings({ enabled: en });
       }
+      var enChk = document.getElementById('setting-voice-enabled');
+      if (enChk) enChk.checked = en;
       if (window.__refreshVoiceSettings) await window.__refreshVoiceSettings();
       if (!en) stopAllVoice();
       updateVoiceToggleUI();
@@ -10132,6 +10134,8 @@ if (window.electronAPI && window.electronAPI.onVoiceSettingsChanged) {
   window.electronAPI.onVoiceSettingsChanged(async function () {
     if (window.__refreshVoiceSettings) await window.__refreshVoiceSettings();
     updateVoiceToggleUI();
+    var enChk = document.getElementById('setting-voice-enabled');
+    if (enChk && voiceSettings) enChk.checked = !!voiceSettings.enabled;
   });
 }
 
@@ -11628,7 +11632,6 @@ function populateVoiceOptions(voices, selectedId) {
 
 function saveVoiceSettings() {
   if (!window.electronAPI || !window.electronAPI.setVoiceSettings) return Promise.resolve();
-  var enabledEl = document.getElementById('setting-voice-enabled');
   var keyEl = document.getElementById('setting-voice-apikey');
   var modeEl = document.getElementById('setting-voice-mode');
   var voiceEl = document.getElementById('setting-voice-voiceid');
@@ -11637,7 +11640,6 @@ function saveVoiceSettings() {
   var maxEl = document.getElementById('setting-voice-maxchars');
   var opt = voiceEl && voiceEl.options[voiceEl.selectedIndex];
   var payload = {
-    enabled: enabledEl ? enabledEl.checked : false,
     mode: modeEl ? modeEl.value : 'active',
     voiceId: opt ? opt.value : '',
     voiceName: opt ? opt.textContent : '',
@@ -11690,7 +11692,11 @@ function saveVoiceSettings() {
   if (!enabledEl) return;
 
   if (enabledEl) enabledEl.addEventListener('change', function () {
-    saveVoiceSettings();
+    if (!window.electronAPI || !window.electronAPI.setVoiceSettings) return;
+    window.electronAPI.setVoiceSettings({ enabled: enabledEl.checked })
+      .then(function () { return window.__refreshVoiceSettings && window.__refreshVoiceSettings(); })
+      .then(function () { if (typeof updateVoiceToggleUI === 'function') updateVoiceToggleUI(); })
+      .catch(function () {});
   });
   if (modeEl) modeEl.addEventListener('change', saveVoiceSettings);
   if (modelEl) modelEl.addEventListener('change', saveVoiceSettings);
