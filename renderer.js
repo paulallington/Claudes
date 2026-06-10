@@ -9972,7 +9972,6 @@ window.addEventListener('blur', function () { voiceWindowFocused = false; });
 
 if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
   window.electronAPI.onVoiceHookEvent(async function (event) {
-    if (event && event.__claudesBackground) { try { vlog && vlog('drop background event', event.session_id); } catch (e) {} return; }
     var colId = clawdResolveHookColumn(event);
     vlog('hook recv', { evt: (event && (event.hook_event_name || event.event)), sid: event && event.session_id, cwd: event && event.cwd, colId: colId });
     if (colId == null) return;  // not this window's column
@@ -9986,6 +9985,18 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
     if (!col) return;
     var sid = event && event.session_id;
     var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
+    // A background run (automation / headless / manager) shares the project cwd
+    // with interactive columns, so its Stop can resolve to a column via the cwd
+    // fallback — drop it. BUT only when it does NOT match this column's OWN session
+    // id: a session id can legitimately be both an interactive column's session AND
+    // in the background set (a `claude --print` run touched the same session), and
+    // dropping a sid-matched Stop silently kills that column's real auto-play
+    // (observed: a live column's own replies dropped as "background"). Matching the
+    // column's session means the column owns this reply — never drop that.
+    if (event && event.__claudesBackground && !sidMatchesColumn) {
+      try { vlog && vlog('drop background event (no sid match)', sid); } catch (e) {}
+      return;
+    }
     // A column whose sessionId hasn't been detected yet (null) owns the reply that
     // resolved to it via the unambiguous-cwd fallback (subagents fire only later,
     // after the parent session is established). Allow recording its path + unspoken
