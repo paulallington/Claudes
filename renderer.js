@@ -10136,6 +10136,9 @@ if (window.electronAPI && window.electronAPI.onVoiceSettingsChanged) {
     updateVoiceToggleUI();
     var enChk = document.getElementById('setting-voice-enabled');
     if (enChk && voiceSettings) enChk.checked = !!voiceSettings.enabled;
+    // Voice/model/tuning changed: drop cached audio so the next play re-synthesizes
+    // with the new settings (the cache key is colId:readingMode, not voice-aware).
+    try { allColumns.forEach(function (c) { if (c) c.voiceCache = {}; }); } catch (e) {}
   });
 }
 
