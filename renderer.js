@@ -121,6 +121,14 @@ var activeProjectKey = null;
 // wide, so voice "active" modes only auto-speak the column in view.
 var lastFocusedColumnId = null;
 
+// Which column the user is ATTENDING to right now for voice auto-play, or null.
+// Unlike lastFocusedColumnId (which stays put when you click non-column UI in the
+// same window), this is set when a mousedown/focusin lands INSIDE a column and
+// CLEARED when it lands on the sidebar/explorer/toolbar/modal. "active" voice
+// modes auto-speak only while this names the replying column, so a reply that
+// finishes while you're in the sidebar is held for click catch-up instead.
+var voiceAttentionColumnId = null;
+
 var config = { projects: [], activeProjectIndex: -1 };
 var projectDragFromIndex = -1; // For sidebar drag-to-reorder
 var workspaceDragFromIndex = -1; // Drag-reorder within a project's sub-workspaces
@@ -2709,6 +2717,14 @@ function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
   var project = config.projects[projectIndex];
   if (!project) return;
 
+  // Programmatic project/workspace switch: the user is no longer attending the
+  // old project's column. Null voice attention so a reply that lands on a still-
+  // live background column does NOT auto-speak; it re-arms only when the user
+  // clicks or types in the now-visible column. Every visible switch (sidebar
+  // click, config-redirect, popout take-back, notification headless-focus-run)
+  // funnels through here, so this is the single chokepoint.
+  voiceAttentionColumnId = null;
+
   // Compute the outgoing state key BEFORE mutating config, so we can hide
   // its container cleanly.
   var prevStateKey = null;
@@ -2821,6 +2837,9 @@ function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
 function activatePopoutProject(index) {
   var project = config.projects[index];
   if (!project) return;
+  // Programmatic activation (popout reveal / take-back): drop voice attention so
+  // a background column can't auto-speak; re-arms when the user focuses a column.
+  voiceAttentionColumnId = null;
   config.activeProjectIndex = index;
   // Popouts are Primary-only; align in-memory config so getActiveState()/
   // refitAll()/persistSessions resolve to the Primary state we reveal below.
@@ -4299,6 +4318,19 @@ function addColumn(args, targetRow, opts) {
     var c = allColumns.get(id);
     if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
       c.lastInputAt = Date.now();
+      // Typing is attention on this column for voice auto-play, even if a prior
+      // sidebar click cleared it (typing fires no focus event, so the click/
+      // refocus catch-up paths never run). Catch up the unspoken reply too, with
+      // the same guards as the click catch-up. The voiceUnspoken flag clears on
+      // the first relevant keystroke, so this is a no-op after that (no storm),
+      // and escape sequences are already filtered out above.
+      voiceAttentionColumnId = id;
+      try {
+        if (c.voiceUnspoken && voiceSettings && voiceSettings.enabled && voiceSettings.focusCatchUp !== false && voiceWindowFocused && !isProjectVoiceMuted(c.projectKey)) {
+          c.voiceUnspoken = false;
+          playColumnReply(id, voiceSettings.readingMode || 'auto');
+        }
+      } catch (e) {}
       // Stop attention flash when the user types — clearly they're responding
       if (c.activityState === 'attention') {
         c.hasUserInput = false;
@@ -4369,7 +4401,17 @@ function addColumn(args, targetRow, opts) {
   });
 
   termWrapper.addEventListener('mousedown', function () {
-    setFocusedColumn(id);
+    setFocusedColumn(id, { userFocus: true });
+  });
+
+  // Clicking the bare header strip (not just the terminal body) also attends the
+  // column for voice auto-play. The header is a sibling of termWrapper, so the
+  // termWrapper listener above doesn't cover it. Action buttons inside the header
+  // fire their own 'click' handlers regardless — this mousedown bubbling up and
+  // marking the column attended is harmless and correct (e.g. pressing A's play
+  // button should attend A).
+  header.addEventListener('mousedown', function () {
+    setFocusedColumn(id, { userFocus: true });
   });
 
   header.querySelector('.col-restart').addEventListener('click', function () {
@@ -5713,7 +5755,7 @@ function tryEndpointFailover(colId) {
   });
 }
 
-function setFocusedColumn(id) {
+function setFocusedColumn(id, opts) {
   var col = allColumns.get(id);
   if (!col) return;
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
@@ -5773,11 +5815,20 @@ function setFocusedColumn(id) {
     }
   });
 
+  // A genuine user-initiated focus also makes this the attended column for
+  // voice auto-play (so a reply that lands while you're typing here speaks).
+  if (opts && opts.userFocus === true) voiceAttentionColumnId = id;
+
   // Focus catch-up: if this column's latest reply was never spoken (e.g. it
   // finished while another column was focused), speak its summary once on focus.
+  // ONLY on genuine user focus AND while the window is focused — programmatic
+  // focus (project/workspace switch, survivor refocus, maximize) and focus
+  // arriving while the window is blurred must NOT auto-speak. Default (no opts)
+  // is silent, so any caller we miss fails safe.
   try {
     var fcol = allColumns.get(id);
-    if (fcol && fcol.voiceUnspoken && voiceSettings && voiceSettings.enabled && voiceSettings.focusCatchUp !== false && !isProjectVoiceMuted(fcol.projectKey)) {
+    if (opts && opts.userFocus === true && voiceWindowFocused
+        && fcol && fcol.voiceUnspoken && voiceSettings && voiceSettings.enabled && voiceSettings.focusCatchUp !== false && !isProjectVoiceMuted(fcol.projectKey)) {
       fcol.voiceUnspoken = false;
       playColumnReply(id, voiceSettings.readingMode || 'auto');
     }
@@ -5815,11 +5866,11 @@ function navigateColumn(direction) {
       ? (curRow - 1 + state.rows.length) % state.rows.length
       : (curRow + 1) % state.rows.length;
     var targetColIdx = Math.min(curCol, state.rows[targetRow].columnIds.length - 1);
-    setFocusedColumn(state.rows[targetRow].columnIds[targetColIdx]);
+    setFocusedColumn(state.rows[targetRow].columnIds[targetColIdx], { userFocus: true });
     return;
   }
 
-  setFocusedColumn(ids[newIdx]);
+  setFocusedColumn(ids[newIdx], { userFocus: true });
 }
 
 // ============================================================
@@ -6689,7 +6740,7 @@ document.addEventListener('keydown', function (e) {
       }
       if (num <= ids.length) {
         e.preventDefault();
-        setFocusedColumn(ids[num - 1]);
+        setFocusedColumn(ids[num - 1], { userFocus: true });
       }
     }
     return;
@@ -9866,11 +9917,13 @@ function isProjectVoiceMuted(projectKey) {
 function onVoiceWindowRefocus() {
   try {
     if (!voiceSettings || !voiceSettings.enabled) return;
-    // find the visible focused column (the one with the 'focused' DOM class)
-    var foundId = null;
-    allColumns.forEach(function (col, id) {
-      if (col && col.element && col.element.classList && col.element.classList.contains('focused')) foundId = id;
-    });
+    // Catch up the ATTENDED column, not lastFocusedColumnId. lastFocusedColumnId
+    // is rewritten by EVERY setFocusedColumn — including programmatic survivor-
+    // refocus / maximize / minimize / restore — so using it could speak a column
+    // the user never attended on alt-tab-back. voiceAttentionColumnId only tracks
+    // genuine user focus/typing and is nulled on programmatic project switches,
+    // so null here means "nothing the user was attending" -> no catch-up (safe).
+    var foundId = voiceAttentionColumnId;
     if (foundId == null) return;
     var fcol = allColumns.get(foundId);
     if (fcol && fcol.voiceUnspoken && voiceSettings.focusCatchUp !== false && !isProjectVoiceMuted(fcol.projectKey)) {
@@ -9885,6 +9938,15 @@ function onVoiceWindowRefocus() {
 var voiceWindowFocused = (typeof document !== 'undefined' && document.hasFocus && document.hasFocus());
 window.addEventListener('focus', function () { voiceWindowFocused = true; onVoiceWindowRefocus(); });
 window.addEventListener('blur', function () { voiceWindowFocused = false; });
+
+// `voiceAttentionColumnId` is "the column the user last GENUINELY focused". It is
+// set ONLY by a real user focus (setFocusedColumn with userFocus:true) or by
+// typing into a column's terminal (onData real-input branch) — NOT by clicking
+// the sidebar/explorer/toolbar. Glancing at the sidebar while a reply is pending
+// therefore no longer mutes voice. It is nulled on a programmatic project/
+// workspace switch (setActiveWorkspace / activatePopoutProject) so a still-live
+// background column never auto-speaks once the user has navigated away; it
+// re-arms when the user clicks or types in the now-visible column.
 
 (function wireVoiceToolbar() {
   var stopBtn = document.getElementById('btn-voice-stop');
@@ -9927,7 +9989,10 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
     if (isProjectVoiceMuted(col.projectKey)) return;  // muted project: no auto-speak / catch-up flag
     var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
     if (!state) return;
-    var isActive = lastFocusedColumnId === colId && voiceWindowFocused;
+    // "Active" for auto-play means the user is ATTENDING to this column right now
+    // (clicked/typing in it), not merely that it was the last column focused before
+    // they moved to the sidebar/toolbar. mode 'all' ignores this (handled below).
+    var isActive = voiceAttentionColumnId === colId && voiceWindowFocused;
     var eligible = false;
     switch (voiceSettings.mode) {
       case 'all': eligible = (evtName === 'Stop' && sidMatchesColumn); break;
@@ -9940,10 +10005,17 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
     // Only for the column's OWN session — a subagent/automation Stop shares the cwd
     // but has a different session_id, and must not overwrite the column's transcript.
     if (evtName === 'Stop' && event.transcript_path && voiceOwnsReply) col.voiceTranscriptPath = event.transcript_path;
-    // A Stop that we don't auto-speak leaves an unspoken reply behind — flag it so
-    // focus catch-up can speak the summary later. When we do speak it, clear the flag.
-    // Track unspoken state only for the column's own session.
-    if (evtName === 'Stop' && voiceOwnsReply) col.voiceUnspoken = !eligible;
+    // An owned Stop has NOT been spoken yet at this point — mark it pending
+    // (unspoken) unconditionally. The speak paths (streamSpeakText /
+    // streamSpeakColumn / playColumnReply) clear it the moment they actually run.
+    // Pre-clearing it to !eligible was a bug: when an eligible reply later bailed
+    // the 250ms settle re-check, it stayed false and the catch-up paths (typing /
+    // focus / window-refocus, all gated on voiceUnspoken===true) could never
+    // replay it -> permanent silence until a manual press. Leaving it true means
+    // eligible+speaks clears it (no double-speak, dedup on lastSpokenText also
+    // guards), while eligible-but-settle-bails OR ineligible stays true so the
+    // catch-up recovers it. Track only for the column's own session.
+    if (evtName === 'Stop' && voiceOwnsReply) col.voiceUnspoken = true;
     // Capture the pre-turn message uuid the moment the user submits, so a later
     // Stop can poll for the FRESH reply (uuid !== baseline) instead of racing the
     // transcript flush and speaking the previous turn.
@@ -9976,7 +10048,7 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
         if (!voiceSettings || !voiceSettings.enabled) return;  // re-check after the await
         // Re-evaluate eligibility after the await — focus/mute can change in 250ms.
         if (isProjectVoiceMuted(col.projectKey)) return;
-        var stillActive = lastFocusedColumnId === colId && voiceWindowFocused;
+        var stillActive = voiceAttentionColumnId === colId && voiceWindowFocused;
         var stillEligible = false;
         switch (voiceSettings.mode) {
           case 'all': stillEligible = sidMatchesColumn; break;
