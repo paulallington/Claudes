@@ -10023,10 +10023,13 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
     if (isProjectVoiceMuted(col.projectKey)) return;  // muted project: no auto-speak / catch-up flag
     var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
     if (!state) return;
-    // "Active" for auto-play means the user is ATTENDING to this column right now
-    // (clicked/typing in it), not merely that it was the last column focused before
-    // they moved to the sidebar/toolbar. mode 'all' ignores this (handled below).
-    var isActive = voiceAttentionColumnId === colId && voiceWindowFocused;
+    // "Active" for auto-play means this is the column the user is ATTENDING
+    // (last clicked/typed in) — INDEPENDENT of whether the app window is focused,
+    // so a reply that lands while they've tabbed away still speaks (the whole point
+    // of voice: listen while doing something else). Attribution is gated by
+    // sidMatchesColumn, so only the genuinely-attended column ever speaks — never a
+    // random one. mode 'all' ignores this (handled below).
+    var isActive = voiceAttentionColumnId === colId;
     var eligible = false;
     switch (voiceSettings.mode) {
       case 'all': eligible = (evtName === 'Stop' && sidMatchesColumn); break;
@@ -10082,7 +10085,7 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
         if (!voiceSettings || !voiceSettings.enabled) { vlog('settle bail', { colId: colId, reason: 'disabled' }); return; }  // re-check after the await
         // Re-evaluate eligibility after the await — focus/mute can change in 250ms.
         if (isProjectVoiceMuted(col.projectKey)) { vlog('settle bail', { colId: colId, reason: 'muted' }); return; }
-        var stillActive = voiceAttentionColumnId === colId && voiceWindowFocused;
+        var stillActive = voiceAttentionColumnId === colId;  // window focus no longer required (see isActive above)
         var stillEligible = false;
         switch (voiceSettings.mode) {
           case 'all': stillEligible = sidMatchesColumn; break;
