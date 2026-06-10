@@ -23,6 +23,8 @@ const { normalizeVoiceSettings, redactVoiceSettings } = require('./lib/voice-set
 const { extractSpeakableText, lastAssistantUuid, splitSentences } = require('./lib/voice-text');
 const { columnTranscriptPath, resolveTranscriptPath, isUnderProjectsRoot } = require('./lib/voice-transcript-path');
 const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice-personality');
+const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
+const { tagBackgroundEvent } = require('./lib/voice-background');
 const https = require('https');
 
 // macOS GUI launches (Dock/Finder) inherit launchd's minimal PATH —
@@ -266,23 +268,22 @@ function ensureConfigDir() {
 
 function readConfig() {
   ensureConfigDir();
-  try {
-    const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-    // Drop any corrupt null entries (can appear from a failed drag-reorder splice).
-    if (Array.isArray(cfg.projects)) {
-      cfg.projects = cfg.projects.filter((p) => p && typeof p === 'object');
-    } else {
-      cfg.projects = [];
-    }
-    return cfg;
-  } catch {
-    return { projects: [], activeProjectIndex: -1 };
+  const { data, recovered } = readJsonWithRecovery(CONFIG_FILE);
+  const cfg = (data && typeof data === 'object') ? data : { projects: [], activeProjectIndex: -1 };
+  // Drop any corrupt null entries (can appear from a failed drag-reorder splice).
+  if (Array.isArray(cfg.projects)) {
+    cfg.projects = cfg.projects.filter((p) => p && typeof p === 'object');
+  } else {
+    cfg.projects = [];
   }
+  if (recovered) cfg._recovered = true;
+  return cfg;
 }
 
 function writeConfig(config) {
   ensureConfigDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
+  if (config && config._recovered) { try { delete config._recovered; } catch (e) {} } // never persist the transient flag
+  atomicWriteJson(CONFIG_FILE, config);
 }
 
 // The renderer calls saveProjects on every drag/resize/tab tweak, which previously
@@ -4090,6 +4091,7 @@ function handleHookRequest(req, res) {
       if (aborted) return;
       try {
         const event = JSON.parse(body);
+        tagBackgroundEvent(event, backgroundSessionIds);
         incrPerfHook();
         mainWindow?.webContents.send('hook:event', event);
         // Also broadcast to every window (incl. popouts) on a dedicated channel
@@ -6307,6 +6309,7 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
       if (!line.trim()) continue;
       try {
         const evt = JSON.parse(line);
+        if (evt && evt.session_id) rememberBackgroundSession(evt.session_id, child);
         let text = '';
         if (evt.type === 'assistant' && evt.message && evt.message.content) {
           evt.message.content.forEach(block => {
@@ -6345,6 +6348,23 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
 // --- Headless Runner ---
 
 const runningHeadless = new Map(); // runId -> { child, cleanup, projectPath, cancelled? }
+
+// Session-ids of invisible background runs (headless, automation agents, managers).
+// Their Stop hooks share the project cwd with interactive columns, so we tag their
+// broadcast events to keep them from arming voice catch-up on a real column.
+const backgroundSessionIds = new Set();
+function rememberBackgroundSession(id, child) {
+  if (!id) return;
+  backgroundSessionIds.add(id);
+  if (child) child.__bgSessionId = id;
+  if (backgroundSessionIds.size > 200) { // defensive bound; session-ids are never reused
+    const oldest = backgroundSessionIds.values().next().value;
+    backgroundSessionIds.delete(oldest);
+  }
+}
+function forgetBackgroundSession(child) {
+  if (child && child.__bgSessionId) backgroundSessionIds.delete(child.__bgSessionId);
+}
 
 function runHeadless(projectPath, prompt) {
   if (!projectPath || typeof prompt !== 'string') {
@@ -6420,6 +6440,7 @@ function runHeadless(projectPath, prompt) {
     const state = runningHeadless.get(runId);
     const cancelled = state && state.cancelled;
     runningHeadless.delete(runId);
+    forgetBackgroundSession(spawned.child);
     spawned.cleanup();
     try { outputStream.end(); } catch { /* ignore */ }
     const status = cancelled ? 'cancelled' : (exitCode === 0 ? 'completed' : 'error');
@@ -6428,6 +6449,7 @@ function runHeadless(projectPath, prompt) {
 
   spawned.child.on('error', (err) => {
     runningHeadless.delete(runId);
+    forgetBackgroundSession(spawned.child);
     spawned.cleanup();
     try { outputStream.end(); } catch { /* ignore */ }
     finalizeHeadlessRun(projectPath, runId, 'error', null, err.message);
@@ -6707,6 +6729,7 @@ async function runAgent(automationId, agentId) {
   child.on('close', (exitCode) => {
     runningAgents.delete(key);
     agentLiveOutputBuffers.delete(key);
+    forgetBackgroundSession(child);
     spawned.cleanup();
 
     const completedAt = new Date().toISOString();
@@ -6781,6 +6804,7 @@ async function runAgent(automationId, agentId) {
   child.on('error', (err) => {
     runningAgents.delete(key);
     agentLiveOutputBuffers.delete(key);
+    forgetBackgroundSession(child);
     spawned.cleanup();
     try {
       const freshData = readAutomations();
@@ -7004,6 +7028,7 @@ async function runManager(automationId) {
       if (!line.trim()) continue;
       try {
         const evt = JSON.parse(line);
+        if (evt && evt.session_id) rememberBackgroundSession(evt.session_id, child);
         let text = '';
         if (evt.type === 'assistant' && evt.message && evt.message.content) {
           evt.message.content.forEach(block => { if (block.type === 'text') text += block.text; });
@@ -7029,6 +7054,7 @@ async function runManager(automationId) {
   child.on('close', (exitCode) => {
     runningManagers.delete(automationId);
     managerLiveOutputBuffers.delete(automationId);
+    forgetBackgroundSession(child);
     if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
 
     const completedAt = new Date().toISOString();
@@ -7131,6 +7157,7 @@ async function runManager(automationId) {
 
   child.on('error', (err) => {
     runningManagers.delete(automationId);
+    forgetBackgroundSession(child);
     if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
     const errData = readAutomations();
     const errAuto = errData.automations.find(a => a.id === automationId);
@@ -7400,7 +7427,11 @@ if (!gotLock) {
       if (cleared > 0) console.log('[startup] dirty shutdown detected — cleared', cleared, 'stale poppedOut flag(s)');
     }
     cfg.cleanShutdown = false; // re-arm; before-quit flips it back to true
-    try { writeConfig(cfg); } catch (err) { console.error('writeConfig (shutdown marker) failed:', err); }
+    if (!cfg._recovered) {
+      try { writeConfig(cfg); } catch (err) { console.error('writeConfig (shutdown marker) failed:', err); }
+    } else {
+      console.error('[config] skipping startup rewrite — config was recovered/defaulted this boot');
+    }
     // Spin up sync watchers for any project that already has sync enabled
     // from a previous session.
     try { reapplySyncFromConfig(cfg); } catch (err) { console.error('sync boot failed:', err); }
@@ -7477,9 +7508,13 @@ app.on('before-quit', () => {
   // config writes; we read the freshly-flushed copy and write the flag.
   try {
     const finalCfg = readConfig();
-    finalCfg.cleanShutdown = true;
-    writeConfig(finalCfg);
-    step('cleanShutdown marker set');
+    if (!finalCfg._recovered) {
+      finalCfg.cleanShutdown = true;
+      writeConfig(finalCfg);
+      step('cleanShutdown marker set');
+    } else {
+      step('cleanShutdown marker skipped — config was recovered/defaulted');
+    }
   } catch (err) {
     diagLog('[quit] cleanShutdown marker write failed:', err && err.message);
   }

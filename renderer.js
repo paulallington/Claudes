@@ -4400,9 +4400,14 @@ function addColumn(args, targetRow, opts) {
     }
   });
 
+  // Capture phase: clicking directly into the xterm viewport (the text area where
+  // the cursor blinks) doesn't reliably bubble a mousedown to termWrapper — xterm's
+  // internal DOM can swallow it — so a bubble-phase listener misses text clicks and
+  // the column never gets attended for voice catch-up. Capture fires parent→child,
+  // before xterm consumes the event, so every click inside the column attends it.
   termWrapper.addEventListener('mousedown', function () {
     setFocusedColumn(id, { userFocus: true });
-  });
+  }, true);
 
   // Clicking the bare header strip (not just the terminal body) also attends the
   // column for voice auto-play. The header is a sibling of termWrapper, so the
@@ -9967,6 +9972,7 @@ window.addEventListener('blur', function () { voiceWindowFocused = false; });
 
 if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
   window.electronAPI.onVoiceHookEvent(async function (event) {
+    if (event && event.__claudesBackground) { try { vlog && vlog('drop background event', event.session_id); } catch (e) {} return; }
     var colId = clawdResolveHookColumn(event);
     vlog('hook recv', { evt: (event && (event.hook_event_name || event.event)), sid: event && event.session_id, cwd: event && event.cwd, colId: colId });
     if (colId == null) return;  // not this window's column
