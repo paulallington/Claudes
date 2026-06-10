@@ -489,16 +489,18 @@ function readLoops() {
 
 function readAutomations() {
   ensureConfigDir();
-  try {
-    return JSON.parse(fs.readFileSync(AUTOMATIONS_FILE, 'utf8'));
-  } catch {
-    return { globalEnabled: true, maxConcurrentRuns: 3, agentReposBaseDir: AGENTS_DIR_DEFAULT, automations: [] };
-  }
+  const defaults = { globalEnabled: true, maxConcurrentRuns: 3, agentReposBaseDir: AGENTS_DIR_DEFAULT, automations: [] };
+  const { data, recovered } = readJsonWithRecovery(AUTOMATIONS_FILE);
+  const result = (data && typeof data === 'object') ? data : defaults;
+  if (!Array.isArray(result.automations)) result.automations = [];
+  if (recovered) result._recovered = true;
+  return result;
 }
 
 function writeAutomations(data) {
   ensureConfigDir();
-  fs.writeFileSync(AUTOMATIONS_FILE, JSON.stringify(data, null, 2), 'utf8');
+  if (data && data._recovered) { try { delete data._recovered; } catch (e) {} } // never persist the transient flag
+  atomicWriteJson(AUTOMATIONS_FILE, data);
 }
 
 // Prompt snippet library — persists to ~/.claudes/snippets.json. Each snippet
