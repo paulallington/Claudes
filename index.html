@@ -523,6 +523,8 @@
               <span class="settings-hint">Only the focused column speaks in 'active' modes.</span>
             </div>
             <label class="settings-toggle"><input type="checkbox" id="setting-voice-focuscatchup"><span>Speak a column's summary when I focus it (if it wasn't already spoken)</span></label>
+            <label class="settings-toggle"><input type="checkbox" id="setting-voice-debuglog"><span>Save debug log</span></label>
+            <span class="settings-hint">Writes the voice decision pipeline to <code>~/.claudes/voice-debug.log</code> for troubleshooting — off by default; no reply text leaves your machine. <button id="setting-voice-openlog" class="settings-browse-btn" style="padding:2px 8px;">Open log</button></span>
             <div class="settings-field">
               <label for="setting-voice-voiceid">Voice</label>
               <div class="settings-path-row">

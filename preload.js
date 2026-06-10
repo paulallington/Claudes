@@ -120,6 +120,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   extractColumnSentences: (o) => ipcRenderer.invoke('voice:extractColumnSentences', o),
   getPersonality: () => ipcRenderer.invoke('voice:getPersonality'),
   setPersonality: (text) => ipcRenderer.invoke('voice:setPersonality', text),
+  voiceLog: (line) => ipcRenderer.send('voice:log', line),
+  revealVoiceLog: () => ipcRenderer.invoke('voice:revealLog'),
   onVoiceHookEvent: (cb) => ipcRenderer.on('voice:hookEvent', (e, ev) => cb(ev)),
   onVoiceSettingsChanged: (cb) => ipcRenderer.on('voice:settingsChanged', () => cb()),
   readMcp: (projectPath) => ipcRenderer.invoke('mcp:read', projectPath),

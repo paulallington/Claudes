@@ -13,6 +13,7 @@ test('normalizeVoiceSettings applies defaults for empty input', () => {
     modelId: 'eleven_flash_v2_5',
     maxChars: 600,
     focusCatchUp: true,
+    debugLog: false,
     personality: '',
     personalityPreset: '',
     stability: 0.5,
@@ -82,6 +83,15 @@ test('normalizeVoiceSettings defaults focusCatchUp true and respects explicit fa
   assert.equal(normalizeVoiceSettings({ focusCatchUp: 'yes' }).focusCatchUp, true);
   assert.equal(normalizeVoiceSettings({ focusCatchUp: false }).focusCatchUp, false);
   assert.equal(normalizeVoiceSettings({ focusCatchUp: true }).focusCatchUp, true);
+});
+
+test('normalizeVoiceSettings defaults debugLog false and respects explicit true', () => {
+  assert.equal(normalizeVoiceSettings().debugLog, false);
+  assert.equal(normalizeVoiceSettings({ debugLog: 'yes' }).debugLog, false);
+  assert.equal(normalizeVoiceSettings({ debugLog: 1 }).debugLog, false);
+  assert.equal(normalizeVoiceSettings({ debugLog: true }).debugLog, true);
+  assert.equal(normalizeVoiceSettings({ debugLog: false }).debugLog, false);
+  assert.equal(redactVoiceSettings({ debugLog: true }).debugLog, true);
 });
 
 test('normalizeVoiceSettings defaults personality fields to empty strings', () => {

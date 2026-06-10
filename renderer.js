@@ -4328,6 +4328,7 @@ function addColumn(args, targetRow, opts) {
       try {
         if (c.voiceUnspoken && voiceSettings && voiceSettings.enabled && voiceSettings.focusCatchUp !== false && voiceWindowFocused && !isProjectVoiceMuted(c.projectKey)) {
           c.voiceUnspoken = false;
+          vlog('catchup typing', { colId: id });
           playColumnReply(id, voiceSettings.readingMode || 'auto');
         }
       } catch (e) {}
@@ -5835,6 +5836,7 @@ function setFocusedColumn(id, opts) {
     if (opts && opts.userFocus === true && voiceWindowFocused
         && fcol && fcol.voiceUnspoken && voiceSettings && voiceSettings.enabled && voiceSettings.focusCatchUp !== false && !isProjectVoiceMuted(fcol.projectKey)) {
       fcol.voiceUnspoken = false;
+      vlog('catchup focus', { colId: id });
       playColumnReply(id, voiceSettings.readingMode || 'auto');
     }
   } catch (e) {}
@@ -9544,7 +9546,19 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
 //   window.__refreshVoiceSettings() — reload the cached settings (call after save)
 //   window.__playVoiceTest(result)  — play a {ok, mime, data} synth result (test button)
 var VOICE_DEBUG = true; // dev: logs the voice pipeline to the DevTools console; set false to silence
-function vlog() { if (VOICE_DEBUG) { try { console.log.apply(console, ['[voice]'].concat([].slice.call(arguments))); } catch (e) {} } }
+function vlog() {
+  var args = [].slice.call(arguments);
+  if (VOICE_DEBUG) { try { console.log.apply(console, ['[voice]'].concat(args)); } catch (e) {} }
+  try {
+    if (voiceSettings && voiceSettings.debugLog && window.electronAPI && window.electronAPI.voiceLog) {
+      var parts = args.map(function (a) {
+        if (typeof a === 'string') return a;
+        try { return JSON.stringify(a); } catch (e) { return String(a); }
+      });
+      window.electronAPI.voiceLog(parts.join(' '));
+    }
+  } catch (e) { /* logging must never break voice */ }
+}
 var voiceSettings = null;
 var currentVoiceAudio = null;
 // Bumped to supersede an in-flight streaming auto-play (a newer Stop, or a
@@ -9572,6 +9586,8 @@ async function runAutoStream(req) {
     } else {
       await streamSpeakColumn(col, req.readingMode, req.baselineUuid, req.colId);
     }
+  } catch (e) {
+    vlog('autostream error', { colId: req.colId, err: String(e && e.message || e) });
   } finally {
     voiceAutoBusy = false;
     vlog('runAutoStream end; drain=' + !!voiceAutoQueue);
@@ -9933,6 +9949,7 @@ function onVoiceWindowRefocus() {
     var fcol = allColumns.get(foundId);
     if (fcol && fcol.voiceUnspoken && voiceSettings.focusCatchUp !== false && !isProjectVoiceMuted(fcol.projectKey)) {
       fcol.voiceUnspoken = false;
+      vlog('catchup window-refocus', { colId: foundId });
       playColumnReply(foundId, voiceSettings.readingMode || 'auto');
     }
   } catch (e) {}
@@ -10040,7 +10057,7 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
       window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId })
         .then(function (r) { if (r && r.ok) col.voicePreTurnUuid = r.uuid; }).catch(function () {});
     }
-    vlog('hook decision', { evt: evtName, colId: colId, enabled: !!(voiceSettings && voiceSettings.enabled), mode: voiceSettings && voiceSettings.mode, voiceId: voiceSettings && voiceSettings.voiceId, focusedColumnId: state && state.focusedColumnId, winFocused: voiceWindowFocused, isActive: isActive, muted: isProjectVoiceMuted(col.projectKey), eligible: eligible, autoBusy: voiceAutoBusy });
+    vlog('hook decision', { evt: evtName, colId: colId, enabled: !!(voiceSettings && voiceSettings.enabled), mode: voiceSettings && voiceSettings.mode, voiceId: voiceSettings && voiceSettings.voiceId, focusedColumnId: state && state.focusedColumnId, winFocused: voiceWindowFocused, isActive: isActive, muted: isProjectVoiceMuted(col.projectKey), eligible: eligible, autoBusy: voiceAutoBusy, sidMatchesColumn: sidMatchesColumn, colSid: col && col.sessionId, evtSid: sid, unspoken: col && col.voiceUnspoken, bg: !!(event && event.__claudesBackground), attention: voiceAttentionColumnId, lastFocused: lastFocusedColumnId });
     if (!eligible) return;
     try {
       var result;
@@ -10061,10 +10078,10 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
         // a newer Stop during the 250ms window must win, so bail if it advanced.
         var settleGen = voiceStreamGen;
         await new Promise(function (r) { setTimeout(r, 250); });
-        if (voiceStreamGen !== settleGen) return;  // superseded during settle (manual/newer Stop)
-        if (!voiceSettings || !voiceSettings.enabled) return;  // re-check after the await
+        if (voiceStreamGen !== settleGen) { vlog('settle bail', { colId: colId, reason: 'superseded' }); return; }  // superseded during settle (manual/newer Stop)
+        if (!voiceSettings || !voiceSettings.enabled) { vlog('settle bail', { colId: colId, reason: 'disabled' }); return; }  // re-check after the await
         // Re-evaluate eligibility after the await — focus/mute can change in 250ms.
-        if (isProjectVoiceMuted(col.projectKey)) return;
+        if (isProjectVoiceMuted(col.projectKey)) { vlog('settle bail', { colId: colId, reason: 'muted' }); return; }
         var stillActive = voiceAttentionColumnId === colId && voiceWindowFocused;
         var stillEligible = false;
         switch (voiceSettings.mode) {
@@ -10073,7 +10090,8 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
           case 'active':
           default: stillEligible = sidMatchesColumn && stillActive; break;
         }
-        if (!stillEligible) return;  // user clicked away / muted during the settle
+        if (!stillEligible) { vlog('settle bail', { colId: colId, reason: 'not-still-eligible', stillActive: stillActive }); return; }  // user clicked away / muted during the settle
+        vlog('settle ok', { colId: colId });
         var termLines = readColumnTerminalLines(col);
         var rawReply = (window.TerminalReply && window.TerminalReply.extractLastTerminalReply(termLines)) || '';
         // Apply the Reading mode here so the dedup string AND the spoken audio
@@ -11540,6 +11558,7 @@ function loadVoiceSettings() {
     }
     if (warnEl) warnEl.classList.toggle('hidden', v.encryptionAvailable !== false);
     var fcEl = document.getElementById('setting-voice-focuscatchup'); if (fcEl) fcEl.checked = v.focusCatchUp !== false;
+    var dlEl = document.getElementById('setting-voice-debuglog'); if (dlEl) dlEl.checked = !!v.debugLog;
     var presetEl = document.getElementById('setting-voice-personality-preset');
     if (presetEl) presetEl.value = v.personalityPreset || '';
     var personaTextEl = document.getElementById('setting-voice-personality-text');
@@ -11622,7 +11641,8 @@ function saveVoiceSettings() {
     modelId: modelEl ? modelEl.value : 'eleven_flash_v2_5',
     readingMode: readingModeEl ? readingModeEl.value : 'auto',
     maxChars: maxEl ? parseInt(maxEl.value, 10) || 600 : 600,
-    focusCatchUp: (document.getElementById('setting-voice-focuscatchup') || {}).checked !== false
+    focusCatchUp: (document.getElementById('setting-voice-focuscatchup') || {}).checked !== false,
+    debugLog: (document.getElementById('setting-voice-debuglog') || {}).checked === true
   };
   var stabEl = document.getElementById('setting-voice-stability');
   var styEl = document.getElementById('setting-voice-style');
@@ -11708,6 +11728,13 @@ function saveVoiceSettings() {
 
   var focusCatchUpEl = document.getElementById('setting-voice-focuscatchup');
   if (focusCatchUpEl) focusCatchUpEl.addEventListener('change', saveVoiceSettings);
+
+  var debugLogEl = document.getElementById('setting-voice-debuglog');
+  if (debugLogEl) debugLogEl.addEventListener('change', saveVoiceSettings);
+  var openLogEl = document.getElementById('setting-voice-openlog');
+  if (openLogEl) openLogEl.addEventListener('click', function () {
+    try { if (window.electronAPI && window.electronAPI.revealVoiceLog) window.electronAPI.revealVoiceLog(); } catch (e) {}
+  });
 
   var personaPresetEl = document.getElementById('setting-voice-personality-preset');
   var personaTextEl = document.getElementById('setting-voice-personality-text');

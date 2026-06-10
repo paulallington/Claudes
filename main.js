@@ -25,6 +25,7 @@ const { columnTranscriptPath, resolveTranscriptPath, isUnderProjectsRoot } = req
 const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice-personality');
 const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
 const { tagBackgroundEvent } = require('./lib/voice-background');
+const { appendWithRotation } = require('./lib/voice-debug-log');
 const https = require('https');
 
 // macOS GUI launches (Dock/Finder) inherit launchd's minimal PATH —
@@ -209,6 +210,7 @@ const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
 const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
+const VOICE_DEBUG_LOG = path.join(CONFIG_DIR, app.isPackaged ? 'voice-debug.log' : 'voice-debug-dev.log');
 
 // --- Path containment ---
 //
@@ -4618,6 +4620,26 @@ ipcMain.handle('config:setTerminalSettings', (event, settings) => {
 // Outbound network calls are proxied through main so the key stays in-process.
 
 
+// Opt-in voice debug log: mirrors the renderer's voice decision pipeline to a
+// rotating file under ~/.claudes so users can dogfood and send us a diagnostic
+// file. Default OFF — nothing is written unless the user enables it, which
+// gates the renderer-side `voice:log` sends. The API key is never logged.
+function appendVoiceDebugLog(line) {
+  try {
+    ensureConfigDir();
+    appendWithRotation(VOICE_DEBUG_LOG, new Date().toISOString() + ' ' + line, 10 * 1024 * 1024);
+  } catch (e) { /* never break on logging */ }
+}
+ipcMain.on('voice:log', (_e, line) => { if (typeof line === 'string' && line.length < 8000) appendVoiceDebugLog(line); });
+ipcMain.handle('voice:revealLog', async () => {
+  try {
+    ensureConfigDir();
+    if (!fs.existsSync(VOICE_DEBUG_LOG)) fs.writeFileSync(VOICE_DEBUG_LOG, '');
+    shell.showItemInFolder(VOICE_DEBUG_LOG);
+    return { ok: true, path: VOICE_DEBUG_LOG };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
 ipcMain.handle('voice:getSettings', () => {
   const cfg = readConfig();
   const redacted = redactVoiceSettings(cfg.voice || {});
@@ -4634,7 +4656,7 @@ ipcMain.handle('voice:setSettings', (event, incoming) => {
   // keys the renderer actually sent. Prevents partial saves (e.g. Apply
   // personality) from resetting enabled/mode/readingMode/etc. to defaults.
   const merged = Object.assign({}, normalizeVoiceSettings(existing));
-  ['enabled','mode','voiceId','voiceName','modelId','readingMode','maxChars','focusCatchUp','personality','personalityPreset','stability','style','speed','similarityBoost','speakerBoost']
+  ['enabled','mode','voiceId','voiceName','modelId','readingMode','maxChars','focusCatchUp','debugLog','personality','personalityPreset','stability','style','speed','similarityBoost','speakerBoost']
     .forEach((k) => { if (Object.prototype.hasOwnProperty.call(inc, k)) merged[k] = inc[k]; });
   const next = normalizeVoiceSettings(merged);
   // API key: set when a non-empty string is sent, clear on explicit clearApiKey, else preserve.
