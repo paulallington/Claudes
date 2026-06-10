@@ -2767,8 +2767,8 @@ function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
 
   if (window.electronAPI && window.electronAPI.gitBranch) {
     window.electronAPI.gitBranch(project.path).then(function (branch) {
-      if (branch && activeProjectKey === project.path) {
-        activeProjectNameEl.textContent = project.name + '  \u2387 ' + branch.trim();
+      if (activeProjectKey === project.path) {
+        updateActiveProjectBranchLabels(branch);
       }
     }).catch(function () {});
   }
@@ -2849,8 +2849,8 @@ function activatePopoutProject(index) {
   if (activeProjectNameEl) activeProjectNameEl.textContent = project.name;
   if (window.electronAPI && window.electronAPI.gitBranch) {
     window.electronAPI.gitBranch(project.path).then(function (branch) {
-      if (branch && activeProjectKey === project.path) {
-        activeProjectNameEl.textContent = project.name + '  \u2387 ' + branch.trim();
+      if (activeProjectKey === project.path) {
+        updateActiveProjectBranchLabels(branch);
       }
     }).catch(function () {});
   }
