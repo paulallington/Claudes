@@ -261,3 +261,77 @@ test('firstSentence returns "" for empty / non-string input', () => {
   assert.equal(firstSentence(null), '');
   assert.equal(firstSentence(undefined), '');
 });
+
+// U+1F50A speaker emoji — the 🔊 summary-line marker.
+const SPEAKER = '\u{1F50A}';
+
+test('extractLastTerminalReply recovers a column-0 🔊 line after a bullet block and separator', () => {
+  const lines = [
+    '● Committed d53e94c3f with the three FAQ-fix files.',
+    '  Other files were left untouched.',
+    '',
+    '────────',
+    '',
+    '\u{1F50A}All committed and ready to go. Deploy whenever.',
+    '',
+    '✻ Sautéed for 42s',
+    '❯ ',
+  ];
+  const out = extractLastTerminalReply(lines);
+  assert.ok(out.includes(SPEAKER), 'output should contain the 🔊 marker');
+  assert.ok(out.includes('All committed and ready to go'), 'output should contain the summary text');
+
+  const split = splitReplySummary(out);
+  assert.equal(split.hasSummary, true);
+  assert.equal(split.summary, 'All committed and ready to go. Deploy whenever.');
+  assert.equal(
+    split.body,
+    'Committed d53e94c3f with the three FAQ-fix files. Other files were left untouched.'
+  );
+});
+
+test('extractLastTerminalReply does not double-append a 🔊 already inside a block continuation', () => {
+  const lines = [
+    '● Here is the summary of what I did.',
+    '  \u{1F50A}All wrapped up and looking good.',
+    '',
+    '✻ Brewed for 9s',
+    '❯ ',
+  ];
+  const out = extractLastTerminalReply(lines);
+  // Exactly one 🔊 marker present (split on it yields 2 parts).
+  assert.equal(out.split(SPEAKER).length, 2, 'should contain exactly one 🔊 marker');
+});
+
+test('extractLastTerminalReply is unchanged when there is no 🔊 line', () => {
+  const lines = [
+    '● Committed d53e94c3f with the three FAQ-fix files.',
+    '  Other files were left untouched.',
+    '',
+    '✻ Sautéed for 42s',
+    '❯ ',
+  ];
+  const out = extractLastTerminalReply(lines);
+  assert.equal(
+    out,
+    'Committed d53e94c3f with the three FAQ-fix files. Other files were left untouched.'
+  );
+  assert.ok(!out.includes(SPEAKER));
+});
+
+test('extractLastTerminalReply captures a 🔊 line plus its indented continuation', () => {
+  const lines = [
+    '● Did the thing.',
+    '',
+    '────────',
+    '',
+    '\u{1F50A}All committed and ready to go.',
+    '  Deploy whenever you like.',
+    '',
+    '❯ ',
+  ];
+  const out = extractLastTerminalReply(lines);
+  const split = splitReplySummary(out);
+  assert.equal(split.hasSummary, true);
+  assert.equal(split.summary, 'All committed and ready to go. Deploy whenever you like.');
+});
