@@ -1570,6 +1570,11 @@ ipcMain.handle('sessions:getRecent', (event, projectPath) => {
   }
 });
 
+// Live automation/headless/manager session ids — interactive columns must never
+// adopt one as their own sessionId. Renderer fetches this once on startup and
+// then keeps in sync via the 'sessions:backgroundIds' broadcast.
+ipcMain.handle('sessions:getBackgroundIds', () => Array.from(backgroundSessionIds));
+
 // Get the title (first user message) from a Claude session JSONL file
 ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId) => {
   const claudeKey = projectPathToClaudeKey(projectPath);
@@ -6377,6 +6382,12 @@ const runningHeadless = new Map(); // runId -> { child, cleanup, projectPath, ca
 // Their Stop hooks share the project cwd with interactive columns, so we tag their
 // broadcast events to keep them from arming voice catch-up on a real column.
 const backgroundSessionIds = new Set();
+function broadcastBackgroundSessionIds() {
+  try {
+    const ids = Array.from(backgroundSessionIds);
+    BrowserWindow.getAllWindows().forEach((w) => { try { w.webContents.send('sessions:backgroundIds', ids); } catch {} });
+  } catch (e) {}
+}
 function rememberBackgroundSession(id, child) {
   if (!id) return;
   backgroundSessionIds.add(id);
@@ -6385,9 +6396,11 @@ function rememberBackgroundSession(id, child) {
     const oldest = backgroundSessionIds.values().next().value;
     backgroundSessionIds.delete(oldest);
   }
+  broadcastBackgroundSessionIds();
 }
 function forgetBackgroundSession(child) {
   if (child && child.__bgSessionId) backgroundSessionIds.delete(child.__bgSessionId);
+  broadcastBackgroundSessionIds();
 }
 
 function runHeadless(projectPath, prompt) {

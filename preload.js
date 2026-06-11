@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   popoutTakeTransfer: (projectKey) => ipcRenderer.invoke('popout:takeTransfer', projectKey),
   onConfigUpdated: (callback) => ipcRenderer.on('config:updated', (_, cfg) => callback(cfg)),
   getRecentSessions: (projectPath) => ipcRenderer.invoke('sessions:getRecent', projectPath),
+  getBackgroundSessionIds: () => ipcRenderer.invoke('sessions:getBackgroundIds'),
+  onBackgroundSessionIds: (cb) => ipcRenderer.on('sessions:backgroundIds', (_e, ids) => cb(ids)),
   saveSessions: (projectPath, sessionIds) => ipcRenderer.invoke('sessions:save', projectPath, sessionIds),
   loadSessions: (projectPath) => ipcRenderer.invoke('sessions:load', projectPath),
   loadStickyNotes: (projectPath, workspaceId) => ipcRenderer.invoke('sticky-notes:load', projectPath, workspaceId),

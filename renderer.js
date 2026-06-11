@@ -129,6 +129,11 @@ var lastFocusedColumnId = null;
 // finishes while you're in the sidebar is held for click catch-up instead.
 var voiceAttentionColumnId = null;
 
+// Live automation/headless/manager session ids (mirrored from main's
+// backgroundSessionIds). An interactive column must never adopt one of these as
+// its own sessionId — see getClaimedSessionIds. Kept fresh via IPC broadcast.
+var backgroundSessionIdsCache = new Set();
+
 var config = { projects: [], activeProjectIndex: -1 };
 var projectDragFromIndex = -1; // For sidebar drag-to-reorder
 var workspaceDragFromIndex = -1; // Drag-reorder within a project's sub-workspaces
@@ -5181,6 +5186,15 @@ if (window.electronAPI && window.electronAPI.onClawdEvent) {
   });
 }
 
+// Mirror main's live automation/headless session ids so interactive columns
+// never adopt one (see getClaimedSessionIds). Fetch once, then stay in sync.
+if (window.electronAPI && window.electronAPI.getBackgroundSessionIds) {
+  window.electronAPI.getBackgroundSessionIds().then(function (ids) { backgroundSessionIdsCache = new Set(ids || []); }).catch(function () {});
+}
+if (window.electronAPI && window.electronAPI.onBackgroundSessionIds) {
+  window.electronAPI.onBackgroundSessionIds(function (ids) { backgroundSessionIdsCache = new Set(ids || []); });
+}
+
 // Idempotent: start the tail for a column's current sessionId. If we already
 // had a tail running for an older sessionId, stop it first. Safe to call as
 // often as we like — called on every assignment site.
@@ -5216,6 +5230,11 @@ function getClaimedSessionIds(excludeColumnId) {
       claimed[col.sessionId] = true;
     }
   });
+  // Background/automation sessions (live `claude --print` runs) must NEVER be
+  // adopted by an interactive column — detectSession and the hook-rebind both
+  // consult this map, so marking them claimed blocks both adoption paths and
+  // keeps a column from latching onto an automation's transcript in the same dir.
+  try { backgroundSessionIdsCache.forEach(function (sid) { if (sid) claimed[sid] = true; }); } catch (e) {}
   return claimed;
 }
 
