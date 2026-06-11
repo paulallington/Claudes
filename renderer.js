@@ -9607,6 +9607,12 @@ var voiceStreamGen = 0;
 var voiceAutoBusy = false;     // true ONLY while an auto stream is in progress (single writer: runAutoStream)
 var voiceAutoQueue = null;     // latest queued auto request { colId, readingMode, baselineUuid }
 
+// True while a playback element is actively producing sound. Auto-play uses this
+// (alongside voiceAutoBusy) to defer behind a MANUAL/catch-up clip too — that
+// path plays via playVoiceAudio without ever setting voiceAutoBusy, so the busy
+// flag alone can't see it (the talking-over bug).
+function isVoicePlaying() { return !!(currentVoiceAudio && !currentVoiceAudio.paused && !currentVoiceAudio.ended); }
+
 // Wraps streamSpeakColumn so auto-play never interrupts an in-progress utterance.
 // Sets voiceAutoBusy synchronously, and on completion drains the latest queued
 // reply (if any). Not awaited by callers — the busy flag is the guard.
@@ -9883,6 +9889,15 @@ function playVoiceAudio(result, onEnded, onError, srcKey, colId) {
     if (currentVoiceAudio === audio) currentVoiceAudio = null;
     refreshVoiceButtonStates();
     if (typeof onEnded === 'function') { try { onEnded(); } catch (e) {} }
+    // A manual/catch-up playback just ended (auto-play sets voiceAutoBusy and
+    // drains via its own finally). If an auto reply deferred while this clip was
+    // talking, play it now — auto-play waits its turn, never interrupts.
+    try {
+      if (!voiceAutoBusy && voiceAutoQueue && !isVoicePlaying()) {
+        var _q = voiceAutoQueue; voiceAutoQueue = null;
+        Promise.resolve(runAutoStream(_q)).catch(function () {});
+      }
+    } catch (e) {}
   };
   audio.__onEnded = endedHandler;
   audio.addEventListener('ended', endedHandler);
@@ -9907,6 +9922,14 @@ function refreshVoiceButtonStates() {
   var src = currentVoiceAudio ? currentVoiceAudio.__src : null;
   var playingColId = currentVoiceAudio ? currentVoiceAudio.__colId : null;
   var paused = currentVoiceAudio ? currentVoiceAudio.paused : true;
+  // Mark the column that is currently SPEAKING so its header shows an at-a-glance
+  // indicator. Only while audio is actually producing sound (not paused/ended).
+  var speakingNow = !!(currentVoiceAudio && !currentVoiceAudio.paused && !currentVoiceAudio.ended);
+  try {
+    allColumns.forEach(function (c, cid) {
+      if (c && c.element) c.element.classList.toggle('voice-speaking', speakingNow && playingColId != null && String(cid) === String(playingColId));
+    });
+  } catch (e) {}
   // Toolbar Stop button lights up only while audio is actually playing.
   var stopBtn = document.getElementById('btn-voice-stop');
   if (stopBtn) {
@@ -10156,7 +10179,7 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
           col.lastSpokenText = spokenTerm;  // dedup: never auto-speak the same reply twice
           var treq = { colId: colId, readingMode: voiceSettings.readingMode, spokenText: spokenTerm };
           vlog('auto eligible (terminal) -> ' + (voiceAutoBusy ? 'QUEUED (busy)' : 'run'), { colId: colId });
-          if (voiceAutoBusy) { voiceAutoQueue = treq; return; }
+          if (voiceAutoBusy || isVoicePlaying()) { voiceAutoQueue = treq; return; }  // defer behind ANY active playback (auto OR manual/catch-up)
           // NOT awaited (sets voiceAutoBusy synchronously before returning); a
           // stray async throw is an intended best-effort no-op, not an unhandledrejection.
           Promise.resolve(runAutoStream(treq)).catch(function () {});
@@ -10166,7 +10189,7 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
         // old/persisted replies still speak.
         var req = { colId: colId, readingMode: voiceSettings.readingMode, baselineUuid: col.voicePreTurnUuid || col.lastSpokenUuid || '' };
         vlog('auto eligible -> ' + (voiceAutoBusy ? 'QUEUED (busy)' : 'run'), req);
-        if (voiceAutoBusy) { voiceAutoQueue = req; return; }  // guard: don't interrupt an in-progress utterance; queue the latest
+        if (voiceAutoBusy || isVoicePlaying()) { voiceAutoQueue = req; return; }  // guard: don't interrupt an in-progress utterance (auto OR manual/catch-up); queue the latest
         // NOT awaited (sets voiceAutoBusy synchronously before returning); swallow
         // a stray async throw so it stays a best-effort no-op, not an unhandledrejection.
         Promise.resolve(runAutoStream(req)).catch(function () {});
