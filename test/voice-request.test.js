@@ -56,6 +56,27 @@ test('buildTtsRequest omits voice_settings when voiceSettings is absent or empty
   assert.equal('voice_settings' in emptyObj, false);
 });
 
+test('buildTtsRequest adds previous_text/next_text as top-level fields when non-empty', () => {
+  const req = buildTtsRequest({
+    apiKey: 'sk-1', voiceId: 'voiceX', text: 'middle',
+    previousText: 'before.', nextText: 'after.'
+  });
+  const body = JSON.parse(req.body);
+  assert.equal(body.previous_text, 'before.');
+  assert.equal(body.next_text, 'after.');
+  // They are top-level, not nested under voice_settings.
+  assert.equal('voice_settings' in body, false);
+});
+
+test('buildTtsRequest omits previous_text/next_text when absent or empty', () => {
+  const noField = JSON.parse(buildTtsRequest({ apiKey: 'sk-1', voiceId: 'voiceX', text: 'hi' }).body);
+  assert.equal('previous_text' in noField, false);
+  assert.equal('next_text' in noField, false);
+  const empty = JSON.parse(buildTtsRequest({ apiKey: 'sk-1', voiceId: 'voiceX', text: 'hi', previousText: '', nextText: '' }).body);
+  assert.equal('previous_text' in empty, false);
+  assert.equal('next_text' in empty, false);
+});
+
 test('buildTtsRequest throws on missing apiKey, voiceId, or text', () => {
   assert.throws(() => buildTtsRequest({ voiceId: 'v', text: 't' }), /apiKey/);
   assert.throws(() => buildTtsRequest({ apiKey: 'k', text: 't' }), /voiceId/);

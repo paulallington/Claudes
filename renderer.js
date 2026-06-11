@@ -9709,14 +9709,16 @@ async function streamSpeakText(col, spokenText, colId) {
   if (!sentences.length) return;
   col.voiceUnspoken = false;
   var myGen = ++voiceStreamGen;                 // supersede any prior stream
-  var synthOne = function (t) { return window.electronAPI.synthesizeVoice({ text: t, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, auto: true }); };
-  var nextP = synthOne(sentences[0]);             // prefetch first
+  // Pass the adjacent chunks so ElevenLabs has prosody context across the
+  // separate per-sentence calls (undefined at the ends is fine — skipped).
+  var synthOne = function (t, prevText, nextText) { return window.electronAPI.synthesizeVoice({ text: t, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, auto: true, previousText: prevText, nextText: nextText }); };
+  var nextP = synthOne(sentences[0], undefined, sentences[1]); // prefetch first
   for (var i = 0; i < sentences.length; i++) {
     if (myGen !== voiceStreamGen) return;         // superseded -> stop
     var result;
     try { result = await nextP; } catch (e) { return; }
     vlog('synth chunk ' + i, { ok: result && result.ok, error: result && result.error, status: result && result.status, hasB64: !!(result && result.base64) });
-    if (i + 1 < sentences.length) nextP = synthOne(sentences[i + 1]); // prefetch next while this plays
+    if (i + 1 < sentences.length) nextP = synthOne(sentences[i + 1], sentences[i], sentences[i + 2]); // prefetch next while this plays
     if (myGen !== voiceStreamGen) return;
     if (result && result.ok && result.base64) {
       await new Promise(function (resolve) {
@@ -9746,14 +9748,16 @@ async function streamSpeakColumn(col, readingMode, baselineUuid, colId) {
   if (sres.uuid) col.lastSpokenUuid = sres.uuid;
   col.voiceUnspoken = false;
   var myGen = ++voiceStreamGen;                 // supersede any prior stream
-  var synthOne = function (t) { return window.electronAPI.synthesizeVoice({ text: t, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, auto: true }); };
-  var nextP = synthOne(sres.sentences[0]);        // prefetch first
+  // Pass the adjacent chunks so ElevenLabs has prosody context across the
+  // separate per-sentence calls (undefined at the ends is fine — skipped).
+  var synthOne = function (t, prevText, nextText) { return window.electronAPI.synthesizeVoice({ text: t, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, auto: true, previousText: prevText, nextText: nextText }); };
+  var nextP = synthOne(sres.sentences[0], undefined, sres.sentences[1]); // prefetch first
   for (var i = 0; i < sres.sentences.length; i++) {
     if (myGen !== voiceStreamGen) return;         // superseded -> stop
     var result;
     try { result = await nextP; } catch (e) { return; }
     vlog('synth chunk ' + i, { ok: result && result.ok, error: result && result.error, status: result && result.status, hasB64: !!(result && result.base64) });
-    if (i + 1 < sres.sentences.length) nextP = synthOne(sres.sentences[i + 1]); // prefetch next while this plays
+    if (i + 1 < sres.sentences.length) nextP = synthOne(sres.sentences[i + 1], sres.sentences[i], sres.sentences[i + 2]); // prefetch next while this plays
     if (myGen !== voiceStreamGen) return;
     if (result && result.ok && result.base64) {
       await new Promise(function (resolve) {

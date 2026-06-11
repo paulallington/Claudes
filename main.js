@@ -4724,7 +4724,7 @@ ipcMain.handle('voice:listVoices', async (event, opts) => {
 
 // Synthesize the given text to MP3 via the ElevenLabs proxy. Resolves the API
 // key from the override or the encrypted store; the key never leaves main.
-async function synthesizeVoiceText({ text, voiceId, modelId, apiKeyOverride, auto }) {
+async function synthesizeVoiceText({ text, voiceId, modelId, apiKeyOverride, auto, previousText, nextText }) {
   // Bound the text before the paid ElevenLabs call: reject non-string/empty and
   // clamp to the voice-settings max-chars ceiling (5000) so a huge payload can't
   // run up cost or stall the request.
@@ -4738,9 +4738,14 @@ async function synthesizeVoiceText({ text, voiceId, modelId, apiKeyOverride, aut
   if (!apiKey) return { ok: false, error: 'no_api_key' };
   const v = normalizeVoiceSettings(cfg.voice || {});
   const voiceSettings = { stability: v.stability, style: v.style, speed: v.speed, similarityBoost: v.similarityBoost, speakerBoost: v.speakerBoost };
+  // Surrounding-chunk context for smoother prosody continuity across the
+  // separate per-sentence ElevenLabs calls. Only forward strings, and cap each
+  // so an oversized request can't be built from a malformed caller.
+  const prevText = (typeof previousText === 'string' && previousText.length > 0) ? previousText.slice(0, 5000) : undefined;
+  const nxtText = (typeof nextText === 'string' && nextText.length > 0) ? nextText.slice(0, 5000) : undefined;
   let req;
   try {
-    req = buildTtsRequest({ apiKey, voiceId, modelId, text, voiceSettings });
+    req = buildTtsRequest({ apiKey, voiceId, modelId, text, voiceSettings, previousText: prevText, nextText: nxtText });
   } catch (buildErr) {
     return { ok: false, error: String(buildErr.message || buildErr) };
   }
@@ -4762,7 +4767,7 @@ async function synthesizeVoiceText({ text, voiceId, modelId, apiKeyOverride, aut
 ipcMain.handle('voice:synthesize', async (event, args) => {
   try {
     const a = args || {};
-    return await synthesizeVoiceText({ text: a.text, voiceId: a.voiceId, modelId: a.modelId, apiKeyOverride: a.apiKeyOverride, auto: a.auto });
+    return await synthesizeVoiceText({ text: a.text, voiceId: a.voiceId, modelId: a.modelId, apiKeyOverride: a.apiKeyOverride, auto: a.auto, previousText: a.previousText, nextText: a.nextText });
   } catch (err) {
     return { ok: false, error: String(err) };
   }
