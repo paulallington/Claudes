@@ -9904,7 +9904,17 @@ function playVoiceAudio(result, onEnded, onError, srcKey, colId) {
   audio.addEventListener('play', function () { refreshVoiceButtonStates(); });
   audio.addEventListener('pause', function () { refreshVoiceButtonStates(); });
   audio.addEventListener('error', function () {
+    if (currentVoiceAudio === audio) currentVoiceAudio = null;
+    try { refreshVoiceButtonStates(); } catch (e) {}
     if (typeof onError === 'function') { try { onError(audio.error || new Error('audio error')); } catch (e) {} }
+    // Mirror endedHandler: a manual/catch-up clip that errored shouldn't strand a
+    // deferred auto reply (auto-play waits behind active playback).
+    try {
+      if (!voiceAutoBusy && voiceAutoQueue && !isVoicePlaying()) {
+        var _q = voiceAutoQueue; voiceAutoQueue = null;
+        Promise.resolve(runAutoStream(_q)).catch(function () {});
+      }
+    } catch (e) {}
   });
   vlog('audio.play() ' + (result.mime || 'audio/mpeg') + ' b64len=' + (result.base64 ? result.base64.length : 0));
   audio.play().catch(function (err) {
