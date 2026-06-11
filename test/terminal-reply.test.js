@@ -319,6 +319,27 @@ test('extractLastTerminalReply is unchanged when there is no 🔊 line', () => {
   assert.ok(!out.includes(SPEAKER));
 });
 
+test('extractLastTerminalReply does not inherit an OLDER reply\'s 🔊 summary', () => {
+  // An earlier reply (higher in scrollback) carries a 🔊 line; the newer reply
+  // below it has NO 🔊 of its own. The stale 🔊 must NOT be appended.
+  const lines = [
+    '● Older reply text here.',
+    '',
+    '\u{1F50A}Old summary line.',
+    '',
+    '────',
+    '',
+    '● Newer reply with no summary line.',
+    '',
+    '✻ Sautéed for 9s',
+    '❯ ',
+  ];
+  const out = extractLastTerminalReply(lines);
+  assert.equal(out, 'Newer reply with no summary line.');
+  assert.equal(out.indexOf(SPEAKER), -1, 'stale 🔊 from the older reply must not leak in');
+  assert.ok(!out.includes('Old summary line'), 'older summary text must not leak in');
+});
+
 test('extractLastTerminalReply captures a 🔊 line plus its indented continuation', () => {
   const lines = [
     '● Did the thing.',
