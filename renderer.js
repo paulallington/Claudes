@@ -9448,6 +9448,24 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
     // because the primary tail is still useful for the parent.
     var col = allColumns.get(colId);
     var via = __resolved.via;
+    // A background run (automation / headless / manager) shares the project cwd
+    // with interactive columns, so its hooks resolve to a column via the cwd
+    // fallback — drop them so the mascot never animates for work the column
+    // isn't doing. Only when the event does NOT match the column's OWN session
+    // id (a sid match means the column genuinely owns this turn).
+    var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
+    if (window.VoiceBackground && window.VoiceBackground.shouldDropBackgroundEvent(event, sidMatchesColumn)) {
+      if (window.Clawd && window.Clawd.logHookEvent) {
+        window.Clawd.logHookEvent({
+          col: colId,
+          event: evtName + ' (bg-drop)',
+          tool: (event && event.tool_name) || '',
+          matcher: (event && event.matcher) || '',
+          anim: null,
+        });
+      }
+      return;
+    }
     // Self-heal a /clear fork: a UserPromptSubmit that resolved by unambiguous
     // cwd OR by dominant-recent-input (ambiguous cwd) carries the column's TRUE
     // new session_id while col.sessionId is stuck on the pre-/clear id. Rebind
