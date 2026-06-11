@@ -10010,16 +10010,17 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
     if (!col) return;
     var sid = event && event.session_id;
     var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
-    // A background run (automation / headless / manager) shares the project cwd
-    // with interactive columns, so its Stop can resolve to a column via the cwd
-    // fallback — drop it. BUT only when it does NOT match this column's OWN session
-    // id: a session id can legitimately be both an interactive column's session AND
-    // in the background set (a `claude --print` run touched the same session), and
-    // dropping a sid-matched Stop silently kills that column's real auto-play
-    // (observed: a live column's own replies dropped as "background"). Matching the
-    // column's session means the column owns this reply — never drop that.
-    if (event && event.__claudesBackground && !sidMatchesColumn) {
-      try { vlog && vlog('drop background event (no sid match)', sid); } catch (e) {}
+    // Background runs (automations / headless agents / managers) must NEVER drive
+    // voice — not auto-play, and not the catch-up arming below (voiceUnspoken /
+    // voiceTranscriptPath). They are tagged __claudesBackground by the main process
+    // (their session_id is in backgroundSessionIds while the run is live). We drop
+    // them even when they match a column's own session: a column can BE a live
+    // automation's session (its reply is automation output the user clicked into),
+    // and the v1.9.3 sid-match exception let that output speak via focus catch-up.
+    // The explicit per-column Play button is a separate path and still works as the
+    // user's deliberate escape hatch if they ever want to hear an automation column.
+    if (event && event.__claudesBackground) {
+      try { vlog && vlog('drop background event', { sid: sid, sidMatchesColumn: sidMatchesColumn }); } catch (e) {}
       return;
     }
     // A column whose sessionId hasn't been detected yet (null) owns the reply that
