@@ -5706,7 +5706,7 @@ function migrateColumnToWorkspace(colId, targetWsId) {
   saveColumnCounts();
 }
 
-function restartColumn(id) {
+async function restartColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
   if (col.isDiff) return;
@@ -5729,6 +5729,19 @@ function restartColumn(id) {
   // Clear and respawn
   col.terminal.clear();
   col.fitAddon.fit();
+
+  // Don't --resume a session that no longer exists on disk — Claude errors
+  // "No conversation found with session ID …". Verify it exists; if not, clear
+  // the id so buildResumeArgs omits --resume and starts a fresh session (the
+  // session detection / hook self-heal then adopts the new id). Only for real
+  // Claude columns (not custom `cmd` columns), and only when we have a checker.
+  if (!col.cmd && col.sessionId && window.electronAPI && window.electronAPI.sessionExists) {
+    try {
+      var stillExists = await window.electronAPI.sessionExists(col.cwd || col.projectKey, col.sessionId);
+      if (!stillExists) col.sessionId = null;
+    } catch (e) { /* if the check fails, fall through and resume as before */ }
+  }
+
   var sendMsg = { type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: col.cwd };
   if (col.cmd) {
     sendMsg.cmd = col.cmd;

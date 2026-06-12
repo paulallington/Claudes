@@ -1591,6 +1591,18 @@ ipcMain.handle('sessions:getRecent', (event, projectPath) => {
   }
 });
 
+// Does a session's transcript actually exist on disk? Used before a respawn so
+// we never `--resume` a phantom session id (Claude errors "No conversation
+// found"). Validates the id charset to keep it strictly a filename.
+ipcMain.handle('sessions:exists', (event, projectPath, sessionId) => {
+  if (!projectPath || typeof sessionId !== 'string' || !/^[A-Za-z0-9-]+$/.test(sessionId)) return false;
+  try {
+    const claudeKey = projectPathToClaudeKey(projectPath);
+    const f = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+    return fs.existsSync(f) && fs.statSync(f).size > 0;
+  } catch (e) { return false; }
+});
+
 // Live automation/headless/manager session ids — interactive columns must never
 // adopt one as their own sessionId. Renderer fetches this once on startup and
 // then keeps in sync via the 'sessions:backgroundIds' broadcast.
