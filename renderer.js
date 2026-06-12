@@ -1367,6 +1367,16 @@ function showToast(message, opts) {
   var toast = document.createElement('div');
   toast.className = 'toast toast-' + (opts.kind || 'info');
   toast.textContent = message;
+  if (opts.action && opts.action.label) {
+    var actionBtn = document.createElement('button');
+    actionBtn.className = 'toast-action';
+    actionBtn.textContent = opts.action.label;
+    actionBtn.addEventListener('click', function () {
+      try { if (typeof opts.action.onClick === 'function') opts.action.onClick(); }
+      finally { if (toast.parentNode) toast.parentNode.removeChild(toast); }
+    });
+    toast.appendChild(actionBtn);
+  }
   container.appendChild(toast);
   if (opts.duration !== 0) {
     setTimeout(function () {
@@ -4493,6 +4503,9 @@ function addColumn(args, targetRow, opts) {
     createdAt: Date.now(),
     lastInputAt: 0,
     hasUserInput: false,
+    hookEverSeen: false,
+    lastHookAt: 0,
+    staleHintShown: false,
     notified: false,
     spawnSessionPct: null,    // (unused) five_hour.utilization at spawn — kept for backward compat
     spawnWeeklyPct: null,     // (unused) reserved
@@ -5725,6 +5738,10 @@ function restartColumn(id) {
   }
   if (col.env) sendMsg.env = col.env;
   wsSend(sendMsg);
+  // Re-evaluate stale-hook health from a clean slate for the new session: if
+  // hooks now reach the column it will never re-flag; if they still don't, the
+  // sweep can surface the hint again after the grace window.
+  col.hookEverSeen = false; col.lastHookAt = 0; col.staleHintShown = false;
   setColumnActivity(id, 'working');
 }
 
@@ -9485,6 +9502,9 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
       }
       return;
     }
+    // Genuine column hook (not a dropped automation): record receipt so the
+    // stale-hook sweep knows live hooks ARE reaching this column.
+    if (col) { col.lastHookAt = Date.now(); col.hookEverSeen = true; }
     // Self-heal a /clear fork: a UserPromptSubmit that resolved by unambiguous
     // cwd OR by dominant-recent-input (ambiguous cwd) carries the column's TRUE
     // new session_id while col.sessionId is stuck on the pre-/clear id. Rebind
@@ -13006,6 +13026,32 @@ function startPlanLimitsPolling() {
 function stopPlanLimitsPolling() {
   if (planLimitsPollTimer) { clearInterval(planLimitsPollTimer); planLimitsPollTimer = null; }
 }
+
+// Stale-hook sweep: when voice is enabled, a column that has done genuine user
+// work but never received a single hook event was almost certainly orphaned by
+// an app restart rotating the hook endpoint out from under its running session.
+// Surface a one-time toast offering a respawn that reconnects it.
+setInterval(function () {
+  try {
+    if (!voiceSettings || !voiceSettings.enabled) return;
+    allColumns.forEach(function (col, id) {
+      if (!col || col.staleHintShown) return;
+      var stale = window.StaleHooks && window.StaleHooks.shouldFlagStaleHooks(col, Date.now(), {
+        voiceEnabled: !!(voiceSettings && voiceSettings.enabled),
+        muted: isProjectVoiceMuted(col.projectKey)
+      });
+      if (stale) {
+        col.staleHintShown = true;
+        var name = (col.customTitle || ('Claude #' + id));
+        showToast(name + ' isn’t receiving live updates — respawn to reconnect voice.', {
+          kind: 'warn',
+          duration: 12000,
+          action: { label: 'Respawn', onClick: function () { restartColumn(id); } }
+        });
+      }
+    });
+  } catch (e) {}
+}, 10000);
 
 window.addEventListener('focus', function () {
   var age = lastPlanLimitsResult && lastPlanLimitsResult.fetchedAt
