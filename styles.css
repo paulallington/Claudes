@@ -1187,22 +1187,16 @@ html[data-platform="darwin"] #toolbar {
   background: var(--bg-main);
 }
 
-/* The column currently speaking: a subtle accent ring + a pulsing speaker badge
-   pinned to its header corner, so it's obvious at a glance which column's reply
-   is being read aloud. The badge is absolutely positioned (anchored to the
-   position:relative column root) so it never disturbs the header's flex layout. */
 .column.voice-speaking {
   box-shadow: inset 0 0 0 2px var(--accent, #e94560);
 }
-.column.voice-speaking::after {
+/* Speaking indicator: a pulsing speaker just before the column title, so it
+   never overlaps the right-hand action buttons (kill ×, maximize). */
+.column.voice-speaking .col-title::before {
   content: '🔊';
-  position: absolute;
-  top: 4px;
-  right: 8px;
-  z-index: 5;
-  font-size: 12px;
+  margin-right: 5px;
+  font-size: 11px;
   line-height: 1;
-  pointer-events: none;
   animation: voiceSpeakingPulse 1s ease-in-out infinite;
 }
 @keyframes voiceSpeakingPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
@@ -1366,6 +1360,11 @@ html[data-platform="darwin"] #toolbar {
 /* Hide less-critical column actions on narrow columns */
 @container (max-width: 250px) {
   .col-action, .col-effort, .col-delta-pill, .col-ctx-meter { display: none; }
+}
+/* Very narrow column: drop the remaining non-essential actions so the
+   minimise / maximise / kill (×) controls never overflow off the header. */
+@container (max-width: 190px) {
+  .col-restart, .col-clear, .col-sessions, .col-play-full, .col-play-summary { display: none; }
 }
 
 .col-action {
