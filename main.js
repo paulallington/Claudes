@@ -12,6 +12,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-thresholds');
+const { isValidHookToken } = require('./lib/hook-token');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
@@ -183,7 +184,27 @@ const PTY_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
 // Token is included in the curl command we write into the user's settings.json,
 // re-synced on every launch (same flow as the port). Re-syncs cost one file
 // write at startup, which is negligible.
-const HOOK_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
+//
+// Persisted across launches: a per-launch-random token would be rotated on every
+// restart/auto-update, which silently breaks the hooks of every ALREADY-RUNNING
+// claude session (they cached the old token and Claude Code never re-reads it),
+// stopping voice/activity until respawn. Persist it so a restart keeps the same
+// token and running sessions keep working. Dev and packaged builds use separate
+// files (they run separate hook servers on separate ports).
+const HOOK_AUTH_TOKEN = (function loadOrCreateHookToken() {
+  const dir = path.join(os.homedir(), '.claudes');
+  const file = path.join(dir, app.isPackaged ? 'hook-token' : 'hook-token-dev');
+  try {
+    const existing = fs.readFileSync(file, 'utf8').trim();
+    if (isValidHookToken(existing)) return existing;
+  } catch (e) { /* missing/unreadable — fall through to generate */ }
+  const token = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, token, { mode: 0o600 });
+  } catch (e) { /* best-effort persist; token still works for this launch */ }
+  return token;
+})();
 
 // Set appUserModelId early so Windows uses a consistent taskbar icon across restarts
 app.setAppUserModelId('com.thecodeguy.claudes');
