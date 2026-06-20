@@ -52,3 +52,31 @@ test('8: leading and trailing blank lines are trimmed from the output', () => {
   const input = '\n\n  real content here\n  wraps on\n\n';
   assert.equal(reflowSelection(input), 'real content here wraps on');
 });
+
+test('9: heading at col 0 with inconsistently 1-space-indented wrapped body joins into one paragraph', () => {
+  // Real user paste: heading is at column 0, but TUI-wrapped body lines carry an
+  // inconsistent ~1-space residual indent. baseIndent is 0 (heading + some
+  // no-indent body lines), so the small residual must count as noise, not structure.
+  const input =
+    'Message to Sam (WhatsApp):\n' +
+    '\n' +
+    ' Hey Sam, update on the R&D claim. I\'ve been through everything\n' +
+    'we\'ve built this year and assessed it\n' +
+    ' properly against what HMRC actually counts as R&D. The honest\n' +
+    'read is most of this year was\n' +
+    ' groundwork: integrations, rules, getting the platform into the right\n' +
+    'state so we can start on the AI';
+  const expected =
+    'Message to Sam (WhatsApp):\n' +
+    '\n' +
+    'Hey Sam, update on the R&D claim. I\'ve been through everything we\'ve built this year and assessed it properly against what HMRC actually counts as R&D. The honest read is most of this year was groundwork: integrations, rules, getting the platform into the right state so we can start on the AI';
+  assert.equal(reflowSelection(input), expected);
+});
+
+test('10: a >=4-space indented block is preserved as code, not flowed', () => {
+  const input = 'prose line\nmore prose\n    code = block()\n    next = line()\nback to prose';
+  assert.equal(
+    reflowSelection(input),
+    'prose line more prose\n    code = block()\n    next = line()\nback to prose'
+  );
+});
