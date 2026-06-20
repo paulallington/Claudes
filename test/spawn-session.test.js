@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { planFreshSessionId, randomUuidV4 } = require('../lib/spawn-session');
+const { planFreshSessionId, randomUuidV4, planResumeArgs } = require('../lib/spawn-session');
 
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -56,6 +56,33 @@ test('does not mutate the input args array', () => {
   const args = ['--effort', 'high'];
   planFreshSessionId({ args: args, cmd: null, hasEndpoint: false }, () => 'gen');
   assert.deepEqual(args, ['--effort', 'high']);
+});
+
+test('planResumeArgs: exists=true + sessionId appends --resume <id>', () => {
+  const baseArgs = ['--effort', 'high'];
+  const r = planResumeArgs({ baseArgs: baseArgs, sessionId: 'abc-123', exists: true });
+  assert.deepEqual(r, ['--effort', 'high', '--resume', 'abc-123']);
+});
+
+test('planResumeArgs: exists=false + sessionId omits --resume', () => {
+  const baseArgs = ['--effort', 'high'];
+  const r = planResumeArgs({ baseArgs: baseArgs, sessionId: 'abc-123', exists: false });
+  assert.deepEqual(r, ['--effort', 'high']);
+});
+
+test('planResumeArgs: null/empty sessionId omits --resume regardless of exists', () => {
+  assert.deepEqual(planResumeArgs({ baseArgs: ['x'], sessionId: null, exists: true }), ['x']);
+  assert.deepEqual(planResumeArgs({ baseArgs: ['x'], sessionId: '', exists: true }), ['x']);
+  assert.deepEqual(planResumeArgs({ baseArgs: ['x'], sessionId: undefined, exists: true }), ['x']);
+});
+
+test('planResumeArgs: does not mutate baseArgs and returns a new array', () => {
+  const baseArgs = ['--effort', 'high'];
+  const r = planResumeArgs({ baseArgs: baseArgs, sessionId: 'abc-123', exists: true });
+  assert.deepEqual(baseArgs, ['--effort', 'high']);
+  assert.notEqual(r, baseArgs);
+  const r2 = planResumeArgs({ baseArgs: baseArgs, sessionId: 'abc-123', exists: false });
+  assert.notEqual(r2, baseArgs);
 });
 
 test('randomUuidV4 returns a valid v4 uuid and two calls differ', () => {

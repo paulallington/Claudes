@@ -18,6 +18,7 @@ const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
 const { resolveWorktreeCandidates, pathIsDirectory } = require('./lib/path-utils');
 const { detectActiveWorktree } = require('./lib/worktree-detect');
+const { revealWindow } = require('./lib/window-reveal');
 const WorkspaceScrub = require('./lib/workspace-scrub');
 const { buildTtsRequest, buildVoicesRequest } = require('./lib/voice-request');
 const { normalizeVoiceSettings, redactVoiceSettings } = require('./lib/voice-settings');
@@ -7436,8 +7437,7 @@ function createTray() {
       label: 'Show Claudes',
       click: () => {
         if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
+          revealWindow(mainWindow);
         }
       }
     },
@@ -7454,8 +7454,7 @@ function createTray() {
   tray.setContextMenu(contextMenu);
   tray.on('double-click', () => {
     if (mainWindow) {
-      mainWindow.show();
-      mainWindow.focus();
+      revealWindow(mainWindow);
     }
   });
 }
@@ -7471,8 +7470,7 @@ if (!gotLock) {
   if (!isDev) {
     app.on('second-instance', () => {
       if (mainWindow) {
-        if (mainWindow.isMinimized()) mainWindow.restore();
-        mainWindow.focus();
+        revealWindow(mainWindow);
       }
     });
   }
@@ -7528,8 +7526,7 @@ if (!gotLock) {
 
   app.on('activate', () => {
     if (mainWindow) {
-      mainWindow.show();
-      mainWindow.focus();
+      revealWindow(mainWindow);
       if (process.platform === 'darwin') {
         app.dock.show();
       }
