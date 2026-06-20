@@ -4260,6 +4260,20 @@ function addColumn(args, targetRow, opts) {
       });
       return false;
     }
+    // Cmd/Ctrl+Shift+C: copy a cleaned-up version of the selection (dedented,
+    // wrapped prose reflowed into paragraphs) for pasting into Slack/docs. Raw
+    // copy stays on plain Cmd/Ctrl+C below. Always preventDefault so no stray
+    // 'c' is inserted when there's no selection.
+    if (e.type === 'keydown' && cmdOrCtrl(e) && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
+      var selClean = terminal.getSelection();
+      if (selClean) {
+        var clean = (window.ReflowText && window.ReflowText.reflowSelection) ? window.ReflowText.reflowSelection(selClean) : selClean;
+        window.electronAPI.clipboardWriteText(clean);
+        terminal.clearSelection();
+      }
+      e.preventDefault();
+      return false;
+    }
     // Copy: Cmd+C on darwin always (no SIGINT semantics for Cmd+C), Ctrl+C
     // on others — copy when there's a selection, otherwise pass through so
     // xterm forwards the SIGINT.
@@ -4412,20 +4426,98 @@ function addColumn(args, targetRow, opts) {
     }
   });
 
+  // Tears down whatever terminal context menu is currently open (node +
+  // capture-phase document listeners). Hoisted into the per-column scope so
+  // a second right-click can tear down the FIRST menu's listeners before
+  // building a new menu — otherwise those closures reference a detached node
+  // and leak (one capture-phase pair per extra right-click).
+  var removeTerminalContextMenu = null;
+
   termWrapper.addEventListener('contextmenu', function (e) {
     e.preventDefault();
+
+    // Capture the selection at menu-open time, before any focus/click changes
+    // can clear it, so the item handlers operate on the correct text.
     var sel = terminal.getSelection();
+
+    if (removeTerminalContextMenu) { removeTerminalContextMenu(); }
+
+    var menu = document.createElement('div');
+    menu.className = 'terminal-context-menu';
+
+    var removed = false;
+    function removeMenu() {
+      if (removed) return;
+      removed = true;
+      menu.remove();
+      document.removeEventListener('mousedown', onMouseDown, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+      removeTerminalContextMenu = null;
+    }
+    function onMouseDown(ev) {
+      if (!menu.contains(ev.target)) removeMenu();
+    }
+    function onKeyDown(ev) {
+      if (ev.key === 'Escape') removeMenu();
+    }
+    removeTerminalContextMenu = removeMenu;
+
     if (sel) {
-      window.electronAPI.clipboardWriteText(sel);
-      terminal.clearSelection();
-    } else {
+      var copyItem = document.createElement('div');
+      copyItem.className = 'terminal-context-item';
+      copyItem.textContent = 'Copy';
+      copyItem.addEventListener('click', function () {
+        window.electronAPI.clipboardWriteText(sel);
+        terminal.clearSelection();
+        removeMenu();
+      });
+      menu.appendChild(copyItem);
+
+      var cleanItem = document.createElement('div');
+      cleanItem.className = 'terminal-context-item';
+      cleanItem.textContent = 'Copy clean text';
+      var hint = document.createElement('span');
+      hint.className = 'terminal-context-hint';
+      hint.textContent = IS_DARWIN ? '⌘⇧C' : 'Ctrl+Shift+C';
+      cleanItem.appendChild(hint);
+      cleanItem.addEventListener('click', function () {
+        var clean = (window.ReflowText && window.ReflowText.reflowSelection) ? window.ReflowText.reflowSelection(sel) : sel;
+        window.electronAPI.clipboardWriteText(clean);
+        terminal.clearSelection();
+        removeMenu();
+      });
+      menu.appendChild(cleanItem);
+    }
+
+    var pasteItem = document.createElement('div');
+    pasteItem.className = 'terminal-context-item';
+    pasteItem.textContent = 'Paste';
+    pasteItem.addEventListener('click', function () {
       window.electronAPI.clipboardReadText().then(function (text) {
         if (text) {
           terminal.focus();
           terminal.paste(text);
         }
       });
-    }
+      removeMenu();
+    });
+    menu.appendChild(pasteItem);
+
+    document.body.appendChild(menu);
+
+    // Position, guarding against the menu spilling off the right/bottom edge.
+    var rect = menu.getBoundingClientRect();
+    var x = e.clientX;
+    var y = e.clientY;
+    if (x + rect.width > window.innerWidth) x = Math.max(0, window.innerWidth - rect.width - 4);
+    if (y + rect.height > window.innerHeight) y = Math.max(0, window.innerHeight - rect.height - 4);
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+
+    setTimeout(function () {
+      document.addEventListener('mousedown', onMouseDown, true);
+      document.addEventListener('keydown', onKeyDown, true);
+    }, 0);
   });
 
   // Capture phase: clicking directly into the xterm viewport (the text area where
