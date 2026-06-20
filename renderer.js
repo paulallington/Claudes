@@ -6525,7 +6525,7 @@ function setupResizeHandle(handle) {
       if (newLeft >= 200 && newRight >= 200) {
         leftColEl.style.width = newLeft + 'px';
         rightColEl.style.width = newRight + 'px';
-        refitAll();
+        refitDebouncer.schedule();
       }
     }
     function onMouseUp() {
@@ -6533,6 +6533,7 @@ function setupResizeHandle(handle) {
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
+      refitDebouncer.flush();
       persistSessions(persistKey, persistWsId);
     }
     document.addEventListener('mousemove', onMouseMove);
@@ -6583,7 +6584,7 @@ function setupRowResizeHandle(handle) {
       if (newTop >= 100 && newBottom >= 100) {
         topEl.style.height = newTop + 'px';
         bottomEl.style.height = newBottom + 'px';
-        refitAll();
+        refitDebouncer.schedule();
       }
     }
     function onMouseUp() {
@@ -6591,6 +6592,7 @@ function setupRowResizeHandle(handle) {
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
+      refitDebouncer.flush();
       persistSessions(persistKey, persistWsId);
     }
     document.addEventListener('mousemove', onMouseMove);
@@ -6785,6 +6787,14 @@ function refitAll() {
     window.__repositionStickyNotesForActiveProject();
   }
 }
+
+// During a column/row drag the element widths/heights update live, but the
+// xterm fit() + PTY resize must be coalesced so xterm.cols and the PTY width
+// never mismatch mid-drag (which corrupts the terminal buffer). schedule() on
+// each mousemove, flush() on mouseup for an immediate authoritative refit.
+var refitDebouncer = (window.ResizeScheduler && window.ResizeScheduler.makeDebouncer)
+  ? window.ResizeScheduler.makeDebouncer(refitAll, 100)
+  : { schedule: refitAll, flush: refitAll, cancel: function () {} };
 
 var resizeTimeout;
 window.addEventListener('resize', function () {
