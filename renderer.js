@@ -4260,27 +4260,29 @@ function addColumn(args, targetRow, opts) {
       });
       return false;
     }
-    // Cmd/Ctrl+Shift+C: copy a cleaned-up version of the selection (dedented,
-    // wrapped prose reflowed into paragraphs) for pasting into Slack/docs. Raw
-    // copy stays on plain Cmd/Ctrl+C below. Always preventDefault so no stray
-    // 'c' is inserted when there's no selection.
+    // Cmd/Ctrl+Shift+C: copy the RAW selection verbatim (no reflow) — the
+    // escape hatch for when you need the terminal's exact wrapping. Clean
+    // (reflowed) copy is now the default on plain Cmd/Ctrl+C below. Always
+    // preventDefault so no stray 'c' is inserted when there's no selection.
     if (e.type === 'keydown' && cmdOrCtrl(e) && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
-      var selClean = terminal.getSelection();
-      if (selClean) {
-        var clean = (window.ReflowText && window.ReflowText.reflowSelection) ? window.ReflowText.reflowSelection(selClean) : selClean;
-        window.electronAPI.clipboardWriteText(clean);
+      var selRaw = terminal.getSelection();
+      if (selRaw) {
+        window.electronAPI.clipboardWriteText(selRaw);
         terminal.clearSelection();
       }
       e.preventDefault();
       return false;
     }
     // Copy: Cmd+C on darwin always (no SIGINT semantics for Cmd+C), Ctrl+C
-    // on others — copy when there's a selection, otherwise pass through so
-    // xterm forwards the SIGINT.
+    // on others — when there's a selection, copy a cleaned-up version
+    // (dedented, wrapped prose reflowed into paragraphs; code/lists preserved)
+    // for pasting into Slack/docs. Raw verbatim copy lives on Cmd/Ctrl+Shift+C
+    // above. With no selection, pass through so xterm forwards the SIGINT.
     if (e.type === 'keydown' && cmdOrCtrl(e) && !e.shiftKey && e.key === 'c') {
       var sel = terminal.getSelection();
       if (sel) {
-        window.electronAPI.clipboardWriteText(sel);
+        var cleanCopy = (window.ReflowText && window.ReflowText.reflowSelection) ? window.ReflowText.reflowSelection(sel) : sel;
+        window.electronAPI.clipboardWriteText(cleanCopy);
         terminal.clearSelection();
         return false;
       }
@@ -4466,27 +4468,31 @@ function addColumn(args, targetRow, opts) {
       var copyItem = document.createElement('div');
       copyItem.className = 'terminal-context-item';
       copyItem.textContent = 'Copy';
+      var copyHint = document.createElement('span');
+      copyHint.className = 'terminal-context-hint';
+      copyHint.textContent = IS_DARWIN ? '⌘C' : 'Ctrl+C';
+      copyItem.appendChild(copyHint);
       copyItem.addEventListener('click', function () {
-        window.electronAPI.clipboardWriteText(sel);
-        terminal.clearSelection();
-        removeMenu();
-      });
-      menu.appendChild(copyItem);
-
-      var cleanItem = document.createElement('div');
-      cleanItem.className = 'terminal-context-item';
-      cleanItem.textContent = 'Copy clean text';
-      var hint = document.createElement('span');
-      hint.className = 'terminal-context-hint';
-      hint.textContent = IS_DARWIN ? '⌘⇧C' : 'Ctrl+Shift+C';
-      cleanItem.appendChild(hint);
-      cleanItem.addEventListener('click', function () {
         var clean = (window.ReflowText && window.ReflowText.reflowSelection) ? window.ReflowText.reflowSelection(sel) : sel;
         window.electronAPI.clipboardWriteText(clean);
         terminal.clearSelection();
         removeMenu();
       });
-      menu.appendChild(cleanItem);
+      menu.appendChild(copyItem);
+
+      var rawItem = document.createElement('div');
+      rawItem.className = 'terminal-context-item';
+      rawItem.textContent = 'Copy raw text';
+      var hint = document.createElement('span');
+      hint.className = 'terminal-context-hint';
+      hint.textContent = IS_DARWIN ? '⌘⇧C' : 'Ctrl+Shift+C';
+      rawItem.appendChild(hint);
+      rawItem.addEventListener('click', function () {
+        window.electronAPI.clipboardWriteText(sel);
+        terminal.clearSelection();
+        removeMenu();
+      });
+      menu.appendChild(rawItem);
     }
 
     var pasteItem = document.createElement('div');
