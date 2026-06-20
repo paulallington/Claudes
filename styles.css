@@ -2793,6 +2793,32 @@ html[data-platform="darwin"] #toolbar {
   color: #ffffff;
 }
 
+/* Terminal right-click context menu — mirrors the file-tree menu so it sits
+   above the xterm viewport with an opaque background on both themes. */
+.terminal-context-menu {
+  position: fixed;
+  z-index: 10000;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-primary, #3a3a52);
+  border-radius: 4px;
+  padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+
+.terminal-context-item {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.terminal-context-item:hover {
+  background: var(--accent);
+  color: #ffffff;
+}
+
 /* Git Changes */
 
 .git-branch-row {
