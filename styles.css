@@ -2807,11 +2807,22 @@ html[data-platform="darwin"] #toolbar {
 }
 
 .terminal-context-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
   padding: 6px 12px;
   font-size: 12px;
   color: var(--text-primary);
   cursor: pointer;
   white-space: nowrap;
+}
+
+.terminal-context-hint {
+  font-size: 10px;
+  opacity: 0.5;
+  margin-left: auto;
+  pointer-events: none;
 }
 
 .terminal-context-item:hover {

@@ -4426,6 +4426,13 @@ function addColumn(args, targetRow, opts) {
     }
   });
 
+  // Tears down whatever terminal context menu is currently open (node +
+  // capture-phase document listeners). Hoisted into the per-column scope so
+  // a second right-click can tear down the FIRST menu's listeners before
+  // building a new menu — otherwise those closures reference a detached node
+  // and leak (one capture-phase pair per extra right-click).
+  var removeTerminalContextMenu = null;
+
   termWrapper.addEventListener('contextmenu', function (e) {
     e.preventDefault();
 
@@ -4433,16 +4440,19 @@ function addColumn(args, targetRow, opts) {
     // can clear it, so the item handlers operate on the correct text.
     var sel = terminal.getSelection();
 
-    var existing = document.querySelector('.terminal-context-menu');
-    if (existing) existing.remove();
+    if (removeTerminalContextMenu) { removeTerminalContextMenu(); }
 
     var menu = document.createElement('div');
     menu.className = 'terminal-context-menu';
 
+    var removed = false;
     function removeMenu() {
+      if (removed) return;
+      removed = true;
       menu.remove();
       document.removeEventListener('mousedown', onMouseDown, true);
       document.removeEventListener('keydown', onKeyDown, true);
+      removeTerminalContextMenu = null;
     }
     function onMouseDown(ev) {
       if (!menu.contains(ev.target)) removeMenu();
@@ -4450,6 +4460,7 @@ function addColumn(args, targetRow, opts) {
     function onKeyDown(ev) {
       if (ev.key === 'Escape') removeMenu();
     }
+    removeTerminalContextMenu = removeMenu;
 
     if (sel) {
       var copyItem = document.createElement('div');
@@ -4465,6 +4476,10 @@ function addColumn(args, targetRow, opts) {
       var cleanItem = document.createElement('div');
       cleanItem.className = 'terminal-context-item';
       cleanItem.textContent = 'Copy clean text';
+      var hint = document.createElement('span');
+      hint.className = 'terminal-context-hint';
+      hint.textContent = IS_DARWIN ? '⌘⇧C' : 'Ctrl+Shift+C';
+      cleanItem.appendChild(hint);
       cleanItem.addEventListener('click', function () {
         var clean = (window.ReflowText && window.ReflowText.reflowSelection) ? window.ReflowText.reflowSelection(sel) : sel;
         window.electronAPI.clipboardWriteText(clean);
