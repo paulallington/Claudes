@@ -2897,6 +2897,20 @@ function restoreSessions(projectPath, workspaceId) {
     // cloud-vs-local logic lives in one place. `baseRowOpts` already carries
     // workspaceId + (resolved) title/cwd handling from the caller.
     async function buildResumeForEntry(e, baseRowOpts) {
+      // Don't --resume a session that no longer exists on disk — Claude errors
+      // "No conversation found with session ID …". Verify it exists; if not,
+      // planResumeArgs omits --resume and the column spawns fresh (the downstream
+      // spawn pins a fresh --session-id). Mirrors the respawn-path guard.
+      var exists = false;
+      if (e.sessionId && window.electronAPI && window.electronAPI.sessionExists) {
+        try {
+          exists = await window.electronAPI.sessionExists(e.cwd || projectPath, e.sessionId);
+        } catch (_) { exists = false; }
+      }
+      if (e.sessionId && !exists) {
+        console.warn("Column '" + (e.title || e.sessionId) + "' session " + e.sessionId + " no longer exists; restoring fresh.");
+      }
+
       var resumeArgs;
       var resumeRowOpts = baseRowOpts;
       if (e.endpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
@@ -2904,16 +2918,14 @@ function restoreSessions(projectPath, workspaceId) {
         try { envBlock = await window.electronAPI.endpointGetEnv(e.endpointId); } catch (_) { envBlock = null; }
         if (envBlock) {
           resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ true);
-          resumeArgs.push('--resume', e.sessionId);
           resumeRowOpts = Object.assign({}, baseRowOpts, { endpointId: e.endpointId, env: envBlock });
         } else {
           resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
-          resumeArgs.push('--resume', e.sessionId);
         }
       } else {
         resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
-        resumeArgs.push('--resume', e.sessionId);
       }
+      resumeArgs = window.SpawnSession.planResumeArgs({ baseArgs: resumeArgs, sessionId: e.sessionId, exists: exists });
       return { resumeArgs: resumeArgs, resumeRowOpts: resumeRowOpts };
     }
 
