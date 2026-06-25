@@ -685,7 +685,7 @@ function connectWS() {
       var col3 = allColumns.get(msg.id);
       if (col3 && !col3.element.querySelector('.exit-overlay')) {
         if (!col3.cmd && col3.sessionId) {
-          col3.fitAddon.fit();
+          fitTerminal(col3.terminal, col3.fitAddon);
           var respawnMsg = {
             type: 'create',
             id: msg.id,
@@ -727,7 +727,7 @@ function reattachAllColumns() {
     // Skip columns that are marked as exited
     if (col.activityState === 'exited') return;
 
-    col.fitAddon.fit();
+    fitTerminal(col.terminal, col.fitAddon);
     wsSend({
       type: 'reattach',
       id: id,
@@ -1169,6 +1169,30 @@ function restoreLayout(projectPath, layout) {
       addColumn(argList, row, opts);
     });
   });
+}
+
+// Run FitAddon.fit(), then trim the row count down to what the renderer can
+// actually paint at the device-pixel-rounded cell height. FitAddon sizes rows
+// from the ideal fractional cell height, which overshoots the wrapper's bottom
+// padding and clips the last row (the bypass-permissions hint). Best-effort:
+// any failure leaves the plain fit() result in place.
+function fitTerminal(terminal, fitAddon) {
+  if (!terminal || !fitAddon) return;
+  fitAddon.fit();
+  try {
+    var rs = terminal._core && terminal._core._renderService;
+    var dev = rs && rs.dimensions && rs.dimensions.device && rs.dimensions.device.cell;
+    var wrap = terminal.element && terminal.element.parentElement;
+    if (!dev || !dev.height || !wrap) return;
+    var availH = parseInt(window.getComputedStyle(wrap).getPropertyValue('height'), 10);
+    var corrected = window.TerminalFit.correctRows({
+      availableHeightCss: availH,
+      deviceCellHeightPx: dev.height,
+      devicePixelRatio: window.devicePixelRatio || 1,
+      proposedRows: terminal.rows
+    });
+    if (corrected !== terminal.rows) terminal.resize(terminal.cols, corrected);
+  } catch (e) { /* correction is best-effort; fit() already applied */ }
 }
 
 function refocusActiveTerminal() {
@@ -3919,7 +3943,7 @@ function createExitOverlay(id, exitCode, col) {
 
   restartBtn.addEventListener('click', function () {
     overlay.remove();
-    col.fitAddon.fit();
+    fitTerminal(col.terminal, col.fitAddon);
     var sendMsg = { type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: col.cwd };
     if (col.cmd) {
       sendMsg.cmd = col.cmd;
@@ -4324,7 +4348,7 @@ function addColumn(args, targetRow, opts) {
     : Promise.resolve([]);
 
   requestAnimationFrame(function () {
-    fitAddon.fit();
+    fitTerminal(terminal, fitAddon);
     if (opts.reattachPtyId != null) {
       // Pty already exists in pty-server — just rebind it to this window's WS.
       // Claude CLI hides xterm's cursor at startup via DECTCEM (\e[?25l) and
@@ -5838,7 +5862,7 @@ async function restartColumn(id) {
 
   // Clear and respawn
   col.terminal.clear();
-  col.fitAddon.fit();
+  fitTerminal(col.terminal, col.fitAddon);
 
   // Don't --resume a session that no longer exists on disk — Claude errors
   // "No conversation found with session ID …". Verify it exists; if not, clear
@@ -5901,7 +5925,7 @@ function tryEndpointFailover(colId) {
       // Re-create the pty with the same column id and the fallback env.
       // Reuse existing args (--resume sessionId if present) so the user keeps their place.
       try { col.terminal.clear(); } catch (e) {}
-      col.fitAddon.fit();
+      fitTerminal(col.terminal, col.fitAddon);
       var respawnMsg = {
         type: 'create',
         id: colId,
@@ -6782,7 +6806,7 @@ function refitAll() {
     if (col.isDiff) return;
     if (col.minimized) return;
     try {
-      col.fitAddon.fit();
+      fitTerminal(col.terminal, col.fitAddon);
       // Suppress activity tracking for redraw data after resize
       resizeSuppressed.add(id);
       setTimeout(function () { resizeSuppressed.delete(id); }, 500);
