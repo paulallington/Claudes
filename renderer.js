@@ -1174,8 +1174,11 @@ function restoreLayout(projectPath, layout) {
 // Run FitAddon.fit(), then trim the row count down to what the renderer can
 // actually paint at the device-pixel-rounded cell height. FitAddon sizes rows
 // from the ideal fractional cell height, which overshoots the wrapper's bottom
-// padding and clips the last row (the bypass-permissions hint). Best-effort:
-// any failure leaves the plain fit() result in place.
+// padding and clips the last row (the bypass-permissions hint). We feed the
+// correction the wrapper's TRUE content height (clientHeight minus vertical
+// padding) — under box-sizing:border-box getComputedStyle(...).height includes
+// the padding and would overcount rows. Best-effort: any failure leaves the
+// plain fit() result in place.
 function fitTerminal(terminal, fitAddon) {
   if (!terminal || !fitAddon) return;
   fitAddon.fit();
@@ -1184,7 +1187,10 @@ function fitTerminal(terminal, fitAddon) {
     var dev = rs && rs.dimensions && rs.dimensions.device && rs.dimensions.device.cell;
     var wrap = terminal.element && terminal.element.parentElement;
     if (!dev || !dev.height || !wrap) return;
-    var availH = parseInt(window.getComputedStyle(wrap).getPropertyValue('height'), 10);
+    var cs = window.getComputedStyle(wrap);
+    var padTop = parseFloat(cs.getPropertyValue('padding-top'));
+    var padBottom = parseFloat(cs.getPropertyValue('padding-bottom'));
+    var availH = window.TerminalFit.contentHeightPx(wrap.clientHeight, padTop, padBottom);
     var corrected = window.TerminalFit.correctRows({
       availableHeightCss: availH,
       deviceCellHeightPx: dev.height,
