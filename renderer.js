@@ -1948,6 +1948,7 @@ function disposeColumnLocalOnly(id) {
     nextSibling.remove();
   }
 
+  if (col.wrapResizeDisconnect) col.wrapResizeDisconnect();
   releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
@@ -4665,6 +4666,33 @@ function addColumn(args, targetRow, opts) {
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
+
+  // Re-fit when the wrapper settles to its final flex height. The create-time
+  // fit() (above) runs before the column header + endpoint banner finish
+  // laying out, so FitAddon picks one row too many; the layout then settles
+  // ~17px shorter and the canvas overflows the (overflow:hidden) wrapper,
+  // clipping the last row. Observing the wrapper catches that settle (and
+  // later header-wrap / panel-toggle resizes) and re-fits — same per-column
+  // logic as refitAll(). Debounced 100ms to match refitDebouncer.
+  if (window.WrapperRefit) {
+    colData.wrapResizeDisconnect = window.WrapperRefit.observeWrapperResize({
+      wrapper: termWrapper,
+      debounceMs: 100,
+      onResize: function () {
+        var live = allColumns.get(id);
+        if (!live) return;
+        if (live.minimized || live.isDiff) return;
+        if (!live.element || live.element.offsetParent === null) return;
+        try {
+          fitTerminal(live.terminal, live.fitAddon);
+          resizeSuppressed.add(id);
+          setTimeout(function () { resizeSuppressed.delete(id); }, 500);
+          wsSend({ type: 'resize', id: id, cols: live.terminal.cols, rows: live.terminal.rows });
+        } catch (e) {}
+      }
+    });
+  }
+
   attachTerminalSearchOverlay(colData);
   colData.deltaSessionEl = header.querySelector('[data-col-delta]');
   colData.ctxMeterEl = header.querySelector('[data-col-ctx]');
@@ -5677,6 +5705,7 @@ function removeColumn(id) {
     nextSibling.remove();
   }
 
+  if (col.wrapResizeDisconnect) col.wrapResizeDisconnect();
   releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
