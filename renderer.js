@@ -716,8 +716,12 @@ function connectWS() {
           if (__rw.cmd) respawnMsg.cmd = __rw.cmd;
           if (col3.env) respawnMsg.env = col3.env;
           col3.terminal.clear();
-          wsSend(respawnMsg);
-          setColumnActivity(msg.id, 'working');
+          // Sleep/wake respawn: the app-owned proxy may have been reaped, so gate
+          // this --no-proxy respawn on proxy readiness (unwrapped fallback) too.
+          spawnThroughHeadroomGate(respawnMsg, buildResumeArgs(col3), function () {
+            wsSend(respawnMsg);
+            setColumnActivity(msg.id, 'working');
+          });
         } else {
           col3.element.appendChild(createExitOverlay(msg.id, null, col3));
           setColumnActivity(msg.id, 'exited');
@@ -755,6 +759,26 @@ function reattachAllColumns() {
       rows: col.terminal.rows
     });
   });
+}
+
+// Ensure the app-owned Headroom proxy is up before sending a wrapped ('headroom')
+// spawn/respawn wire message. On failure, rewrite `msg` in place to an unwrapped
+// spawn (using `plainArgs`) so the column still works instead of exiting (code 1)
+// with ConnectionRefused. `send` runs exactly once with the final `msg`. Every
+// spawn/respawn path routes through here so they all self-heal identically.
+function spawnThroughHeadroomGate(msg, plainArgs, send) {
+  if (msg && msg.cmd === 'headroom' && window.electronAPI && window.electronAPI.ensureHeadroomProxy) {
+    window.electronAPI.ensureHeadroomProxy().then(function (res) {
+      if (!res || res.ok === false) {
+        try { if (typeof showToast === 'function') showToast('Headroom proxy unavailable — spawning without Headroom', { kind: 'warn' }); } catch (e) { /* ignore */ }
+        msg.args = plainArgs;
+        delete msg.cmd;
+      }
+      send();
+    }, function () { send(); });
+  } else {
+    send();
+  }
 }
 
 function wsSend(obj) {
@@ -3982,6 +4006,7 @@ function createExitOverlay(id, exitCode, col) {
     // Keep a Headroom-wrapped column wrapped on manual Restart. Passthrough for
     // arbitrary-cmd/endpoint columns (the wrap guards both), and re-derived from
     // the live global flag rather than any persisted per-column state.
+    var __plainArgs = sendMsg.args;
     if (window.HeadroomWrap) {
       var __hwr = window.HeadroomWrap.applyHeadroomWrap({
         enabled: !!(headroomInstalled && config && config.useHeadroom),
@@ -3992,15 +4017,17 @@ function createExitOverlay(id, exitCode, col) {
       sendMsg.args = __hwr.args;
       if (__hwr.cmd) sendMsg.cmd = __hwr.cmd;
     }
-    wsSend(sendMsg);
-    col.terminal.clear();
-    setColumnActivity(id, 'working');
-    // Run-tab launches: the previous exit fired refreshRunConfigs and set the
-    // config row back to "stopped". Now that we've re-spawned the same column
-    // (col.cmd / customTitle unchanged → findRunningColumn matches again),
-    // refresh so the UI flips back to the playing/stop state. Without this
-    // the user's only signal that the restart worked is terminal output.
-    if (col.cmd) setTimeout(refreshRunConfigs, 300);
+    spawnThroughHeadroomGate(sendMsg, __plainArgs, function () {
+      wsSend(sendMsg);
+      col.terminal.clear();
+      setColumnActivity(id, 'working');
+      // Run-tab launches: the previous exit fired refreshRunConfigs and set the
+      // config row back to "stopped". Now that we've re-spawned the same column
+      // (col.cmd / customTitle unchanged → findRunningColumn matches again),
+      // refresh so the UI flips back to the playing/stop state. Without this
+      // the user's only signal that the restart worked is terminal output.
+      if (col.cmd) setTimeout(refreshRunConfigs, 300);
+    });
   });
   closeBtn.addEventListener('click', function () {
     var hadCmd = !!col.cmd;
@@ -4419,7 +4446,11 @@ function addColumn(args, targetRow, opts) {
     if (__hw.cmd) sendMsg.cmd = __hw.cmd;
     if (opts.env) sendMsg.env = opts.env;
 
-    function finishSpawn() {
+    // Wrapped columns launch with --no-proxy, so the app-owned Headroom proxy
+    // must be up first. The gate is idempotent + race-guarded in main, so
+    // concurrent restored columns start it exactly once; on failure it falls back
+    // to an unwrapped spawn instead of a ConnectionRefused exit (code 1).
+    spawnThroughHeadroomGate(sendMsg, claudeArgs, function finishSpawn() {
       vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
       wsSend(sendMsg);
 
@@ -4433,25 +4464,7 @@ function addColumn(args, targetRow, opts) {
           detectSession(id, cwd, preIds, 0);
         });
       }
-    }
-
-    // Wrapped columns launch with --no-proxy, so the app-owned Headroom proxy
-    // must be up first. ensureHeadroomProxy is idempotent + race-guarded in main,
-    // so concurrent restored columns start it exactly once. On failure, fall back
-    // to an unwrapped spawn so the column still works instead of exiting (code 1)
-    // with ConnectionRefused.
-    if (__hw.cmd === 'headroom' && window.electronAPI && window.electronAPI.ensureHeadroomProxy) {
-      window.electronAPI.ensureHeadroomProxy().then(function (res) {
-        if (!res || res.ok === false) {
-          if (typeof showToast === 'function') showToast('Headroom proxy unavailable — spawning without Headroom', { kind: 'warn' });
-          sendMsg.args = claudeArgs;
-          delete sendMsg.cmd;
-        }
-        finishSpawn();
-      }, function () { finishSpawn(); });
-    } else {
-      finishSpawn();
-    }
+    });
   });
 
   terminal.onData(function (data) {
@@ -5989,6 +6002,7 @@ async function restartColumn(id) {
   if (col.env) sendMsg.env = col.env;
   // Keep a Headroom-wrapped column wrapped on respawn. Passthrough for
   // arbitrary-cmd/endpoint columns; re-derived from the live global flag.
+  var __plainArgs = sendMsg.args;
   if (window.HeadroomWrap) {
     var __hwr = window.HeadroomWrap.applyHeadroomWrap({
       enabled: !!(headroomInstalled && config && config.useHeadroom),
@@ -5999,12 +6013,14 @@ async function restartColumn(id) {
     sendMsg.args = __hwr.args;
     if (__hwr.cmd) sendMsg.cmd = __hwr.cmd;
   }
-  wsSend(sendMsg);
-  // Re-evaluate stale-hook health from a clean slate for the new session: if
-  // hooks now reach the column it will never re-flag; if they still don't, the
-  // sweep can surface the hint again after the grace window.
-  col.hookEverSeen = false; col.lastHookAt = 0; col.staleHintShown = false;
-  setColumnActivity(id, 'working');
+  spawnThroughHeadroomGate(sendMsg, __plainArgs, function () {
+    wsSend(sendMsg);
+    // Re-evaluate stale-hook health from a clean slate for the new session: if
+    // hooks now reach the column it will never re-flag; if they still don't, the
+    // sweep can surface the hint again after the grace window.
+    col.hookEverSeen = false; col.lastHookAt = 0; col.staleHintShown = false;
+    setColumnActivity(id, 'working');
+  });
 }
 
 function tryEndpointFailover(colId) {
