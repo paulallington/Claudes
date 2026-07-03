@@ -126,9 +126,41 @@ function probeHeadroom() {
       // stdout looks like "headroom, version 0.29.0" — pull out the version.
       const m = out.match(/version\s+([0-9][\w.\-]*)/i);
       headroomStatus = { installed: true, version: m ? m[1] : (out || null) };
+      // Binary confirmed present — attempt a once-per-launch silent update.
+      maybeAutoUpdateHeadroom();
     });
   } catch {
     // Never let a probe failure block startup.
+  }
+}
+
+// Silent, once-per-launch Headroom auto-update. Only runs when the binary is
+// installed (chained from probeHeadroom's success path) AND the user's global
+// `useHeadroom` toggle is on. `headroom update -y` checks PyPI and exits in
+// ~1-2s when already current, only reinstalling on a newer release, so it's
+// cheap to run on every launch. Fully non-blocking — never delays startup.
+function maybeAutoUpdateHeadroom() {
+  try {
+    const cfg = readConfig();
+    // Only bother users who actually opted into Headroom.
+    if (!cfg || !cfg.useHeadroom) return;
+    execFile('headroom', ['update', '-y'], { timeout: 300000 }, (err, stdout, stderr) => {
+      // ENOENT / network failure / refused install type / timeout — never crash.
+      if (err) {
+        console.warn('[headroom] auto-update failed:', err.message);
+        return;
+      }
+      console.log('[headroom] auto-update:', ((stdout || '').trim().split('\n').pop() || '').trim());
+      // Re-probe so headroomStatus.version reflects any upgrade we just applied.
+      execFile('headroom', ['--version'], { timeout: 4000 }, (verErr, verOut) => {
+        if (verErr) return;
+        const out = (verOut || '').trim();
+        const m = out.match(/version\s+([0-9][\w.\-]*)/i);
+        headroomStatus = { installed: true, version: m ? m[1] : (out || null) };
+      });
+    });
+  } catch {
+    // Never let auto-update block or crash startup.
   }
 }
 
