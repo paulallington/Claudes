@@ -30,24 +30,34 @@ const { tagBackgroundEvent } = require('./lib/voice-background');
 const { appendWithRotation } = require('./lib/voice-debug-log');
 const https = require('https');
 
-// macOS GUI launches (Dock/Finder) inherit launchd's minimal PATH —
-// `/usr/bin:/bin:/usr/sbin:/sbin` — which omits Homebrew, ~/.local/bin, nvm,
-// etc. That's why `which claude` returns nothing and every `spawn(claude,…)`
-// or `spawn(node,…)` ENOENTs (e.g. headless runs produce "no output"). Fix
-// it once at process start so EVERY subsequent spawn/execFile inherits a
-// real PATH.
-if (process.platform !== 'win32') {
-  const extras = [
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
-    '/usr/bin',
-    '/bin',
-    path.join(os.homedir(), '.local/bin'),
-    path.join(os.homedir(), '.volta/bin'),
-    path.join(os.homedir(), '.fnm'),
-    path.join(os.homedir(), 'bin'),
-    path.join(os.homedir(), '.claude/bin'),
-  ];
+// GUI launches don't inherit the user's shell PATH, so tools installed to
+// user-local dirs are invisible to every spawn/execFile. On macOS
+// (Dock/Finder) launchd hands us a minimal `/usr/bin:/bin:/usr/sbin:/sbin`
+// that omits Homebrew, ~/.local/bin, nvm, etc. On Windows a Start-menu /
+// installed launch likewise lacks `~/.local/bin` (where pip/pipx/uv drop
+// console scripts like headroom.exe). Either way `which claude`/`headroom`
+// returns nothing and the spawn ENOENTs (e.g. headless runs produce "no
+// output"). Fix it once at process start so EVERY subsequent spawn/execFile
+// inherits a real PATH.
+{
+  const extras = process.platform === 'win32'
+    ? [
+        path.join(os.homedir(), '.local', 'bin'),                    // pip --user / uv tool / modern pipx (headroom.exe lives here)
+        path.join(os.homedir(), '.claude', 'bin'),
+        process.env.APPDATA && path.join(process.env.APPDATA, 'Python', 'Scripts'), // pip --user (roaming) on some setups
+        path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Scripts'),
+      ].filter(Boolean)
+    : [
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+        '/usr/bin',
+        '/bin',
+        path.join(os.homedir(), '.local/bin'),
+        path.join(os.homedir(), '.volta/bin'),
+        path.join(os.homedir(), '.fnm'),
+        path.join(os.homedir(), 'bin'),
+        path.join(os.homedir(), '.claude/bin'),
+      ];
   const have = new Set((process.env.PATH || '').split(path.delimiter).filter(Boolean));
   const missing = extras.filter((p) => !have.has(p));
   if (missing.length) {
