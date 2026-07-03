@@ -42,7 +42,6 @@ var btnManageEndpoints = document.getElementById('btn-manage-endpoints');
 // every default-Claude spawn through `headroom wrap claude --` until turned off.
 var optUseHeadroom = document.getElementById('opt-use-headroom');
 var headroomLabel = document.getElementById('opt-headroom-label');
-var headroomExtra = document.getElementById('opt-headroom-extra');
 var headroomDashboardLink = document.getElementById('headroom-dashboard-link');
 var headroomRequiredNote = document.getElementById('headroom-required-note');
 var headroomInstallLink = document.getElementById('headroom-install-link');
@@ -4419,7 +4418,7 @@ function addColumn(args, targetRow, opts) {
     var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: __hw.args };
     if (__hw.cmd) sendMsg.cmd = __hw.cmd;
     if (opts.env) sendMsg.env = opts.env;
-    vlog('spawn', { colId: id, cwd: cwd, cmd: cmd || 'claude', args: claudeArgs });
+    vlog('spawn', { colId: id, cwd: cwd, cmd: __hw.cmd || 'claude', args: __hw.args });
     wsSend(sendMsg);
 
     var isResume = claudeArgs.indexOf('--resume') !== -1;
