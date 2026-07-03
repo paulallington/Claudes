@@ -38,6 +38,16 @@ var optDefaultEffortCloud = document.getElementById('opt-default-effort-cloud');
 var optDefaultEffortLocal = document.getElementById('opt-default-effort-local');
 var btnManageEndpoints = document.getElementById('btn-manage-endpoints');
 
+// Headroom spawn toggle. GLOBAL (config.useHeadroom), not per-project — it wraps
+// every default-Claude spawn through `headroom wrap claude --` until turned off.
+var optUseHeadroom = document.getElementById('opt-use-headroom');
+var headroomLabel = document.getElementById('opt-headroom-label');
+var headroomExtra = document.getElementById('opt-headroom-extra');
+var headroomDashboardLink = document.getElementById('headroom-dashboard-link');
+var headroomRequiredNote = document.getElementById('headroom-required-note');
+var headroomInstallLink = document.getElementById('headroom-install-link');
+var headroomInstalled = false;  // resolved async from main; gates wrapping + UI
+
 // Per-endpoint-class default effort applied at spawn. User-configurable in the
 // spawn options panel; persisted in config.defaultEffortCloud/Local.
 var defaultEffortCloud = 'high';
@@ -686,14 +696,25 @@ function connectWS() {
       if (col3 && !col3.element.querySelector('.exit-overlay')) {
         if (!col3.cmd && col3.sessionId) {
           fitTerminal(col3.terminal, col3.fitAddon);
+          // Keep a Headroom-wrapped column wrapped across auto-respawn. Re-derive
+          // `enabled` from the live global flag (never persisted on the column).
+          var __rw = (window.HeadroomWrap)
+            ? window.HeadroomWrap.applyHeadroomWrap({
+                enabled: !!(headroomInstalled && config && config.useHeadroom),
+                cmd: col3.cmd,
+                args: buildResumeArgs(col3),
+                hasEndpoint: !!(col3.endpointId || col3.env)
+              })
+            : { cmd: col3.cmd, args: buildResumeArgs(col3) };
           var respawnMsg = {
             type: 'create',
             id: msg.id,
             cols: col3.terminal.cols,
             rows: col3.terminal.rows,
             cwd: col3.cwd,
-            args: buildResumeArgs(col3)
+            args: __rw.args
           };
+          if (__rw.cmd) respawnMsg.cmd = __rw.cmd;
           if (col3.env) respawnMsg.env = col3.env;
           col3.terminal.clear();
           wsSend(respawnMsg);
@@ -3959,6 +3980,19 @@ function createExitOverlay(id, exitCode, col) {
       sendMsg.args = buildResumeArgs(col);
     }
     if (col.env) sendMsg.env = col.env;
+    // Keep a Headroom-wrapped column wrapped on manual Restart. Passthrough for
+    // arbitrary-cmd/endpoint columns (the wrap guards both), and re-derived from
+    // the live global flag rather than any persisted per-column state.
+    if (window.HeadroomWrap) {
+      var __hwr = window.HeadroomWrap.applyHeadroomWrap({
+        enabled: !!(headroomInstalled && config && config.useHeadroom),
+        cmd: col.cmd,
+        args: sendMsg.args,
+        hasEndpoint: !!(col.endpointId || col.env)
+      });
+      sendMsg.args = __hwr.args;
+      if (__hwr.cmd) sendMsg.cmd = __hwr.cmd;
+    }
     wsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
@@ -4368,8 +4402,22 @@ function addColumn(args, targetRow, opts) {
       wsSend({ type: 'reattach', id: id, cols: terminal.cols, rows: terminal.rows });
       return;
     }
-    var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: claudeArgs };
-    if (cmd) sendMsg.cmd = cmd;
+    // Apply the Headroom wrap to a {cmd, args} pair FIRST, then build sendMsg
+    // from the result. The wrap no-ops unless the global toggle is on AND this
+    // is a plain default-Claude spawn (no endpoint, no arbitrary cmd). We must
+    // NOT reassign the local `cmd` var — the detectSession guard below relies on
+    // it staying falsy for default Claude columns, and `claudeArgs`/session-id
+    // pinning must stay intact (the wrap just nests those args after `--`).
+    var __hw = (window.HeadroomWrap)
+      ? window.HeadroomWrap.applyHeadroomWrap({
+          enabled: !!(headroomInstalled && config && config.useHeadroom),
+          cmd: cmd,
+          args: claudeArgs,
+          hasEndpoint: !!(opts.endpointId || opts.env)
+        })
+      : { cmd: cmd, args: claudeArgs };
+    var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: __hw.args };
+    if (__hw.cmd) sendMsg.cmd = __hw.cmd;
     if (opts.env) sendMsg.env = opts.env;
     vlog('spawn', { colId: id, cwd: cwd, cmd: cmd || 'claude', args: claudeArgs });
     wsSend(sendMsg);
@@ -5919,6 +5967,18 @@ async function restartColumn(id) {
     sendMsg.args = buildResumeArgs(col);
   }
   if (col.env) sendMsg.env = col.env;
+  // Keep a Headroom-wrapped column wrapped on respawn. Passthrough for
+  // arbitrary-cmd/endpoint columns; re-derived from the live global flag.
+  if (window.HeadroomWrap) {
+    var __hwr = window.HeadroomWrap.applyHeadroomWrap({
+      enabled: !!(headroomInstalled && config && config.useHeadroom),
+      cmd: col.cmd,
+      args: sendMsg.args,
+      hasEndpoint: !!(col.endpointId || col.env)
+    });
+    sendMsg.args = __hwr.args;
+    if (__hwr.cmd) sendMsg.cmd = __hwr.cmd;
+  }
   wsSend(sendMsg);
   // Re-evaluate stale-hook health from a clean slate for the new session: if
   // hooks now reach the column it will never re-flag; if they still don't, the
@@ -10631,6 +10691,7 @@ function updateSpawnButtonLabel() {
   if (optRemoteControl.checked) tags.push('remote');
   if (optBare.checked || (currentEndpointEnv && currentEndpointEnv.ANTHROPIC_CUSTOM_HEADERS)) tags.push('bare');
   if (optStripMcps.checked) tags.push('no-mcp');
+  if (optUseHeadroom && optUseHeadroom.checked) tags.push('headroom');
   if (optWorktree.value.trim()) tags.push('worktree');
   if (optCustomArgs.value.trim()) tags.push('custom');
 
@@ -10693,6 +10754,9 @@ function loadSpawnOptions() {
   // populateEndpointModelDropdown can preselect it.
   currentEndpointModel = endpointId ? (opts.endpointModel || null) : null;
   applyEndpointSelection(endpointId, /* persist */ false);
+  // Headroom is a GLOBAL toggle (not part of the per-project spawnOptions object),
+  // so reflect config.useHeadroom directly — but only when the binary is present.
+  if (optUseHeadroom) optUseHeadroom.checked = headroomInstalled && !!(config && config.useHeadroom);
   updateSpawnButtonLabel();
 }
 
@@ -10723,6 +10787,47 @@ optStripMcps.addEventListener('change', onSpawnOptionChanged);
 optModel.addEventListener('change', onSpawnOptionChanged);
 optWorktree.addEventListener('input', onSpawnOptionChanged);
 optCustomArgs.addEventListener('input', onSpawnOptionChanged);
+
+// --- Headroom toggle wiring ---
+// The checkbox reflects a GLOBAL flag (config.useHeadroom), and is only usable
+// when the `headroom` binary is detected on the host. When it's missing we
+// disable the toggle and surface an install hint instead of silently no-opping.
+function applyHeadroomUiState() {
+  if (!optUseHeadroom) return;
+  if (headroomInstalled) {
+    optUseHeadroom.disabled = false;
+    if (headroomLabel) headroomLabel.classList.remove('is-disabled');
+    optUseHeadroom.checked = !!(config && config.useHeadroom);
+    if (headroomDashboardLink) headroomDashboardLink.classList.remove('hidden');
+    if (headroomRequiredNote) headroomRequiredNote.classList.add('hidden');
+  } else {
+    optUseHeadroom.disabled = true;
+    optUseHeadroom.checked = false;
+    if (headroomLabel) headroomLabel.classList.add('is-disabled');
+    if (headroomDashboardLink) headroomDashboardLink.classList.add('hidden');
+    if (headroomRequiredNote) headroomRequiredNote.classList.remove('hidden');
+  }
+  updateSpawnButtonLabel();
+}
+function initHeadroomUI() {
+  if (!window.electronAPI || !window.electronAPI.getHeadroomStatus) { applyHeadroomUiState(); return; }
+  window.electronAPI.getHeadroomStatus().then(function (st) {
+    headroomInstalled = !!(st && st.installed);
+    applyHeadroomUiState();
+  }).catch(function () { headroomInstalled = false; applyHeadroomUiState(); });
+}
+
+if (optUseHeadroom) {
+  optUseHeadroom.addEventListener('change', function () {
+    config.useHeadroom = optUseHeadroom.checked;
+    saveConfig();
+    updateSpawnButtonLabel();
+  });
+}
+if (headroomDashboardLink) headroomDashboardLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard'); });
+if (headroomInstallLink) headroomInstallLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('https://github.com/headroomlabs-ai/headroom'); });
+
+initHeadroomUI();
 
 // Default-effort selectors are app-global (not per-project), so they bypass
 // saveSpawnOptions and persist straight to config root.

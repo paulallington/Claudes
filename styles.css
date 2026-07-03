@@ -1008,6 +1008,40 @@ html[data-platform="darwin"] #toolbar {
   accent-color: var(--accent);
 }
 
+/* Headroom row: secondary links/notes sitting under the "Use Headroom" toggle.
+   Dimmed label state when the checkbox is disabled (Headroom not installed). */
+.spawn-headroom-extra {
+  gap: 6px;
+  padding-top: 0;
+  padding-left: 24px;
+  font-size: 11px;
+}
+
+.spawn-link {
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.spawn-link:hover {
+  text-decoration: underline;
+}
+
+.spawn-required {
+  color: #f5a623;
+  font-size: 11px;
+}
+
+.spawn-required.hidden,
+.spawn-link.hidden {
+  display: none;
+}
+
+#opt-headroom-label.is-disabled {
+  opacity: .55;
+}
+
 .spawn-effort-row select,
 .spawn-model-row select,
 .spawn-perm-row select,
