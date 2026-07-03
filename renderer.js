@@ -10798,9 +10798,11 @@ function loadSpawnOptions() {
   // populateEndpointModelDropdown can preselect it.
   currentEndpointModel = endpointId ? (opts.endpointModel || null) : null;
   applyEndpointSelection(endpointId, /* persist */ false);
-  // Headroom is a GLOBAL toggle (not part of the per-project spawnOptions object),
-  // so reflect config.useHeadroom directly — but only when the binary is present.
-  if (optUseHeadroom) optUseHeadroom.checked = headroomInstalled && !!(config && config.useHeadroom);
+  // Headroom is a GLOBAL toggle (not part of the per-project spawnOptions object).
+  // Refresh the whole Headroom UI here — parent checkbox AND the sub-toggles
+  // (1M/Memory/Output shaper) — so the subs never keep a stale enabled/disabled
+  // state from an earlier boot pass when the async `headroom` probe hadn't resolved.
+  applyHeadroomUiState();
   updateSpawnButtonLabel();
 }
 
