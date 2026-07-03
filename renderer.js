@@ -45,6 +45,10 @@ var headroomLabel = document.getElementById('opt-headroom-label');
 var headroomDashboardLink = document.getElementById('headroom-dashboard-link');
 var headroomRequiredNote = document.getElementById('headroom-required-note');
 var headroomInstallLink = document.getElementById('headroom-install-link');
+var optHeadroom1m = document.getElementById('opt-headroom-1m');
+var optHeadroomMemory = document.getElementById('opt-headroom-memory');
+var optHeadroomShaper = document.getElementById('opt-headroom-shaper');
+var headroomSubs = document.getElementById('opt-headroom-subs');
 var headroomInstalled = false;  // resolved async from main; gates wrapping + UI
 
 // Per-endpoint-class default effort applied at spawn. User-configurable in the
@@ -700,6 +704,7 @@ function connectWS() {
           var __rw = (window.HeadroomWrap)
             ? window.HeadroomWrap.applyHeadroomWrap({
                 enabled: !!(headroomInstalled && config && config.useHeadroom),
+                oneM: !!(config && config.useHeadroom1m !== false),
                 cmd: col3.cmd,
                 args: buildResumeArgs(col3),
                 hasEndpoint: !!(col3.endpointId || col3.env)
@@ -4010,6 +4015,7 @@ function createExitOverlay(id, exitCode, col) {
     if (window.HeadroomWrap) {
       var __hwr = window.HeadroomWrap.applyHeadroomWrap({
         enabled: !!(headroomInstalled && config && config.useHeadroom),
+        oneM: !!(config && config.useHeadroom1m !== false),
         cmd: col.cmd,
         args: sendMsg.args,
         hasEndpoint: !!(col.endpointId || col.env)
@@ -4437,6 +4443,7 @@ function addColumn(args, targetRow, opts) {
     var __hw = (window.HeadroomWrap)
       ? window.HeadroomWrap.applyHeadroomWrap({
           enabled: !!(headroomInstalled && config && config.useHeadroom),
+          oneM: !!(config && config.useHeadroom1m !== false),
           cmd: cmd,
           args: claudeArgs,
           hasEndpoint: !!(opts.endpointId || opts.env)
@@ -6006,6 +6013,7 @@ async function restartColumn(id) {
   if (window.HeadroomWrap) {
     var __hwr = window.HeadroomWrap.applyHeadroomWrap({
       enabled: !!(headroomInstalled && config && config.useHeadroom),
+      oneM: !!(config && config.useHeadroom1m !== false),
       cmd: col.cmd,
       args: sendMsg.args,
       hasEndpoint: !!(col.endpointId || col.env)
@@ -10843,6 +10851,13 @@ function applyHeadroomUiState() {
     if (headroomDashboardLink) headroomDashboardLink.classList.add('hidden');
     if (headroomRequiredNote) headroomRequiredNote.classList.remove('hidden');
   }
+  // Sub-toggles are usable only when Headroom is installed AND the parent toggle
+  // is on. 1M defaults ON (undefined !== false); memory/shaper default off.
+  var subsUsable = headroomInstalled && !!(config && config.useHeadroom);
+  if (optHeadroom1m) { optHeadroom1m.disabled = !subsUsable; optHeadroom1m.checked = !!(config && config.useHeadroom1m !== false); }
+  if (optHeadroomMemory) { optHeadroomMemory.disabled = !subsUsable; optHeadroomMemory.checked = !!(config && config.useHeadroomMemory); }
+  if (optHeadroomShaper) { optHeadroomShaper.disabled = !subsUsable; optHeadroomShaper.checked = !!(config && config.useHeadroomOutputShaper); }
+  if (headroomSubs) headroomSubs.classList.toggle('is-disabled', !subsUsable);
   updateSpawnButtonLabel();
 }
 function initHeadroomUI() {
@@ -10865,7 +10880,40 @@ if (optUseHeadroom) {
   optUseHeadroom.addEventListener('change', function () {
     config.useHeadroom = optUseHeadroom.checked;
     saveConfig();
+    applyHeadroomUiState();
+  });
+}
+if (optHeadroom1m) {
+  optHeadroom1m.addEventListener('change', function () {
+    config.useHeadroom1m = optHeadroom1m.checked;
+    saveConfig();
     updateSpawnButtonLabel();
+  });
+}
+if (optHeadroomMemory) {
+  optHeadroomMemory.addEventListener('change', function () {
+    config.useHeadroomMemory = optHeadroomMemory.checked;
+    saveConfig();
+    // main.js applies --memory the next time it starts the app-owned proxy.
+    if (optHeadroomMemory.checked && typeof showToast === 'function') {
+      showToast('Headroom memory enabled — applies on the next proxy start (relaunch to apply now)', { kind: 'info' });
+    }
+  });
+}
+if (optHeadroomShaper) {
+  optHeadroomShaper.addEventListener('change', function () {
+    config.useHeadroomOutputShaper = optHeadroomShaper.checked;
+    saveConfig();
+    // The shaper is a live runtime toggle on the running proxy — no restart.
+    if (window.electronAPI && window.electronAPI.setHeadroomOutputShaper) {
+      window.electronAPI.setHeadroomOutputShaper(optHeadroomShaper.checked).then(function (res) {
+        if (res && res.ok === false) {
+          if (typeof showToast === 'function') showToast('Output shaper: ' + (res.error || 'could not apply'), { kind: 'warn' });
+        } else if (optHeadroomShaper.checked && typeof showToast === 'function') {
+          showToast('Output shaper enabled', { kind: 'info' });
+        }
+      });
+    }
   });
 }
 if (headroomDashboardLink) headroomDashboardLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard'); });

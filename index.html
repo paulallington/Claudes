@@ -254,6 +254,20 @@
                 <a href="#" id="headroom-dashboard-link" class="spawn-link" title="Open the Headroom savings dashboard">Dashboard &#8599;</a>
                 <span id="headroom-required-note" class="spawn-required hidden">Headroom Required &middot; <a href="#" id="headroom-install-link" class="spawn-link">github.com/headroomlabs-ai/headroom</a></span>
               </div>
+              <div class="spawn-headroom-subs" id="opt-headroom-subs">
+                <label class="spawn-option spawn-headroom-sub" id="opt-headroom-1m-label">
+                  <input type="checkbox" id="opt-headroom-1m"> 1M context
+                  <span class="spawn-help" title="Keep the full 1M context window through the proxy (--1m). Behind Headroom's proxy Claude Code otherwise drops the 1M beta header and caps at 200k. On by default.">?</span>
+                </label>
+                <label class="spawn-option spawn-headroom-sub" id="opt-headroom-memory-label">
+                  <input type="checkbox" id="opt-headroom-memory"> Memory
+                  <span class="spawn-help" title="Persistent cross-session memory. Proxy-wide (affects all Headroom columns). Enabling restarts the Headroom proxy to apply.">?</span>
+                </label>
+                <label class="spawn-option spawn-headroom-sub" id="opt-headroom-shaper-label">
+                  <input type="checkbox" id="opt-headroom-shaper"> Output shaper
+                  <span class="spawn-help" title="Cut output tokens by shaping response verbosity to your learned preference. Proxy-wide, applied live — no restart.">?</span>
+                </label>
+              </div>
               <label class="spawn-option">
                 <input type="checkbox" id="opt-remote-control"> Remote Control
                 <span class="spawn-help" title="Enable remote access from claude.ai/code or the Claude mobile app (--remote-control).">?</span>

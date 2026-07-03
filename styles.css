@@ -1010,6 +1010,16 @@ html[data-platform="darwin"] #toolbar {
 
 /* Headroom row: secondary links/notes sitting under the "Use Headroom" toggle.
    Dimmed label state when the checkbox is disabled (Headroom not installed). */
+.spawn-headroom-subs {
+  display: flex;
+  flex-direction: column;
+}
+.spawn-headroom-sub {
+  padding-left: 22px;
+}
+.spawn-headroom-subs.is-disabled {
+  opacity: 0.45;
+}
 .spawn-headroom-extra {
   gap: 6px;
   padding-top: 0;

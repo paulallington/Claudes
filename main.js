@@ -4802,6 +4802,37 @@ ipcMain.handle('headroom:ensureProxy', async () => {
     return { ok: false, started: false, error: String((e && e.message) || e) };
   }
 });
+// Output shaper — proxy-wide, but hot-togglable with no restart. Enabling runs
+// `headroom learn --verbosity --apply` (learns the user's verbosity + POSTs the
+// runtime-env override on the running proxy); disabling clears the override via
+// the same /admin/runtime-env channel.
+ipcMain.handle('headroom:setOutputShaper', async (_e, on) => {
+  if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
+  if (on) {
+    return await new Promise((resolve) => {
+      execFile('headroom', ['learn', '--verbosity', '--apply'], { timeout: 120000 }, (err) => {
+        resolve(err ? { ok: false, error: (err.message || 'learn failed') } : { ok: true });
+      });
+    });
+  }
+  return await new Promise((resolve) => {
+    const body = JSON.stringify({ HEADROOM_OUTPUT_SHAPER: '0' });
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    try {
+      const req = http.request({
+        host: '127.0.0.1', port: headroomPort(), path: '/admin/runtime-env', method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeout: 4000,
+      }, (res) => {
+        res.resume();
+        finish({ ok: res.statusCode >= 200 && res.statusCode < 300, error: res.statusCode >= 300 ? ('HTTP ' + res.statusCode) : undefined });
+      });
+      req.on('timeout', () => { try { req.destroy(); } catch { /* ignore */ } finish({ ok: false, error: 'timeout' }); });
+      req.on('error', (e) => finish({ ok: false, error: e.message }));
+      req.write(body); req.end();
+    } catch (e) { finish({ ok: false, error: String((e && e.message) || e) }); }
+  });
+});
 ipcMain.handle('headroom:status', () => headroomStatus);
 
 // --- Voice / TTS IPC Handlers ---
