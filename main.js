@@ -112,6 +112,26 @@ function diagLog(...args) {
 }
 diagLogInit();
 
+// Headroom CLI detection. We probe the `headroom` binary once at startup and
+// cache the result so the renderer can offer the "spawn with Headroom" option
+// only when it's actually installed. PATH is normalized above, so a
+// ~/.local/bin/headroom resolves here.
+let headroomStatus = { installed: false, version: null };
+function probeHeadroom() {
+  try {
+    execFile('headroom', ['--version'], { timeout: 4000 }, (err, stdout) => {
+      // ENOENT / non-zero exit / timeout → not usable; leave the default.
+      if (err) return;
+      const out = (stdout || '').trim();
+      // stdout looks like "headroom, version 0.29.0" — pull out the version.
+      const m = out.match(/version\s+([0-9][\w.\-]*)/i);
+      headroomStatus = { installed: true, version: m ? m[1] : (out || null) };
+    });
+  } catch {
+    // Never let a probe failure block startup.
+  }
+}
+
 // Lightweight perf instrumentation. Every PERF_SAMPLE_MS we ask Electron
 // for per-process CPU/memory and log a single line. Hook traffic is
 // counted between samples so we can see throughput.
@@ -4652,6 +4672,7 @@ ipcMain.handle('config:setTerminalSettings', (event, settings) => {
   writeConfig(cfg);
   return { ok: true, settings: cfg.terminal };
 });
+ipcMain.handle('headroom:status', () => headroomStatus);
 
 // --- Voice / TTS IPC Handlers ---
 //
@@ -7484,6 +7505,7 @@ if (!gotLock) {
     setupAutoUpdater();
     migrateLoopsToAutomations();
     startAutomationScheduler();
+    probeHeadroom(); // one-shot: cache whether the `headroom` CLI is available
 
     const cfg = readConfig();
     // Zombie-popout guard: `poppedOut: true` is intentionally preserved across
