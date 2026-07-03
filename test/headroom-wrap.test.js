@@ -3,7 +3,11 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { applyHeadroomWrap } = require('../lib/headroom-wrap');
 
-test('enabled, cmd undefined, wraps claude with args after --', () => {
+// The app owns a single persistent Headroom proxy; wrapped columns must only
+// ever REUSE it (--no-proxy), never run the detect-or-start path. --1m is a
+// claude-side flag added when the caller asks for the 1M context window.
+
+test('enabled, cmd undefined, wraps claude with --no-proxy and args after --', () => {
   const result = applyHeadroomWrap({
     enabled: true,
     cmd: undefined,
@@ -12,11 +16,11 @@ test('enabled, cmd undefined, wraps claude with args after --', () => {
   });
   assert.deepStrictEqual(result, {
     cmd: 'headroom',
-    args: ['wrap', 'claude', '--', '--model', 'opus'],
+    args: ['wrap', 'claude', '--no-proxy', '--', '--model', 'opus'],
   });
 });
 
-test('enabled, cmd "claude", wraps with originals after --', () => {
+test('enabled, cmd "claude", wraps with --no-proxy + originals after --', () => {
   const result = applyHeadroomWrap({
     enabled: true,
     cmd: 'claude',
@@ -25,29 +29,59 @@ test('enabled, cmd "claude", wraps with originals after --', () => {
   });
   assert.deepStrictEqual(result, {
     cmd: 'headroom',
-    args: ['wrap', 'claude', '--', '--resume', 'x'],
+    args: ['wrap', 'claude', '--no-proxy', '--', '--resume', 'x'],
   });
 });
 
-test('enabled but hasEndpoint true -> passthrough unchanged', () => {
+test('oneM true -> --1m after --no-proxy, before --', () => {
+  const result = applyHeadroomWrap({
+    enabled: true,
+    cmd: 'claude',
+    args: ['--resume', 'x'],
+    hasEndpoint: false,
+    oneM: true,
+  });
+  assert.deepStrictEqual(result, {
+    cmd: 'headroom',
+    args: ['wrap', 'claude', '--no-proxy', '--1m', '--', '--resume', 'x'],
+  });
+});
+
+test('oneM false -> no --1m', () => {
+  const result = applyHeadroomWrap({
+    enabled: true,
+    cmd: 'claude',
+    args: [],
+    hasEndpoint: false,
+    oneM: false,
+  });
+  assert.deepStrictEqual(result, {
+    cmd: 'headroom',
+    args: ['wrap', 'claude', '--no-proxy', '--'],
+  });
+});
+
+test('enabled but hasEndpoint true -> passthrough unchanged (oneM ignored)', () => {
   const args = ['--model', 'opus'];
   const result = applyHeadroomWrap({
     enabled: true,
     cmd: 'claude',
     args,
     hasEndpoint: true,
+    oneM: true,
   });
   assert.deepStrictEqual(result, { cmd: 'claude', args });
   assert.strictEqual(result.args, args);
 });
 
-test('enabled but cmd is an arbitrary command -> passthrough', () => {
+test('enabled but cmd is an arbitrary command -> passthrough (oneM ignored)', () => {
   const args = ['-c', 'echo hi'];
   const result = applyHeadroomWrap({
     enabled: true,
     cmd: 'bash',
     args,
     hasEndpoint: false,
+    oneM: true,
   });
   assert.deepStrictEqual(result, { cmd: 'bash', args });
   assert.strictEqual(result.args, args);
@@ -75,7 +109,7 @@ test('passthrough returns args exactly as received (undefined stays undefined)',
   assert.deepStrictEqual(result, { cmd: 'claude', args: undefined });
 });
 
-test('enabled with empty args array -> wrap with just --', () => {
+test('enabled with empty args array -> wrap with --no-proxy + --', () => {
   const result = applyHeadroomWrap({
     enabled: true,
     cmd: 'claude',
@@ -84,11 +118,11 @@ test('enabled with empty args array -> wrap with just --', () => {
   });
   assert.deepStrictEqual(result, {
     cmd: 'headroom',
-    args: ['wrap', 'claude', '--'],
+    args: ['wrap', 'claude', '--no-proxy', '--'],
   });
 });
 
-test('enabled with undefined args -> wrap with just --', () => {
+test('enabled with undefined args -> wrap with --no-proxy + --', () => {
   const result = applyHeadroomWrap({
     enabled: true,
     cmd: undefined,
@@ -97,7 +131,7 @@ test('enabled with undefined args -> wrap with just --', () => {
   });
   assert.deepStrictEqual(result, {
     cmd: 'headroom',
-    args: ['wrap', 'claude', '--'],
+    args: ['wrap', 'claude', '--no-proxy', '--'],
   });
 });
 
@@ -109,6 +143,7 @@ test('input args array is not mutated', () => {
     cmd: 'claude',
     args,
     hasEndpoint: false,
+    oneM: true,
   });
   assert.deepStrictEqual(args, snapshot);
 });
