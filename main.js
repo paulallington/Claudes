@@ -58,6 +58,18 @@ const https = require('https');
         path.join(os.homedir(), 'bin'),
         path.join(os.homedir(), '.claude/bin'),
       ];
+  if (process.platform !== 'win32') {
+    // python.org / Xcode `pip install --user` drops console scripts into
+    // ~/Library/Python/<ver>/bin (framework Python), not ~/.local/bin — so
+    // Headroom can be missed on macOS too. Enumerate the version dirs like
+    // findSystemNode() does for nvm.
+    try {
+      const pyBase = path.join(os.homedir(), 'Library', 'Python');
+      for (const v of fs.readdirSync(pyBase)) {
+        extras.push(path.join(pyBase, v, 'bin'));   // e.g. ~/Library/Python/3.12/bin
+      }
+    } catch { /* not macOS / no framework-python user installs */ }
+  }
   const have = new Set((process.env.PATH || '').split(path.delimiter).filter(Boolean));
   const missing = extras.filter((p) => !have.has(p));
   if (missing.length) {
