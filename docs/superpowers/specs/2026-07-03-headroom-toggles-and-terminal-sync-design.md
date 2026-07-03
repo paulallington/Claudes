@@ -6,11 +6,15 @@
 
 ## Summary
 
-Three related pieces of work, shipped on one branch:
+Work shipped on one branch, in priority order:
 
-1. **More Headroom wrap toggles** — extend the existing "Use Headroom" spawn
-   option with sub-toggles for **1M context (`--1m`)**, **persistent memory
-   (`--memory`)**, and **live learning (`--learn`)**.
+0. **App-owned proxy lifecycle** *(P0 — live blocker)* — the app starts and owns a
+   single Headroom proxy; columns launch with `--no-proxy` so they only ever
+   *reuse* it. Fixes the post-reboot / cold-start failure where every column runs
+   the full proxy-managing `headroom wrap` and they race (or the proxy-management
+   path misbehaves in the Electron spawn env) → `ConnectionRefused` → `exited (code 1)`.
+1. **More Headroom toggles** — **1M context (`--1m`, wrap/claude-side)**,
+   **persistent memory (`--memory`, proxy-side)**, **live learning (`--learn`)**.
 2. **Output shaper toggle** — a *runtime* (hot, no-restart) toggle that enables
    Headroom's output-token shaper via its `/admin/runtime-env` admin channel.
 3. **Per-column Headroom badge** — a small `HR ↗` indicator showing which
@@ -19,8 +23,19 @@ Three related pieces of work, shipped on one branch:
    is corrupted when Claude streams a response, currently worked around by
    manually resizing the window.
 
-The first three extend the shipped `lib/headroom-wrap.js` feature. The fourth is
-an independent, investigation-led bug fix bundled into the same branch.
+Items 0–3 extend the shipped `lib/headroom-wrap.js` feature. Item 4 is an
+independent, investigation-led bug fix bundled into the same branch.
+
+### Why item 0 comes first, and what it proved
+
+Root cause confirmed by test: `headroom wrap claude --no-proxy -- --print "…"`
+against an already-running proxy returns cleanly (exit 0). A plain
+`headroom wrap claude` (which detects-or-starts the proxy) works from a normal
+shell but fails when spawned by the app's pty-server — the app currently emits
+`headroom wrap claude -- <args>` with **no `--no-proxy`** and **never starts a
+proxy itself**, so every column runs the fragile proxy-management path. Moving
+proxy ownership into the app removes all reliance on that path, fixes the cold-start
+race, and is the prerequisite that makes the memory toggle's restart feasible.
 
 ## Background
 
@@ -93,29 +108,69 @@ Two candidate mechanisms remain, to be disambiguated by an instrumented repro:
 - Bug: **instrument first, fix second.** Do not guess the mechanism; log
   `xterm.cols`/`rows` vs the pty size at each `data`/`resize` event, reproduce, pin
   A vs B, then fix and add a regression test.
-- One branch, sequenced: **bug fix + `--1m` + memory + badge first** (highest value),
-  then **output-shaper + learn**.
+- One branch, sequenced: **(0) app-owned proxy lifecycle first** (live blocker +
+  prerequisite for memory-restart), then **`--1m` + badge + garble bug**, then
+  **memory + output-shaper + learn**.
+- The proxy is **persistent/detached** — its lifetime must not be tied to any single
+  column or the spawning shell.
 
 ## Components
+
+### 0. App-owned proxy lifecycle (`main.js` + `lib/` + `renderer.js`) — P0
+
+**Confirmed requirement:** a `headroom wrap` process *owns* the proxy it starts —
+when that process dies, the proxy dies (verified: closing the owning cmd wrapper
+drops every routed session). So the app must start a **persistent, detached**
+proxy that outlives individual columns and the spawning shell.
+
+- **`main.js` — `ensureHeadroomProxy()`**:
+  - GET `http://127.0.0.1:<port>/health` (short timeout). Healthy → resolve (reuse).
+  - Else spawn **`headroom proxy [--memory] [--learn]`** *detached + unref'd* (NOT via
+    `wrap`, so its lifetime isn't tied to a column), then poll `/health` until ready
+    (~15–20s timeout). Include the proxy-side flags per config (`useHeadroomMemory`,
+    `useHeadroomLearn`).
+  - **Concurrency guard:** memoize the in-flight promise so N concurrent columns
+    trigger **one** proxy start, not N (kills the cold-start race).
+  - Returns `{ ok, started, error }`.
+- **Column spawns use `--no-proxy`** (see component 1) so they only ever *reuse* the
+  app-owned proxy — never run the fragile detect-or-start path.
+- **Startup + pre-spawn:** call `ensureHeadroomProxy()` on app launch when
+  `useHeadroom` is on, and (idempotently — fast when already healthy) before each
+  wrapped spawn. Renderer awaits IPC `headroom:ensureProxy` before a wrapped spawn;
+  on failure, surface an error (do not silently spawn a column that will `exit 1`).
+- **Lifecycle on quit:** leave the proxy running (persistent, matches user
+  expectation) OR track+stop on app quit — decide during implementation; persistent
+  is the lower-friction default.
+- **Testable core:** extract the decision/readiness logic to a `lib/` helper
+  (e.g. `ensure-proxy.js`) with injected `probeHealth` / `startProxy` / `sleep` so the
+  reuse/start/race-guard logic is unit-tested without real I/O. The detached spawn
+  itself is thin glue in `main.js`, verified via the dev app.
+
+**Interaction with memory/learn:** because the app now owns the proxy, `--memory`
+and `--learn` move onto the **`headroom proxy`** start command (they are proxy-side),
+not the per-column wrap. Enabling memory therefore = restart the app-owned proxy with
+`--memory` — which is exactly the memory-restart affordance (component 4), now trivial
+since the app controls the one proxy. `--1m` stays on the wrap (it's claude-side:
+`ANTHROPIC_MODEL`). **Verify** which of memory/learn are `headroom proxy` flags vs
+`wrap` flags during implementation (`--memory` confirmed on `headroom proxy`).
 
 ### 1. `lib/headroom-wrap.js` (extend, pure, unit-tested)
 
 Extend the signature to carry the wrap-flag booleans:
 
 ```js
-// applyHeadroomWrap({ enabled, cmd, args, hasEndpoint, oneM, memory, learn }) -> { cmd, args }
+// applyHeadroomWrap({ enabled, cmd, args, hasEndpoint, oneM }) -> { cmd, args }
 ```
 
 - Passthrough rules unchanged (falsy `enabled`, truthy `hasEndpoint`, or a truthy
   non-`claude` `cmd` → return original).
-- When wrapping, build the flag list deterministically in a fixed order and insert
-  before `--`:
-  `['wrap', 'claude', ...flags, '--', ...args]` where `flags` = the on-flags among
-  `['--1m', '--memory', '--learn']` (that fixed order).
-- Each flag is included only when its boolean is truthy. No flags on → identical to
-  today (`['wrap','claude','--',...args]`).
-
-Remains pure/deterministic, no I/O.
+- When wrapping, always include **`--no-proxy`** (reuse the app-owned proxy), then the
+  claude-side `--1m` when `oneM` is on, before `--`:
+  `['wrap', 'claude', '--no-proxy', ...(oneM ? ['--1m'] : []), '--', ...args]`.
+- `--memory` / `--learn` are **not** wrap flags here — they live on the app-owned
+  `headroom proxy` start command (component 0). This keeps per-column wrap purely a
+  *reuse* of the proxy plus the claude-side `--1m`.
+- Fixed, deterministic order. Remains pure/deterministic, no I/O.
 
 ### 2. Global config (`renderer.js` + `main.js`)
 
