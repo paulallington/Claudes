@@ -113,6 +113,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTerminalSettings: () => ipcRenderer.invoke('config:getTerminalSettings'),
   setTerminalSettings: (settings) => ipcRenderer.invoke('config:setTerminalSettings', settings),
   getHeadroomStatus: () => ipcRenderer.invoke('headroom:status'),
+  onHeadroomStatus: (cb) => ipcRenderer.on('headroom:status-changed', (_e, st) => cb(st)),
   getVoiceSettings: () => ipcRenderer.invoke('voice:getSettings'),
   setVoiceSettings: (s) => ipcRenderer.invoke('voice:setSettings', s),
   listVoices: (opts) => ipcRenderer.invoke('voice:listVoices', opts),

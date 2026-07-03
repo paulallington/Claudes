@@ -139,15 +139,35 @@ diagLogInit();
 // only when it's actually installed. PATH is normalized above, so a
 // ~/.local/bin/headroom resolves here.
 let headroomStatus = { installed: false, version: null };
+// Push the resolved status to every open window. The renderer reads status once
+// at boot, but the probe below is async (Python startup is ~0.5-3s), so the
+// renderer usually reads {installed:false} before it finishes. Broadcasting on
+// resolve lets late-arriving results re-render the "Use Headroom" checkbox.
+function broadcastHeadroomStatus() {
+  BrowserWindow.getAllWindows().forEach((w) => {
+    try { if (!w.isDestroyed()) w.webContents.send('headroom:status-changed', headroomStatus); } catch { /* ignore */ }
+  });
+}
 function probeHeadroom() {
+  // Log whether the PATH augmentation took effect — ground truth for the
+  // packaged app, where ~/.local/bin often isn't on PATH by default.
+  diagLog('[headroom] probing (PATH has .local: ' + String((process.env.PATH || '').toLowerCase().includes('.local')) + ')');
   try {
     execFile('headroom', ['--version'], { timeout: 4000 }, (err, stdout) => {
       // ENOENT / non-zero exit / timeout → not usable; leave the default.
-      if (err) return;
+      if (err) {
+        diagLog('[headroom] probe failed:', err && (err.code || err.message));
+        // Broadcasting the still-false status is harmless and confirms the probe ran.
+        broadcastHeadroomStatus();
+        return;
+      }
       const out = (stdout || '').trim();
       // stdout looks like "headroom, version 0.29.0" — pull out the version.
       const m = out.match(/version\s+([0-9][\w.\-]*)/i);
       headroomStatus = { installed: true, version: m ? m[1] : (out || null) };
+      diagLog('[headroom] probe ok: version=' + (headroomStatus.version || '?'));
+      // Push the resolved status so the renderer's boot-race read is corrected.
+      broadcastHeadroomStatus();
       // Binary confirmed present — attempt a once-per-launch silent update.
       maybeAutoUpdateHeadroom();
     });
@@ -179,6 +199,8 @@ function maybeAutoUpdateHeadroom() {
         const out = (verOut || '').trim();
         const m = out.match(/version\s+([0-9][\w.\-]*)/i);
         headroomStatus = { installed: true, version: m ? m[1] : (out || null) };
+        // Push the (possibly bumped) version so the UI reflects the upgrade.
+        broadcastHeadroomStatus();
       });
     });
   } catch {

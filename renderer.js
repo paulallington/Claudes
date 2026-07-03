@@ -10814,6 +10814,14 @@ function initHeadroomUI() {
     headroomInstalled = !!(st && st.installed);
     applyHeadroomUiState();
   }).catch(function () { headroomInstalled = false; applyHeadroomUiState(); });
+  // The initial fetch races the async probe in main and usually loses. Subscribe
+  // so the probe's push-on-resolve re-renders the checkbox once it lands.
+  if (window.electronAPI && window.electronAPI.onHeadroomStatus) {
+    window.electronAPI.onHeadroomStatus(function (st) {
+      headroomInstalled = !!(st && st.installed);
+      applyHeadroomUiState();
+    });
+  }
 }
 
 if (optUseHeadroom) {
