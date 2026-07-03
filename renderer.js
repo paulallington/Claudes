@@ -4418,18 +4418,39 @@ function addColumn(args, targetRow, opts) {
     var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: __hw.args };
     if (__hw.cmd) sendMsg.cmd = __hw.cmd;
     if (opts.env) sendMsg.env = opts.env;
-    vlog('spawn', { colId: id, cwd: cwd, cmd: __hw.cmd || 'claude', args: __hw.args });
-    wsSend(sendMsg);
 
-    var isResume = claudeArgs.indexOf('--resume') !== -1;
-    if (!cmd && !isResume && !__plan.sessionId && window.electronAPI) {
-      preSpawnSessionsPromise.then(function (preSessions) {
-        var preIds = {};
-        for (var i = 0; i < preSessions.length; i++) {
-          preIds[preSessions[i].sessionId] = true;
+    function finishSpawn() {
+      vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
+      wsSend(sendMsg);
+
+      var isResume = claudeArgs.indexOf('--resume') !== -1;
+      if (!cmd && !isResume && !__plan.sessionId && window.electronAPI) {
+        preSpawnSessionsPromise.then(function (preSessions) {
+          var preIds = {};
+          for (var i = 0; i < preSessions.length; i++) {
+            preIds[preSessions[i].sessionId] = true;
+          }
+          detectSession(id, cwd, preIds, 0);
+        });
+      }
+    }
+
+    // Wrapped columns launch with --no-proxy, so the app-owned Headroom proxy
+    // must be up first. ensureHeadroomProxy is idempotent + race-guarded in main,
+    // so concurrent restored columns start it exactly once. On failure, fall back
+    // to an unwrapped spawn so the column still works instead of exiting (code 1)
+    // with ConnectionRefused.
+    if (__hw.cmd === 'headroom' && window.electronAPI && window.electronAPI.ensureHeadroomProxy) {
+      window.electronAPI.ensureHeadroomProxy().then(function (res) {
+        if (!res || res.ok === false) {
+          if (typeof showToast === 'function') showToast('Headroom proxy unavailable — spawning without Headroom', { kind: 'warn' });
+          sendMsg.args = claudeArgs;
+          delete sendMsg.cmd;
         }
-        detectSession(id, cwd, preIds, 0);
-      });
+        finishSpawn();
+      }, function () { finishSpawn(); });
+    } else {
+      finishSpawn();
     }
   });
 

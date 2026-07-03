@@ -26,6 +26,7 @@ const { extractSpeakableText, lastAssistantUuid, splitSentences } = require('./l
 const { columnTranscriptPath, resolveTranscriptPath, isUnderProjectsRoot } = require('./lib/voice-transcript-path');
 const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice-personality');
 const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
+const { makeProxyEnsurer } = require('./lib/ensure-proxy');
 const { tagBackgroundEvent } = require('./lib/voice-background');
 const { appendWithRotation } = require('./lib/voice-debug-log');
 const https = require('https');
@@ -4747,6 +4748,59 @@ ipcMain.handle('config:setTerminalSettings', (event, settings) => {
   cfg.terminal = Object.assign({}, cfg.terminal || {}, settings && typeof settings === 'object' ? settings : {});
   writeConfig(cfg);
   return { ok: true, settings: cfg.terminal };
+});
+// Headroom proxy lifecycle — the app owns ONE persistent, detached proxy so
+// wrapped columns launch with --no-proxy and just reuse it. A `headroom wrap`
+// process OWNS any proxy it starts (the proxy dies with that process), and the
+// per-column detect-or-start path also races on cold boot — owning the proxy
+// here fixes both. One shared ensurer keeps the in-flight race guard across the
+// concurrent ensure() calls that restored columns fire.
+function headroomPort() {
+  const p = parseInt(process.env.HEADROOM_PORT, 10);
+  return p >= 1 && p <= 65535 ? p : 8787;
+}
+function probeHeadroomHealth() {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    try {
+      const req = http.get({ host: '127.0.0.1', port: headroomPort(), path: '/health', timeout: 2000 }, (res) => {
+        res.resume();
+        finish(res.statusCode === 200);
+      });
+      req.on('timeout', () => { try { req.destroy(); } catch { /* ignore */ } finish(false); });
+      req.on('error', () => finish(false));
+    } catch { finish(false); }
+  });
+}
+function startHeadroomProxy() {
+  const args = ['proxy'];
+  try {
+    const cfg = readConfig();
+    if (cfg && cfg.useHeadroomMemory) args.push('--memory');
+  } catch { /* default: no memory */ }
+  try {
+    spawn('headroom', args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    diagLog('[headroom] started detached proxy on port ' + headroomPort() + (args.includes('--memory') ? ' (--memory)' : ''));
+  } catch (e) {
+    console.warn('[headroom] failed to start proxy:', e && e.message);
+  }
+}
+const ensureHeadroomProxy = makeProxyEnsurer({
+  probeHealth: probeHeadroomHealth,
+  startProxy: startHeadroomProxy,
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  timeoutMs: 20000,
+  intervalMs: 300,
+});
+ipcMain.handle('headroom:ensureProxy', async () => {
+  if (!headroomStatus.installed) return { ok: false, started: false, error: 'headroom not installed' };
+  try {
+    const res = await ensureHeadroomProxy();
+    return { ok: res.ok, started: res.started, error: res.error ? String(res.error.message || res.error) : undefined };
+  } catch (e) {
+    return { ok: false, started: false, error: String((e && e.message) || e) };
+  }
 });
 ipcMain.handle('headroom:status', () => headroomStatus);
 
