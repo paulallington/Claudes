@@ -246,6 +246,14 @@
             <button id="btn-add" title="Spawn Claude (Ctrl+Shift+T)">+ Spawn Claude</button>
             <button id="btn-add-options" title="Spawn options" class="spawn-chevron">&#9662;</button>
             <div id="spawn-dropdown" class="spawn-dropdown hidden">
+              <label class="spawn-option" id="opt-headroom-label">
+                <input type="checkbox" id="opt-use-headroom"> Use Headroom
+                <span class="spawn-help" title="Route this column's Claude through the Headroom optimization proxy (headroom wrap claude — cuts token usage). Global toggle: applies to every project until turned off. Skipped automatically on local-endpoint columns.">?</span>
+              </label>
+              <div class="spawn-option spawn-headroom-extra" id="opt-headroom-extra">
+                <a href="#" id="headroom-dashboard-link" class="spawn-link" title="Open the Headroom savings dashboard">Dashboard &#8599;</a>
+                <span id="headroom-required-note" class="spawn-required hidden">Headroom Required &middot; <a href="#" id="headroom-install-link" class="spawn-link">github.com/headroomlabs-ai/headroom</a></span>
+              </div>
               <label class="spawn-option">
                 <input type="checkbox" id="opt-remote-control"> Remote Control
                 <span class="spawn-help" title="Enable remote access from claude.ai/code or the Claude mobile app (--remote-control).">?</span>
@@ -1482,6 +1490,7 @@
   <script src="./lib/voice-text.js"></script>
   <script src="./lib/terminal-reply.js"></script>
   <script src="./lib/reflow-text.js"></script>
+  <script src="./lib/headroom-wrap.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>
