@@ -4232,6 +4232,18 @@ function addColumn(args, targetRow, opts) {
 
   var fitAddon = new FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
+  // Unicode 11 width table. xterm defaults to Unicode 6, which measures many
+  // emoji / wide chars (e.g. 🔊 U+1F50A) as width 1. Claude Code's TUI renders
+  // them as width 2 and updates the screen differentially with cursor-forward
+  // (CUF) moves; a width mismatch leaves the cursor one cell off, so stale cells
+  // show through the gaps and the line garbles starting at the emoji. Activating
+  // v11 aligns xterm's widths with Claude Code's, eliminating the garble.
+  try {
+    if (typeof Unicode11Addon !== 'undefined' && Unicode11Addon.Unicode11Addon) {
+      terminal.loadAddon(new Unicode11Addon.Unicode11Addon());
+      terminal.unicode.activeVersion = '11';
+    }
+  } catch (e) { /* addon optional; falls back to Unicode 6 widths */ }
   var searchAddon = null;
   try {
     if (typeof SearchAddon !== 'undefined' && SearchAddon.SearchAddon) {
