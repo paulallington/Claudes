@@ -13,3 +13,4 @@ out/
 .superpowers/
 test-results/
 playwright-report/
+.tokensave/
