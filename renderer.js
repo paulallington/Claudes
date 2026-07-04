@@ -4131,12 +4131,23 @@ function addColumn(args, targetRow, opts) {
   } else if (endpointPresets.length > 0 && !opts.cmd) {
     // Only show cloud banner if user has presets configured (otherwise it's
     // noise) and only for actual claude columns (not custom-cmd columns).
+    // Cloud + Headroom-on + no local endpoint = this column is wrapped through
+    // the Headroom proxy (matches applyHeadroomWrap's condition), so surface an
+    // HR badge. The "CLOUD" tag alone only means cloud-vs-local, not Headroom.
+    var __hrWrapped = !!(headroomInstalled && config && config.useHeadroom);
     endpointBanner = document.createElement('div');
     endpointBanner.className = 'endpoint-banner endpoint-banner--cloud';
     endpointBanner.innerHTML =
       '<span class="endpoint-banner-tag endpoint-banner-tag--cloud">Cloud</span>' +
       '<span class="endpoint-banner-name">Anthropic</span>' +
+      (__hrWrapped ? '<span class="endpoint-banner-tag endpoint-banner-tag--headroom" role="button" title="Routed through the Headroom proxy — click to open the dashboard">HR &#8599;</span>' : '') +
       '<span class="endpoint-banner-caveat">Suitable for any tasks</span>';
+  }
+  if (endpointBanner) {
+    var __hrTag = endpointBanner.querySelector('.endpoint-banner-tag--headroom');
+    if (__hrTag) __hrTag.addEventListener('click', function () {
+      if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard');
+    });
   }
 
   var termWrapper = document.createElement('div');

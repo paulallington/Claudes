@@ -2120,6 +2120,16 @@ html[data-platform="darwin"] #toolbar {
   color: #4ade80;
 }
 
+.endpoint-banner-tag--headroom {
+  background: rgba(34, 211, 238, 0.18);
+  color: #22d3ee;
+  cursor: pointer;
+}
+
+.endpoint-banner-tag--headroom:hover {
+  background: rgba(34, 211, 238, 0.32);
+}
+
 .endpoint-banner-name {
   font-weight: 600;
   color: var(--text-primary);
