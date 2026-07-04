@@ -4797,26 +4797,19 @@ ipcMain.handle('headroom:ensureProxy', async () => {
   if (!headroomStatus.installed) return { ok: false, started: false, error: 'headroom not installed' };
   try {
     const res = await ensureHeadroomProxy();
+    // Once the proxy is up, apply persisted runtime toggles (output shaper) so a
+    // checked box actually takes effect on boot — not only on a manual click.
+    if (res.ok) applyPersistedShaperState();
     return { ok: res.ok, started: res.started, error: res.error ? String(res.error.message || res.error) : undefined };
   } catch (e) {
     return { ok: false, started: false, error: String((e && e.message) || e) };
   }
 });
-// Output shaper — proxy-wide, but hot-togglable with no restart. Enabling runs
-// `headroom learn --verbosity --apply` (learns the user's verbosity + POSTs the
-// runtime-env override on the running proxy); disabling clears the override via
-// the same /admin/runtime-env channel.
-ipcMain.handle('headroom:setOutputShaper', async (_e, on) => {
-  if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
-  if (on) {
-    return await new Promise((resolve) => {
-      execFile('headroom', ['learn', '--verbosity', '--apply'], { timeout: 120000 }, (err) => {
-        resolve(err ? { ok: false, error: (err.message || 'learn failed') } : { ok: true });
-      });
-    });
-  }
-  return await new Promise((resolve) => {
-    const body = JSON.stringify({ HEADROOM_OUTPUT_SHAPER: '0' });
+// Output shaper — proxy-wide, but hot-togglable with no restart via the proxy's
+// /admin/runtime-env channel. `_postShaperEnv(on)` flips the live override.
+function _postShaperEnv(on) {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ HEADROOM_OUTPUT_SHAPER: on ? '1' : '0' });
     let done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
     try {
@@ -4832,6 +4825,36 @@ ipcMain.handle('headroom:setOutputShaper', async (_e, on) => {
       req.write(body); req.end();
     } catch (e) { finish({ ok: false, error: String((e && e.message) || e) }); }
   });
+}
+// Apply the persisted output-shaper state to the running proxy once per session
+// (called after the proxy is confirmed ready in headroom:ensureProxy). Enables the
+// live override without re-running the slow learn step — the learned verbosity
+// from a prior toggle persists in verbosity.json. Without this, a persisted
+// "on" state does nothing until the user manually toggles the checkbox again.
+let _shaperStateApplied = false;
+function applyPersistedShaperState() {
+  if (_shaperStateApplied) return;
+  let cfg; try { cfg = readConfig(); } catch { return; }
+  if (cfg && cfg.useHeadroomOutputShaper) {
+    _shaperStateApplied = true;
+    _postShaperEnv(true).then((r) => { if (!r || !r.ok) _shaperStateApplied = false; }, () => { _shaperStateApplied = false; });
+  }
+}
+// Enabling additionally runs `headroom learn --verbosity --apply` to learn the
+// user's verbosity level (the override is inert without a learned level).
+ipcMain.handle('headroom:setOutputShaper', async (_e, on) => {
+  if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
+  if (on) {
+    return await new Promise((resolve) => {
+      execFile('headroom', ['learn', '--verbosity', '--apply'], { timeout: 120000 }, (err) => {
+        if (err) { resolve({ ok: false, error: (err.message || 'learn failed') }); return; }
+        _shaperStateApplied = true;
+        resolve({ ok: true });
+      });
+    });
+  }
+  _shaperStateApplied = false;
+  return await _postShaperEnv(false);
 });
 ipcMain.handle('headroom:status', () => headroomStatus);
 
