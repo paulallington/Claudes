@@ -4782,6 +4782,9 @@ function startHeadroomProxy() {
   try {
     spawn('headroom', args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
     diagLog('[headroom] started detached proxy on port ' + headroomPort() + (args.includes('--memory') ? ' (--memory)' : ''));
+    // A freshly started proxy has an empty runtime-env, so re-arm the persisted
+    // output-shaper apply (the next ensureProxy re-enables it on the new proxy).
+    _shaperStateApplied = false;
   } catch (e) {
     console.warn('[headroom] failed to start proxy:', e && e.message);
   }
