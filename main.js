@@ -26,6 +26,7 @@ const { extractSpeakableText, lastAssistantUuid, splitSentences } = require('./l
 const { columnTranscriptPath, resolveTranscriptPath, isUnderProjectsRoot } = require('./lib/voice-transcript-path');
 const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice-personality');
 const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
+const { makeProxyEnsurer } = require('./lib/ensure-proxy');
 const { tagBackgroundEvent } = require('./lib/voice-background');
 const { appendWithRotation } = require('./lib/voice-debug-log');
 const https = require('https');
@@ -4747,6 +4748,116 @@ ipcMain.handle('config:setTerminalSettings', (event, settings) => {
   cfg.terminal = Object.assign({}, cfg.terminal || {}, settings && typeof settings === 'object' ? settings : {});
   writeConfig(cfg);
   return { ok: true, settings: cfg.terminal };
+});
+// Headroom proxy lifecycle — the app owns ONE persistent, detached proxy so
+// wrapped columns launch with --no-proxy and just reuse it. A `headroom wrap`
+// process OWNS any proxy it starts (the proxy dies with that process), and the
+// per-column detect-or-start path also races on cold boot — owning the proxy
+// here fixes both. One shared ensurer keeps the in-flight race guard across the
+// concurrent ensure() calls that restored columns fire.
+function headroomPort() {
+  const p = parseInt(process.env.HEADROOM_PORT, 10);
+  return p >= 1 && p <= 65535 ? p : 8787;
+}
+function probeHeadroomHealth() {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    try {
+      const req = http.get({ host: '127.0.0.1', port: headroomPort(), path: '/health', timeout: 2000 }, (res) => {
+        res.resume();
+        finish(res.statusCode === 200);
+      });
+      req.on('timeout', () => { try { req.destroy(); } catch { /* ignore */ } finish(false); });
+      req.on('error', () => finish(false));
+    } catch { finish(false); }
+  });
+}
+function startHeadroomProxy() {
+  const args = ['proxy'];
+  try {
+    const cfg = readConfig();
+    if (cfg && cfg.useHeadroomMemory) args.push('--memory');
+  } catch { /* default: no memory */ }
+  try {
+    spawn('headroom', args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    diagLog('[headroom] started detached proxy on port ' + headroomPort() + (args.includes('--memory') ? ' (--memory)' : ''));
+    // A freshly started proxy has an empty runtime-env, so re-arm the persisted
+    // output-shaper apply (the next ensureProxy re-enables it on the new proxy).
+    _shaperStateApplied = false;
+  } catch (e) {
+    console.warn('[headroom] failed to start proxy:', e && e.message);
+  }
+}
+const ensureHeadroomProxy = makeProxyEnsurer({
+  probeHealth: probeHeadroomHealth,
+  startProxy: startHeadroomProxy,
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  timeoutMs: 20000,
+  intervalMs: 300,
+});
+ipcMain.handle('headroom:ensureProxy', async () => {
+  if (!headroomStatus.installed) return { ok: false, started: false, error: 'headroom not installed' };
+  try {
+    const res = await ensureHeadroomProxy();
+    // Once the proxy is up, apply persisted runtime toggles (output shaper) so a
+    // checked box actually takes effect on boot — not only on a manual click.
+    if (res.ok) applyPersistedShaperState();
+    return { ok: res.ok, started: res.started, error: res.error ? String(res.error.message || res.error) : undefined };
+  } catch (e) {
+    return { ok: false, started: false, error: String((e && e.message) || e) };
+  }
+});
+// Output shaper — proxy-wide, but hot-togglable with no restart via the proxy's
+// /admin/runtime-env channel. `_postShaperEnv(on)` flips the live override.
+function _postShaperEnv(on) {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ HEADROOM_OUTPUT_SHAPER: on ? '1' : '0' });
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    try {
+      const req = http.request({
+        host: '127.0.0.1', port: headroomPort(), path: '/admin/runtime-env', method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }, timeout: 4000,
+      }, (res) => {
+        res.resume();
+        finish({ ok: res.statusCode >= 200 && res.statusCode < 300, error: res.statusCode >= 300 ? ('HTTP ' + res.statusCode) : undefined });
+      });
+      req.on('timeout', () => { try { req.destroy(); } catch { /* ignore */ } finish({ ok: false, error: 'timeout' }); });
+      req.on('error', (e) => finish({ ok: false, error: e.message }));
+      req.write(body); req.end();
+    } catch (e) { finish({ ok: false, error: String((e && e.message) || e) }); }
+  });
+}
+// Apply the persisted output-shaper state to the running proxy once per session
+// (called after the proxy is confirmed ready in headroom:ensureProxy). Enables the
+// live override without re-running the slow learn step — the learned verbosity
+// from a prior toggle persists in verbosity.json. Without this, a persisted
+// "on" state does nothing until the user manually toggles the checkbox again.
+let _shaperStateApplied = false;
+function applyPersistedShaperState() {
+  if (_shaperStateApplied) return;
+  let cfg; try { cfg = readConfig(); } catch { return; }
+  if (cfg && cfg.useHeadroomOutputShaper) {
+    _shaperStateApplied = true;
+    _postShaperEnv(true).then((r) => { if (!r || !r.ok) _shaperStateApplied = false; }, () => { _shaperStateApplied = false; });
+  }
+}
+// Enabling additionally runs `headroom learn --verbosity --apply` to learn the
+// user's verbosity level (the override is inert without a learned level).
+ipcMain.handle('headroom:setOutputShaper', async (_e, on) => {
+  if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
+  if (on) {
+    return await new Promise((resolve) => {
+      execFile('headroom', ['learn', '--verbosity', '--apply'], { timeout: 120000 }, (err) => {
+        if (err) { resolve({ ok: false, error: (err.message || 'learn failed') }); return; }
+        _shaperStateApplied = true;
+        resolve({ ok: true });
+      });
+    });
+  }
+  _shaperStateApplied = false;
+  return await _postShaperEnv(false);
 });
 ipcMain.handle('headroom:status', () => headroomStatus);
 

@@ -45,6 +45,10 @@ var headroomLabel = document.getElementById('opt-headroom-label');
 var headroomDashboardLink = document.getElementById('headroom-dashboard-link');
 var headroomRequiredNote = document.getElementById('headroom-required-note');
 var headroomInstallLink = document.getElementById('headroom-install-link');
+var optHeadroom1m = document.getElementById('opt-headroom-1m');
+var optHeadroomMemory = document.getElementById('opt-headroom-memory');
+var optHeadroomShaper = document.getElementById('opt-headroom-shaper');
+var headroomSubs = document.getElementById('opt-headroom-subs');
 var headroomInstalled = false;  // resolved async from main; gates wrapping + UI
 
 // Per-endpoint-class default effort applied at spawn. User-configurable in the
@@ -700,6 +704,7 @@ function connectWS() {
           var __rw = (window.HeadroomWrap)
             ? window.HeadroomWrap.applyHeadroomWrap({
                 enabled: !!(headroomInstalled && config && config.useHeadroom),
+                oneM: !!(config && config.useHeadroom1m !== false),
                 cmd: col3.cmd,
                 args: buildResumeArgs(col3),
                 hasEndpoint: !!(col3.endpointId || col3.env)
@@ -716,8 +721,12 @@ function connectWS() {
           if (__rw.cmd) respawnMsg.cmd = __rw.cmd;
           if (col3.env) respawnMsg.env = col3.env;
           col3.terminal.clear();
-          wsSend(respawnMsg);
-          setColumnActivity(msg.id, 'working');
+          // Sleep/wake respawn: the app-owned proxy may have been reaped, so gate
+          // this --no-proxy respawn on proxy readiness (unwrapped fallback) too.
+          spawnThroughHeadroomGate(respawnMsg, buildResumeArgs(col3), function () {
+            wsSend(respawnMsg);
+            setColumnActivity(msg.id, 'working');
+          });
         } else {
           col3.element.appendChild(createExitOverlay(msg.id, null, col3));
           setColumnActivity(msg.id, 'exited');
@@ -755,6 +764,26 @@ function reattachAllColumns() {
       rows: col.terminal.rows
     });
   });
+}
+
+// Ensure the app-owned Headroom proxy is up before sending a wrapped ('headroom')
+// spawn/respawn wire message. On failure, rewrite `msg` in place to an unwrapped
+// spawn (using `plainArgs`) so the column still works instead of exiting (code 1)
+// with ConnectionRefused. `send` runs exactly once with the final `msg`. Every
+// spawn/respawn path routes through here so they all self-heal identically.
+function spawnThroughHeadroomGate(msg, plainArgs, send) {
+  if (msg && msg.cmd === 'headroom' && window.electronAPI && window.electronAPI.ensureHeadroomProxy) {
+    window.electronAPI.ensureHeadroomProxy().then(function (res) {
+      if (!res || res.ok === false) {
+        try { if (typeof showToast === 'function') showToast('Headroom proxy unavailable — spawning without Headroom', { kind: 'warn' }); } catch (e) { /* ignore */ }
+        msg.args = plainArgs;
+        delete msg.cmd;
+      }
+      send();
+    }, function () { send(); });
+  } else {
+    send();
+  }
 }
 
 function wsSend(obj) {
@@ -3982,9 +4011,11 @@ function createExitOverlay(id, exitCode, col) {
     // Keep a Headroom-wrapped column wrapped on manual Restart. Passthrough for
     // arbitrary-cmd/endpoint columns (the wrap guards both), and re-derived from
     // the live global flag rather than any persisted per-column state.
+    var __plainArgs = sendMsg.args;
     if (window.HeadroomWrap) {
       var __hwr = window.HeadroomWrap.applyHeadroomWrap({
         enabled: !!(headroomInstalled && config && config.useHeadroom),
+        oneM: !!(config && config.useHeadroom1m !== false),
         cmd: col.cmd,
         args: sendMsg.args,
         hasEndpoint: !!(col.endpointId || col.env)
@@ -3992,15 +4023,17 @@ function createExitOverlay(id, exitCode, col) {
       sendMsg.args = __hwr.args;
       if (__hwr.cmd) sendMsg.cmd = __hwr.cmd;
     }
-    wsSend(sendMsg);
-    col.terminal.clear();
-    setColumnActivity(id, 'working');
-    // Run-tab launches: the previous exit fired refreshRunConfigs and set the
-    // config row back to "stopped". Now that we've re-spawned the same column
-    // (col.cmd / customTitle unchanged → findRunningColumn matches again),
-    // refresh so the UI flips back to the playing/stop state. Without this
-    // the user's only signal that the restart worked is terminal output.
-    if (col.cmd) setTimeout(refreshRunConfigs, 300);
+    spawnThroughHeadroomGate(sendMsg, __plainArgs, function () {
+      wsSend(sendMsg);
+      col.terminal.clear();
+      setColumnActivity(id, 'working');
+      // Run-tab launches: the previous exit fired refreshRunConfigs and set the
+      // config row back to "stopped". Now that we've re-spawned the same column
+      // (col.cmd / customTitle unchanged → findRunningColumn matches again),
+      // refresh so the UI flips back to the playing/stop state. Without this
+      // the user's only signal that the restart worked is terminal output.
+      if (col.cmd) setTimeout(refreshRunConfigs, 300);
+    });
   });
   closeBtn.addEventListener('click', function () {
     var hadCmd = !!col.cmd;
@@ -4098,12 +4131,23 @@ function addColumn(args, targetRow, opts) {
   } else if (endpointPresets.length > 0 && !opts.cmd) {
     // Only show cloud banner if user has presets configured (otherwise it's
     // noise) and only for actual claude columns (not custom-cmd columns).
+    // Cloud + Headroom-on + no local endpoint = this column is wrapped through
+    // the Headroom proxy (matches applyHeadroomWrap's condition), so surface an
+    // HR badge. The "CLOUD" tag alone only means cloud-vs-local, not Headroom.
+    var __hrWrapped = !!(headroomInstalled && config && config.useHeadroom);
     endpointBanner = document.createElement('div');
     endpointBanner.className = 'endpoint-banner endpoint-banner--cloud';
     endpointBanner.innerHTML =
       '<span class="endpoint-banner-tag endpoint-banner-tag--cloud">Cloud</span>' +
       '<span class="endpoint-banner-name">Anthropic</span>' +
+      (__hrWrapped ? '<span class="endpoint-banner-tag endpoint-banner-tag--headroom" role="button" title="Routed through the Headroom proxy — click to open the dashboard">HR &#8599;</span>' : '') +
       '<span class="endpoint-banner-caveat">Suitable for any tasks</span>';
+  }
+  if (endpointBanner) {
+    var __hrTag = endpointBanner.querySelector('.endpoint-banner-tag--headroom');
+    if (__hrTag) __hrTag.addEventListener('click', function () {
+      if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard');
+    });
   }
 
   var termWrapper = document.createElement('div');
@@ -4199,6 +4243,18 @@ function addColumn(args, targetRow, opts) {
 
   var fitAddon = new FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
+  // Unicode 11 width table. xterm defaults to Unicode 6, which measures many
+  // emoji / wide chars (e.g. 🔊 U+1F50A) as width 1. Claude Code's TUI renders
+  // them as width 2 and updates the screen differentially with cursor-forward
+  // (CUF) moves; a width mismatch leaves the cursor one cell off, so stale cells
+  // show through the gaps and the line garbles starting at the emoji. Activating
+  // v11 aligns xterm's widths with Claude Code's, eliminating the garble.
+  try {
+    if (typeof Unicode11Addon !== 'undefined' && Unicode11Addon.Unicode11Addon) {
+      terminal.loadAddon(new Unicode11Addon.Unicode11Addon());
+      terminal.unicode.activeVersion = '11';
+    }
+  } catch (e) { /* addon optional; falls back to Unicode 6 widths */ }
   var searchAddon = null;
   try {
     if (typeof SearchAddon !== 'undefined' && SearchAddon.SearchAddon) {
@@ -4410,6 +4466,7 @@ function addColumn(args, targetRow, opts) {
     var __hw = (window.HeadroomWrap)
       ? window.HeadroomWrap.applyHeadroomWrap({
           enabled: !!(headroomInstalled && config && config.useHeadroom),
+          oneM: !!(config && config.useHeadroom1m !== false),
           cmd: cmd,
           args: claudeArgs,
           hasEndpoint: !!(opts.endpointId || opts.env)
@@ -4418,19 +4475,26 @@ function addColumn(args, targetRow, opts) {
     var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: __hw.args };
     if (__hw.cmd) sendMsg.cmd = __hw.cmd;
     if (opts.env) sendMsg.env = opts.env;
-    vlog('spawn', { colId: id, cwd: cwd, cmd: __hw.cmd || 'claude', args: __hw.args });
-    wsSend(sendMsg);
 
-    var isResume = claudeArgs.indexOf('--resume') !== -1;
-    if (!cmd && !isResume && !__plan.sessionId && window.electronAPI) {
-      preSpawnSessionsPromise.then(function (preSessions) {
-        var preIds = {};
-        for (var i = 0; i < preSessions.length; i++) {
-          preIds[preSessions[i].sessionId] = true;
-        }
-        detectSession(id, cwd, preIds, 0);
-      });
-    }
+    // Wrapped columns launch with --no-proxy, so the app-owned Headroom proxy
+    // must be up first. The gate is idempotent + race-guarded in main, so
+    // concurrent restored columns start it exactly once; on failure it falls back
+    // to an unwrapped spawn instead of a ConnectionRefused exit (code 1).
+    spawnThroughHeadroomGate(sendMsg, claudeArgs, function finishSpawn() {
+      vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
+      wsSend(sendMsg);
+
+      var isResume = claudeArgs.indexOf('--resume') !== -1;
+      if (!cmd && !isResume && !__plan.sessionId && window.electronAPI) {
+        preSpawnSessionsPromise.then(function (preSessions) {
+          var preIds = {};
+          for (var i = 0; i < preSessions.length; i++) {
+            preIds[preSessions[i].sessionId] = true;
+          }
+          detectSession(id, cwd, preIds, 0);
+        });
+      }
+    });
   });
 
   terminal.onData(function (data) {
@@ -5968,9 +6032,11 @@ async function restartColumn(id) {
   if (col.env) sendMsg.env = col.env;
   // Keep a Headroom-wrapped column wrapped on respawn. Passthrough for
   // arbitrary-cmd/endpoint columns; re-derived from the live global flag.
+  var __plainArgs = sendMsg.args;
   if (window.HeadroomWrap) {
     var __hwr = window.HeadroomWrap.applyHeadroomWrap({
       enabled: !!(headroomInstalled && config && config.useHeadroom),
+      oneM: !!(config && config.useHeadroom1m !== false),
       cmd: col.cmd,
       args: sendMsg.args,
       hasEndpoint: !!(col.endpointId || col.env)
@@ -5978,12 +6044,14 @@ async function restartColumn(id) {
     sendMsg.args = __hwr.args;
     if (__hwr.cmd) sendMsg.cmd = __hwr.cmd;
   }
-  wsSend(sendMsg);
-  // Re-evaluate stale-hook health from a clean slate for the new session: if
-  // hooks now reach the column it will never re-flag; if they still don't, the
-  // sweep can surface the hint again after the grace window.
-  col.hookEverSeen = false; col.lastHookAt = 0; col.staleHintShown = false;
-  setColumnActivity(id, 'working');
+  spawnThroughHeadroomGate(sendMsg, __plainArgs, function () {
+    wsSend(sendMsg);
+    // Re-evaluate stale-hook health from a clean slate for the new session: if
+    // hooks now reach the column it will never re-flag; if they still don't, the
+    // sweep can surface the hint again after the grace window.
+    col.hookEverSeen = false; col.lastHookAt = 0; col.staleHintShown = false;
+    setColumnActivity(id, 'working');
+  });
 }
 
 function tryEndpointFailover(colId) {
@@ -10753,9 +10821,11 @@ function loadSpawnOptions() {
   // populateEndpointModelDropdown can preselect it.
   currentEndpointModel = endpointId ? (opts.endpointModel || null) : null;
   applyEndpointSelection(endpointId, /* persist */ false);
-  // Headroom is a GLOBAL toggle (not part of the per-project spawnOptions object),
-  // so reflect config.useHeadroom directly — but only when the binary is present.
-  if (optUseHeadroom) optUseHeadroom.checked = headroomInstalled && !!(config && config.useHeadroom);
+  // Headroom is a GLOBAL toggle (not part of the per-project spawnOptions object).
+  // Refresh the whole Headroom UI here — parent checkbox AND the sub-toggles
+  // (1M/Memory/Output shaper) — so the subs never keep a stale enabled/disabled
+  // state from an earlier boot pass when the async `headroom` probe hadn't resolved.
+  applyHeadroomUiState();
   updateSpawnButtonLabel();
 }
 
@@ -10806,6 +10876,13 @@ function applyHeadroomUiState() {
     if (headroomDashboardLink) headroomDashboardLink.classList.add('hidden');
     if (headroomRequiredNote) headroomRequiredNote.classList.remove('hidden');
   }
+  // Sub-toggles are usable only when Headroom is installed AND the parent toggle
+  // is on. 1M defaults ON (undefined !== false); memory/shaper default off.
+  var subsUsable = headroomInstalled && !!(config && config.useHeadroom);
+  if (optHeadroom1m) { optHeadroom1m.disabled = !subsUsable; optHeadroom1m.checked = !!(config && config.useHeadroom1m !== false); }
+  if (optHeadroomMemory) { optHeadroomMemory.disabled = !subsUsable; optHeadroomMemory.checked = !!(config && config.useHeadroomMemory); }
+  if (optHeadroomShaper) { optHeadroomShaper.disabled = !subsUsable; optHeadroomShaper.checked = !!(config && config.useHeadroomOutputShaper); }
+  if (headroomSubs) headroomSubs.classList.toggle('is-disabled', !subsUsable);
   updateSpawnButtonLabel();
 }
 function initHeadroomUI() {
@@ -10828,7 +10905,40 @@ if (optUseHeadroom) {
   optUseHeadroom.addEventListener('change', function () {
     config.useHeadroom = optUseHeadroom.checked;
     saveConfig();
+    applyHeadroomUiState();
+  });
+}
+if (optHeadroom1m) {
+  optHeadroom1m.addEventListener('change', function () {
+    config.useHeadroom1m = optHeadroom1m.checked;
+    saveConfig();
     updateSpawnButtonLabel();
+  });
+}
+if (optHeadroomMemory) {
+  optHeadroomMemory.addEventListener('change', function () {
+    config.useHeadroomMemory = optHeadroomMemory.checked;
+    saveConfig();
+    // main.js applies --memory the next time it starts the app-owned proxy.
+    if (optHeadroomMemory.checked && typeof showToast === 'function') {
+      showToast('Headroom memory enabled — applies on the next proxy start (relaunch to apply now)', { kind: 'info' });
+    }
+  });
+}
+if (optHeadroomShaper) {
+  optHeadroomShaper.addEventListener('change', function () {
+    config.useHeadroomOutputShaper = optHeadroomShaper.checked;
+    saveConfig();
+    // The shaper is a live runtime toggle on the running proxy — no restart.
+    if (window.electronAPI && window.electronAPI.setHeadroomOutputShaper) {
+      window.electronAPI.setHeadroomOutputShaper(optHeadroomShaper.checked).then(function (res) {
+        if (res && res.ok === false) {
+          if (typeof showToast === 'function') showToast('Output shaper: ' + (res.error || 'could not apply'), { kind: 'warn' });
+        } else if (optHeadroomShaper.checked && typeof showToast === 'function') {
+          showToast('Output shaper enabled', { kind: 'info' });
+        }
+      });
+    }
   });
 }
 if (headroomDashboardLink) headroomDashboardLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard'); });

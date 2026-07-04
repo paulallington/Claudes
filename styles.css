@@ -1010,6 +1010,16 @@ html[data-platform="darwin"] #toolbar {
 
 /* Headroom row: secondary links/notes sitting under the "Use Headroom" toggle.
    Dimmed label state when the checkbox is disabled (Headroom not installed). */
+.spawn-headroom-subs {
+  display: flex;
+  flex-direction: column;
+}
+.spawn-headroom-sub {
+  padding-left: 22px;
+}
+.spawn-headroom-subs.is-disabled {
+  opacity: 0.45;
+}
 .spawn-headroom-extra {
   gap: 6px;
   padding-top: 0;
@@ -2108,6 +2118,16 @@ html[data-platform="darwin"] #toolbar {
 .endpoint-banner-tag--cloud {
   background: rgba(74, 222, 128, 0.2);
   color: #4ade80;
+}
+
+.endpoint-banner-tag--headroom {
+  background: rgba(34, 211, 238, 0.18);
+  color: #22d3ee;
+  cursor: pointer;
+}
+
+.endpoint-banner-tag--headroom:hover {
+  background: rgba(34, 211, 238, 0.32);
 }
 
 .endpoint-banner-name {
