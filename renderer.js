@@ -10830,6 +10830,7 @@ function applyHeadroomUiState() {
   // column's binding. Both default off.
   if (optHeadroomMemory) { optHeadroomMemory.disabled = !headroomInstalled; optHeadroomMemory.checked = !!(config && config.useHeadroomMemory); }
   if (optHeadroomShaper) { optHeadroomShaper.disabled = !headroomInstalled; optHeadroomShaper.checked = !!(config && config.useHeadroomOutputShaper); }
+  try { if (typeof renderShaperNote === 'function') renderShaperNote('idle'); } catch (e) { /* ignore */ }
   // Show/refresh the top-level Headroom service control once the binary probe
   // resolves (renderHeadroomService is hoisted; refs assigned at module load).
   try { if (typeof renderHeadroomService === 'function') renderHeadroomService(); } catch (e) { /* ignore */ }
@@ -10875,6 +10876,34 @@ if (optHeadroomMemory) {
     }
   });
 }
+// Persistent instructions/status under the Output-shaper toggle. The shaper is
+// inert until `headroom learn --verbosity --apply` builds a verbosity baseline
+// (~2 min, one-time), so a bare checkbox leaves the user guessing. This line
+// spells out what it needs, shows calibration progress, and — if calibration
+// fails — gives the exact command to run by hand.
+var headroomShaperNote = document.getElementById('headroom-shaper-note');
+function renderShaperNote(state, detail) {
+  if (!headroomShaperNote) return;
+  var on = !!(config && config.useHeadroomOutputShaper);
+  var calibrated = !!(config && config.headroomShaperCalibrated);
+  var cls = 'headroom-shaper-note', text = '';
+  if (state === 'calibrating') {
+    cls += ' is-busy';
+    text = 'Calibrating your verbosity baseline… ~2 min, one-time. Leave it running.';
+  } else if (state === 'error') {
+    cls += ' is-error';
+    text = 'Calibration failed' + (detail ? ' (' + detail + ')' : '') + '. Run this in a terminal, then re-toggle: headroom learn --verbosity --apply';
+  } else if (on && calibrated) {
+    cls += ' is-ok';
+    text = 'Active — trimming output to your learned verbosity.';
+  } else if (on && !calibrated) {
+    text = 'Turning on runs a one-time ~2 min calibration to learn your verbosity.';
+  } else {
+    text = 'Off. Turn on to cut output tokens — first enable calibrates once (~2 min).';
+  }
+  headroomShaperNote.className = cls;
+  headroomShaperNote.textContent = text;
+}
 if (optHeadroomShaper) {
   optHeadroomShaper.addEventListener('change', function () {
     config.useHeadroomOutputShaper = optHeadroomShaper.checked;
@@ -10884,16 +10913,24 @@ if (optHeadroomShaper) {
     // takes ~2 minutes to build the verbosity baseline the shaper needs; until
     // that finishes the shaper is inert. Tell the user so the wait isn't silent.
     if (window.electronAPI && window.electronAPI.setHeadroomOutputShaper) {
-      if (optHeadroomShaper.checked && typeof showToast === 'function') {
-        showToast('Output shaper: learning your verbosity baseline (~2 min)…', { kind: 'info' });
+      if (optHeadroomShaper.checked) {
+        renderShaperNote('calibrating');
+        if (typeof showToast === 'function') showToast('Output shaper: learning your verbosity baseline (~2 min)…', { kind: 'info' });
+      } else {
+        renderShaperNote('idle');
       }
       window.electronAPI.setHeadroomOutputShaper(optHeadroomShaper.checked).then(function (res) {
         if (res && res.ok === false) {
+          if (optHeadroomShaper.checked) renderShaperNote('error', res.error);
           if (typeof showToast === 'function') showToast('Output shaper: ' + (res.error || 'could not apply'), { kind: 'warn' });
-        } else if (optHeadroomShaper.checked && typeof showToast === 'function') {
-          showToast('Output shaper active', { kind: 'info' });
+        } else {
+          if (optHeadroomShaper.checked) { config.headroomShaperCalibrated = true; saveConfig(); }
+          renderShaperNote('idle');
+          if (optHeadroomShaper.checked && typeof showToast === 'function') showToast('Output shaper active', { kind: 'info' });
         }
       });
+    } else {
+      renderShaperNote('idle');
     }
   });
 }
