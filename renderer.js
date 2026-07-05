@@ -48,6 +48,7 @@ var headroomInstallLink = document.getElementById('headroom-install-link');
 var optHeadroom1m = document.getElementById('opt-headroom-1m');
 var optHeadroomMemory = document.getElementById('opt-headroom-memory');
 var optHeadroomShaper = document.getElementById('opt-headroom-shaper');
+var optHeadroomAutostart = document.getElementById('opt-headroom-autostart');
 var headroomSubs = document.getElementById('opt-headroom-subs');
 var headroomInstalled = false;  // resolved async from main; gates wrapping + UI
 
@@ -10830,6 +10831,7 @@ function applyHeadroomUiState() {
   // column's binding. Both default off.
   if (optHeadroomMemory) { optHeadroomMemory.disabled = !headroomInstalled; optHeadroomMemory.checked = !!(config && config.useHeadroomMemory); }
   if (optHeadroomShaper) { optHeadroomShaper.disabled = !headroomInstalled; optHeadroomShaper.checked = !!(config && config.useHeadroomOutputShaper); }
+  if (optHeadroomAutostart) { optHeadroomAutostart.disabled = !headroomInstalled; optHeadroomAutostart.checked = !!(config && config.headroomAutoStart); }
   try { if (typeof renderShaperNote === 'function') renderShaperNote('idle'); } catch (e) { /* ignore */ }
   // Show/refresh the top-level Headroom service control once the binary probe
   // resolves (renderHeadroomService is hoisted; refs assigned at module load).
@@ -10873,6 +10875,18 @@ if (optHeadroomMemory) {
     // main.js applies --memory the next time it starts the app-owned proxy.
     if (optHeadroomMemory.checked && typeof showToast === 'function') {
       showToast('Headroom memory enabled — Stop then Start the proxy to apply', { kind: 'info' });
+    }
+  });
+}
+if (optHeadroomAutostart) {
+  optHeadroomAutostart.addEventListener('change', function () {
+    config.headroomAutoStart = optHeadroomAutostart.checked;
+    saveConfig();
+    // main.js reads this on launch (post binary-probe) and starts the proxy.
+    if (typeof showToast === 'function') {
+      showToast(optHeadroomAutostart.checked
+        ? 'Headroom will start automatically when Claudes opens'
+        : 'Headroom auto-start off', { kind: 'info' });
     }
   });
 }
@@ -11001,6 +11015,12 @@ function initHeadroomServiceUI() {
   if (window.electronAPI && window.electronAPI.onHeadroomServiceLog) {
     window.electronAPI.onHeadroomServiceLog(function (line) {
       if (headroomServiceLog) { headroomServiceLog.classList.remove('hidden'); headroomServiceLog.textContent = line; }
+      // Keep the dot in sync when the proxy is driven from main (e.g. launch
+      // auto-start), not just the Start button. The button flow owns its own
+      // busy state, so only nudge when a background transition is signalled.
+      if (/ready on port/i.test(line)) { headroomServiceState.running = true; headroomServiceState.busy = false; renderHeadroomService(); }
+      else if (/^Starting Headroom proxy/i.test(line)) { if (!headroomServiceState.running) { headroomServiceState.busy = true; renderHeadroomService(); } }
+      else if (/^Failed to start/i.test(line)) { headroomServiceState.busy = false; renderHeadroomService(); }
     });
   }
   refreshHeadroomService();

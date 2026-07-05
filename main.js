@@ -170,6 +170,8 @@ function probeHeadroom() {
       broadcastHeadroomStatus();
       // Binary confirmed present — attempt a once-per-launch silent update.
       maybeAutoUpdateHeadroom();
+      // …and, if the user opted in, bring the proxy up automatically.
+      maybeAutoStartHeadroom();
     });
   } catch {
     // Never let a probe failure block startup.
@@ -4841,7 +4843,9 @@ ipcMain.handle('headroom:serviceStatus', async () => {
     port: headroomPort(),
   };
 });
-ipcMain.handle('headroom:serviceStart', async () => {
+// Shared start path for both the Start button and the launch auto-start. Spawns
+// the app-managed proxy (unless one is already answering) and polls to ready.
+async function startHeadroomManagedProxy() {
   if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
   if (await probeHeadroomHealth()) { applyPersistedShaperState(); return { ok: true, running: true, alreadyRunning: true }; }
   broadcastServiceLog('Starting Headroom proxy on port ' + headroomPort() + '…');
@@ -4860,7 +4864,19 @@ ipcMain.handle('headroom:serviceStart', async () => {
   if (healthy) { applyPersistedShaperState(); broadcastServiceLog('Headroom proxy ready on port ' + headroomPort() + '.'); }
   else broadcastServiceLog('Headroom proxy started but not answering yet — it may still be indexing.');
   return { ok: healthy, installed: true, running: healthy, healthy: healthy, error: healthy ? undefined : 'not ready' };
-});
+}
+// Once-per-launch: if the user opted into "Run on startup", bring the proxy up
+// as soon as the binary probe confirms it's installed. Fire-and-forget — never
+// let it block startup; the sidebar control reflects progress via serviceLog.
+let _headroomAutoStarted = false;
+function maybeAutoStartHeadroom() {
+  if (_headroomAutoStarted || !headroomStatus.installed) return;
+  let cfg; try { cfg = readConfig(); } catch { return; }
+  if (!cfg || !cfg.headroomAutoStart) return;
+  _headroomAutoStarted = true;
+  startHeadroomManagedProxy().catch(() => { /* logged via serviceLog */ });
+}
+ipcMain.handle('headroom:serviceStart', async () => startHeadroomManagedProxy());
 ipcMain.handle('headroom:serviceStop', async () => {
   if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
   const wasManaged = stopHeadroomProxyProcess();
