@@ -10972,22 +10972,25 @@ var headroomServiceLog = document.getElementById('headroom-service-log');
 var headroomServiceDash = document.getElementById('headroom-service-dash');
 var headroomServiceState = { running: false, busy: false };
 
-var headroomServiceMain = document.getElementById('headroom-service-main');
-var headroomServiceInstall = document.getElementById('headroom-service-install');
 function renderHeadroomService() {
   if (!headroomServiceEl) return;
+  // Resolve the sub-panels at call time: this function is hoisted and can run
+  // before module-level `var`s below it are assigned, which previously left
+  // `main` un-hidden (both panels visible at once).
+  var mainEl = document.getElementById('headroom-service-main');
+  var installEl = document.getElementById('headroom-service-install');
   // Not installed: once the probe has resolved, show the install prompt instead
   // of the running-state controls. Before the probe lands, stay hidden (no flash).
   if (!headroomInstalled) {
     if (!headroomProbed) { headroomServiceEl.classList.add('hidden'); return; }
     headroomServiceEl.classList.remove('hidden');
-    if (headroomServiceMain) headroomServiceMain.classList.add('hidden');
-    if (headroomServiceInstall) headroomServiceInstall.classList.remove('hidden');
+    if (mainEl) mainEl.classList.add('hidden');
+    if (installEl) installEl.classList.remove('hidden');
     return;
   }
   headroomServiceEl.classList.remove('hidden');
-  if (headroomServiceInstall) headroomServiceInstall.classList.add('hidden');
-  if (headroomServiceMain) headroomServiceMain.classList.remove('hidden');
+  if (installEl) installEl.classList.add('hidden');
+  if (mainEl) mainEl.classList.remove('hidden');
   var s = headroomServiceState;
   var dotClass = s.busy ? 'busy' : (s.running ? 'running' : 'stopped');
   if (headroomServiceDot) headroomServiceDot.className = 'headroom-service-dot ' + dotClass;

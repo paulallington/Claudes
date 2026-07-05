@@ -46,6 +46,7 @@ const https = require('https');
         path.join(os.homedir(), '.claude', 'bin'),
         process.env.APPDATA && path.join(process.env.APPDATA, 'Python', 'Scripts'), // pip --user (roaming) on some setups
         path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Scripts'),
+        process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links'), // winget shims
       ].filter(Boolean)
     : [
         '/opt/homebrew/bin',
@@ -148,33 +149,54 @@ function broadcastHeadroomStatus() {
     try { if (!w.isDestroyed()) w.webContents.send('headroom:status-changed', headroomStatus); } catch { /* ignore */ }
   });
 }
+let _headroomProbeTimer = null;
+let _headroomProbeTries = 0;
+function markHeadroomInstalled(version, viaBinary) {
+  const wasInstalled = headroomStatus.installed;
+  headroomStatus = { installed: true, version: version || headroomStatus.version || null };
+  broadcastHeadroomStatus();
+  if (_headroomProbeTimer) { clearTimeout(_headroomProbeTimer); _headroomProbeTimer = null; }
+  if (!wasInstalled) {
+    if (viaBinary) maybeAutoUpdateHeadroom(); // update needs a resolvable binary
+    maybeAutoStartHeadroom();                 // no-op unless opted in / already up
+  }
+}
+// If the first probe misses, retry a few times — the binary may become
+// resolvable, or (more usefully) the user may start their proxy after launch,
+// at which point the /health fallback below will detect it.
+function scheduleHeadroomReprobe() {
+  if (headroomStatus.installed || _headroomProbeTimer || _headroomProbeTries >= 6) return;
+  _headroomProbeTimer = setTimeout(() => { _headroomProbeTimer = null; probeHeadroom(); }, 20000);
+}
 function probeHeadroom() {
-  // Log whether the PATH augmentation took effect — ground truth for the
-  // packaged app, where ~/.local/bin often isn't on PATH by default.
-  diagLog('[headroom] probing (PATH has .local: ' + String((process.env.PATH || '').toLowerCase().includes('.local')) + ')');
+  _headroomProbeTries++;
+  diagLog('[headroom] probing #' + _headroomProbeTries + ' (PATH has .local: ' + String((process.env.PATH || '').toLowerCase().includes('.local')) + ')');
   try {
-    execFile('headroom', ['--version'], { timeout: 4000 }, (err, stdout) => {
-      // ENOENT / non-zero exit / timeout → not usable; leave the default.
-      if (err) {
-        diagLog('[headroom] probe failed:', err && (err.code || err.message));
-        // Broadcasting the still-false status is harmless and confirms the probe ran.
-        broadcastHeadroomStatus();
+    // shell:true on Windows so PATHEXT resolves .cmd/.bat shims (pipx/uv put a
+    // headroom.exe, but some setups use script shims). Longer timeout because a
+    // cold `headroom --version` can pull in heavy imports before printing.
+    execFile('headroom', ['--version'], { timeout: 8000, windowsHide: true, shell: process.platform === 'win32' }, async (err, stdout) => {
+      if (!err) {
+        const out = (stdout || '').trim();
+        // stdout looks like "headroom, version 0.29.0" — pull out the version.
+        const m = out.match(/version\s+([0-9][\w.\-]*)/i);
+        diagLog('[headroom] probe ok: version=' + (m ? m[1] : (out || '?')));
+        markHeadroomInstalled(m ? m[1] : (out || null), true);
         return;
       }
-      const out = (stdout || '').trim();
-      // stdout looks like "headroom, version 0.29.0" — pull out the version.
-      const m = out.match(/version\s+([0-9][\w.\-]*)/i);
-      headroomStatus = { installed: true, version: m ? m[1] : (out || null) };
-      diagLog('[headroom] probe ok: version=' + (headroomStatus.version || '?'));
-      // Push the resolved status so the renderer's boot-race read is corrected.
-      broadcastHeadroomStatus();
-      // Binary confirmed present — attempt a once-per-launch silent update.
-      maybeAutoUpdateHeadroom();
-      // …and, if the user opted in, bring the proxy up automatically.
-      maybeAutoStartHeadroom();
+      diagLog('[headroom] version probe failed:', err && (err.code || err.message));
+      // Fallback: if the proxy is answering on /health, headroom is unambiguously
+      // installed — even when the binary isn't resolvable on the app's PATH. This
+      // fixes the "not installed" while a proxy is clearly running case.
+      let healthy = false;
+      try { healthy = await probeHeadroomHealth(); } catch { /* ignore */ }
+      if (healthy) { diagLog('[headroom] detected via /health fallback'); markHeadroomInstalled(null, false); return; }
+      broadcastHeadroomStatus(); // confirm not-installed to the renderer
+      scheduleHeadroomReprobe();  // …but keep trying, in case it appears later
     });
   } catch {
     // Never let a probe failure block startup.
+    scheduleHeadroomReprobe();
   }
 }
 
