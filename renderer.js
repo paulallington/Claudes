@@ -773,14 +773,21 @@ function reattachAllColumns() {
 // spawn/respawn path routes through here so they all self-heal identically.
 function spawnThroughHeadroomGate(msg, plainArgs, send) {
   if (msg && msg.cmd === 'headroom' && window.electronAPI && window.electronAPI.ensureHeadroomProxy) {
+    // A cold proxy start (rtk + code-graph indexing) can take up to a minute, so
+    // surface a toast if the wait runs long instead of leaving the user staring
+    // at a silent spawning column.
+    var __startingToast = setTimeout(function () {
+      try { if (typeof showToast === 'function') showToast('Starting Headroom proxy… first launch can take up to a minute', { kind: 'info' }); } catch (e) { /* ignore */ }
+    }, 1500);
     window.electronAPI.ensureHeadroomProxy().then(function (res) {
+      clearTimeout(__startingToast);
       if (!res || res.ok === false) {
         try { if (typeof showToast === 'function') showToast('Headroom proxy unavailable — spawning without Headroom', { kind: 'warn' }); } catch (e) { /* ignore */ }
         msg.args = plainArgs;
         delete msg.cmd;
       }
       send();
-    }, function () { send(); });
+    }, function () { clearTimeout(__startingToast); send(); });
   } else {
     send();
   }
@@ -10930,12 +10937,18 @@ if (optHeadroomShaper) {
     config.useHeadroomOutputShaper = optHeadroomShaper.checked;
     saveConfig();
     // The shaper is a live runtime toggle on the running proxy — no restart.
+    // But enabling it runs `headroom learn --verbosity --apply` first, which
+    // takes ~2 minutes to build the verbosity baseline the shaper needs; until
+    // that finishes the shaper is inert. Tell the user so the wait isn't silent.
     if (window.electronAPI && window.electronAPI.setHeadroomOutputShaper) {
+      if (optHeadroomShaper.checked && typeof showToast === 'function') {
+        showToast('Output shaper: learning your verbosity baseline (~2 min)…', { kind: 'info' });
+      }
       window.electronAPI.setHeadroomOutputShaper(optHeadroomShaper.checked).then(function (res) {
         if (res && res.ok === false) {
           if (typeof showToast === 'function') showToast('Output shaper: ' + (res.error || 'could not apply'), { kind: 'warn' });
         } else if (optHeadroomShaper.checked && typeof showToast === 'function') {
-          showToast('Output shaper enabled', { kind: 'info' });
+          showToast('Output shaper active', { kind: 'info' });
         }
       });
     }

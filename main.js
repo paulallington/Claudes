@@ -4793,7 +4793,7 @@ const ensureHeadroomProxy = makeProxyEnsurer({
   probeHealth: probeHeadroomHealth,
   startProxy: startHeadroomProxy,
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-  timeoutMs: 20000,
+  timeoutMs: 60000,
   intervalMs: 300,
 });
 ipcMain.handle('headroom:ensureProxy', async () => {
@@ -7693,6 +7693,20 @@ if (!gotLock) {
     migrateLoopsToAutomations();
     startAutomationScheduler();
     probeHeadroom(); // one-shot: cache whether the `headroom` CLI is available
+    // Warm the app-owned Headroom proxy at launch (not lazily on first column
+    // spawn) so a cold start's slow rtk / code-graph indexing happens while the
+    // app loads — columns then find it ready instead of racing the startup and
+    // exiting with ConnectionRefused. probeHeadroom resolves async, so poll for
+    // it briefly; ensureHeadroomProxy is race-guarded so this is idempotent.
+    (function warmHeadroomProxy(attempt) {
+      let cfg = null;
+      try { cfg = readConfig(); } catch (e) { /* ignore */ }
+      if (headroomStatus.installed) {
+        if (cfg && cfg.useHeadroom) { try { ensureHeadroomProxy(); } catch (e) { /* best effort */ } }
+        return;
+      }
+      if ((attempt || 0) < 10) setTimeout(() => warmHeadroomProxy((attempt || 0) + 1), 500);
+    })(0);
 
     const cfg = readConfig();
     // Zombie-popout guard: `poppedOut: true` is intentionally preserved across
