@@ -4785,11 +4785,22 @@ function probeHeadroomHealth() {
 // proxy only has to be *up*, it does not have to survive reboots. We capture its
 // output so the user gets the startup feedback the old detached/ignored spawn hid.
 let headroomProxyChild = null;
+// The proxy logs to stdout with ANSI colour codes and, once up, keeps emitting
+// routine INFO lines (RapidOCR, request logs…). Strip the escape sequences so
+// the sidebar log doesn't show raw `[32m` garbage.
+function stripAnsi(s) {
+  return String(s).replace(/\x1B\[[0-9;]*[A-Za-z]/g, '').replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '');
+}
 function broadcastServiceLog(line) {
+  const clean = stripAnsi(line);
   try {
-    BrowserWindow.getAllWindows().forEach((w) => { try { w.webContents.send('headroom:serviceLog', line); } catch { /* ignore */ } });
+    BrowserWindow.getAllWindows().forEach((w) => { try { w.webContents.send('headroom:serviceLog', clean); } catch { /* ignore */ } });
   } catch { /* ignore */ }
 }
+// Only forward the proxy's own noisy stdout to the sidebar during the startup
+// window — after it's ready, the log should hold our clean status line, not a
+// live tail of INFO spam. Our own broadcastServiceLog calls are never gated.
+let _streamingHeadroomStartup = false;
 function stopHeadroomProxyProcess() {
   const child = headroomProxyChild;
   headroomProxyChild = null;
@@ -4849,8 +4860,11 @@ async function startHeadroomManagedProxy() {
   if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
   if (await probeHeadroomHealth()) { applyPersistedShaperState(); return { ok: true, running: true, alreadyRunning: true }; }
   broadcastServiceLog('Starting Headroom proxy on port ' + headroomPort() + '…');
-  const res = await startHeadroomProxyProcess(broadcastServiceLog);
-  if (!res.ok) { broadcastServiceLog('Failed to start Headroom: ' + (res.error || 'unknown error')); return { ok: false, running: false, error: res.error }; }
+  _streamingHeadroomStartup = true;
+  // Forward the proxy's raw stdout only while starting; broadcastServiceLog
+  // strips ANSI. Our own status lines below are emitted directly (never gated).
+  const res = await startHeadroomProxyProcess((ln) => { if (_streamingHeadroomStartup) broadcastServiceLog(ln); });
+  if (!res.ok) { _streamingHeadroomStartup = false; broadcastServiceLog('Failed to start Headroom: ' + (res.error || 'unknown error')); return { ok: false, running: false, error: res.error }; }
   // A freshly started proxy has a clean runtime-env, so re-arm the shaper apply.
   _shaperStateApplied = false;
   // Poll for readiness — a cold start indexes the code graph, which can take a
@@ -4861,6 +4875,7 @@ async function startHeadroomManagedProxy() {
     if (await probeHeadroomHealth()) { healthy = true; break; }
     await new Promise((r) => setTimeout(r, 1000));
   }
+  _streamingHeadroomStartup = false; // stop tailing the proxy's INFO spam
   if (healthy) { applyPersistedShaperState(); broadcastServiceLog('Headroom proxy ready on port ' + headroomPort() + '.'); }
   else broadcastServiceLog('Headroom proxy started but not answering yet — it may still be indexing.');
   return { ok: healthy, installed: true, running: healthy, healthy: healthy, error: healthy ? undefined : 'not ready' };

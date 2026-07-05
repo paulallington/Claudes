@@ -13420,6 +13420,25 @@ function startContextMeterPoll(colId) {
           col.effectiveLimit = ep.contextWindow;
         }
       }
+      // Headroom-aware: a column bound to the Headroom proxy with 1M on runs a
+      // 1M window even though col.model has no [1m] marker (the marker lives in
+      // the injected env, not the column's model id). Ask buildHeadroomEnv — the
+      // exact same source of truth the spawn binding uses — so the meter's
+      // denominator can never disagree with what the column actually got.
+      if (!col.effectiveLimit && window.HeadroomEnv) {
+        try {
+          var hrEnv = window.HeadroomEnv.buildHeadroomEnv({
+            enabled: !!(headroomInstalled && config && config.useHeadroom),
+            hasEndpoint: !!(col.endpointId || col.env),
+            isClaude: !col.cmd,
+            oneM: !!(config && config.useHeadroom1m !== false),
+            oneMModel: (config && config.headroom1mModel) || 'claude-opus-4-8'
+          });
+          if (hrEnv && hrEnv.ANTHROPIC_MODEL && /\[1m\]/i.test(hrEnv.ANTHROPIC_MODEL)) {
+            col.effectiveLimit = 1000000;
+          }
+        } catch (e) { /* fall through to pref/heuristic */ }
+      }
       // Pref-driven baseline: user can lock 200k or 1M via Settings.
       if (!col.effectiveLimit) {
         var pref = getCtxDefaultPref();
