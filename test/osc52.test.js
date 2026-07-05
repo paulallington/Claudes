@@ -34,3 +34,18 @@ test('6: empty / whitespace payload returns null', () => {
 test('7: base64 that fails to decode returns null', () => {
   assert.equal(parseOsc52('c;@@@not base64@@@'), null);
 });
+
+test('8: whitespace-wrapped base64 still decodes', () => {
+  var wrapped = b64('hello world').match(/.{1,4}/g).join('\n');
+  assert.equal(parseOsc52('c;' + wrapped), 'hello world');
+  assert.equal(parseOsc52('c; ' + b64('hi') + ' '), 'hi');
+});
+
+test('9: malformed base64 with length not a multiple of 4 returns null', () => {
+  assert.equal(parseOsc52('c;abc'), null);
+});
+
+test('10: oversized decoded payload returns null', () => {
+  var big = 'a'.repeat(5 * 1024 * 1024 + 1);
+  assert.equal(parseOsc52('c;' + b64(big)), null);
+});
