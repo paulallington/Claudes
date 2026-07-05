@@ -655,6 +655,14 @@ html[data-platform="darwin"] .sidebar-header {
   border-radius: 6px;
   font-size: 12px;
 }
+/* This codebase has no generic `.hidden` utility — every `.hidden` is scoped.
+   The service panel and its sub-elements need their own rule or the class is a
+   no-op (which left the install prompt, log, and dash always visible). */
+.headroom-service.hidden,
+.headroom-service-main.hidden,
+.headroom-service-install.hidden,
+.headroom-service-log.hidden,
+.headroom-service-dash.hidden { display: none; }
 .headroom-service-row {
   display: flex;
   align-items: center;
