@@ -699,34 +699,22 @@ function connectWS() {
       if (col3 && !col3.element.querySelector('.exit-overlay')) {
         if (!col3.cmd && col3.sessionId) {
           fitTerminal(col3.terminal, col3.fitAddon);
-          // Keep a Headroom-wrapped column wrapped across auto-respawn. Re-derive
-          // `enabled` from the live global flag (never persisted on the column).
-          var __rw = (window.HeadroomWrap)
-            ? window.HeadroomWrap.applyHeadroomWrap({
-                enabled: !!(headroomInstalled && config && config.useHeadroom),
-                oneM: !!(config && config.useHeadroom1m !== false),
-                cmd: col3.cmd,
-                args: buildResumeArgs(col3),
-                hasEndpoint: !!(col3.endpointId || col3.env)
-              })
-            : { cmd: col3.cmd, args: buildResumeArgs(col3) };
           var respawnMsg = {
             type: 'create',
             id: msg.id,
             cols: col3.terminal.cols,
             rows: col3.terminal.rows,
             cwd: col3.cwd,
-            args: __rw.args
+            args: buildResumeArgs(col3)
           };
-          if (__rw.cmd) respawnMsg.cmd = __rw.cmd;
+          if (col3.cmd) respawnMsg.cmd = col3.cmd;
           if (col3.env) respawnMsg.env = col3.env;
+          // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
+          // Re-derived from the live global flag; never persisted on the column.
+          maybeBindHeadroom(respawnMsg, { hasEndpoint: !!(col3.endpointId || col3.env), isClaude: !col3.cmd });
           col3.terminal.clear();
-          // Sleep/wake respawn: the app-owned proxy may have been reaped, so gate
-          // this --no-proxy respawn on proxy readiness (unwrapped fallback) too.
-          spawnThroughHeadroomGate(respawnMsg, buildResumeArgs(col3), function () {
-            wsSend(respawnMsg);
-            setColumnActivity(msg.id, 'working');
-          });
+          wsSend(respawnMsg);
+          setColumnActivity(msg.id, 'working');
         } else {
           col3.element.appendChild(createExitOverlay(msg.id, null, col3));
           setColumnActivity(msg.id, 'exited');
@@ -771,26 +759,16 @@ function reattachAllColumns() {
 // spawn (using `plainArgs`) so the column still works instead of exiting (code 1)
 // with ConnectionRefused. `send` runs exactly once with the final `msg`. Every
 // spawn/respawn path routes through here so they all self-heal identically.
-function spawnThroughHeadroomGate(msg, plainArgs, send) {
-  if (msg && msg.cmd === 'headroom' && window.electronAPI && window.electronAPI.ensureHeadroomProxy) {
-    // A cold proxy start (rtk + code-graph indexing) can take up to a minute, so
-    // surface a toast if the wait runs long instead of leaving the user staring
-    // at a silent spawning column.
-    var __startingToast = setTimeout(function () {
-      try { if (typeof showToast === 'function') showToast('Starting Headroom proxy… first launch can take up to a minute', { kind: 'info' }); } catch (e) { /* ignore */ }
-    }, 1500);
-    window.electronAPI.ensureHeadroomProxy().then(function (res) {
-      clearTimeout(__startingToast);
-      if (!res || res.ok === false) {
-        try { if (typeof showToast === 'function') showToast('Headroom proxy unavailable — spawning without Headroom', { kind: 'warn' }); } catch (e) { /* ignore */ }
-        msg.args = plainArgs;
-        delete msg.cmd;
-      }
-      send();
-    }, function () { clearTimeout(__startingToast); send(); });
-  } else {
-    send();
-  }
+function maybeBindHeadroom(msg, ctx) {
+  if (!msg || !window.HeadroomEnv) return;
+  var env = window.HeadroomEnv.buildHeadroomEnv({
+    enabled: !!(headroomInstalled && config && config.useHeadroom),
+    hasEndpoint: !!(ctx && ctx.hasEndpoint),
+    isClaude: !(ctx && ctx.isClaude === false),
+    oneM: !!(config && config.useHeadroom1m !== false),
+    oneMModel: (config && config.headroom1mModel) || 'claude-opus-4-8'
+  });
+  if (env) msg.env = Object.assign({}, msg.env, env);
 }
 
 function wsSend(obj) {
@@ -4015,32 +3993,18 @@ function createExitOverlay(id, exitCode, col) {
       sendMsg.args = buildResumeArgs(col);
     }
     if (col.env) sendMsg.env = col.env;
-    // Keep a Headroom-wrapped column wrapped on manual Restart. Passthrough for
-    // arbitrary-cmd/endpoint columns (the wrap guards both), and re-derived from
-    // the live global flag rather than any persisted per-column state.
-    var __plainArgs = sendMsg.args;
-    if (window.HeadroomWrap) {
-      var __hwr = window.HeadroomWrap.applyHeadroomWrap({
-        enabled: !!(headroomInstalled && config && config.useHeadroom),
-        oneM: !!(config && config.useHeadroom1m !== false),
-        cmd: col.cmd,
-        args: sendMsg.args,
-        hasEndpoint: !!(col.endpointId || col.env)
-      });
-      sendMsg.args = __hwr.args;
-      if (__hwr.cmd) sendMsg.cmd = __hwr.cmd;
-    }
-    spawnThroughHeadroomGate(sendMsg, __plainArgs, function () {
-      wsSend(sendMsg);
-      col.terminal.clear();
-      setColumnActivity(id, 'working');
-      // Run-tab launches: the previous exit fired refreshRunConfigs and set the
-      // config row back to "stopped". Now that we've re-spawned the same column
-      // (col.cmd / customTitle unchanged → findRunningColumn matches again),
-      // refresh so the UI flips back to the playing/stop state. Without this
-      // the user's only signal that the restart worked is terminal output.
-      if (col.cmd) setTimeout(refreshRunConfigs, 300);
-    });
+    // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
+    // Re-derived from the live global flag; passthrough for endpoint/arbitrary cmd.
+    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd });
+    wsSend(sendMsg);
+    col.terminal.clear();
+    setColumnActivity(id, 'working');
+    // Run-tab launches: the previous exit fired refreshRunConfigs and set the
+    // config row back to "stopped". Now that we've re-spawned the same column
+    // (col.cmd / customTitle unchanged → findRunningColumn matches again),
+    // refresh so the UI flips back to the playing/stop state. Without this
+    // the user's only signal that the restart worked is terminal output.
+    if (col.cmd) setTimeout(refreshRunConfigs, 300);
   });
   closeBtn.addEventListener('click', function () {
     var hadCmd = !!col.cmd;
@@ -4464,44 +4428,29 @@ function addColumn(args, targetRow, opts) {
       wsSend({ type: 'reattach', id: id, cols: terminal.cols, rows: terminal.rows });
       return;
     }
-    // Apply the Headroom wrap to a {cmd, args} pair FIRST, then build sendMsg
-    // from the result. The wrap no-ops unless the global toggle is on AND this
-    // is a plain default-Claude spawn (no endpoint, no arbitrary cmd). We must
-    // NOT reassign the local `cmd` var — the detectSession guard below relies on
-    // it staying falsy for default Claude columns, and `claudeArgs`/session-id
-    // pinning must stay intact (the wrap just nests those args after `--`).
-    var __hw = (window.HeadroomWrap)
-      ? window.HeadroomWrap.applyHeadroomWrap({
-          enabled: !!(headroomInstalled && config && config.useHeadroom),
-          oneM: !!(config && config.useHeadroom1m !== false),
-          cmd: cmd,
-          args: claudeArgs,
-          hasEndpoint: !!(opts.endpointId || opts.env)
-        })
-      : { cmd: cmd, args: claudeArgs };
-    var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: __hw.args };
-    if (__hw.cmd) sendMsg.cmd = __hw.cmd;
+    // Bind this column to the app-managed Headroom proxy by env var (no fragile
+    // `headroom wrap` subprocess). maybeBindHeadroom no-ops unless the global
+    // toggle is on AND this is a plain default-Claude spawn (no endpoint, no
+    // arbitrary cmd). We keep `cmd`/`claudeArgs`/session-id pinning intact — the
+    // detectSession guard below relies on `cmd` staying falsy for default cols.
+    var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: claudeArgs };
+    if (cmd) sendMsg.cmd = cmd;
     if (opts.env) sendMsg.env = opts.env;
+    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd });
 
-    // Wrapped columns launch with --no-proxy, so the app-owned Headroom proxy
-    // must be up first. The gate is idempotent + race-guarded in main, so
-    // concurrent restored columns start it exactly once; on failure it falls back
-    // to an unwrapped spawn instead of a ConnectionRefused exit (code 1).
-    spawnThroughHeadroomGate(sendMsg, claudeArgs, function finishSpawn() {
-      vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
-      wsSend(sendMsg);
+    vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
+    wsSend(sendMsg);
 
-      var isResume = claudeArgs.indexOf('--resume') !== -1;
-      if (!cmd && !isResume && !__plan.sessionId && window.electronAPI) {
-        preSpawnSessionsPromise.then(function (preSessions) {
-          var preIds = {};
-          for (var i = 0; i < preSessions.length; i++) {
-            preIds[preSessions[i].sessionId] = true;
-          }
-          detectSession(id, cwd, preIds, 0);
-        });
-      }
-    });
+    var isResume = claudeArgs.indexOf('--resume') !== -1;
+    if (!cmd && !isResume && !__plan.sessionId && window.electronAPI) {
+      preSpawnSessionsPromise.then(function (preSessions) {
+        var preIds = {};
+        for (var i = 0; i < preSessions.length; i++) {
+          preIds[preSessions[i].sessionId] = true;
+        }
+        detectSession(id, cwd, preIds, 0);
+      });
+    }
   });
 
   terminal.onData(function (data) {
@@ -6037,28 +5986,15 @@ async function restartColumn(id) {
     sendMsg.args = buildResumeArgs(col);
   }
   if (col.env) sendMsg.env = col.env;
-  // Keep a Headroom-wrapped column wrapped on respawn. Passthrough for
-  // arbitrary-cmd/endpoint columns; re-derived from the live global flag.
-  var __plainArgs = sendMsg.args;
-  if (window.HeadroomWrap) {
-    var __hwr = window.HeadroomWrap.applyHeadroomWrap({
-      enabled: !!(headroomInstalled && config && config.useHeadroom),
-      oneM: !!(config && config.useHeadroom1m !== false),
-      cmd: col.cmd,
-      args: sendMsg.args,
-      hasEndpoint: !!(col.endpointId || col.env)
-    });
-    sendMsg.args = __hwr.args;
-    if (__hwr.cmd) sendMsg.cmd = __hwr.cmd;
-  }
-  spawnThroughHeadroomGate(sendMsg, __plainArgs, function () {
-    wsSend(sendMsg);
-    // Re-evaluate stale-hook health from a clean slate for the new session: if
-    // hooks now reach the column it will never re-flag; if they still don't, the
-    // sweep can surface the hint again after the grace window.
-    col.hookEverSeen = false; col.lastHookAt = 0; col.staleHintShown = false;
-    setColumnActivity(id, 'working');
-  });
+  // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
+  // Passthrough for arbitrary-cmd/endpoint columns; re-derived from live flag.
+  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd });
+  wsSend(sendMsg);
+  // Re-evaluate stale-hook health from a clean slate for the new session: if
+  // hooks now reach the column it will never re-flag; if they still don't, the
+  // sweep can surface the hint again after the grace window.
+  col.hookEverSeen = false; col.lastHookAt = 0; col.staleHintShown = false;
+  setColumnActivity(id, 'working');
 }
 
 function tryEndpointFailover(colId) {
@@ -10890,6 +10826,9 @@ function applyHeadroomUiState() {
   if (optHeadroomMemory) { optHeadroomMemory.disabled = !subsUsable; optHeadroomMemory.checked = !!(config && config.useHeadroomMemory); }
   if (optHeadroomShaper) { optHeadroomShaper.disabled = !subsUsable; optHeadroomShaper.checked = !!(config && config.useHeadroomOutputShaper); }
   if (headroomSubs) headroomSubs.classList.toggle('is-disabled', !subsUsable);
+  // Show/refresh the top-level Headroom service control once the binary probe
+  // resolves (renderHeadroomService is hoisted; refs assigned at module load).
+  try { if (typeof renderHeadroomService === 'function') renderHeadroomService(); } catch (e) { /* ignore */ }
   updateSpawnButtonLabel();
 }
 function initHeadroomUI() {
@@ -10957,7 +10896,77 @@ if (optHeadroomShaper) {
 if (headroomDashboardLink) headroomDashboardLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard'); });
 if (headroomInstallLink) headroomInstallLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('https://github.com/headroomlabs-ai/headroom'); });
 
+// --- Top-level Headroom persistent-service control (sidebar) ---
+var headroomServiceEl = document.getElementById('headroom-service');
+var headroomServiceDot = document.getElementById('headroom-service-dot');
+var headroomServiceLabel = document.getElementById('headroom-service-label');
+var headroomServiceBtn = document.getElementById('headroom-service-btn');
+var headroomServiceLog = document.getElementById('headroom-service-log');
+var headroomServiceDash = document.getElementById('headroom-service-dash');
+var headroomServiceState = { running: false, busy: false };
+
+function renderHeadroomService() {
+  if (!headroomServiceEl) return;
+  if (!headroomInstalled) { headroomServiceEl.classList.add('hidden'); return; }
+  headroomServiceEl.classList.remove('hidden');
+  var s = headroomServiceState;
+  var dotClass = s.busy ? 'busy' : (s.running ? 'running' : 'stopped');
+  if (headroomServiceDot) headroomServiceDot.className = 'headroom-service-dot ' + dotClass;
+  if (headroomServiceLabel) headroomServiceLabel.textContent = s.busy ? 'Headroom · starting…' : (s.running ? 'Headroom · running' : 'Headroom · stopped');
+  if (headroomServiceBtn) {
+    headroomServiceBtn.textContent = s.busy ? '…' : (s.running ? 'Stop' : 'Start');
+    headroomServiceBtn.disabled = !!s.busy;
+  }
+  if (headroomServiceDash) headroomServiceDash.classList.toggle('hidden', !s.running);
+}
+
+function refreshHeadroomService() {
+  if (!window.electronAPI || !window.electronAPI.getHeadroomServiceStatus) return;
+  window.electronAPI.getHeadroomServiceStatus().then(function (st) {
+    if (st && st.ok) headroomServiceState.running = !!st.running;
+    renderHeadroomService();
+  }).catch(function () {});
+}
+
+function initHeadroomServiceUI() {
+  if (!headroomServiceEl) return;
+  if (headroomServiceBtn) {
+    headroomServiceBtn.addEventListener('click', function () {
+      if (headroomServiceState.busy || !window.electronAPI) return;
+      if (headroomServiceState.running) {
+        headroomServiceState.busy = true; renderHeadroomService();
+        window.electronAPI.stopHeadroomService().then(function (r) {
+          headroomServiceState.busy = false;
+          headroomServiceState.running = !!(r && r.running);
+          renderHeadroomService();
+        }).catch(function () { headroomServiceState.busy = false; renderHeadroomService(); });
+      } else {
+        headroomServiceState.busy = true;
+        if (headroomServiceLog) { headroomServiceLog.classList.remove('hidden'); headroomServiceLog.textContent = 'Starting…'; }
+        renderHeadroomService();
+        window.electronAPI.startHeadroomService().then(function (r) {
+          headroomServiceState.busy = false;
+          headroomServiceState.running = !!(r && r.running);
+          renderHeadroomService();
+          if (r && r.ok === false && typeof showToast === 'function') showToast('Headroom: ' + (r.error || 'could not start'), { kind: 'warn' });
+        }).catch(function () { headroomServiceState.busy = false; renderHeadroomService(); });
+      }
+    });
+  }
+  if (headroomServiceDash) headroomServiceDash.addEventListener('click', function (e) {
+    e.preventDefault();
+    if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard');
+  });
+  if (window.electronAPI && window.electronAPI.onHeadroomServiceLog) {
+    window.electronAPI.onHeadroomServiceLog(function (line) {
+      if (headroomServiceLog) { headroomServiceLog.classList.remove('hidden'); headroomServiceLog.textContent = line; }
+    });
+  }
+  refreshHeadroomService();
+}
+
 initHeadroomUI();
+initHeadroomServiceUI();
 
 // Default-effort selectors are app-global (not per-project), so they bypass
 // saveSpawnOptions and persist straight to config root.

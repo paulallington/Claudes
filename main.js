@@ -26,7 +26,6 @@ const { extractSpeakableText, lastAssistantUuid, splitSentences } = require('./l
 const { columnTranscriptPath, resolveTranscriptPath, isUnderProjectsRoot } = require('./lib/voice-transcript-path');
 const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice-personality');
 const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
-const { makeProxyEnsurer } = require('./lib/ensure-proxy');
 const { tagBackgroundEvent } = require('./lib/voice-background');
 const { appendWithRotation } = require('./lib/voice-debug-log');
 const https = require('https');
@@ -4773,40 +4772,89 @@ function probeHeadroomHealth() {
     } catch { finish(false); }
   });
 }
-function startHeadroomProxy() {
-  const args = ['proxy'];
-  try {
-    const cfg = readConfig();
-    if (cfg && cfg.useHeadroomMemory) args.push('--memory');
-  } catch { /* default: no memory */ }
-  try {
-    spawn('headroom', args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-    diagLog('[headroom] started detached proxy on port ' + headroomPort() + (args.includes('--memory') ? ' (--memory)' : ''));
-    // A freshly started proxy has an empty runtime-env, so re-arm the persisted
-    // output-shaper apply (the next ensureProxy re-enables it on the new proxy).
-    _shaperStateApplied = false;
-  } catch (e) {
-    console.warn('[headroom] failed to start proxy:', e && e.message);
-  }
+// Headroom persistent service. The app no longer spawns the proxy itself — that
+// was unreliable from the Electron/pty-server environment. Instead it drives
+// Headroom's own supervised deployment via `headroom install`, which auto-starts
+// on boot and survives reboots; columns bind to it by ANTHROPIC_BASE_URL.
+function runHeadroomInstall(args, onLine) {
+  // Spawn (not execFile) so we can stream progress to the renderer — `install
+  // apply` does a slow cold rtk / code-graph index and the user wants feedback.
+  return new Promise((resolve) => {
+    let out = '';
+    let child;
+    try {
+      child = spawn('headroom', ['install'].concat(args), { windowsHide: true });
+    } catch (e) {
+      resolve({ ok: false, output: '', error: String((e && e.message) || e) });
+      return;
+    }
+    const onData = (buf) => {
+      const s = buf.toString();
+      out += s;
+      if (onLine) s.split(/\r?\n/).forEach((ln) => { if (ln.trim()) onLine(ln); });
+    };
+    if (child.stdout) child.stdout.on('data', onData);
+    if (child.stderr) child.stderr.on('data', onData);
+    child.on('error', (e) => resolve({ ok: false, output: out, error: String((e && e.message) || e) }));
+    child.on('close', (code) => resolve({ ok: code === 0, output: out, error: code === 0 ? undefined : ('exit ' + code) }));
+  });
 }
-const ensureHeadroomProxy = makeProxyEnsurer({
-  probeHealth: probeHeadroomHealth,
-  startProxy: startHeadroomProxy,
-  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-  timeoutMs: 60000,
-  intervalMs: 300,
-});
-ipcMain.handle('headroom:ensureProxy', async () => {
-  if (!headroomStatus.installed) return { ok: false, started: false, error: 'headroom not installed' };
+function broadcastServiceLog(line) {
   try {
-    const res = await ensureHeadroomProxy();
-    // Once the proxy is up, apply persisted runtime toggles (output shaper) so a
-    // checked box actually takes effect on boot — not only on a manual click.
-    if (res.ok) applyPersistedShaperState();
-    return { ok: res.ok, started: res.started, error: res.error ? String(res.error.message || res.error) : undefined };
-  } catch (e) {
-    return { ok: false, started: false, error: String((e && e.message) || e) };
+    BrowserWindow.getAllWindows().forEach((w) => { try { w.webContents.send('headroom:serviceLog', line); } catch { /* ignore */ } });
+  } catch { /* ignore */ }
+}
+function isDeploymentInstalled(statusText) {
+  const t = String(statusText || '');
+  return !/No deployment profile|not installed/i.test(t) && t.trim().length > 0;
+}
+ipcMain.handle('headroom:serviceStatus', async () => {
+  if (!headroomStatus.installed) return { ok: false, installed: false, running: false, healthy: false, port: headroomPort(), error: 'headroom not installed' };
+  const res = await runHeadroomInstall(['status']);
+  const healthy = await probeHeadroomHealth();
+  if (healthy) applyPersistedShaperState();
+  return {
+    ok: true,
+    installed: isDeploymentInstalled(res.output) || healthy,
+    running: healthy,
+    healthy: healthy,
+    port: headroomPort(),
+    output: res.output,
+  };
+});
+ipcMain.handle('headroom:serviceStart', async () => {
+  if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
+  if (await probeHeadroomHealth()) { applyPersistedShaperState(); return { ok: true, running: true, alreadyRunning: true }; }
+  let cfg = null; try { cfg = readConfig(); } catch { /* ignore */ }
+  const statusRes = await runHeadroomInstall(['status']);
+  let res;
+  if (!isDeploymentInstalled(statusRes.output)) {
+    const applyArgs = ['apply', '--preset', 'persistent-service', '--providers', 'manual', '--port', String(headroomPort())];
+    if (cfg && cfg.useHeadroomMemory) applyArgs.push('--memory');
+    broadcastServiceLog('Installing persistent Headroom service…');
+    res = await runHeadroomInstall(applyArgs, broadcastServiceLog);
+  } else {
+    broadcastServiceLog('Starting Headroom service…');
+    res = await runHeadroomInstall(['start'], broadcastServiceLog);
   }
+  // A (re)started service has a fresh runtime-env, so re-arm the shaper apply.
+  _shaperStateApplied = false;
+  // Poll for readiness — a cold start indexes the code graph, which can take a
+  // while; that's exactly why we stream progress rather than fail silently.
+  let healthy = false;
+  for (let i = 0; i < 120 && res.ok; i++) {
+    if (await probeHeadroomHealth()) { healthy = true; break; }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  if (healthy) { applyPersistedShaperState(); broadcastServiceLog('Headroom proxy ready on port ' + headroomPort() + '.'); }
+  else if (res.ok) broadcastServiceLog('Headroom service started but not answering yet — it may still be indexing.');
+  return { ok: res.ok && healthy, installed: true, running: healthy, healthy: healthy, output: res.output, error: res.ok ? (healthy ? undefined : 'not ready') : res.error };
+});
+ipcMain.handle('headroom:serviceStop', async () => {
+  if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
+  broadcastServiceLog('Stopping Headroom service…');
+  const res = await runHeadroomInstall(['stop'], broadcastServiceLog);
+  return { ok: res.ok, running: false, output: res.output, error: res.error };
 });
 // Output shaper — proxy-wide, but hot-togglable with no restart via the proxy's
 // /admin/runtime-env channel. `_postShaperEnv(on)` flips the live override.
@@ -7693,20 +7741,6 @@ if (!gotLock) {
     migrateLoopsToAutomations();
     startAutomationScheduler();
     probeHeadroom(); // one-shot: cache whether the `headroom` CLI is available
-    // Warm the app-owned Headroom proxy at launch (not lazily on first column
-    // spawn) so a cold start's slow rtk / code-graph indexing happens while the
-    // app loads — columns then find it ready instead of racing the startup and
-    // exiting with ConnectionRefused. probeHeadroom resolves async, so poll for
-    // it briefly; ensureHeadroomProxy is race-guarded so this is idempotent.
-    (function warmHeadroomProxy(attempt) {
-      let cfg = null;
-      try { cfg = readConfig(); } catch (e) { /* ignore */ }
-      if (headroomStatus.installed) {
-        if (cfg && cfg.useHeadroom) { try { ensureHeadroomProxy(); } catch (e) { /* best effort */ } }
-        return;
-      }
-      if ((attempt || 0) < 10) setTimeout(() => warmHeadroomProxy((attempt || 0) + 1), 500);
-    })(0);
 
     const cfg = readConfig();
     // Zombie-popout guard: `poppedOut: true` is intentionally preserved across
