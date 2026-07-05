@@ -22,6 +22,7 @@
       <div id="project-list"></div>
       <button id="btn-add-project">+ Add Project</button>
       <div id="headroom-service" class="headroom-service hidden">
+        <div class="headroom-service-main hidden" id="headroom-service-main">
         <div class="headroom-service-row">
           <span class="headroom-service-dot" id="headroom-service-dot"></span>
           <span class="headroom-service-label" id="headroom-service-label">Headroom</span>
@@ -43,6 +44,16 @@
             <span class="spawn-help" title="Cut output tokens by shaping response verbosity to your learned preference. Proxy-wide, applied live — no restart.">?</span>
           </label>
           <div class="headroom-shaper-note" id="headroom-shaper-note"></div>
+        </div>
+        </div>
+        <div class="headroom-service-install hidden" id="headroom-service-install">
+          <div class="headroom-service-row">
+            <span class="headroom-service-dot stopped"></span>
+            <span class="headroom-service-label">Headroom · not installed</span>
+          </div>
+          <div class="headroom-install-hint">Local proxy that cuts token usage. Install the CLI:</div>
+          <code class="headroom-install-cmd" id="headroom-install-cmd" title="Click to copy">pip install "headroom-ai[all]"</code>
+          <a href="#" class="headroom-service-dash" id="headroom-install-docs">Docs &amp; other install methods &#8599;</a>
         </div>
       </div>
       <div id="plan-limits-mini" class="plan-limits-mini hidden"></div>

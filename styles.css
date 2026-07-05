@@ -733,6 +733,28 @@ html[data-platform="darwin"] .sidebar-header {
 .headroom-shaper-note.is-busy { color: #22d3ee; }
 .headroom-shaper-note.is-ok { color: #4ade80; }
 .headroom-shaper-note.is-error { color: #f87171; }
+.headroom-install-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-secondary, #cbd5e1);
+}
+.headroom-install-cmd {
+  display: block;
+  margin: 5px 0;
+  padding: 5px 7px;
+  font-family: monospace;
+  font-size: 10.5px;
+  color: #22d3ee;
+  background: rgba(34, 211, 238, 0.08);
+  border: 1px solid rgba(34, 211, 238, 0.25);
+  border-radius: 4px;
+  cursor: pointer;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.headroom-install-cmd:hover { background: rgba(34, 211, 238, 0.14); }
+#headroom-install-docs { font-size: 10px; display: inline-block; margin-top: 2px; }
 
 /* --- Main Area --- */
 

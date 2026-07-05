@@ -51,6 +51,7 @@ var optHeadroomShaper = document.getElementById('opt-headroom-shaper');
 var optHeadroomAutostart = document.getElementById('opt-headroom-autostart');
 var headroomSubs = document.getElementById('opt-headroom-subs');
 var headroomInstalled = false;  // resolved async from main; gates wrapping + UI
+var headroomProbed = false;     // true once main's post-probe status has landed (gates the not-installed prompt so it doesn't flash before the probe)
 
 // Per-endpoint-class default effort applied at spawn. User-configurable in the
 // spawn options panel; persisted in config.defaultEffortCloud/Local.
@@ -10849,6 +10850,7 @@ function initHeadroomUI() {
   if (window.electronAPI && window.electronAPI.onHeadroomStatus) {
     window.electronAPI.onHeadroomStatus(function (st) {
       headroomInstalled = !!(st && st.installed);
+      headroomProbed = true;  // authoritative post-probe result — safe to show the install prompt now
       applyHeadroomUiState();
     });
   }
@@ -10950,6 +10952,16 @@ if (optHeadroomShaper) {
 }
 if (headroomDashboardLink) headroomDashboardLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard'); });
 if (headroomInstallLink) headroomInstallLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('https://github.com/headroomlabs-ai/headroom'); });
+var headroomInstallDocs = document.getElementById('headroom-install-docs');
+if (headroomInstallDocs) headroomInstallDocs.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('https://github.com/headroomlabs-ai/headroom'); });
+var headroomInstallCmd = document.getElementById('headroom-install-cmd');
+if (headroomInstallCmd) headroomInstallCmd.addEventListener('click', function () {
+  var cmd = headroomInstallCmd.textContent || '';
+  try {
+    navigator.clipboard.writeText(cmd);
+    if (typeof showToast === 'function') showToast('Install command copied', { kind: 'info' });
+  } catch (e) { /* clipboard unavailable — the text is still selectable */ }
+});
 
 // --- Top-level Headroom persistent-service control (sidebar) ---
 var headroomServiceEl = document.getElementById('headroom-service');
@@ -10960,10 +10972,22 @@ var headroomServiceLog = document.getElementById('headroom-service-log');
 var headroomServiceDash = document.getElementById('headroom-service-dash');
 var headroomServiceState = { running: false, busy: false };
 
+var headroomServiceMain = document.getElementById('headroom-service-main');
+var headroomServiceInstall = document.getElementById('headroom-service-install');
 function renderHeadroomService() {
   if (!headroomServiceEl) return;
-  if (!headroomInstalled) { headroomServiceEl.classList.add('hidden'); return; }
+  // Not installed: once the probe has resolved, show the install prompt instead
+  // of the running-state controls. Before the probe lands, stay hidden (no flash).
+  if (!headroomInstalled) {
+    if (!headroomProbed) { headroomServiceEl.classList.add('hidden'); return; }
+    headroomServiceEl.classList.remove('hidden');
+    if (headroomServiceMain) headroomServiceMain.classList.add('hidden');
+    if (headroomServiceInstall) headroomServiceInstall.classList.remove('hidden');
+    return;
+  }
   headroomServiceEl.classList.remove('hidden');
+  if (headroomServiceInstall) headroomServiceInstall.classList.add('hidden');
+  if (headroomServiceMain) headroomServiceMain.classList.remove('hidden');
   var s = headroomServiceState;
   var dotClass = s.busy ? 'busy' : (s.running ? 'running' : 'stopped');
   if (headroomServiceDot) headroomServiceDot.className = 'headroom-service-dot ' + dotClass;
