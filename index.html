@@ -29,6 +29,16 @@
           <button class="headroom-service-btn" id="headroom-service-btn">Start</button>
         </div>
         <div class="headroom-service-log hidden" id="headroom-service-log"></div>
+        <div class="headroom-service-opts" id="headroom-service-opts">
+          <label class="headroom-service-opt" id="opt-headroom-memory-label">
+            <input type="checkbox" id="opt-headroom-memory"> Memory
+            <span class="spawn-help" title="Persistent cross-session memory. Proxy-wide (affects every Headroom column). Takes effect when the app next starts its Headroom proxy — Stop then Start to apply.">?</span>
+          </label>
+          <label class="headroom-service-opt" id="opt-headroom-shaper-label">
+            <input type="checkbox" id="opt-headroom-shaper"> Output shaper
+            <span class="spawn-help" title="Cut output tokens by shaping response verbosity to your learned preference. Proxy-wide, applied live — no restart.">?</span>
+          </label>
+        </div>
       </div>
       <div id="plan-limits-mini" class="plan-limits-mini hidden"></div>
     </div>
@@ -267,14 +277,6 @@
                 <label class="spawn-option spawn-headroom-sub" id="opt-headroom-1m-label">
                   <input type="checkbox" id="opt-headroom-1m"> 1M context
                   <span class="spawn-help" title="Keep the full 1M context window through the proxy (--1m). Behind Headroom's proxy Claude Code otherwise drops the 1M beta header and caps at 200k. On by default.">?</span>
-                </label>
-                <label class="spawn-option spawn-headroom-sub" id="opt-headroom-memory-label">
-                  <input type="checkbox" id="opt-headroom-memory"> Memory
-                  <span class="spawn-help" title="Persistent cross-session memory. Proxy-wide (affects all Headroom columns). Takes effect when the app next starts its own Headroom proxy — i.e. a clean launch with no proxy already running.">?</span>
-                </label>
-                <label class="spawn-option spawn-headroom-sub" id="opt-headroom-shaper-label">
-                  <input type="checkbox" id="opt-headroom-shaper"> Output shaper
-                  <span class="spawn-help" title="Cut output tokens by shaping response verbosity to your learned preference. Proxy-wide, applied live — no restart.">?</span>
                 </label>
               </div>
               <label class="spawn-option">

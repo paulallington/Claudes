@@ -10819,13 +10819,17 @@ function applyHeadroomUiState() {
     if (headroomDashboardLink) headroomDashboardLink.classList.add('hidden');
     if (headroomRequiredNote) headroomRequiredNote.classList.remove('hidden');
   }
-  // Sub-toggles are usable only when Headroom is installed AND the parent toggle
-  // is on. 1M defaults ON (undefined !== false); memory/shaper default off.
+  // 1M is a per-column env toggle in the spawn dropdown — usable only when
+  // Headroom is installed AND this column's parent "Use Headroom" is on. It
+  // defaults ON (undefined !== false).
   var subsUsable = headroomInstalled && !!(config && config.useHeadroom);
   if (optHeadroom1m) { optHeadroom1m.disabled = !subsUsable; optHeadroom1m.checked = !!(config && config.useHeadroom1m !== false); }
-  if (optHeadroomMemory) { optHeadroomMemory.disabled = !subsUsable; optHeadroomMemory.checked = !!(config && config.useHeadroomMemory); }
-  if (optHeadroomShaper) { optHeadroomShaper.disabled = !subsUsable; optHeadroomShaper.checked = !!(config && config.useHeadroomOutputShaper); }
   if (headroomSubs) headroomSubs.classList.toggle('is-disabled', !subsUsable);
+  // Memory + Output shaper are PROXY-WIDE, so they live on the top-level service
+  // control and are gated only on Headroom being installed — not on any single
+  // column's binding. Both default off.
+  if (optHeadroomMemory) { optHeadroomMemory.disabled = !headroomInstalled; optHeadroomMemory.checked = !!(config && config.useHeadroomMemory); }
+  if (optHeadroomShaper) { optHeadroomShaper.disabled = !headroomInstalled; optHeadroomShaper.checked = !!(config && config.useHeadroomOutputShaper); }
   // Show/refresh the top-level Headroom service control once the binary probe
   // resolves (renderHeadroomService is hoisted; refs assigned at module load).
   try { if (typeof renderHeadroomService === 'function') renderHeadroomService(); } catch (e) { /* ignore */ }
@@ -10867,7 +10871,7 @@ if (optHeadroomMemory) {
     saveConfig();
     // main.js applies --memory the next time it starts the app-owned proxy.
     if (optHeadroomMemory.checked && typeof showToast === 'function') {
-      showToast('Headroom memory enabled — applies on the next proxy start (relaunch to apply now)', { kind: 'info' });
+      showToast('Headroom memory enabled — Stop then Start the proxy to apply', { kind: 'info' });
     }
   });
 }

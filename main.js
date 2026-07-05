@@ -4776,85 +4776,96 @@ function probeHeadroomHealth() {
 // was unreliable from the Electron/pty-server environment. Instead it drives
 // Headroom's own supervised deployment via `headroom install`, which auto-starts
 // on boot and survives reboots; columns bind to it by ANTHROPIC_BASE_URL.
-function runHeadroomInstall(args, onLine) {
-  // Spawn (not execFile) so we can stream progress to the renderer — `install
-  // apply` does a slow cold rtk / code-graph index and the user wants feedback.
-  return new Promise((resolve) => {
-    let out = '';
-    let child;
-    try {
-      child = spawn('headroom', ['install'].concat(args), { windowsHide: true });
-    } catch (e) {
-      resolve({ ok: false, output: '', error: String((e && e.message) || e) });
-      return;
-    }
-    const onData = (buf) => {
-      const s = buf.toString();
-      out += s;
-      if (onLine) s.split(/\r?\n/).forEach((ln) => { if (ln.trim()) onLine(ln); });
-    };
-    if (child.stdout) child.stdout.on('data', onData);
-    if (child.stderr) child.stderr.on('data', onData);
-    child.on('error', (e) => resolve({ ok: false, output: out, error: String((e && e.message) || e) }));
-    child.on('close', (code) => resolve({ ok: code === 0, output: out, error: code === 0 ? undefined : ('exit ' + code) }));
-  });
-}
+// The proxy is managed as an ordinary child process (`headroom proxy`), NOT an
+// OS service. `install --preset persistent-service` shells out to sc.exe, which
+// needs Administrator on Windows and fails in a non-elevated app; a plain child
+// needs no privileges, and — since columns now bind by ANTHROPIC_BASE_URL — the
+// proxy only has to be *up*, it does not have to survive reboots. We capture its
+// output so the user gets the startup feedback the old detached/ignored spawn hid.
+let headroomProxyChild = null;
 function broadcastServiceLog(line) {
   try {
     BrowserWindow.getAllWindows().forEach((w) => { try { w.webContents.send('headroom:serviceLog', line); } catch { /* ignore */ } });
   } catch { /* ignore */ }
 }
-function isDeploymentInstalled(statusText) {
-  const t = String(statusText || '');
-  return !/No deployment profile|not installed/i.test(t) && t.trim().length > 0;
+function stopHeadroomProxyProcess() {
+  const child = headroomProxyChild;
+  headroomProxyChild = null;
+  if (!child) return false;
+  try { child.kill(); } catch { /* ignore */ }
+  return true;
+}
+function startHeadroomProxyProcess(onLine) {
+  return new Promise((resolve) => {
+    let cfg = null; try { cfg = readConfig(); } catch { /* ignore */ }
+    const args = ['proxy', '--port', String(headroomPort())];
+    if (cfg && cfg.useHeadroomMemory) args.push('--memory');
+    let child;
+    try {
+      child = spawn('headroom', args, { windowsHide: true });
+    } catch (e) {
+      resolve({ ok: false, error: String((e && e.message) || e) });
+      return;
+    }
+    headroomProxyChild = child;
+    let settled = false;
+    const onData = (buf) => {
+      const s = buf.toString();
+      if (onLine) s.split(/\r?\n/).forEach((ln) => { if (ln.trim()) onLine(ln); });
+    };
+    if (child.stdout) child.stdout.on('data', onData);
+    if (child.stderr) child.stderr.on('data', onData);
+    child.on('error', (e) => {
+      if (headroomProxyChild === child) headroomProxyChild = null;
+      if (!settled) { settled = true; resolve({ ok: false, error: String((e && e.message) || e) }); }
+    });
+    child.on('close', (code) => {
+      if (headroomProxyChild === child) headroomProxyChild = null;
+      if (!settled) { settled = true; resolve({ ok: false, error: 'proxy exited (' + code + ')' }); }
+    });
+    // The process stays alive on success, so don't wait for close — hand back
+    // once it's spawned and let the caller poll /health for readiness.
+    setTimeout(() => { if (!settled) { settled = true; resolve({ ok: true, spawned: true }); } }, 300);
+  });
 }
 ipcMain.handle('headroom:serviceStatus', async () => {
   if (!headroomStatus.installed) return { ok: false, installed: false, running: false, healthy: false, port: headroomPort(), error: 'headroom not installed' };
-  const res = await runHeadroomInstall(['status']);
   const healthy = await probeHeadroomHealth();
   if (healthy) applyPersistedShaperState();
   return {
     ok: true,
-    installed: isDeploymentInstalled(res.output) || healthy,
+    installed: true,
     running: healthy,
     healthy: healthy,
+    managed: !!headroomProxyChild,
     port: headroomPort(),
-    output: res.output,
   };
 });
 ipcMain.handle('headroom:serviceStart', async () => {
   if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
   if (await probeHeadroomHealth()) { applyPersistedShaperState(); return { ok: true, running: true, alreadyRunning: true }; }
-  let cfg = null; try { cfg = readConfig(); } catch { /* ignore */ }
-  const statusRes = await runHeadroomInstall(['status']);
-  let res;
-  if (!isDeploymentInstalled(statusRes.output)) {
-    const applyArgs = ['apply', '--preset', 'persistent-service', '--providers', 'manual', '--port', String(headroomPort())];
-    if (cfg && cfg.useHeadroomMemory) applyArgs.push('--memory');
-    broadcastServiceLog('Installing persistent Headroom service…');
-    res = await runHeadroomInstall(applyArgs, broadcastServiceLog);
-  } else {
-    broadcastServiceLog('Starting Headroom service…');
-    res = await runHeadroomInstall(['start'], broadcastServiceLog);
-  }
-  // A (re)started service has a fresh runtime-env, so re-arm the shaper apply.
+  broadcastServiceLog('Starting Headroom proxy on port ' + headroomPort() + '…');
+  const res = await startHeadroomProxyProcess(broadcastServiceLog);
+  if (!res.ok) { broadcastServiceLog('Failed to start Headroom: ' + (res.error || 'unknown error')); return { ok: false, running: false, error: res.error }; }
+  // A freshly started proxy has a clean runtime-env, so re-arm the shaper apply.
   _shaperStateApplied = false;
   // Poll for readiness — a cold start indexes the code graph, which can take a
   // while; that's exactly why we stream progress rather than fail silently.
   let healthy = false;
-  for (let i = 0; i < 120 && res.ok; i++) {
+  for (let i = 0; i < 120; i++) {
+    if (!headroomProxyChild) break; // process died — stop waiting
     if (await probeHeadroomHealth()) { healthy = true; break; }
     await new Promise((r) => setTimeout(r, 1000));
   }
   if (healthy) { applyPersistedShaperState(); broadcastServiceLog('Headroom proxy ready on port ' + headroomPort() + '.'); }
-  else if (res.ok) broadcastServiceLog('Headroom service started but not answering yet — it may still be indexing.');
-  return { ok: res.ok && healthy, installed: true, running: healthy, healthy: healthy, output: res.output, error: res.ok ? (healthy ? undefined : 'not ready') : res.error };
+  else broadcastServiceLog('Headroom proxy started but not answering yet — it may still be indexing.');
+  return { ok: healthy, installed: true, running: healthy, healthy: healthy, error: healthy ? undefined : 'not ready' };
 });
 ipcMain.handle('headroom:serviceStop', async () => {
   if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
-  broadcastServiceLog('Stopping Headroom service…');
-  const res = await runHeadroomInstall(['stop'], broadcastServiceLog);
-  return { ok: res.ok, running: false, output: res.output, error: res.error };
+  const wasManaged = stopHeadroomProxyProcess();
+  broadcastServiceLog(wasManaged ? 'Stopped Headroom proxy.' : 'No app-managed Headroom proxy to stop (it may be running from another terminal).');
+  return { ok: true, running: false, managed: wasManaged };
 });
 // Output shaper — proxy-wide, but hot-togglable with no restart via the proxy's
 // /admin/runtime-env channel. `_postShaperEnv(on)` flips the live override.
@@ -7856,6 +7867,8 @@ app.on('before-quit', () => {
     try { clearInterval(t.timer); } catch {}
   }
   clawdTails.clear();
+  step('stopHeadroomProxyProcess');
+  stopHeadroomProxyProcess();
   step('killPtyServer');
   killPtyServer();
   // The hook server's listening socket keeps the event loop alive; close it
