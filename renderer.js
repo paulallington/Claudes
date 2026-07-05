@@ -4243,6 +4243,18 @@ function addColumn(args, targetRow, opts) {
     }
   } catch (e) { /* addon optional */ }
   terminal.open(termWrapper);
+  // OSC 52 clipboard: Claude's TUI copies by emitting an OSC 52 escape sequence,
+  // but xterm.js has no built-in handler so the copy is silently dropped. Decode
+  // the payload and write it to the system clipboard via the Electron bridge.
+  try {
+    terminal.parser.registerOscHandler(52, function (data) {
+      var text = window.Osc52 && window.Osc52.parseOsc52 ? window.Osc52.parseOsc52(data) : null;
+      if (text != null && window.electronAPI && window.electronAPI.clipboardWriteText) {
+        window.electronAPI.clipboardWriteText(text);
+      }
+      return true; // handled — prevents xterm passing it through
+    });
+  } catch (e) { /* parser API optional */ }
   // WebGL renderer is fast but Chromium caps WebGL contexts at ~16 per process.
   // When exceeded, Chromium silently kills the oldest context and that
   // terminal's canvas goes blank. Subscribe to onContextLoss so we dispose the
