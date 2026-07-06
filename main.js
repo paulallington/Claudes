@@ -4878,9 +4878,17 @@ ipcMain.handle('headroom:serviceStatus', async () => {
 });
 // Shared start path for both the Start button and the launch auto-start. Spawns
 // the app-managed proxy (unless one is already answering) and polls to ready.
+let _headroomStartInflight = null;
 async function startHeadroomManagedProxy() {
   if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
   if (await probeHeadroomHealth()) { applyPersistedShaperState(); return { ok: true, running: true, alreadyRunning: true }; }
+  // Share one start across concurrent callers (several columns gating at once on
+  // launch, plus the auto-start) so we never spawn two proxies on the same port.
+  if (_headroomStartInflight) return _headroomStartInflight;
+  _headroomStartInflight = (async () => { return await _startHeadroomManagedProxyInner(); })();
+  try { return await _headroomStartInflight; } finally { _headroomStartInflight = null; }
+}
+async function _startHeadroomManagedProxyInner() {
   broadcastServiceLog('Starting Headroom proxy on port ' + headroomPort() + '…');
   _streamingHeadroomStartup = true;
   // Forward the proxy's raw stdout only while starting; broadcastServiceLog

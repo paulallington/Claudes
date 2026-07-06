@@ -715,7 +715,7 @@ function connectWS() {
           // Re-derived from the live global flag; never persisted on the column.
           maybeBindHeadroom(respawnMsg, { hasEndpoint: !!(col3.endpointId || col3.env), isClaude: !col3.cmd });
           col3.terminal.clear();
-          wsSend(respawnMsg);
+          gatedWsSend(respawnMsg);
           setColumnActivity(msg.id, 'working');
         } else {
           col3.element.appendChild(createExitOverlay(msg.id, null, col3));
@@ -777,6 +777,40 @@ function wsSend(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(obj));
   }
+}
+
+// A Headroom-bound column must not spawn into a cold proxy: the CLI's own retry
+// (attempt N/10) runs out before a still-indexing proxy answers, leaving a
+// ConnectionRefused (esp. right after a restart with auto-start on). Gate the
+// create on readiness — start the proxy if needed and wait for /health — then
+// send. One shared in-flight promise so restoring several Headroom columns
+// triggers a single start, not one per column.
+var _headroomReadyInflight = null;
+function ensureHeadroomReady() {
+  var api = window.electronAPI;
+  if (!api || !api.getHeadroomServiceStatus) return Promise.resolve(true);
+  if (_headroomReadyInflight) return _headroomReadyInflight;
+  var work = api.getHeadroomServiceStatus().then(function (st) {
+    if (st && st.running) return true;                 // already up
+    if (!api.startHeadroomService) return false;
+    return api.startHeadroomService().then(function (r) { return !!(r && r.running); });
+  }).catch(function () { return false; });
+  // Cap the wait so a genuinely broken proxy can't hang the spawn forever —
+  // fall through and let the CLI's own retry surface the error after 60s.
+  var capped = Promise.race([work, new Promise(function (res) { setTimeout(function () { res(false); }, 60000); })]);
+  _headroomReadyInflight = capped;
+  capped.then(function () { _headroomReadyInflight = null; }, function () { _headroomReadyInflight = null; });
+  return capped;
+}
+// Drop-in for wsSend at the Headroom-aware spawn sites: gates the create when the
+// message carries a proxy base URL, passes everything else straight through.
+function gatedWsSend(msg) {
+  if (!msg || !msg.env || !msg.env.ANTHROPIC_BASE_URL) { wsSend(msg); return; }
+  var col = (msg.id && allColumns && allColumns.get) ? allColumns.get(msg.id) : null;
+  var hintTimer = setTimeout(function () {
+    if (col && col.terminal) { try { col.terminal.write('\x1b[2m⧗ Waiting for the Headroom proxy to start…\x1b[0m\r\n'); } catch (e) { /* ignore */ } }
+  }, 500);
+  ensureHeadroomReady().then(function () { clearTimeout(hintTimer); wsSend(msg); });
 }
 
 // ============================================================
@@ -3998,7 +4032,7 @@ function createExitOverlay(id, exitCode, col) {
     // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
     // Re-derived from the live global flag; passthrough for endpoint/arbitrary cmd.
     maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd });
-    wsSend(sendMsg);
+    gatedWsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
     // Run-tab launches: the previous exit fired refreshRunConfigs and set the
@@ -4453,7 +4487,7 @@ function addColumn(args, targetRow, opts) {
     maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd });
 
     vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
-    wsSend(sendMsg);
+    gatedWsSend(sendMsg);
 
     var isResume = claudeArgs.indexOf('--resume') !== -1;
     if (!cmd && !isResume && !__plan.sessionId && window.electronAPI) {
@@ -6003,7 +6037,7 @@ async function restartColumn(id) {
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
   // Passthrough for arbitrary-cmd/endpoint columns; re-derived from live flag.
   maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd });
-  wsSend(sendMsg);
+  gatedWsSend(sendMsg);
   // Re-evaluate stale-hook health from a clean slate for the new session: if
   // hooks now reach the column it will never re-flag; if they still don't, the
   // sweep can surface the hint again after the grace window.
