@@ -662,7 +662,19 @@ html[data-platform="darwin"] .sidebar-header {
 .headroom-service-main.hidden,
 .headroom-service-install.hidden,
 .headroom-service-log.hidden,
-.headroom-service-dash.hidden { display: none; }
+.headroom-service-dash.hidden,
+.headroom-service-restart.hidden { display: none; }
+.headroom-service-dot.stalled { background: #f87171; box-shadow: 0 0 6px rgba(248, 113, 113, 0.6); }
+.headroom-service-restart {
+  background: none;
+  border: none;
+  color: var(--text-secondary, #cbd5e1);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+}
+.headroom-service-restart:hover { color: var(--accent, #22d3ee); }
 .headroom-service-row {
   display: flex;
   align-items: center;

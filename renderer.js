@@ -11016,7 +11016,8 @@ var headroomServiceLabel = document.getElementById('headroom-service-label');
 var headroomServiceBtn = document.getElementById('headroom-service-btn');
 var headroomServiceLog = document.getElementById('headroom-service-log');
 var headroomServiceDash = document.getElementById('headroom-service-dash');
-var headroomServiceState = { running: false, busy: false };
+var headroomServiceRestart = document.getElementById('headroom-service-restart');
+var headroomServiceState = { running: false, busy: false, stalled: false };
 
 function renderHeadroomService() {
   if (!headroomServiceEl) return;
@@ -11038,14 +11039,20 @@ function renderHeadroomService() {
   if (installEl) installEl.classList.add('hidden');
   if (mainEl) mainEl.classList.remove('hidden');
   var s = headroomServiceState;
-  var dotClass = s.busy ? 'busy' : (s.running ? 'running' : 'stopped');
+  var dotClass = s.stalled ? 'stalled' : (s.busy ? 'busy' : (s.running ? 'running' : 'stopped'));
   if (headroomServiceDot) headroomServiceDot.className = 'headroom-service-dot ' + dotClass;
-  if (headroomServiceLabel) headroomServiceLabel.textContent = s.busy ? 'Headroom · starting…' : (s.running ? 'Headroom · running' : 'Headroom · stopped');
+  if (headroomServiceLabel) headroomServiceLabel.textContent = s.stalled ? 'Headroom · not responding' : (s.busy ? 'Headroom · starting…' : (s.running ? 'Headroom · running' : 'Headroom · stopped'));
   if (headroomServiceBtn) {
-    headroomServiceBtn.textContent = s.busy ? '…' : (s.running ? 'Stop' : 'Start');
+    headroomServiceBtn.textContent = s.stalled ? 'Restart' : (s.busy ? '…' : (s.running ? 'Stop' : 'Start'));
     headroomServiceBtn.disabled = !!s.busy;
   }
   if (headroomServiceDash) headroomServiceDash.classList.toggle('hidden', !s.running);
+  // ↻ is a convenience restart while running or mid-start; when stalled the
+  // primary button already reads "Restart", so hide the icon to avoid two.
+  if (headroomServiceRestart) {
+    headroomServiceRestart.classList.toggle('hidden', !(s.running || s.busy));
+    headroomServiceRestart.disabled = false;
+  }
 }
 
 function refreshHeadroomService() {
@@ -11058,9 +11065,23 @@ function refreshHeadroomService() {
 
 function initHeadroomServiceUI() {
   if (!headroomServiceEl) return;
+  function doHeadroomRestart() {
+    if (!window.electronAPI || !window.electronAPI.restartHeadroomService) return;
+    headroomServiceState.busy = true; headroomServiceState.stalled = false; headroomServiceState.running = false;
+    if (headroomServiceLog) { headroomServiceLog.classList.remove('hidden'); headroomServiceLog.textContent = 'Restarting…'; }
+    renderHeadroomService();
+    window.electronAPI.restartHeadroomService().then(function (r) {
+      headroomServiceState.busy = false;
+      headroomServiceState.running = !!(r && r.running);
+      headroomServiceState.stalled = !!(r && r.ok === false);
+      renderHeadroomService();
+      if (r && r.ok === false && typeof showToast === 'function') showToast('Headroom: ' + (r.error || 'restart failed'), { kind: 'warn' });
+    }).catch(function () { headroomServiceState.busy = false; renderHeadroomService(); });
+  }
   if (headroomServiceBtn) {
     headroomServiceBtn.addEventListener('click', function () {
       if (headroomServiceState.busy || !window.electronAPI) return;
+      if (headroomServiceState.stalled) { doHeadroomRestart(); return; }
       if (headroomServiceState.running) {
         headroomServiceState.busy = true; renderHeadroomService();
         window.electronAPI.stopHeadroomService().then(function (r) {
@@ -11085,15 +11106,19 @@ function initHeadroomServiceUI() {
     e.preventDefault();
     if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard');
   });
+  if (headroomServiceRestart) headroomServiceRestart.addEventListener('click', doHeadroomRestart);
   if (window.electronAPI && window.electronAPI.onHeadroomServiceLog) {
     window.electronAPI.onHeadroomServiceLog(function (line) {
       if (headroomServiceLog) { headroomServiceLog.classList.remove('hidden'); headroomServiceLog.textContent = line; }
       // Keep the dot in sync when the proxy is driven from main (e.g. launch
       // auto-start), not just the Start button. The button flow owns its own
       // busy state, so only nudge when a background transition is signalled.
-      if (/ready on port/i.test(line)) { headroomServiceState.running = true; headroomServiceState.busy = false; renderHeadroomService(); }
-      else if (/^Starting Headroom proxy/i.test(line)) { if (!headroomServiceState.running) { headroomServiceState.busy = true; renderHeadroomService(); } }
-      else if (/^Failed to start/i.test(line)) { headroomServiceState.busy = false; renderHeadroomService(); }
+      if (/ready on port/i.test(line)) { headroomServiceState.running = true; headroomServiceState.busy = false; headroomServiceState.stalled = false; renderHeadroomService(); }
+      else if (/^Starting Headroom proxy|^Restarting Headroom/i.test(line)) { headroomServiceState.stalled = false; if (!headroomServiceState.running) { headroomServiceState.busy = true; renderHeadroomService(); } }
+      // Terminal non-ready outcomes — clear busy so the button un-sticks, and
+      // mark stalled so the Restart escape hatch is offered instead of a dead '…'.
+      else if (/didn’t answer|didn't answer|not answering yet/i.test(line)) { headroomServiceState.busy = false; headroomServiceState.stalled = true; headroomServiceState.running = false; renderHeadroomService(); }
+      else if (/^Failed to start/i.test(line)) { headroomServiceState.busy = false; headroomServiceState.stalled = true; renderHeadroomService(); }
     });
   }
   refreshHeadroomService();

@@ -117,6 +117,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getHeadroomServiceStatus: () => ipcRenderer.invoke('headroom:serviceStatus'),
   startHeadroomService: () => ipcRenderer.invoke('headroom:serviceStart'),
   stopHeadroomService: () => ipcRenderer.invoke('headroom:serviceStop'),
+  restartHeadroomService: () => ipcRenderer.invoke('headroom:serviceRestart'),
   onHeadroomServiceLog: (cb) => ipcRenderer.on('headroom:serviceLog', (_e, line) => cb(line)),
   setHeadroomOutputShaper: (on) => ipcRenderer.invoke('headroom:setOutputShaper', on),
   getVoiceSettings: () => ipcRenderer.invoke('voice:getSettings'),

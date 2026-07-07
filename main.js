@@ -4844,12 +4844,22 @@ function startHeadroomProxyProcess(onLine) {
     }
     headroomProxyChild = child;
     let settled = false;
+    // Persist the full proxy output to its own log so a hang ("started but not
+    // answering") can be diagnosed after the fact — the sidebar only shows the
+    // last line, and we stop tailing once ready.
+    let proxyLog = null;
+    try {
+      proxyLog = fs.createWriteStream(path.join(diagLogDir(), 'headroom-proxy.log'), { flags: 'a' });
+      proxyLog.write('\n===== proxy start ' + new Date().toISOString() + ' args=' + JSON.stringify(args) + ' =====\n');
+    } catch { /* logging is best-effort */ }
     const onData = (buf) => {
       const s = buf.toString();
+      if (proxyLog) { try { proxyLog.write(s); } catch { /* ignore */ } }
       if (onLine) s.split(/\r?\n/).forEach((ln) => { if (ln.trim()) onLine(ln); });
     };
     if (child.stdout) child.stdout.on('data', onData);
     if (child.stderr) child.stderr.on('data', onData);
+    child.on('close', () => { if (proxyLog) { try { proxyLog.end(); } catch { /* ignore */ } proxyLog = null; } });
     child.on('error', (e) => {
       if (headroomProxyChild === child) headroomProxyChild = null;
       if (!settled) { settled = true; resolve({ ok: false, error: String((e && e.message) || e) }); }
@@ -4900,14 +4910,16 @@ async function _startHeadroomManagedProxyInner() {
   // Poll for readiness — a cold start indexes the code graph, which can take a
   // while; that's exactly why we stream progress rather than fail silently.
   let healthy = false;
-  for (let i = 0; i < 120; i++) {
-    if (!headroomProxyChild) break; // process died — stop waiting
-    if (await probeHeadroomHealth()) { healthy = true; break; }
+  const POLL_SECS = 180; // cold start loads ONNX models + indexes the code graph
+  for (let i = 0; i < POLL_SECS; i++) {
+    if (!headroomProxyChild) { diagLog('[headroom] proxy process exited during startup at ' + i + 's'); break; }
+    if (await probeHeadroomHealth()) { healthy = true; diagLog('[headroom] proxy healthy after ' + i + 's'); break; }
+    if (i && i % 15 === 0) { diagLog('[headroom] still waiting for proxy health (' + i + 's)…'); broadcastServiceLog('Still starting Headroom… (' + i + 's; indexing on first run)'); }
     await new Promise((r) => setTimeout(r, 1000));
   }
   _streamingHeadroomStartup = false; // stop tailing the proxy's INFO spam
   if (healthy) { applyPersistedShaperState(); broadcastServiceLog('Headroom proxy ready on port ' + headroomPort() + '.'); }
-  else broadcastServiceLog('Headroom proxy started but not answering yet — it may still be indexing.');
+  else { diagLog('[headroom] proxy not healthy after ' + POLL_SECS + 's — see headroom-proxy.log'); broadcastServiceLog('Headroom didn’t answer after ' + POLL_SECS + 's — use Restart (details in headroom-proxy.log).'); }
   return { ok: healthy, installed: true, running: healthy, healthy: healthy, error: healthy ? undefined : 'not ready' };
 }
 // Once-per-launch: if the user opted into "Run on startup", bring the proxy up
@@ -4927,6 +4939,18 @@ ipcMain.handle('headroom:serviceStop', async () => {
   const wasManaged = stopHeadroomProxyProcess();
   broadcastServiceLog(wasManaged ? 'Stopped Headroom proxy.' : 'No app-managed Headroom proxy to stop (it may be running from another terminal).');
   return { ok: true, running: false, managed: wasManaged };
+});
+// Force-restart: the escape hatch for a stuck "started but not answering" proxy.
+// Kill our child, drop any in-flight start, wait for the port to free, start fresh.
+ipcMain.handle('headroom:serviceRestart', async () => {
+  if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
+  diagLog('[headroom] restart requested');
+  broadcastServiceLog('Restarting Headroom proxy…');
+  stopHeadroomProxyProcess();
+  _headroomStartInflight = null;
+  _shaperStateApplied = false;
+  await new Promise((r) => setTimeout(r, 1200)); // let the port release
+  return startHeadroomManagedProxy();
 });
 // Output shaper — proxy-wide, but hot-togglable with no restart via the proxy's
 // /admin/runtime-env channel. `_postShaperEnv(on)` flips the live override.
