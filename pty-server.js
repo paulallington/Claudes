@@ -46,7 +46,22 @@ if (process.platform === 'darwin') {
 }
 
 const pty = require('node-pty');
-const { diagLogDir } = require('./lib/diag-log-dir');
+
+// Resolve the diagnostics log dir. INLINED (not require('./lib/...')) on
+// purpose: pty-server.js runs under system Node from app.asar.unpacked/, and
+// lib/ is packed inside app.asar — a require('./lib/...') there throws
+// MODULE_NOT_FOUND and crash-loops the whole terminal server. pty-server must
+// stay self-contained. Mirrors main.js's diagLogDir + lib/diag-log-dir.js.
+function diagLogDir() {
+  const home = os.homedir();
+  if (process.platform === 'darwin') return path.join(home, 'Library', 'Logs', 'Claudes');
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+    return path.join(base, 'Claudes', 'Logs');
+  }
+  const xdgState = process.env.XDG_STATE_HOME || path.join(home, '.local', 'state');
+  return path.join(xdgState, 'Claudes', 'logs');
+}
 
 // --- Crash breadcrumbs -----------------------------------------------------
 // pty-server crashes NATIVELY inside node-pty's Windows ConPTY layer (exit -1,
@@ -57,7 +72,7 @@ const { diagLogDir } = require('./lib/diag-log-dir');
 // this file after a crash names the exact op + pty that triggered it.
 let OP_LOG_PATH = null;
 try {
-  const dir = diagLogDir({ platform: process.platform, env: process.env, homedir: os.homedir() });
+  const dir = diagLogDir();
   fs.mkdirSync(dir, { recursive: true });
   OP_LOG_PATH = path.join(dir, 'pty-ops.log');
 } catch { /* best-effort diagnostics — never block startup */ }

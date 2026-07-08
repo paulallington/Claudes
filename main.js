@@ -1251,6 +1251,24 @@ ipcMain.handle('config:getProjects', () => {
 });
 
 ipcMain.handle('config:saveProjects', (event, config) => {
+  // Data-loss guard: never let an empty projects list overwrite a non-empty
+  // on-disk one. This is the exact failure that wiped every project once —
+  // a renderer that saved before loadProjects() ran (e.g. pty-server was
+  // crash-looping so ws.onopen never fired) persisted its empty default over
+  // real data, cascading through the .bak too. Refusing the clobber costs only
+  // the rare legitimate "removed my last project" (it reappears next launch);
+  // that's a fair trade against silent total loss.
+  try {
+    const incoming = config && Array.isArray(config.projects) ? config.projects.length : 0;
+    if (incoming === 0) {
+      const disk = readConfig();
+      if (disk && Array.isArray(disk.projects) && disk.projects.length > 0) {
+        console.error('[config] refused empty projects save over', disk.projects.length, 'on-disk projects (data-loss guard)');
+        return;
+      }
+    }
+  } catch (err) { /* if the guard check itself fails, fall through to normal save */ }
+
   // The renderer doesn't manage sync state — those fields are written via
   // the dedicated sync:* IPC handlers. If we accept the renderer's payload
   // verbatim every column close/resize would clobber sync.sourcePath and

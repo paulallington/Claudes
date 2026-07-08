@@ -150,6 +150,12 @@ var voiceAttentionColumnId = null;
 var backgroundSessionIdsCache = new Set();
 
 var config = { projects: [], activeProjectIndex: -1 };
+// Guard against clobbering the on-disk config with this empty default before
+// loadProjects() has read the real one. loadProjects only runs on ws.onopen, so
+// if pty-server is down (crash-loop) it never fires — and any saveConfig() in
+// that window would persist an empty projects list over the user's real data.
+// saveConfig() no-ops until this flips true.
+var configLoaded = false;
 var projectDragFromIndex = -1; // For sidebar drag-to-reorder
 var workspaceDragFromIndex = -1; // Drag-reorder within a project's sub-workspaces
 var workspaceDragFromProjectPath = null; // Same-project check during drop
@@ -1780,6 +1786,7 @@ function loadProjects() {
   if (!window.electronAPI) return;
   window.electronAPI.getProjects().then(function (cfg) {
     config = cfg || { projects: [], activeProjectIndex: -1 };
+    configLoaded = true; // authoritative on-disk config is now in memory — saves are safe
     // Drop any corrupt null entries (can appear from a failed drag-reorder splice).
     if (Array.isArray(config.projects)) {
       config.projects = config.projects.filter(function (p) { return p && typeof p === 'object'; });
@@ -2095,6 +2102,8 @@ function handleProjectPoppedIn(projectPath) {
 
 function saveConfig() {
   if (!window.electronAPI) return;
+  // Never persist the empty default before loadProjects() has run — see configLoaded.
+  if (!configLoaded) return;
   window.electronAPI.saveProjects(config);
 }
 
