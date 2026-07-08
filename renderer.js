@@ -14661,6 +14661,41 @@ if (window.electronAPI && window.electronAPI.getPtyPort) {
   connectWS();
 }
 
+// Startup guard: if Claudes' Claude-Code hooks are disconnected, the app
+// receives no UserPromptSubmit events and can't follow /clear session forks —
+// col.sessionId sticks on the pre-/clear session, so resumes (including the
+// auto crash-recovery respawn) silently revert to the wrong conversation. This
+// degrades silently otherwise, so warn prominently with a one-click reconnect.
+(function warnIfHooksDisconnected() {
+  if (!window.electronAPI || !window.electronAPI.isHooksConfigured) return;
+  // Defer so the warning lands after the window is up and settled, not mid-boot.
+  setTimeout(function () {
+    window.electronAPI.isHooksConfigured().then(function (configured) {
+      if (configured) return;
+      showToast(
+        'Claude hooks are disconnected — after /clear, resume (and crash recovery) can revert to the wrong conversation. Reconnect to fix session tracking.',
+        {
+          kind: 'warn',
+          duration: 0, // persistent until acted on — this silently breaks resume
+          action: {
+            label: 'Reconnect hooks',
+            onClick: function () {
+              if (!window.electronAPI.configureHooks) return;
+              window.electronAPI.configureHooks().then(function (result) {
+                if (result && result.ok) {
+                  showToast('Hooks reconnected. Respawn open Claude columns to start receiving events.', { kind: 'info', duration: 6000 });
+                } else {
+                  showToast('Couldn’t reconnect hooks: ' + ((result && result.error) || 'unknown error') + '. Try Settings → Hooks → Connect.', { kind: 'error', duration: 8000 });
+                }
+              });
+            }
+          }
+        }
+      );
+    }).catch(function () { /* status unavailable — stay quiet */ });
+  }, 2500);
+})();
+
 // --- App Version ---
 
 window.electronAPI.getVersion().then(function(v) {
