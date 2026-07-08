@@ -365,7 +365,15 @@ function handleConnection(ws, req) {
         };
 
         let p;
-        breadcrumb('create', { id, cols: safeCols, rows: safeRows, cmd: cmd ? String(cmd).slice(0, 60) : 'claude' });
+        // Capture the resume/session target so crash-recovery respawns are
+        // attributable: after a crash the tail of pty-ops.log shows which
+        // session each column resumed into, pinpointing wrong-conversation
+        // mis-attribution (renderer sent the wrong id vs. Claude resumed wrong).
+        const argList = Array.isArray(args) ? args : [];
+        const resumeIdx = argList.indexOf('--resume');
+        const sessIdx = argList.indexOf('--session-id');
+        const resumeTarget = resumeIdx !== -1 ? argList[resumeIdx + 1] : (sessIdx !== -1 ? '(new:' + argList[sessIdx + 1] + ')' : null);
+        breadcrumb('create', { id, cols: safeCols, rows: safeRows, cmd: cmd ? String(cmd).slice(0, 60) : 'claude', resume: resumeTarget });
         try {
           p = pty.spawn(cmd || CLAUDE_PATH, args || [], ptyOpts);
         } catch (err) {
