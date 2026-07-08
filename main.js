@@ -868,6 +868,10 @@ function startPtyServer() {
     const autoUpdateClaude = readConfig().autoUpdateClaude === true ? '1' : '0';
     ptyServerProcess = spawn(nodePath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Hide the console window Windows would otherwise pop up (and minimise)
+      // each time we spawn system Node from this GUI app — most visibly on every
+      // crash-recovery restart. No effect on non-Windows.
+      windowsHide: true,
       env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN, CLAUDES_AUTO_UPDATE_CLAUDE: autoUpdateClaude }
     });
 
