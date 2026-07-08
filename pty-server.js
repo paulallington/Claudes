@@ -289,6 +289,17 @@ function handleConnection(ws, req) {
     connectionPtys.add(id);
 
     p._dataHandler = (data) => {
+      // Trigger hunt: the native crash strikes while the server is otherwise
+      // idle, so the suspect is Claude EMITTING output after a long quiet spell
+      // (its own ~15-min wall-clock activity), not a keystroke. Breadcrumb the
+      // first data after >30s of silence — cheap (one Date.now() per chunk),
+      // and if the crash follows, its cause is named on disk. Belt-and-braces
+      // in case useConptyDll doesn't fully eliminate it.
+      const now = Date.now();
+      if (p._lastDataAt && now - p._lastDataAt > 30000) {
+        breadcrumb('data-after-idle', { id, idleMs: now - p._lastDataAt, bytes: Buffer.byteLength(data, 'utf8'), head: String(data).replace(/[\x00-\x1f\x7f]/g, '.').slice(0, 24) });
+      }
+      p._lastDataAt = now;
       if (ws.readyState === 1 /* OPEN */) {
         try {
           ws.send(JSON.stringify({ type: 'data', id, data }));
@@ -369,6 +380,14 @@ function handleConnection(ws, req) {
           cols: safeCols,
           rows: safeRows,
           cwd: cwd || process.cwd(),
+          // Use node-pty's BUNDLED ConPTY (Microsoft OpenConsole
+          // 1.23.251008001, shipped under node-pty/third_party/conpty) instead
+          // of the OS's built-in conhost. Windows 11's in-box ConPTY is older
+          // and crashes natively (exit -1, no JS stack) on a ~15-min cadence,
+          // killing the whole terminal server. The bundled DLL is what VS Code
+          // uses for stability, and this path also skips the AttachConsole
+          // console-list agent (another crash source). No-op off Windows.
+          useConptyDll: true,
           // Filter the renderer-supplied env so it cannot inject NODE_OPTIONS,
           // LD_PRELOAD, PATH overrides, etc. The parent process env is still
           // inherited (so legitimate vars like USERPROFILE, HOME, locale set
