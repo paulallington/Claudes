@@ -724,7 +724,25 @@ function connectWS() {
       }
     }
   };
-  ws.onclose = function () { setTimeout(connectWS, 2000); };
+  ws.onclose = function () {
+    // The socket can close because pty-server crashed and main auto-restarted
+    // it (lib/pty-restart-policy). The new server normally re-binds the same
+    // preferred port, but if that port is briefly still held it falls back to an
+    // OS-assigned one — so re-fetch the live port before each reconnect instead
+    // of hammering a stale one forever. On reconnect, ws.onopen → reattachAllColumns
+    // fires; ptys that died with the old server come back as 'reattach-failed',
+    // which auto-respawns them with --resume.
+    setTimeout(function () {
+      if (window.electronAPI && window.electronAPI.getPtyPort) {
+        window.electronAPI.getPtyPort().then(function (p) {
+          if (p) wsPort = p;
+          connectWS();
+        }, function () { connectWS(); });
+      } else {
+        connectWS();
+      }
+    }, 2000);
+  };
 }
 
 if (window.electronAPI && window.electronAPI.onPowerResume) {

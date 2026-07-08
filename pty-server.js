@@ -225,6 +225,18 @@ function handleConnection(ws, req) {
   }
   const connectionPtys = new Set();
 
+  // A per-socket error (e.g. an inbound frame exceeding maxPayload —
+  // WS_ERR_UNSUPPORTED_MESSAGE_LENGTH — or a mid-stream TCP reset) emits an
+  // 'error' event on the ws. Without a listener, ws re-emits it as an
+  // *unhandled* 'error' and the whole pty-server process crashes, freezing
+  // EVERY terminal, not just this one. Handle it: log and close this socket.
+  // The 'close' handler below then orphans this connection's ptys with the
+  // usual grace period, so the renderer reconnects and reattaches to them.
+  ws.on('error', (err) => {
+    console.error('[pty-server] websocket error (closing this socket):', (err && err.message) || err);
+    try { ws.close(); } catch { /* already closing/closed */ }
+  });
+
   // Wire up a pty's data/exit events to this WebSocket
   function attachPty(id, p) {
     connectionPtys.add(id);
@@ -450,6 +462,20 @@ function handleConnection(ws, req) {
 }
 
 wss = createWss(PORT, false);
+
+// Last-resort guards. A recoverable throw anywhere in an async callback (a
+// node-pty disposable firing after teardown, a JSON edge case, an ECONNRESET on
+// a socket without its own handler) would otherwise take the whole process down
+// and freeze every terminal. Surviving is strictly better than crashing here —
+// the offending pty/socket is already lost, but the rest keep working. Native
+// ConPTY crashes bypass JS entirely and still exit the process; the parent's
+// crash-recovery restart (lib/pty-restart-policy) covers those.
+process.on('uncaughtException', (err) => {
+  console.error('[pty-server] uncaughtException (surviving):', (err && err.stack) || err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[pty-server] unhandledRejection (surviving):', (reason && reason.stack) || reason);
+});
 
 process.on('SIGINT', () => {
   for (const [id, p] of ptys) {
