@@ -19,6 +19,7 @@ const http = require('http');
 const { resolveWorktreeCandidates, pathIsDirectory } = require('./lib/path-utils');
 const { detectActiveWorktree } = require('./lib/worktree-detect');
 const { revealWindow } = require('./lib/window-reveal');
+const { planPtyServerRestart, WINDOW_MS: PTY_RESTART_WINDOW_MS } = require('./lib/pty-restart-policy');
 const WorkspaceScrub = require('./lib/workspace-scrub');
 const { buildTtsRequest, buildVoicesRequest } = require('./lib/voice-request');
 const { normalizeVoiceSettings, redactVoiceSettings } = require('./lib/voice-settings');
@@ -337,6 +338,7 @@ let hookServer;
 let hookServerPort;
 const ptyPort = app.isPackaged ? 3456 : 3457;     // preferred pty port
 let ptyActualPort = ptyPort;                       // updated from the pty-server's READY:<port> line, which may differ if it fell back to an OS-assigned port
+let ptyRestartTimestamps = [];                     // rolling record of crash-recovery restarts (see lib/pty-restart-policy)
 const hookServerListenPort = app.isPackaged ? 53456 : 53457;
 let ptyServerProcess;
 
@@ -894,6 +896,26 @@ function startPtyServer() {
 
     ptyServerProcess.on('exit', (code, signal) => {
       diagLog('[pty-server] exited with code', code, 'signal', signal || '(none)');
+      // pty-server is the only path between the renderer's terminals and
+      // node-pty; when it dies every column freezes. On Windows it crashes
+      // natively inside ConPTY (exit -1, no JS stack) with no warning. Resurrect
+      // it so the renderer's existing reconnect → reattach → resume chain fires,
+      // instead of leaving the user with a dead app they must quit and relaunch.
+      ptyServerProcess = null;
+      const plan = planPtyServerRestart(ptyRestartTimestamps, { isQuitting, signal, code, now: Date.now() });
+      ptyRestartTimestamps = plan.timestamps;
+      if (plan.giveUp) {
+        diagLog('[pty-server] crash-loop: too many restarts within', PTY_RESTART_WINDOW_MS / 1000 + 's — giving up; relaunch the app to recover terminals');
+        return;
+      }
+      if (!plan.restart) return; // clean shutdown or our own SIGTERM/SIGKILL
+      diagLog('[pty-server] scheduling crash-recovery restart in', plan.delayMs + 'ms (restart #' + plan.recentCount + ')');
+      setTimeout(() => {
+        if (isQuitting) return;
+        startPtyServer()
+          .then(() => diagLog('[pty-server] restarted after crash — renderer will reconnect and resume sessions'))
+          .catch((e) => diagLog('[pty-server] crash-recovery restart failed:', (e && e.message) || String(e)));
+      }, plan.delayMs).unref();
     });
 
     ptyServerProcess.stdout.on('data', (data) => {
