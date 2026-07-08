@@ -46,6 +46,38 @@ if (process.platform === 'darwin') {
 }
 
 const pty = require('node-pty');
+const { diagLogDir } = require('./lib/diag-log-dir');
+
+// --- Crash breadcrumbs -----------------------------------------------------
+// pty-server crashes NATIVELY inside node-pty's Windows ConPTY layer (exit -1,
+// no JS stack), so we can't see which pty operation was in flight when it died.
+// Log every create/kill/resize/exit SYNCHRONOUSLY to disk — a native crash
+// takes down the process before any buffered stream flushes, so appendFileSync
+// (not a WriteStream) is what guarantees the last line survives. The tail of
+// this file after a crash names the exact op + pty that triggered it.
+let OP_LOG_PATH = null;
+try {
+  const dir = diagLogDir({ platform: process.platform, env: process.env, homedir: os.homedir() });
+  fs.mkdirSync(dir, { recursive: true });
+  OP_LOG_PATH = path.join(dir, 'pty-ops.log');
+} catch { /* best-effort diagnostics — never block startup */ }
+let opSeq = 0;
+function breadcrumb(op, fields) {
+  if (!OP_LOG_PATH) return;
+  opSeq++;
+  // Roll at ~2 MB so an uncrashed long-running session can't grow it forever.
+  // Checked occasionally rather than every op to keep the hot path cheap.
+  if (opSeq % 64 === 0) {
+    try {
+      const st = fs.statSync(OP_LOG_PATH);
+      if (st.size > 2 * 1024 * 1024) { try { fs.unlinkSync(OP_LOG_PATH + '.old'); } catch {} fs.renameSync(OP_LOG_PATH, OP_LOG_PATH + '.old'); }
+    } catch { /* not present yet */ }
+  }
+  const line = new Date().toISOString() + ' #' + opSeq + ' ' + op +
+    (fields ? ' ' + JSON.stringify(fields) : '') + '\n';
+  try { fs.appendFileSync(OP_LOG_PATH, line); } catch { /* best effort */ }
+}
+breadcrumb('server-start', { pid: process.pid, port: parseInt(process.env.PTY_PORT || '3456', 10) });
 
 const PORT = parseInt(process.env.PTY_PORT || '3456', 10);
 const AUTH_TOKEN = process.env.PTY_AUTH_TOKEN || '';
@@ -263,6 +295,7 @@ function handleConnection(ws, req) {
     };
 
     p._exitHandler = ({ exitCode }) => {
+      breadcrumb('pty-exit', { id, exitCode });
       if (ptys.get(id) === p) {
         ptys.delete(id);
         connectionPtys.delete(id);
@@ -332,6 +365,7 @@ function handleConnection(ws, req) {
         };
 
         let p;
+        breadcrumb('create', { id, cols: safeCols, rows: safeRows, cmd: cmd ? String(cmd).slice(0, 60) : 'claude' });
         try {
           p = pty.spawn(cmd || CLAUDE_PATH, args || [], ptyOpts);
         } catch (err) {
@@ -357,6 +391,7 @@ function handleConnection(ws, req) {
 
         ptys.set(id, p);
         p._createdAt = Date.now();
+        breadcrumb('spawned', { id, pid: p.pid });
         attachPty(id, p);
         break;
       }
@@ -417,6 +452,7 @@ function handleConnection(ws, req) {
         const safeCols = Math.max(1, Math.min(MAX_COLS, parseInt(msg.cols, 10) || 0));
         const safeRows = Math.max(1, Math.min(MAX_ROWS, parseInt(msg.rows, 10) || 0));
         if (safeCols && safeRows) {
+          breadcrumb('resize', { id: msg.id, cols: safeCols, rows: safeRows });
           try { p.resize(safeCols, safeRows); } catch (err) { console.warn('[pty-server] resize on exited pty ignored:', err && err.message); }
         }
         break;
@@ -425,6 +461,7 @@ function handleConnection(ws, req) {
       case 'kill': {
         const p = ptys.get(msg.id);
         if (p) {
+          breadcrumb('kill', { id: msg.id });
           try { p.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
           ptys.delete(msg.id);
           connectionPtys.delete(msg.id);
@@ -449,6 +486,7 @@ function handleConnection(ws, req) {
           const pty = ptys.get(id);
           if (pty) {
             console.log(`Orphan grace expired for pty ${id}, killing`);
+            breadcrumb('orphan-kill', { id });
             try { pty.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
             ptys.delete(id);
           }
@@ -471,9 +509,11 @@ wss = createWss(PORT, false);
 // ConPTY crashes bypass JS entirely and still exit the process; the parent's
 // crash-recovery restart (lib/pty-restart-policy) covers those.
 process.on('uncaughtException', (err) => {
+  breadcrumb('uncaughtException', { msg: (err && err.message) || String(err) });
   console.error('[pty-server] uncaughtException (surviving):', (err && err.stack) || err);
 });
 process.on('unhandledRejection', (reason) => {
+  breadcrumb('unhandledRejection', { msg: (reason && reason.message) || String(reason) });
   console.error('[pty-server] unhandledRejection (surviving):', (reason && reason.stack) || reason);
 });
 
