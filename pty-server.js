@@ -2,7 +2,7 @@ const { WebSocketServer } = require('ws');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { execFileSync } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 
 // node-pty ships a `spawn-helper` binary under prebuilds/<platform-arch>/ on
 // macOS that posix_spawn execs as argv[0]. npm strips the executable bit when
@@ -93,6 +93,23 @@ function breadcrumb(op, fields) {
   try { fs.appendFileSync(OP_LOG_PATH, line); } catch { /* best effort */ }
 }
 breadcrumb('server-start', { pid: process.pid, port: parseInt(process.env.PTY_PORT || '3456', 10) });
+
+// Kill a pty AND its descendants. useConptyDll (set on every spawn) makes
+// node-pty's own kill() terminate only the directly-spawned process — the
+// process-tree cleanup used to live in the console-process-list path that the
+// DLL path bypasses. Without this, Killing/Respawning a Run-tab column (dotnet
+// run, npm start, a REPL) would orphan the dev server and its children, holding
+// the port. taskkill /T walks the tree from pid, so fire it (best-effort,
+// non-blocking) BEFORE p.kill() severs the parent link; p.kill() then does the
+// conpty/handle cleanup and drives onExit. No-op tree-kill off Windows.
+function killPtyTree(p) {
+  if (!p) return;
+  const pid = p.pid;
+  if (process.platform === 'win32' && pid) {
+    try { execFile('taskkill', ['/PID', String(pid), '/T', '/F'], () => { /* best-effort */ }); } catch { /* ignore */ }
+  }
+  try { p.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
+}
 
 const PORT = parseInt(process.env.PTY_PORT || '3456', 10);
 const AUTH_TOKEN = process.env.PTY_AUTH_TOKEN || '';
@@ -504,7 +521,7 @@ function handleConnection(ws, req) {
         const p = ptys.get(msg.id);
         if (p) {
           breadcrumb('kill', { id: msg.id });
-          try { p.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
+          killPtyTree(p);
           ptys.delete(msg.id);
           connectionPtys.delete(msg.id);
           clearOrphanTimer(msg.id);
@@ -529,7 +546,7 @@ function handleConnection(ws, req) {
           if (pty) {
             console.log(`Orphan grace expired for pty ${id}, killing`);
             breadcrumb('orphan-kill', { id });
-            try { pty.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
+            killPtyTree(pty);
             ptys.delete(id);
           }
           orphanTimers.delete(id);
@@ -560,15 +577,11 @@ process.on('unhandledRejection', (reason) => {
 });
 
 process.on('SIGINT', () => {
-  for (const [id, p] of ptys) {
-    try { p.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
-  }
+  for (const [id, p] of ptys) killPtyTree(p);
   process.exit();
 });
 
 process.on('SIGTERM', () => {
-  for (const [id, p] of ptys) {
-    try { p.kill(); } catch (err) { console.warn('[pty-server] kill on exited pty ignored:', err && err.message); }
-  }
+  for (const [id, p] of ptys) killPtyTree(p);
   process.exit();
 });
