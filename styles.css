@@ -8026,6 +8026,9 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
 /* MCP modal — right edit pane fills remaining width, inputs/textareas span
    the pane so we don't get a thin left-aligned strip of fields. Mirrors the
    layout of the endpoints modal proper but with explicit form-box flex. */
+#mcp-modal .endpoints-body {
+  flex-wrap: wrap;
+}
 .mcp-edit-pane {
   flex: 1;
   padding: 16px 20px;

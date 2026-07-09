@@ -4493,6 +4493,14 @@ function addColumn(args, targetRow, opts) {
   var cwd = opts.cwd || activeProjectKey;
   var claudeArgs = args || [];
   var cmd = opts.cmd || null;
+  // Project root for MCP-selection lookup: captured synchronously here (before
+  // any await) since `activeProjectKey` is mutable and the user can switch
+  // projects while the spawn's rAF/async callback below is in flight. The MCP
+  // selection is keyed by the project's `.path` (see setProjectMcpDefault /
+  // mcp:buildProjectConfig in main.js), which is exactly what `activeProjectKey`
+  // holds (set to `project.path` on project switch) — NOT `cwd`, which may be a
+  // worktree/custom subdirectory distinct from the project root.
+  var mcpProjectRoot = activeProjectKey;
 
   // Pin a deterministic session id for fresh local Claude spawns by injecting
   // --session-id, so voice/attribution resolves to the exact JSONL the CLI
@@ -4512,7 +4520,7 @@ function addColumn(args, targetRow, opts) {
     ? window.electronAPI.getRecentSessions(cwd)
     : Promise.resolve([]);
 
-  requestAnimationFrame(function () {
+  requestAnimationFrame(async function () {
     fitTerminal(terminal, fitAddon);
     if (opts.reattachPtyId != null) {
       // Pty already exists in pty-server — just rebind it to this window's WS.
@@ -4535,6 +4543,19 @@ function addColumn(args, targetRow, opts) {
     if (cmd) sendMsg.cmd = cmd;
     if (opts.env) sendMsg.env = opts.env;
     maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd });
+
+    // Project-scoped MCP: for claude columns, resolve the project's inherited-server
+    // selection and append --mcp-config/--strict-mcp-config. No-op when inheriting
+    // all (returns {inherit:true}) or when "Strip MCPs" already put --mcp-config in
+    // args (appendProjectMcpArgs guards that). Never blocks the spawn on failure.
+    if (!cmd && window.electronAPI && window.electronAPI.buildProjectMcpConfig && window.McpProject) {
+      try {
+        var mcpRes = await window.electronAPI.buildProjectMcpConfig(mcpProjectRoot);
+        sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
+      } catch (e) {
+        vlog('spawn', { colId: id, mcpErr: String(e && e.message) });
+      }
+    }
 
     vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
     gatedWsSend(sendMsg);
@@ -19293,6 +19314,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   var saveBtn = document.getElementById('mcp-save');
   var delBtn = document.getElementById('mcp-delete');
   var pathLabel = document.getElementById('mcp-project-path');
+  var inheritListEl = document.getElementById('mcp-inherit-list');
   var projectPath = null;
   var servers = {}; // name -> config
   var editingName = null;
@@ -19420,6 +19442,57 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     if (el) el.addEventListener('keydown', function (e) { e.stopPropagation(); });
   });
 
+  function renderInheritList(servers, projectDefault) {
+    if (!inheritListEl) return;
+    inheritListEl.innerHTML = '';
+    var hadSelection = Array.isArray(projectDefault);
+    inheritListEl.setAttribute('data-had-selection', hadSelection ? 'true' : 'false');
+    if (!servers || servers.length === 0) {
+      var hint = document.createElement('div');
+      hint.className = 'automation-permission-hint';
+      hint.textContent = 'No MCP servers discovered for this project (all inherited).';
+      inheritListEl.appendChild(hint);
+      return;
+    }
+    servers.forEach(function (s) {
+      var checked = !hadSelection || projectDefault.indexOf(s.name) !== -1;
+      var label = document.createElement('label');
+      label.className = 'automation-permission-option';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'mcp-inherit-cb';
+      cb.setAttribute('data-server', s.name);
+      cb.checked = checked;
+      cb.addEventListener('change', persistInherit);
+      var span = document.createElement('span');
+      span.textContent = s.name + ' ';
+      var scope = document.createElement('span');
+      scope.className = 'automation-permission-hint';
+      scope.textContent = '(' + s.scope + ')';
+      span.appendChild(scope);
+      label.appendChild(cb);
+      label.appendChild(span);
+      inheritListEl.appendChild(label);
+    });
+  }
+
+  function persistInherit() {
+    if (!inheritListEl || !projectPath || !window.electronAPI || !window.electronAPI.setProjectMcpDefault) return;
+    var cbs = inheritListEl.querySelectorAll('.mcp-inherit-cb');
+    var allNames = [];
+    var checkedNames = [];
+    cbs.forEach(function (cb) {
+      var n = cb.getAttribute('data-server');
+      allNames.push(n);
+      if (cb.checked) checkedNames.push(n);
+    });
+    var hadSelection = inheritListEl.getAttribute('data-had-selection') === 'true';
+    var selection = window.McpProject.readbackMcpSelection(checkedNames, allNames, hadSelection);
+    // Once the user touches a box, the selection becomes explicit.
+    inheritListEl.setAttribute('data-had-selection', selection === null ? 'false' : 'true');
+    window.electronAPI.setProjectMcpDefault(projectPath, selection);
+  }
+
   window.openMcpModal = function (projPath) {
     if (!projPath || !window.electronAPI || !window.electronAPI.readMcp) return;
     projectPath = projPath;
@@ -19432,6 +19505,11 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       editingName = null;
       renderList();
     });
+    if (window.electronAPI.discoverMcpServers) {
+      window.electronAPI.discoverMcpServers(projPath).then(function (res) {
+        renderInheritList((res && res.servers) || [], (res && res.projectDefault) || null);
+      }).catch(function () { renderInheritList([], null); });
+    }
   };
 })();
 
