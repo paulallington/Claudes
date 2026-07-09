@@ -2631,7 +2631,21 @@ function buildProjectItem(project, index) {
         config.projects[projIndex].exploreHaiku = enabled;
         window.electronAPI.saveProjects(config);
         if (config.projects[projIndex].path && window.electronAPI && window.electronAPI.setExploreAgent) {
-          window.electronAPI.setExploreAgent(config.projects[projIndex].path, enabled);
+          var revertExploreHaiku = function (err) {
+            config.projects[projIndex].exploreHaiku = !enabled;
+            window.electronAPI.saveProjects(config);
+            renderProjectList();
+            var reason = (err && err.message) ? err.message : (err || 'unknown error');
+            console.error('setExploreAgent failed, reverting exploreHaiku:', reason);
+            showToast('Could not ' + (enabled ? 'enable' : 'disable') + ' Explore-on-Haiku: ' + reason, { kind: 'error' });
+          };
+          window.electronAPI.setExploreAgent(config.projects[projIndex].path, enabled)
+            .then(function (res) {
+              if (!res || !res.success) {
+                revertExploreHaiku(res && res.error);
+              }
+            })
+            .catch(function (err) { revertExploreHaiku(err); });
         }
         renderProjectList();
       } else if (action === 'ungroup') {
