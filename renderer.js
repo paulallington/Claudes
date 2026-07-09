@@ -4493,6 +4493,14 @@ function addColumn(args, targetRow, opts) {
   var cwd = opts.cwd || activeProjectKey;
   var claudeArgs = args || [];
   var cmd = opts.cmd || null;
+  // Project root for MCP-selection lookup: captured synchronously here (before
+  // any await) since `activeProjectKey` is mutable and the user can switch
+  // projects while the spawn's rAF/async callback below is in flight. The MCP
+  // selection is keyed by the project's `.path` (see setProjectMcpDefault /
+  // mcp:buildProjectConfig in main.js), which is exactly what `activeProjectKey`
+  // holds (set to `project.path` on project switch) — NOT `cwd`, which may be a
+  // worktree/custom subdirectory distinct from the project root.
+  var mcpProjectRoot = activeProjectKey;
 
   // Pin a deterministic session id for fresh local Claude spawns by injecting
   // --session-id, so voice/attribution resolves to the exact JSONL the CLI
@@ -4542,7 +4550,7 @@ function addColumn(args, targetRow, opts) {
     // args (appendProjectMcpArgs guards that). Never blocks the spawn on failure.
     if (!cmd && window.electronAPI && window.electronAPI.buildProjectMcpConfig && window.McpProject) {
       try {
-        var mcpRes = await window.electronAPI.buildProjectMcpConfig(cwd);
+        var mcpRes = await window.electronAPI.buildProjectMcpConfig(mcpProjectRoot);
         sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
       } catch (e) {
         vlog('spawn', { colId: id, mcpErr: String(e && e.message) });

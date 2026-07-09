@@ -5546,7 +5546,7 @@ ipcMain.handle('mcp:buildProjectConfig', (event, projectPath) => {
     fs.renameSync(tmp, file);
     return { mcpConfigPath: file, strict: true };
   } catch (err) {
-    console.warn('[mcp] buildProjectConfig failed, falling back to inherit-all:', err.message);
+    console.warn('[mcp] buildProjectConfig failed, falling back to inherit-all:', err && err.message);
     return { inherit: true };
   }
 });
