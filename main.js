@@ -33,6 +33,8 @@ const {
   buildInteractiveArgs,
   interactiveSuffix,
   stripAnsi: stripAnsiTui,
+  denoiseInteractive,
+  capTail,
   resolveMcpSelection,
   filterMcpDefs
 } = require('./lib/interactive-scheduled');
@@ -7258,7 +7260,7 @@ function spawnInteractiveScheduled(prompt, cwd, opts) {
   } catch (e) {
     // Defer so the caller can register the returned handle before onComplete fires.
     setImmediate(() => finish({ status: 'error', output: '', lastError: 'pty-server connect failed: ' + ((e && e.message) || e) }));
-    return { kill: () => finish({ status: 'interrupted', output: stripAnsiTui(buffer), lastError: 'Killed' }) };
+    return { kill: () => finish({ status: 'interrupted', output: capTail(denoiseInteractive(buffer), 8000), lastError: 'Killed' }) };
   }
 
   ws.on('open', () => {
@@ -7287,13 +7289,12 @@ function spawnInteractiveScheduled(prompt, cwd, opts) {
       }
     } else if (msg.type === 'exit') {
       // Interactive sessions shouldn't self-exit, but if it does, capture + finish.
-      const clean = stripAnsiTui(buffer);
-      finish({ status: 'completed', output: clean, parsed: parseAgentResult(clean) });
+      finish({ status: 'completed', output: capTail(denoiseInteractive(buffer), 8000), parsed: parseAgentResult(stripAnsiTui(buffer)) });
     }
   });
 
-  ws.on('error', (err) => { finish({ status: 'error', output: stripAnsiTui(buffer), lastError: (err && err.message) || String(err) }); });
-  ws.on('close', () => { if (!done) finish({ status: 'error', output: stripAnsiTui(buffer), lastError: 'pty-server connection closed' }); });
+  ws.on('error', (err) => { finish({ status: 'error', output: capTail(denoiseInteractive(buffer), 8000), lastError: (err && err.message) || String(err) }); });
+  ws.on('close', () => { if (!done) finish({ status: 'error', output: capTail(denoiseInteractive(buffer), 8000), lastError: 'pty-server connection closed' }); });
 
   function maybeInject() {
     if (injected || done) return;
@@ -7330,24 +7331,23 @@ function spawnInteractiveScheduled(prompt, cwd, opts) {
             const j = JSON.parse(content);
             parsed = { summary: j.summary || '', attentionItems: j.attentionItems || [] };
           } catch { parsed = parseAgentResult(content); }
-          finish({ status: 'completed', output: stripAnsiTui(buffer), parsed });
+          finish({ status: 'completed', output: capTail(denoiseInteractive(buffer), 8000), parsed });
           return;
         }
       } catch { /* keep polling */ }
     }
     if (markerSeenAt && Date.now() - markerSeenAt >= MARKER_GRACE_MS) {
-      const clean = stripAnsiTui(buffer);
-      finish({ status: 'completed', output: clean, parsed: parseAgentResult(clean) });
+      finish({ status: 'completed', output: capTail(denoiseInteractive(buffer), 8000), parsed: parseAgentResult(stripAnsiTui(buffer)) });
     }
   }, 1000);
   pollTimer.unref();
 
   watchdog = setTimeout(() => {
-    finish({ status: 'interrupted', output: stripAnsiTui(buffer), lastError: 'Watchdog timeout after ' + maxMs + 'ms' });
+    finish({ status: 'interrupted', output: capTail(denoiseInteractive(buffer), 8000), lastError: 'Watchdog timeout after ' + maxMs + 'ms' });
   }, maxMs);
   watchdog.unref();
 
-  return { kill: () => finish({ status: 'interrupted', output: stripAnsiTui(buffer), lastError: 'Killed' }) };
+  return { kill: () => finish({ status: 'interrupted', output: capTail(denoiseInteractive(buffer), 8000), lastError: 'Killed' }) };
 }
 
 async function runAgent(automationId, agentId) {
@@ -7569,15 +7569,20 @@ async function runAgent(automationId, agentId) {
       sentinelPath,
       maxDurationMs: (typeof agent.maxDurationMs === 'number' && agent.maxDurationMs > 0) ? agent.maxDurationMs : 600000,
       onText: (text) => {
-        textChunks.push(text);
-        if (mainWindow) mainWindow.webContents.send('automations:agent-output', { automationId, agentId, chunk: stripAnsiTui(text) });
+        // De-noise per frame so the live buffer stays small and readable: a pure
+        // TUI redraw / spinner frame collapses to '' and is dropped; only real
+        // narration is kept and streamed to the UI.
+        const clean = denoiseInteractive(text);
+        if (!clean) return;
+        textChunks.push(clean);
+        if (mainWindow) mainWindow.webContents.send('automations:agent-output', { automationId, agentId, chunk: clean });
       },
       onComplete: (result) => {
         finalizeAgentRun(automationId, agentId, key, {
           sessionMode: 'interactive',
           status: result.status || 'completed',
           exitCode: null,
-          output: result.output || stripAnsiTui(textChunks.join('')),
+          output: result.output || capTail(denoiseInteractive(textChunks.join('\n')), 8000),
           parsed: result.parsed || null,
           startedAt,
           lastError: result.lastError

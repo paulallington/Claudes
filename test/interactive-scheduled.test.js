@@ -6,6 +6,8 @@ const {
   buildInteractiveArgs,
   interactiveSuffix,
   stripAnsi,
+  denoiseInteractive,
+  capTail,
   resolveMcpSelection,
   filterMcpDefs
 } = require('../lib/interactive-scheduled');
@@ -98,6 +100,52 @@ test('stripAnsi: removes 2-char escapes (cursor save/restore, keypad)', () => {
 test('stripAnsi: null/undefined -> empty string', () => {
   assert.strictEqual(stripAnsi(null), '');
   assert.strictEqual(stripAnsi(undefined), '');
+});
+
+// --- denoiseInteractive ---
+
+test('denoiseInteractive: a pure spinner frame collapses to empty', () => {
+  const frame = ESC + '[38;2;215;119;87m' + 'thinking with xhigh effort' + ESC + '[39m' + ESC + '[50;1H';
+  assert.strictEqual(denoiseInteractive(frame), '');
+});
+
+test('denoiseInteractive: keeps real narration, drops surrounding TUI chrome', () => {
+  const raw = ESC + '[?25l' + "I'll start by draining the Claude Triage column." + ESC + '[38;2;1;1;1m' + 'thinking with xhigh effort' + ESC + '[0m';
+  assert.strictEqual(denoiseInteractive(raw), "I'll start by draining the Claude Triage column.");
+});
+
+test('denoiseInteractive: strips token counters and status words', () => {
+  const raw = 'Found 3 issues.' + ESC + '[2K' + ' ↓ 584 tokens · thought for 6s Baking…';
+  const out = denoiseInteractive(raw);
+  assert.ok(out.includes('Found 3 issues.'));
+  assert.ok(!/tokens/i.test(out));
+  assert.ok(!/thought for/i.test(out));
+  assert.ok(!/Baking/i.test(out));
+});
+
+test('denoiseInteractive: collapses the concatenated-spinner blob to nothing', () => {
+  let blob = '';
+  for (let i = 0; i < 200; i++) blob += ESC + '[38;2;215;119;87m' + 'thinking with xhigh effort' + '✻';
+  assert.strictEqual(denoiseInteractive(blob), '');
+});
+
+test('denoiseInteractive: null/undefined -> empty', () => {
+  assert.strictEqual(denoiseInteractive(null), '');
+  assert.strictEqual(denoiseInteractive(undefined), '');
+});
+
+// --- capTail ---
+
+test('capTail: short text unchanged', () => {
+  assert.strictEqual(capTail('hello', 100), 'hello');
+});
+
+test('capTail: long text keeps the tail and marks elision', () => {
+  const s = 'x'.repeat(50) + 'THE_END';
+  const out = capTail(s, 10);
+  assert.ok(out.endsWith('THE_END'));
+  assert.ok(out.length < s.length);
+  assert.ok(/trimmed/.test(out));
 });
 
 // --- resolveMcpSelection ---
