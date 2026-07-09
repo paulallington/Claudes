@@ -1240,6 +1240,12 @@
         <span id="mcp-close" class="modal-close">&times;</span>
       </div>
       <div class="modal-body endpoints-body">
+        <div id="mcp-inherit-section" style="flex-basis:100%; padding:12px 4px 4px; border-bottom:1px solid var(--border, #333); margin-bottom:8px;">
+          <label style="display:block; margin-bottom:6px;">Inherited MCP servers
+            <span class="automation-permission-hint">Applies to every window and automation in this project. Unchecked = not loaded. Leave all checked to inherit every server.</span>
+          </label>
+          <div id="mcp-inherit-list" class="automation-permissions"></div>
+        </div>
         <div class="endpoints-sidebar">
           <div class="endpoints-list-header">
             <span>Servers</span>
@@ -1535,6 +1541,7 @@
   <script src="./lib/reflow-text.js"></script>
   <script src="./lib/osc52.js"></script>
   <script src="./lib/headroom-env.js"></script>
+  <script src="./lib/mcp-project.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

@@ -19293,6 +19293,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   var saveBtn = document.getElementById('mcp-save');
   var delBtn = document.getElementById('mcp-delete');
   var pathLabel = document.getElementById('mcp-project-path');
+  var inheritListEl = document.getElementById('mcp-inherit-list');
   var projectPath = null;
   var servers = {}; // name -> config
   var editingName = null;
@@ -19420,6 +19421,57 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     if (el) el.addEventListener('keydown', function (e) { e.stopPropagation(); });
   });
 
+  function renderInheritList(servers, projectDefault) {
+    if (!inheritListEl) return;
+    inheritListEl.innerHTML = '';
+    var hadSelection = Array.isArray(projectDefault);
+    inheritListEl.setAttribute('data-had-selection', hadSelection ? 'true' : 'false');
+    if (!servers || servers.length === 0) {
+      var hint = document.createElement('div');
+      hint.className = 'automation-permission-hint';
+      hint.textContent = 'No MCP servers discovered for this project (all inherited).';
+      inheritListEl.appendChild(hint);
+      return;
+    }
+    servers.forEach(function (s) {
+      var checked = !hadSelection || projectDefault.indexOf(s.name) !== -1;
+      var label = document.createElement('label');
+      label.className = 'automation-permission-option';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'mcp-inherit-cb';
+      cb.setAttribute('data-server', s.name);
+      cb.checked = checked;
+      cb.addEventListener('change', persistInherit);
+      var span = document.createElement('span');
+      span.textContent = s.name + ' ';
+      var scope = document.createElement('span');
+      scope.className = 'automation-permission-hint';
+      scope.textContent = '(' + s.scope + ')';
+      span.appendChild(scope);
+      label.appendChild(cb);
+      label.appendChild(span);
+      inheritListEl.appendChild(label);
+    });
+  }
+
+  function persistInherit() {
+    if (!inheritListEl || !projectPath || !window.electronAPI || !window.electronAPI.setProjectMcpDefault) return;
+    var cbs = inheritListEl.querySelectorAll('.mcp-inherit-cb');
+    var allNames = [];
+    var checkedNames = [];
+    cbs.forEach(function (cb) {
+      var n = cb.getAttribute('data-server');
+      allNames.push(n);
+      if (cb.checked) checkedNames.push(n);
+    });
+    var hadSelection = inheritListEl.getAttribute('data-had-selection') === 'true';
+    var selection = window.McpProject.readbackMcpSelection(checkedNames, allNames, hadSelection);
+    // Once the user touches a box, the selection becomes explicit.
+    inheritListEl.setAttribute('data-had-selection', selection === null ? 'false' : 'true');
+    window.electronAPI.setProjectMcpDefault(projectPath, selection);
+  }
+
   window.openMcpModal = function (projPath) {
     if (!projPath || !window.electronAPI || !window.electronAPI.readMcp) return;
     projectPath = projPath;
@@ -19432,6 +19484,11 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       editingName = null;
       renderList();
     });
+    if (window.electronAPI.discoverMcpServers) {
+      window.electronAPI.discoverMcpServers(projPath).then(function (res) {
+        renderInheritList((res && res.servers) || [], (res && res.projectDefault) || null);
+      }).catch(function () { renderInheritList([], null); });
+    }
   };
 })();
 
