@@ -4512,7 +4512,7 @@ function addColumn(args, targetRow, opts) {
     ? window.electronAPI.getRecentSessions(cwd)
     : Promise.resolve([]);
 
-  requestAnimationFrame(function () {
+  requestAnimationFrame(async function () {
     fitTerminal(terminal, fitAddon);
     if (opts.reattachPtyId != null) {
       // Pty already exists in pty-server — just rebind it to this window's WS.
@@ -4535,6 +4535,19 @@ function addColumn(args, targetRow, opts) {
     if (cmd) sendMsg.cmd = cmd;
     if (opts.env) sendMsg.env = opts.env;
     maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd });
+
+    // Project-scoped MCP: for claude columns, resolve the project's inherited-server
+    // selection and append --mcp-config/--strict-mcp-config. No-op when inheriting
+    // all (returns {inherit:true}) or when "Strip MCPs" already put --mcp-config in
+    // args (appendProjectMcpArgs guards that). Never blocks the spawn on failure.
+    if (!cmd && window.electronAPI && window.electronAPI.buildProjectMcpConfig && window.McpProject) {
+      try {
+        var mcpRes = await window.electronAPI.buildProjectMcpConfig(cwd);
+        sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
+      } catch (e) {
+        vlog('spawn', { colId: id, mcpErr: String(e && e.message) });
+      }
+    }
 
     vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
     gatedWsSend(sendMsg);
