@@ -20,9 +20,9 @@ test('model: sonnet is used and haiku is absent', () => {
   assert.ok(!out.includes('model: haiku'));
 });
 
-test('tools line is exactly Glob, Grep, Read with no write tools', () => {
+test('tools line is exactly Glob, Grep, Read, Bash, WebFetch, WebSearch with no write tools', () => {
   const out = buildExploreAgentFile();
-  assert.ok(out.includes('tools: Glob, Grep, Read'));
+  assert.ok(out.includes('tools: Glob, Grep, Read, Bash, WebFetch, WebSearch'));
   assert.ok(!out.includes('Write'));
   assert.ok(!out.includes('Edit'));
   assert.ok(!out.includes('Agent'));
