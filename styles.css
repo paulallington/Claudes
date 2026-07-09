@@ -8026,8 +8026,36 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
 /* MCP modal — right edit pane fills remaining width, inputs/textareas span
    the pane so we don't get a thin left-aligned strip of fields. Mirrors the
    layout of the endpoints modal proper but with explicit form-box flex. */
+/* Inherited-servers section sits full-width above the .mcp.json editor.
+   flex-wrap lets the flex-basis:100% section claim its own row. */
 #mcp-modal .endpoints-body {
   flex-wrap: wrap;
+}
+#mcp-inherit-section {
+  flex-basis: 100%;
+  padding: 14px 18px 16px;
+  border-bottom: 1px solid var(--border, #333);
+}
+.mcp-inherit-heading {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+.mcp-inherit-hint {
+  display: block;
+  max-width: 680px;
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+/* Spread servers across the modal width instead of a single narrow column;
+   overrides .automation-permissions' flex column (id beats class). */
+#mcp-inherit-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px 20px;
+  max-height: 240px;
+  overflow-y: auto;
 }
 .mcp-edit-pane {
   flex: 1;
