@@ -20,12 +20,15 @@ test('model: sonnet is used and haiku is absent', () => {
   assert.ok(!out.includes('model: haiku'));
 });
 
-test('tools line is exactly Glob, Grep, Read, Bash, WebFetch, WebSearch with no write tools', () => {
+test('tools line is exactly Glob, Grep, Read with no write, shell, or network tools', () => {
   const out = buildExploreAgentFile();
-  assert.ok(out.includes('tools: Glob, Grep, Read, Bash, WebFetch, WebSearch'));
+  const toolsLine = out.split('\n').find((line) => line.startsWith('tools:'));
+  assert.equal(toolsLine, 'tools: Glob, Grep, Read');
   assert.ok(!out.includes('Write'));
   assert.ok(!out.includes('Edit'));
   assert.ok(!out.includes('Agent'));
+  // Security regression guard: the weaker Haiku model must not get shell access.
+  assert.ok(!/\bBash\b/.test(out));
 });
 
 test('body follows the closing frontmatter and mentions locating code / summary', () => {
