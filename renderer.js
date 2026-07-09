@@ -14985,9 +14985,14 @@ function renderAutomationCards(automations, container) {
         }
       }
 
+      var interactiveTag = (agent.sessionMode === 'interactive')
+        ? '<span class="automation-card-conn-tag automation-card-conn-tag--interactive" title="Drives your logged-in browser">Interactive</span>'
+        : '';
+
       card.innerHTML = '<div class="automation-card-header">' +
         '<span class="automation-card-name">' + escapeHtml(agent.name) + '</span>' +
         connTag +
+        interactiveTag +
         '<span class="automation-card-schedule">' + schedText + '</span>' +
         '</div>' +
         '<div class="automation-card-status">' + lastRunText + '</div>' +
@@ -15035,9 +15040,15 @@ function renderAutomationCards(automations, container) {
         });
       }
 
+      var anyInteractive = automation.agents.some(function (ag) { return ag.sessionMode === 'interactive'; });
+      var interactiveTagsHtml = anyInteractive
+        ? '<span class="automation-card-conn-tag automation-card-conn-tag--interactive" title="Drives your logged-in browser">Interactive</span>'
+        : '';
+
       card.innerHTML = '<div class="automation-card-header">' +
         '<span class="automation-card-name">' + escapeHtml(automation.name) + '</span>' +
         connTagsHtml +
+        interactiveTagsHtml +
         '<span class="automation-card-schedule">' + agentSummary + '</span>' +
         '</div>' + dotsHtml +
         '<div class="automation-card-footer">' +
@@ -15573,6 +15584,8 @@ document.getElementById('automation-detail-run-select').addEventListener('change
 var automationEditingId = null;
 var automationEditingData = null; // Store the existing automation for preserving clone paths
 var modalAgents = []; // Tracks agent data for the modal
+var modalMcpServers = []; // [{name, scope}] MCP servers discovered for the modal's project
+var modalMcpProjectPath = null; // project path the above were discovered for
 var activeCloneAutomationId = null;
 
 // Check if adding upstreamIdx as a dependency of agentIdx would create a cycle
@@ -15658,6 +15671,21 @@ function openAutomationModal(existingAutomation) {
   document.getElementById('automation-name').value = existingAutomation ? existingAutomation.name : '';
 
   renderModalAgentCards();
+
+  // Discover the project's MCP servers for the per-agent allowlist checkboxes,
+  // then re-render the cards so they appear. Reads a local config file, so this
+  // resolves near-instantly (before the user can meaningfully edit).
+  var mcpProjPath = existingAutomation ? existingAutomation.projectPath : (typeof getActiveProjectPath === 'function' ? getActiveProjectPath() : null);
+  modalMcpServers = [];
+  modalMcpProjectPath = mcpProjPath;
+  if (mcpProjPath && window.electronAPI && window.electronAPI.discoverMcpServers) {
+    window.electronAPI.discoverMcpServers(mcpProjPath).then(function (res) {
+      // Ignore if the modal was closed or switched projects meanwhile.
+      if (modalMcpProjectPath !== mcpProjPath) return;
+      modalMcpServers = (res && res.servers) || [];
+      renderModalAgentCards();
+    }).catch(function () { /* no MCP discovery — checkboxes just won't show */ });
+  }
 
   // Manager section — available for all automations (single or multi-agent)
   var managerSection = document.getElementById('automation-manager-section');
@@ -15810,11 +15838,51 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
   var checkedDays = agent && agent.schedule && agent.schedule.days ? agent.schedule.days : ['mon', 'tue', 'wed', 'thu', 'fri'];
   var runMode = agent ? (agent.runMode || 'independent') : 'independent';
 
+  // Session mode toggle (headless vs interactive) + live-browser warning.
+  var isInteractive = !!(agent && agent.sessionMode === 'interactive');
+  var sessionModeHtml =
+    '<div class="automation-form-group">' +
+      '<label>Session mode</label>' +
+      '<select class="automation-input agent-session-mode">' +
+        '<option value="headless"' + (isInteractive ? '' : ' selected') + '>Headless (default)</option>' +
+        '<option value="interactive"' + (isInteractive ? ' selected' : '') + '>Interactive (uses your logged-in browser)</option>' +
+      '</select>' +
+      '<div class="automation-permission-hint agent-session-mode-warn"' + (isInteractive ? '' : ' style="display:none;"') + '>' +
+        '⚠ Drives your <strong>real, logged-in Chrome</strong> (Claude-in-Chrome). The run is unattended with permissions auto-approved, and a watchdog kills it if it hangs.' +
+      '</div>' +
+      '<div class="automation-maxduration-row agent-maxduration-group" style="margin-top:6px;' + (isInteractive ? '' : 'display:none;') + '">' +
+        '<label class="automation-permission-hint" style="display:block;margin-bottom:2px;">Max duration (minutes) — watchdog kills a hung run</label>' +
+        '<input type="number" class="automation-input agent-max-duration" min="1" step="1" placeholder="10" value="' + (agent && typeof agent.maxDurationMs === 'number' && agent.maxDurationMs > 0 ? Math.round(agent.maxDurationMs / 60000) : '') + '">' +
+      '</div>' +
+    '</div>';
+
+  // MCP-server allowlist checkboxes, populated from modalMcpServers (discovered
+  // for the project when the modal opened). null selection = inherit all.
+  var mcpSel = agent && Array.isArray(agent.mcpServers) ? agent.mcpServers : null;
+  var mcpBoxes;
+  if (!modalMcpServers || modalMcpServers.length === 0) {
+    mcpBoxes = '<div class="automation-permission-hint">No MCP servers discovered for this project (all inherited).</div>';
+  } else {
+    mcpBoxes = modalMcpServers.map(function (s) {
+      var checked = (mcpSel === null) ? true : (mcpSel.indexOf(s.name) !== -1);
+      return '<label class="automation-permission-option">' +
+        '<input type="checkbox" class="agent-mcp-server-cb" data-server="' + escapeHtml(s.name) + '"' + (checked ? ' checked' : '') + '>' +
+        '<span>' + escapeHtml(s.name) + ' <span class="automation-permission-hint">(' + escapeHtml(s.scope) + ')</span></span>' +
+      '</label>';
+    }).join('');
+  }
+  var mcpServersHtml =
+    '<div class="automation-form-group">' +
+      '<label>MCP servers <span class="automation-permission-hint">(unchecked = disabled for this agent; leave all checked to inherit every server)</span></label>' +
+      '<div class="automation-permissions agent-mcp-servers" data-had-selection="' + (mcpSel === null ? 'false' : 'true') + '">' + mcpBoxes + '</div>' +
+    '</div>';
+
   var header = '';
   if (isMulti) {
     var badges = '';
     if (runMode === 'run_after') badges += '<span class="agent-badge agent-badge-chained">Chained</span>';
     if (agent && agent.isolation && agent.isolation.enabled) badges += '<span class="agent-badge agent-badge-isolated">Isolated</span>';
+    if (agent && agent.sessionMode === 'interactive') badges += '<span class="agent-badge agent-badge-interactive" title="Runs as an interactive session that drives your logged-in browser">Interactive</span>';
 
     var schedSummary = (agent && runMode !== 'run_after') ? formatScheduleText(agent) : '';
 
@@ -15980,6 +16048,8 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
           '<label class="automation-permission-option"><input type="checkbox" class="agent-skip-permissions"' + (agent && agent.skipPermissions ? ' checked' : '') + '><span>Skip permissions</span></label>' +
         '</div>' +
       '</div>' +
+      sessionModeHtml +
+      mcpServersHtml +
     '</div>' +
     '</div>';
 
@@ -16008,6 +16078,13 @@ function updateCardHeaderBadges(card, agentIndex) {
     b2.className = 'agent-badge agent-badge-isolated';
     b2.textContent = 'Isolated';
     frag.appendChild(b2);
+  }
+  if (ag.sessionMode === 'interactive') {
+    var b3 = document.createElement('span');
+    b3.className = 'agent-badge agent-badge-interactive';
+    b3.textContent = 'Interactive';
+    b3.title = 'Runs as an interactive session that drives your logged-in browser';
+    frag.appendChild(b3);
   }
   title.after(frag);
 }
@@ -16176,6 +16253,19 @@ function bindAgentCardEvents(card, agentIndex) {
     });
   }
 
+  var sessionModeSel = card.querySelector('.agent-session-mode');
+  if (sessionModeSel) {
+    sessionModeSel.addEventListener('change', function () {
+      var interactive = this.value === 'interactive';
+      modalAgents[agentIndex].sessionMode = interactive ? 'interactive' : 'headless';
+      var warn = card.querySelector('.agent-session-mode-warn');
+      if (warn) warn.style.display = interactive ? '' : 'none';
+      var maxDurGroup = card.querySelector('.agent-maxduration-group');
+      if (maxDurGroup) maxDurGroup.style.display = interactive ? '' : 'none';
+      updateCardHeaderBadges(card, agentIndex);
+    });
+  }
+
   var addTimeBtn = card.querySelector('.agent-btn-add-time');
   if (addTimeBtn) {
     addTimeBtn.addEventListener('click', function () {
@@ -16296,6 +16386,33 @@ function syncAgentFromCard(card, agentIndex) {
   agent.endpointId = (epEl && epEl.value) ? epEl.value : null;
   var epModelEl = card.querySelector('.agent-endpoint-model');
   agent.endpointModel = (epModelEl && epModelEl.value) ? epModelEl.value : null;
+
+  var sessionModeEl = card.querySelector('.agent-session-mode');
+  agent.sessionMode = (sessionModeEl && sessionModeEl.value === 'interactive') ? 'interactive' : 'headless';
+
+  var maxDurEl = card.querySelector('.agent-max-duration');
+  if (maxDurEl) {
+    var mins = parseInt(maxDurEl.value, 10);
+    agent.maxDurationMs = (mins && mins > 0) ? mins * 60000 : null;
+  }
+
+  // MCP allowlist: null when the inherit-all default is untouched (no prior
+  // selection AND every discovered server still checked); otherwise the explicit
+  // set of checked names. If nothing was discovered, leave the existing value.
+  var mcpContainer = card.querySelector('.agent-mcp-servers');
+  if (mcpContainer) {
+    var cbs = mcpContainer.querySelectorAll('.agent-mcp-server-cb');
+    if (cbs.length > 0) {
+      var checkedNames = [];
+      var allChecked = true;
+      cbs.forEach(function (cb) {
+        if (cb.checked) checkedNames.push(cb.getAttribute('data-server'));
+        else allChecked = false;
+      });
+      var hadSelection = mcpContainer.getAttribute('data-had-selection') === 'true';
+      agent.mcpServers = (!hadSelection && allChecked) ? null : checkedNames;
+    }
+  }
 }
 
 function syncAllAgentsFromCards() {

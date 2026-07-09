@@ -28,6 +28,14 @@ const { columnTranscriptPath, resolveTranscriptPath, isUnderProjectsRoot } = req
 const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice-personality');
 const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
 const { tagBackgroundEvent } = require('./lib/voice-background');
+const WebSocket = require('ws');
+const {
+  buildInteractiveArgs,
+  interactiveSuffix,
+  stripAnsi: stripAnsiTui,
+  resolveMcpSelection,
+  filterMcpDefs
+} = require('./lib/interactive-scheduled');
 const { appendWithRotation } = require('./lib/voice-debug-log');
 const https = require('https');
 
@@ -633,10 +641,11 @@ function readLoops() {
 
 function readAutomations() {
   ensureConfigDir();
-  const defaults = { globalEnabled: true, maxConcurrentRuns: 3, agentReposBaseDir: AGENTS_DIR_DEFAULT, automations: [] };
+  const defaults = { globalEnabled: true, maxConcurrentRuns: 3, agentReposBaseDir: AGENTS_DIR_DEFAULT, automations: [], projectMcpDefaults: {} };
   const { data, recovered } = readJsonWithRecovery(AUTOMATIONS_FILE);
   const result = (data && typeof data === 'object') ? data : defaults;
   if (!Array.isArray(result.automations)) result.automations = [];
+  if (!result.projectMcpDefaults || typeof result.projectMcpDefaults !== 'object') result.projectMcpDefaults = {};
   if (recovered) result._recovered = true;
   return result;
 }
@@ -5450,6 +5459,30 @@ ipcMain.handle('automations:getForProject', (event, projectPath) => {
   return data.automations.filter(a => a.projectPath.replace(/\\/g, '/') === normalized);
 });
 
+// List the MCP servers available to a project (merged user + project scope),
+// for the automation editor's MCP-allowlist checkboxes. Also returns the
+// project's saved default selection (if any) so the editor can pre-check it.
+ipcMain.handle('automations:discoverMcpServers', (event, projectPath) => {
+  const discovered = discoverProjectMcpServers(projectPath);
+  const servers = Object.keys(discovered).sort().map(name => ({ name, scope: discovered[name].scope }));
+  const data = readAutomations();
+  const norm = projectPath ? String(projectPath).replace(/\\/g, '/') : '';
+  const projectDefault = (data.projectMcpDefaults && data.projectMcpDefaults[norm]) || null;
+  return { servers, projectDefault };
+});
+
+// Persist a per-project default MCP allowlist (array of server names, or null to
+// clear). Agents without their own mcpServers selection inherit this.
+ipcMain.handle('automations:setProjectMcpDefault', (event, projectPath, serverNames) => {
+  const data = readAutomations();
+  if (!data.projectMcpDefaults || typeof data.projectMcpDefaults !== 'object') data.projectMcpDefaults = {};
+  const norm = String(projectPath).replace(/\\/g, '/');
+  if (Array.isArray(serverNames)) data.projectMcpDefaults[norm] = serverNames;
+  else delete data.projectMcpDefaults[norm];
+  writeAutomations(data);
+  return data.projectMcpDefaults[norm] || null;
+});
+
 ipcMain.handle('automations:create', (event, config) => {
   const data = readAutomations();
   const automationId = generateAutomationId();
@@ -5471,6 +5504,9 @@ ipcMain.handle('automations:create', (event, config) => {
       enabled: true,
       skipPermissions: false,
       firstStartOnly: false,
+      sessionMode: 'headless',
+      mcpServers: null,
+      maxDurationMs: null,
       dbConnectionString: null,
       dbReadOnly: true,
       lastRunAt: null,
@@ -5524,7 +5560,7 @@ ipcMain.handle('automations:updateAgent', (event, automationId, agentId, updates
   if (!agent) return null;
   const safeFields = ['name', 'prompt', 'schedule', 'runMode', 'runAfter', 'runOnUpstreamFailure',
     'passUpstreamContext', 'isolation', 'enabled', 'skipPermissions', 'firstStartOnly', 'dbConnectionString', 'dbReadOnly',
-    'endpointId', 'endpointModel'];
+    'endpointId', 'endpointModel', 'sessionMode', 'mcpServers', 'maxDurationMs'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) agent[field] = updates[field];
   });
@@ -5546,6 +5582,9 @@ ipcMain.handle('automations:addAgent', (event, automationId, agentConfig) => {
     enabled: true,
     skipPermissions: false,
     firstStartOnly: false,
+    sessionMode: 'headless',
+    mcpServers: null,
+    maxDurationMs: null,
     dbConnectionString: null,
     dbReadOnly: true,
     lastRunAt: null,
@@ -6751,6 +6790,9 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
     fs.mkdirSync(path.dirname(mcpConfigPath), { recursive: true });
     fs.writeFileSync(mcpConfigPath, JSON.stringify(opts.mcpConfig), 'utf8');
     args.push('--mcp-config', mcpConfigPath);
+    // Scoped MCP allowlist: --strict-mcp-config makes the CLI ignore every other
+    // (user- and project-scoped) MCP server and load ONLY those in mcpConfig.
+    if (opts.strictMcp) args.push('--strict-mcp-config');
     if (Array.isArray(opts.allowedTools) && opts.allowedTools.length > 0) {
       args.push('--allowedTools', opts.allowedTools.join(','));
     }
@@ -7007,6 +7049,307 @@ function getAgentEndpointEnv(agent, projectPath) {
   return getProjectEndpointEnvByPath(projectPath);
 }
 
+// Discover the MCP servers available to an automation's project: the merged set
+// of user-scoped (~/.claude.json → mcpServers), project-scoped
+// (~/.claude.json → projects[projectPath].mcpServers) and project-root
+// .mcp.json servers. Returns { name: { def, scope } }; later scopes win on a
+// name clash (project overrides user), matching Claude Code's own precedence.
+function discoverProjectMcpServers(projectPath) {
+  const servers = {};
+  const addAll = (map, scope) => {
+    if (!map || typeof map !== 'object') return;
+    for (const [name, def] of Object.entries(map)) {
+      servers[name] = { def, scope };
+    }
+  };
+  // User + project scope from ~/.claude.json
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
+    addAll(cfg.mcpServers, 'user');
+    if (cfg.projects && projectPath) {
+      const norm = String(projectPath).replace(/\\/g, '/');
+      for (const [p, pcfg] of Object.entries(cfg.projects)) {
+        if (p.replace(/\\/g, '/') === norm && pcfg && pcfg.mcpServers) {
+          addAll(pcfg.mcpServers, 'project');
+        }
+      }
+    }
+  } catch { /* no ~/.claude.json or unreadable — fine */ }
+  // Project-root .mcp.json
+  try {
+    if (projectPath) {
+      const j = JSON.parse(fs.readFileSync(path.join(projectPath, '.mcp.json'), 'utf8'));
+      addAll(j.mcpServers, 'project-file');
+    }
+  } catch { /* no project .mcp.json — fine */ }
+  return servers;
+}
+
+// Shared run finalizer for BOTH headless and interactive agent runs: write the
+// run record, clear currentRunStartedAt / update last* state, fan out to
+// dependents, notify the renderer, and drain the queue. Idempotent-ish: callers
+// must have already released any mode-specific resources (headless child, WS).
+function finalizeAgentRun(automationId, agentId, key, o) {
+  o = o || {};
+  runningAgents.delete(key);
+  agentLiveOutputBuffers.delete(key);
+  if (o.sessionMode === 'interactive') interactiveRunActive = false;
+
+  const completedAt = o.completedAt || new Date().toISOString();
+  const runStatus = o.status || 'completed';
+  const displayOutput = o.output || '';
+  let parsed = o.parsed && typeof o.parsed === 'object'
+    ? { summary: o.parsed.summary || '', attentionItems: o.parsed.attentionItems || [] }
+    : parseAgentResult(displayOutput);
+
+  try {
+    saveAgentRun(automationId, agentId, {
+      automationId, agentId,
+      startedAt: o.startedAt, completedAt,
+      durationMs: new Date(completedAt).getTime() - new Date(o.startedAt).getTime(),
+      exitCode: (o.exitCode === undefined ? null : o.exitCode),
+      status: runStatus,
+      summary: parsed.summary,
+      output: displayOutput,
+      attentionItems: parsed.attentionItems,
+      costUsd: null
+    });
+  } catch { /* don't let save failure prevent state cleanup below */ }
+
+  try {
+    const freshData = readAutomations();
+    const freshAuto = freshData.automations.find(a => a.id === automationId);
+    if (freshAuto) {
+      const freshAgent = freshAuto.agents.find(ag => ag.id === agentId);
+      if (freshAgent) {
+        freshAgent.currentRunStartedAt = null;
+        freshAgent.lastRunAt = completedAt;
+        freshAgent.lastRunStatus = runStatus;
+        freshAgent.lastError = (o.lastError !== undefined)
+          ? o.lastError
+          : (runStatus === 'completed' ? null : (o.exitCode != null ? 'Exit code: ' + o.exitCode : runStatus));
+        freshAgent.lastSummary = parsed.summary || null;
+        freshAgent.lastAttentionItems = parsed.attentionItems || [];
+        writeAutomations(freshData);
+      }
+      triggerDependentAgents(automationId, agentId, runStatus, freshData);
+      checkPipelineComplete(automationId);
+    }
+  } catch { /* avoid crashing the finalizer */ }
+
+  if (mainWindow) {
+    mainWindow.webContents.send('automations:agent-completed', {
+      automationId, agentId,
+      status: runStatus,
+      summary: parsed.summary,
+      attentionItems: parsed.attentionItems,
+      exitCode: (o.exitCode === undefined ? null : o.exitCode)
+    });
+    if (parsed.attentionItems.length > 0) mainWindow.flashFrame(true);
+  }
+
+  if (agentQueue.length > 0) {
+    const next = agentQueue.shift();
+    runAgent(next.automationId, next.agentId);
+  }
+}
+
+// Only one interactive scheduled run at a time: they drive the user's single
+// paired Chrome, so two would collide. Interactive runs still count toward
+// maxConcurrentRuns AND hold this global lock.
+let interactiveRunActive = false;
+
+// Spawn a scheduled INTERACTIVE claude session by opening our own authenticated
+// WebSocket client to the local pty-server (the same server the renderer's
+// columns use). Unlike spawnHeadlessClaude (child_process + --print), this gives
+// a real interactive TUI session, so interactive-only integrations — notably the
+// paired Chrome extension (Claude-in-Chrome) — are available.
+//
+// opts: { sessionId, skipPermissions, model, env, mcpConfig, mcpConfigPath,
+//   strictMcp, extraArgs, sentinelPath, maxDurationMs, minBootMs, onText, onComplete }
+// Returns a handle { kill() } compatible with runningAgents (stopAutomationScheduler
+// calls .kill()).
+function spawnInteractiveScheduled(prompt, cwd, opts) {
+  opts = opts || {};
+  const ptyId = 'sched_' + crypto.randomBytes(8).toString('hex');
+  const args = buildInteractiveArgs({
+    sessionId: opts.sessionId,
+    skipPermissions: opts.skipPermissions,
+    model: opts.model,
+    hasEndpoint: !!opts.env,
+    mcpConfigPath: opts.mcpConfigPath,
+    strictMcp: opts.strictMcp,
+    extraArgs: opts.extraArgs
+  });
+
+  // Write the scoped MCP config (if any) — the pty-spawned claude reads it by path.
+  if (opts.mcpConfig && opts.mcpConfigPath) {
+    try {
+      fs.mkdirSync(path.dirname(opts.mcpConfigPath), { recursive: true });
+      fs.writeFileSync(opts.mcpConfigPath, JSON.stringify(opts.mcpConfig), 'utf8');
+    } catch { /* best effort; claude will error visibly if missing */ }
+  }
+
+  let ws = null;
+  let buffer = '';
+  let done = false;
+  let injected = false;
+  let bootAt = 0;
+  let lastDataAt = 0;
+  let markerSeenAt = 0;
+  let watchdog = null;
+  let pollTimer = null;
+  let injectTimer = null;
+
+  const MIN_BOOT_MS = opts.minBootMs || 6000;   // let the TUI + MCP servers boot
+  const QUIET_MS = 1500;                          // inject on first calm gap after boot
+  const HARD_INJECT_MS = opts.hardInjectMs || 20000; // inject regardless by this point
+  const MARKER_GRACE_MS = 8000;                   // fallback: complete N ms after marker if no sentinel
+  const maxMs = opts.maxDurationMs || 600000;     // watchdog hard cap (10 min default)
+
+  const cleanupFiles = () => {
+    if (opts.mcpConfigPath) { try { fs.unlinkSync(opts.mcpConfigPath); } catch { /* ignore */ } }
+    if (opts.sentinelPath) { try { fs.unlinkSync(opts.sentinelPath); } catch { /* ignore */ } }
+  };
+
+  const finish = (result) => {
+    if (done) return;
+    done = true;
+    if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (injectTimer) { clearInterval(injectTimer); injectTimer = null; }
+    try {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'kill', id: ptyId }));
+    } catch { /* ignore */ }
+    // Give the kill a beat to reach the pty-server, then close + cleanup temp files.
+    setTimeout(() => {
+      try { if (ws) ws.close(); } catch { /* ignore */ }
+      cleanupFiles();
+    }, 1000).unref();
+    if (typeof opts.onComplete === 'function') opts.onComplete(result || {});
+  };
+
+  const doInject = () => {
+    if (injected || done) return;
+    injected = true;
+    try {
+      // Injecting a long prompt into the TUI needs BOTH fixes, learned by
+      // observation:
+      //  1) Wrap in BRACKETED PASTE (ESC[200~ … ESC[201~) so the whole prompt
+      //     lands — sending it raw drops all but the tail.
+      //  2) FLATTEN to a single line first — with newlines still present a
+      //     following Enter inserts a newline instead of submitting, so the
+      //     pasted prompt just sits in the input box forever (→ watchdog).
+      // Flattened + bracketed + a separate \r submits reliably. Collapsing
+      // newlines to spaces doesn't change how the model reads the instructions.
+      const line = String(prompt).replace(/\r?\n/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+      const BRACKET_START = '\x1b[200~';
+      const BRACKET_END = '\x1b[201~';
+      ws.send(JSON.stringify({ type: 'write', id: ptyId, data: BRACKET_START + line + BRACKET_END }));
+      // Submit after the paste has been processed by the TUI.
+      setTimeout(() => {
+        try { if (!done && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'write', id: ptyId, data: '\r' })); } catch { /* ignore */ }
+      }, 700);
+    } catch { /* ignore */ }
+  };
+
+  try {
+    ws = new WebSocket('ws://127.0.0.1:' + ptyActualPort, ['claudes-auth-' + PTY_AUTH_TOKEN]);
+  } catch (e) {
+    // Defer so the caller can register the returned handle before onComplete fires.
+    setImmediate(() => finish({ status: 'error', output: '', lastError: 'pty-server connect failed: ' + ((e && e.message) || e) }));
+    return { kill: () => finish({ status: 'interrupted', output: stripAnsiTui(buffer), lastError: 'Killed' }) };
+  }
+
+  ws.on('open', () => {
+    const createMsg = { type: 'create', id: ptyId, cols: 200, rows: 50, cwd, args };
+    if (opts.env) createMsg.env = opts.env;
+    try { ws.send(JSON.stringify(createMsg)); }
+    catch (e) { finish({ status: 'error', output: '', lastError: (e && e.message) || String(e) }); return; }
+    bootAt = Date.now();
+    lastDataAt = Date.now();
+  });
+
+  ws.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (msg.id && msg.id !== ptyId) return;
+    if (msg.type === 'data') {
+      buffer += msg.data;
+      lastDataAt = Date.now();
+      if (typeof opts.onText === 'function') opts.onText(msg.data);
+      if (!injected) maybeInject();
+      // Fallback: note when a closing :::loop-result marker first appears in the
+      // scraped output; if the sentinel file never lands, complete off this.
+      if (injected && !markerSeenAt) {
+        const clean = stripAnsiTui(buffer);
+        if (/:::loop-result\s*\n[\s\S]*?\n\s*:::loop-result/.test(clean)) markerSeenAt = Date.now();
+      }
+    } else if (msg.type === 'exit') {
+      // Interactive sessions shouldn't self-exit, but if it does, capture + finish.
+      const clean = stripAnsiTui(buffer);
+      finish({ status: 'completed', output: clean, parsed: parseAgentResult(clean) });
+    }
+  });
+
+  ws.on('error', (err) => { finish({ status: 'error', output: stripAnsiTui(buffer), lastError: (err && err.message) || String(err) }); });
+  ws.on('close', () => { if (!done) finish({ status: 'error', output: stripAnsiTui(buffer), lastError: 'pty-server connection closed' }); });
+
+  function maybeInject() {
+    if (injected || done) return;
+    const now = Date.now();
+    if (now - bootAt < MIN_BOOT_MS) return;
+    if (now - lastDataAt < QUIET_MS) return;
+    doInject();
+  }
+
+  // Timer catches the calm gap even when no further data arrives to drive
+  // maybeInject; a hard deadline guarantees injection even if the TUI never goes
+  // quiet (e.g. a blinking cursor / spinner keeps emitting output).
+  injectTimer = setInterval(() => {
+    if (injected || done) return;
+    const now = Date.now();
+    if (!bootAt || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const calm = now - bootAt >= MIN_BOOT_MS && now - lastDataAt >= QUIET_MS;
+    const deadline = now - bootAt >= HARD_INJECT_MS;
+    if (calm || deadline) {
+      doInject();
+    }
+  }, 500);
+  injectTimer.unref();
+
+  // Completion poll: sentinel file first (clean JSON), marker-grace as fallback.
+  pollTimer = setInterval(() => {
+    if (done || !injected) return;
+    if (opts.sentinelPath) {
+      try {
+        if (fs.existsSync(opts.sentinelPath)) {
+          const content = fs.readFileSync(opts.sentinelPath, 'utf8');
+          let parsed;
+          try {
+            const j = JSON.parse(content);
+            parsed = { summary: j.summary || '', attentionItems: j.attentionItems || [] };
+          } catch { parsed = parseAgentResult(content); }
+          finish({ status: 'completed', output: stripAnsiTui(buffer), parsed });
+          return;
+        }
+      } catch { /* keep polling */ }
+    }
+    if (markerSeenAt && Date.now() - markerSeenAt >= MARKER_GRACE_MS) {
+      const clean = stripAnsiTui(buffer);
+      finish({ status: 'completed', output: clean, parsed: parseAgentResult(clean) });
+    }
+  }, 1000);
+  pollTimer.unref();
+
+  watchdog = setTimeout(() => {
+    finish({ status: 'interrupted', output: stripAnsiTui(buffer), lastError: 'Watchdog timeout after ' + maxMs + 'ms' });
+  }, maxMs);
+  watchdog.unref();
+
+  return { kill: () => finish({ status: 'interrupted', output: stripAnsiTui(buffer), lastError: 'Killed' }) };
+}
+
 async function runAgent(automationId, agentId) {
   let data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
@@ -7020,6 +7363,15 @@ async function runAgent(automationId, agentId) {
   // Check concurrency limit (shared across loops and agents)
   const totalRunning = runningAgents.size;
   if (totalRunning >= (data.maxConcurrentRuns || 3)) {
+    if (!agentQueue.some(q => q.automationId === automationId && q.agentId === agentId)) {
+      agentQueue.push({ automationId, agentId });
+    }
+    return;
+  }
+
+  // Interactive runs are serialised: only one at a time. They drive the user's
+  // single paired Chrome, so two concurrent interactive runs would collide.
+  if (agent.sessionMode === 'interactive' && interactiveRunActive) {
     if (!agentQueue.some(q => q.automationId === automationId && q.agentId === agentId)) {
       agentQueue.push({ automationId, agentId });
     }
@@ -7151,24 +7503,25 @@ async function runAgent(automationId, agentId) {
     }
   }
 
-  // Build MCP config (if any) — same shape as before
-  let mcpOpts = null;
+  // --- MCP server selection (applies to both headless and interactive) ---
+  // Resolve the effective allowlist: per-agent override, else per-project
+  // default, else null = inherit ALL merged servers (today's behaviour).
+  const projMcpDefault = (data.projectMcpDefaults && automation.projectPath)
+    ? data.projectMcpDefaults[String(automation.projectPath).replace(/\\/g, '/')]
+    : null;
+  const mcpSelection = resolveMcpSelection(agent.mcpServers, projMcpDefault);
+
+  // Derived MongoDB server + its read-only tool allowlist (unchanged shape).
+  let mongoServer = null;
+  let mongoAllowed = null;
   if (agent.dbConnectionString) {
     const mcpArgs = ['-y', 'mongodb-mcp-server@latest'];
     if (agent.dbReadOnly !== false) mcpArgs.push('--readOnly');
-    const mcpConfig = {
-      mcpServers: {
-        mongodb: {
-          command: 'npx',
-          args: mcpArgs,
-          env: { MDB_MCP_CONNECTION_STRING: agent.dbConnectionString }
-        }
-      }
+    mongoServer = {
+      mongodb: { command: 'npx', args: mcpArgs, env: { MDB_MCP_CONNECTION_STRING: agent.dbConnectionString } }
     };
-    const mcpConfigPath = path.join(AUTOMATIONS_RUNS_DIR, automationId + '_' + agentId + '_mcp.json');
-    let allowedTools = null;
     if (agent.dbReadOnly !== false) {
-      allowedTools = [
+      mongoAllowed = [
         'mcp__mongodb__find', 'mcp__mongodb__count', 'mcp__mongodb__collection-indexes',
         'mcp__mongodb__collection-schema', 'mcp__mongodb__collection-storage-size',
         'mcp__mongodb__db-stats', 'mcp__mongodb__explain', 'mcp__mongodb__export',
@@ -7178,15 +7531,73 @@ async function runAgent(automationId, agentId) {
         'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'
       ];
     }
-    mcpOpts = { mcpConfig, mcpConfigPath, allowedTools };
   }
 
+  // Per-run token keeps concurrent runs of the same agent from colliding on the
+  // temp mcp-config / sentinel filenames.
+  const runToken = Date.now() + '_' + crypto.randomBytes(4).toString('hex');
+  let mcpOpts = null;
+  if (mcpSelection !== null) {
+    // Scoped allowlist: strict config with ONLY the selected servers (+ mongo).
+    const available = discoverProjectMcpServers(automation.projectPath);
+    const scoped = filterMcpDefs(available, mcpSelection, mongoServer || null);
+    const mcpConfigPath = path.join(AUTOMATIONS_RUNS_DIR, automationId + '_' + agentId + '_' + runToken + '_mcp.json');
+    mcpOpts = { mcpConfig: scoped, mcpConfigPath, allowedTools: mongoAllowed, strictMcp: true };
+  } else if (mongoServer) {
+    // No allowlist: legacy additive mongo-only config (no --strict-mcp-config).
+    const mcpConfigPath = path.join(AUTOMATIONS_RUNS_DIR, automationId + '_' + agentId + '_' + runToken + '_mcp.json');
+    mcpOpts = { mcpConfig: { mcpServers: mongoServer }, mcpConfigPath, allowedTools: mongoAllowed, strictMcp: false };
+  }
+
+  const agentEnv = getAgentEndpointEnv(agent, automation.projectPath);
+
+  // --- Interactive scheduled run (opt-in) ---
+  if (agent.sessionMode === 'interactive') {
+    interactiveRunActive = true;
+    const sentinelPath = path.join(AUTOMATIONS_RUNS_DIR, automationId + '_' + agentId + '_' + runToken + '.result.json');
+    try { fs.unlinkSync(sentinelPath); } catch { /* not there yet — fine */ }
+    const interactivePrompt = fullPrompt + interactiveSuffix(sentinelPath);
+    const handle = spawnInteractiveScheduled(interactivePrompt, cwd, {
+      sessionId: crypto.randomUUID(),
+      skipPermissions: !!agent.skipPermissions,
+      model: agent.endpointModel || null,
+      env: agentEnv,
+      mcpConfig: mcpOpts ? mcpOpts.mcpConfig : null,
+      mcpConfigPath: mcpOpts ? mcpOpts.mcpConfigPath : null,
+      strictMcp: mcpOpts ? mcpOpts.strictMcp : false,
+      extraArgs: Array.isArray(agent.extraArgs) ? agent.extraArgs : null,
+      sentinelPath,
+      maxDurationMs: (typeof agent.maxDurationMs === 'number' && agent.maxDurationMs > 0) ? agent.maxDurationMs : 600000,
+      onText: (text) => {
+        textChunks.push(text);
+        if (mainWindow) mainWindow.webContents.send('automations:agent-output', { automationId, agentId, chunk: stripAnsiTui(text) });
+      },
+      onComplete: (result) => {
+        finalizeAgentRun(automationId, agentId, key, {
+          sessionMode: 'interactive',
+          status: result.status || 'completed',
+          exitCode: null,
+          output: result.output || stripAnsiTui(textChunks.join('')),
+          parsed: result.parsed || null,
+          startedAt,
+          lastError: result.lastError
+        });
+      }
+    });
+    runningAgents.set(key, handle);
+    agentLiveOutputBuffers.set(key, textChunks);
+    return;
+  }
+
+  // --- Headless run (default, unchanged) ---
   const spawned = spawnHeadlessClaude(fullPrompt, cwd, {
     skipPermissions: !!agent.skipPermissions,
     mcpConfig: mcpOpts ? mcpOpts.mcpConfig : null,
     mcpConfigPath: mcpOpts ? mcpOpts.mcpConfigPath : null,
     allowedTools: mcpOpts ? mcpOpts.allowedTools : null,
-    env: getAgentEndpointEnv(agent, automation.projectPath),
+    strictMcp: mcpOpts ? mcpOpts.strictMcp : false,
+    extraArgs: Array.isArray(agent.extraArgs) ? agent.extraArgs : null,
+    env: agentEnv,
     onRaw: (raw) => { outputChunks.push(raw); },
     onText: (text) => {
       textChunks.push(text);
@@ -7199,105 +7610,26 @@ async function runAgent(automationId, agentId) {
   agentLiveOutputBuffers.set(key, textChunks);
 
   child.on('close', (exitCode) => {
-    runningAgents.delete(key);
-    agentLiveOutputBuffers.delete(key);
     forgetBackgroundSession(child);
     spawned.cleanup();
-
-    const completedAt = new Date().toISOString();
-    let runStatus = exitCode === 0 ? 'completed' : 'error';
-    let parsed = { summary: '', attentionItems: [] };
-
-    try {
-      const displayOutput = textChunks.join('');
-      parsed = parseAgentResult(displayOutput);
-
-      const runData = {
-        automationId, agentId,
-        startedAt, completedAt,
-        durationMs: new Date(completedAt).getTime() - new Date(startedAt).getTime(),
-        exitCode,
-        status: runStatus,
-        summary: parsed.summary,
-        output: displayOutput,
-        attentionItems: parsed.attentionItems,
-        costUsd: null
-      };
-
-      saveAgentRun(automationId, agentId, runData);
-    } catch { /* don't let save failure prevent state cleanup below */ }
-
-    // Always clear currentRunStartedAt — this is critical to prevent stuck state
-    try {
-      const freshData = readAutomations();
-      const freshAuto = freshData.automations.find(a => a.id === automationId);
-      if (freshAuto) {
-        const freshAgent = freshAuto.agents.find(ag => ag.id === agentId);
-        if (freshAgent) {
-          freshAgent.currentRunStartedAt = null;
-          freshAgent.lastRunAt = completedAt;
-          freshAgent.lastRunStatus = runStatus;
-          freshAgent.lastError = exitCode === 0 ? null : 'Exit code: ' + exitCode;
-          freshAgent.lastSummary = parsed.summary || null;
-          freshAgent.lastAttentionItems = parsed.attentionItems || [];
-          writeAutomations(freshData);
-        }
-
-        // Trigger dependent agents
-        triggerDependentAgents(automationId, agentId, runStatus, freshData);
-
-        // Check if pipeline is fully complete — trigger manager if configured
-        checkPipelineComplete(automationId);
-      }
-    } catch { /* avoid crashing the close handler */ }
-
-    // Always notify renderer
-    if (mainWindow) {
-      mainWindow.webContents.send('automations:agent-completed', {
-        automationId, agentId,
-        status: runStatus,
-        summary: parsed.summary,
-        attentionItems: parsed.attentionItems,
-        exitCode
-      });
-
-      if (parsed.attentionItems.length > 0) {
-        mainWindow.flashFrame(true);
-      }
-    }
-
-    // Process queue
-    if (agentQueue.length > 0) {
-      const next = agentQueue.shift();
-      runAgent(next.automationId, next.agentId);
-    }
+    finalizeAgentRun(automationId, agentId, key, {
+      status: exitCode === 0 ? 'completed' : 'error',
+      exitCode,
+      output: textChunks.join(''),
+      startedAt
+    });
   });
 
   child.on('error', (err) => {
-    runningAgents.delete(key);
-    agentLiveOutputBuffers.delete(key);
     forgetBackgroundSession(child);
     spawned.cleanup();
-    try {
-      const freshData = readAutomations();
-      const freshAuto = freshData.automations.find(a => a.id === automationId);
-      if (freshAuto) {
-        const freshAgent = freshAuto.agents.find(ag => ag.id === agentId);
-        if (freshAgent) {
-          freshAgent.currentRunStartedAt = null;
-          freshAgent.lastRunStatus = 'error';
-          freshAgent.lastError = err.message;
-          writeAutomations(freshData);
-        }
-      }
-    } catch { /* avoid crashing the error handler */ }
-    if (mainWindow) mainWindow.webContents.send('automations:agent-completed', {
-      automationId, agentId, status: 'error', error: err.message
+    finalizeAgentRun(automationId, agentId, key, {
+      status: 'error',
+      exitCode: null,
+      output: textChunks.join(''),
+      startedAt,
+      lastError: err.message
     });
-    if (agentQueue.length > 0) {
-      const next = agentQueue.shift();
-      runAgent(next.automationId, next.agentId);
-    }
   });
 }
 

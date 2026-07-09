@@ -162,6 +162,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Automations
   getAutomations: () => ipcRenderer.invoke('automations:getAll'),
   getAutomationsForProject: (projectPath) => ipcRenderer.invoke('automations:getForProject', projectPath),
+  discoverMcpServers: (projectPath) => ipcRenderer.invoke('automations:discoverMcpServers', projectPath),
+  setProjectMcpDefault: (projectPath, serverNames) => ipcRenderer.invoke('automations:setProjectMcpDefault', projectPath, serverNames),
   createAutomation: (config) => ipcRenderer.invoke('automations:create', config),
   updateAutomation: (automationId, updates) => ipcRenderer.invoke('automations:update', automationId, updates),
   deleteAutomation: (automationId) => ipcRenderer.invoke('automations:delete', automationId),
