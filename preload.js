@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSessionTitle: (projectPath, sessionId) => ipcRenderer.invoke('sessions:getTitle', projectPath, sessionId),
   readClaudeMd: (projectPath) => ipcRenderer.invoke('claudemd:read', projectPath),
   saveClaudeMd: (projectPath, content) => ipcRenderer.invoke('claudemd:save', projectPath, content),
+  setExploreAgent: (projectPath, enabled) => ipcRenderer.invoke('agents:setExplore', projectPath, enabled),
   readDir: (dirPath) => ipcRenderer.invoke('fs:readDir', dirPath),
   searchFiles: (rootDir, query) => ipcRenderer.invoke('fs:searchFiles', rootDir, query),
   readFile: (filePath) => ipcRenderer.invoke('fs:readFile', filePath),

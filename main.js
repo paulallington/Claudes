@@ -27,6 +27,7 @@ const { extractSpeakableText, lastAssistantUuid, splitSentences } = require('./l
 const { columnTranscriptPath, resolveTranscriptPath, isUnderProjectsRoot } = require('./lib/voice-transcript-path');
 const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice-personality');
 const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
+const { buildExploreAgentFile, EXPLORE_AGENT_REL } = require('./lib/explore-agent');
 const { tagBackgroundEvent } = require('./lib/voice-background');
 const WebSocket = require('ws');
 const {
@@ -2217,6 +2218,25 @@ ipcMain.handle('claudemd:save', (event, projectPath, content) => {
       return { success: false, error: 'content exceeds write size cap (5MB)' };
     }
     fs.writeFileSync(filePath, content, 'utf8');
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agents:setExplore', (event, projectPath, enabled) => {
+  try {
+    if (typeof projectPath !== 'string' || !projectPath) {
+      return { success: false, error: 'projectPath must be a non-empty string' };
+    }
+    const safeBase = assertInsideAllowedRoots(projectPath);
+    const filePath = path.join(safeBase, EXPLORE_AGENT_REL);
+    if (enabled) {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, buildExploreAgentFile(), 'utf8');
+    } else if (fs.existsSync(filePath)) {
+      fs.rmSync(filePath);
+    }
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
