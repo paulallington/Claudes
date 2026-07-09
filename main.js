@@ -29,6 +29,7 @@ const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice
 const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
 const { buildExploreAgentFile, EXPLORE_AGENT_REL } = require('./lib/explore-agent');
 const { tagBackgroundEvent } = require('./lib/voice-background');
+const { resolveProjectMcpSpawn } = require('./lib/mcp-project');
 const WebSocket = require('ws');
 const {
   buildInteractiveArgs,
@@ -366,6 +367,25 @@ const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'ag
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
 const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
 const VOICE_DEBUG_LOG = path.join(CONFIG_DIR, app.isPackaged ? 'voice-debug.log' : 'voice-debug-dev.log');
+
+// Per-spawn scoped MCP config files are short-lived (written just before a
+// column spawns, read once by the Claude CLI via --mcp-config). Stale files
+// can accumulate if the app crashes mid-spawn; sweep anything older than an
+// hour at boot so MCP_TMP_DIR doesn't grow unbounded.
+const MCP_TMP_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'mcp-tmp' : 'mcp-tmp-dev');
+
+function sweepMcpTmp() {
+  try {
+    if (!fs.existsSync(MCP_TMP_DIR)) return;
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const name of fs.readdirSync(MCP_TMP_DIR)) {
+      const p = path.join(MCP_TMP_DIR, name);
+      try {
+        if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
+      } catch (_) { /* ignore individual file errors */ }
+    }
+  } catch (_) { /* ignore */ }
+}
 
 // --- Path containment ---
 //
@@ -5505,6 +5525,32 @@ ipcMain.handle('automations:setProjectMcpDefault', (event, projectPath, serverNa
   return data.projectMcpDefaults[norm] || null;
 });
 
+// Build a scoped MCP config file for an interactive column spawned under a
+// project. Secrets (server defs) never leave main — the renderer only gets
+// a file path. Returns { inherit: true } (no scoping needed) or
+// { mcpConfigPath, strict }. Fails open on any error so a spawn is never
+// blocked by MCP config materialization.
+ipcMain.handle('mcp:buildProjectConfig', (event, projectPath) => {
+  try {
+    if (!projectPath) return { inherit: true };
+    const data = readAutomations();
+    const norm = String(projectPath).replace(/\\/g, '/');
+    const projectDefault = (data.projectMcpDefaults && data.projectMcpDefaults[norm]) || null;
+    const discovered = discoverProjectMcpServers(projectPath);
+    const res = resolveProjectMcpSpawn(projectDefault, discovered);
+    if (res.inherit) return { inherit: true };
+    fs.mkdirSync(MCP_TMP_DIR, { recursive: true, mode: 0o700 });
+    const file = path.join(MCP_TMP_DIR, `col_${process.pid}_${Date.now()}_${Math.floor(Math.random() * 1e6)}.json`);
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(res.config), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(tmp, file);
+    return { mcpConfigPath: file, strict: true };
+  } catch (err) {
+    console.warn('[mcp] buildProjectConfig failed, falling back to inherit-all:', err.message);
+    return { inherit: true };
+  }
+});
+
 ipcMain.handle('automations:create', (event, config) => {
   const data = readAutomations();
   const automationId = generateAutomationId();
@@ -8236,6 +8282,7 @@ if (!gotLock) {
     createWindow();
     setupAutoUpdater();
     migrateLoopsToAutomations();
+    sweepMcpTmp();
     startAutomationScheduler();
     probeHeadroom(); // one-shot: cache whether the `headroom` CLI is available
 
