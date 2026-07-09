@@ -2558,6 +2558,7 @@ function buildProjectItem(project, index) {
     addMenuItem(project.pinned ? 'Unpin' : 'Pin to top', 'toggle-pin');
     addMenuItem(isHidden ? 'Show Project' : 'Hide Project', 'toggle-hide');
     addMenuItem(config.projects[projIndex].voiceMuted ? 'Unmute voice' : 'Mute voice', 'toggle-voice-mute');
+    addMenuItem(project.exploreHaiku ? 'Explore: Haiku (on)' : 'Keep Explore on Haiku', 'toggle-explore-haiku');
     if (inGroup) {
       addMenuItem('Remove from "' + groupKey + '" group', 'ungroup');
     } else if (project.ungrouped && groupKey) {
@@ -2624,6 +2625,14 @@ function buildProjectItem(project, index) {
       } else if (action === 'toggle-hide') {
         config.projects[projIndex].hidden = !config.projects[projIndex].hidden;
         window.electronAPI.saveProjects(config);
+        renderProjectList();
+      } else if (action === 'toggle-explore-haiku') {
+        var enabled = !config.projects[projIndex].exploreHaiku;
+        config.projects[projIndex].exploreHaiku = enabled;
+        window.electronAPI.saveProjects(config);
+        if (config.projects[projIndex].path && window.electronAPI && window.electronAPI.setExploreAgent) {
+          window.electronAPI.setExploreAgent(config.projects[projIndex].path, enabled);
+        }
         renderProjectList();
       } else if (action === 'ungroup') {
         config.projects[projIndex].ungrouped = true;
