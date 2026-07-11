@@ -743,6 +743,17 @@ html[data-platform="darwin"] .sidebar-header {
 .headroom-service-opt input[type="checkbox"] { margin: 0; cursor: pointer; accent-color: #22d3ee; }
 .headroom-service-opt input:disabled { cursor: default; }
 .headroom-service-opt:has(input:disabled) { opacity: 0.5; cursor: default; }
+.headroom-mode-select {
+  font-size: 11px;
+  color: var(--text-primary);
+  background: var(--bg-button);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 1px 4px;
+  cursor: pointer;
+}
+.headroom-mode-select:disabled { cursor: default; }
+.headroom-service-opt:has(select:disabled) { opacity: 0.5; cursor: default; }
 .headroom-shaper-note {
   margin: 2px 0 0 20px;
   font-size: 10px;

@@ -40,6 +40,15 @@
             <input type="checkbox" id="opt-headroom-memory"> Memory
             <span class="spawn-help" title="Persistent cross-session memory. Proxy-wide (affects every Headroom column). Takes effect when the app next starts its Headroom proxy — Stop then Start to apply.">?</span>
           </label>
+          <label class="headroom-service-opt" id="opt-headroom-mode-label">
+            Mode
+            <select id="opt-headroom-mode" class="headroom-mode-select">
+              <option value="cache">Cache (recommended)</option>
+              <option value="token">Token</option>
+              <option value="off">Off</option>
+            </select>
+            <span class="spawn-help" title="How the proxy optimises. Cache (default, best for a Claude subscription): freezes prior turns to preserve Anthropic's prefix cache — no history rewriting, and it's the cache-reads that stretch your rate-limit window. Token: compresses by rewriting prior turns for max token savings, but busts the prefix cache — only worth it on a metered API key. Off: passthrough. Proxy-wide; takes effect when the proxy next starts — Stop then Start to apply.">?</span>
+          </label>
           <label class="headroom-service-opt" id="opt-headroom-shaper-label">
             <input type="checkbox" id="opt-headroom-shaper"> Output shaper
             <span class="spawn-help" title="Cut output tokens by shaping response verbosity to your learned preference. Proxy-wide, applied live — no restart.">?</span>

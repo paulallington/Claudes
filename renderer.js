@@ -47,6 +47,7 @@ var headroomRequiredNote = document.getElementById('headroom-required-note');
 var headroomInstallLink = document.getElementById('headroom-install-link');
 var optHeadroom1m = document.getElementById('opt-headroom-1m');
 var optHeadroomMemory = document.getElementById('opt-headroom-memory');
+var optHeadroomMode = document.getElementById('opt-headroom-mode');
 var optHeadroomShaper = document.getElementById('opt-headroom-shaper');
 var optHeadroomAutostart = document.getElementById('opt-headroom-autostart');
 var headroomSubs = document.getElementById('opt-headroom-subs');
@@ -10948,6 +10949,7 @@ function applyHeadroomUiState() {
   // control and are gated only on Headroom being installed — not on any single
   // column's binding. Both default off.
   if (optHeadroomMemory) { optHeadroomMemory.disabled = !headroomInstalled; optHeadroomMemory.checked = !!(config && config.useHeadroomMemory); }
+  if (optHeadroomMode) { optHeadroomMode.disabled = !headroomInstalled; optHeadroomMode.value = (config && config.headroomMode) || 'cache'; }
   if (optHeadroomShaper) { optHeadroomShaper.disabled = !headroomInstalled; optHeadroomShaper.checked = !!(config && config.useHeadroomOutputShaper); }
   if (optHeadroomAutostart) { optHeadroomAutostart.disabled = !headroomInstalled; optHeadroomAutostart.checked = !!(config && config.headroomAutoStart); }
   try { if (typeof renderShaperNote === 'function') renderShaperNote('idle'); } catch (e) { /* ignore */ }
@@ -10994,6 +10996,17 @@ if (optHeadroomMemory) {
     // main.js applies --memory the next time it starts the app-owned proxy.
     if (optHeadroomMemory.checked && typeof showToast === 'function') {
       showToast('Headroom memory enabled — Stop then Start the proxy to apply', { kind: 'info' });
+    }
+  });
+}
+if (optHeadroomMode) {
+  optHeadroomMode.addEventListener('change', function () {
+    config.headroomMode = optHeadroomMode.value || 'cache';
+    saveConfig();
+    // main.js reads headroomMode when it next starts the app-owned proxy
+    // (buildHeadroomProxyArgs) — it's a start-time flag, not hot-swappable.
+    if (typeof showToast === 'function') {
+      showToast('Headroom mode set to ' + config.headroomMode + ' — Stop then Start the proxy to apply', { kind: 'info' });
     }
   });
 }
