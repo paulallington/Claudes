@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { buildHeadroomEnv } = require('../lib/headroom-env');
+const { buildHeadroomEnv, buildHeadroomProxyArgs } = require('../lib/headroom-env');
 
 test('enabled claude column -> base URL + tool search', () => {
   const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false });
@@ -47,4 +47,48 @@ test('arbitrary-command column (isClaude false) -> null', () => {
 test('no input -> null (safe)', () => {
   assert.strictEqual(buildHeadroomEnv(), null);
   assert.strictEqual(buildHeadroomEnv({}), null);
+});
+
+test('proxy args: absent mode falls back to cache (subscription-safe default)', () => {
+  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 8787), ['proxy', '--port', '8787', '--mode', 'cache']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs(undefined, 8787), ['proxy', '--port', '8787', '--mode', 'cache']);
+});
+
+test('proxy args: cache mode -> --mode cache', () => {
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'cache' }, 8787), ['proxy', '--port', '8787', '--mode', 'cache']);
+});
+
+test('proxy args: token mode -> --mode token', () => {
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'token' }, 8787), ['proxy', '--port', '8787', '--mode', 'token']);
+});
+
+test('proxy args: off mode -> --no-optimize (no --mode)', () => {
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'off' }, 8787), ['proxy', '--port', '8787', '--no-optimize']);
+});
+
+test('proxy args: unknown mode falls back to cache', () => {
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'bogus' }, 8787), ['proxy', '--port', '8787', '--mode', 'cache']);
+});
+
+test('proxy args: memory adds --memory before the mode flag', () => {
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ useHeadroomMemory: true, headroomMode: 'token' }, 8787),
+    ['proxy', '--port', '8787', '--memory', '--mode', 'token']);
+});
+
+test('proxy args: memory + off -> --memory --no-optimize', () => {
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ useHeadroomMemory: true, headroomMode: 'off' }, 8787),
+    ['proxy', '--port', '8787', '--memory', '--no-optimize']);
+});
+
+test('proxy args: mode is case-insensitive', () => {
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'TOKEN' }, 8787), ['proxy', '--port', '8787', '--mode', 'token']);
+});
+
+test('proxy args: invalid port falls back to 8787', () => {
+  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 0), ['proxy', '--port', '8787', '--mode', 'cache']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 99999), ['proxy', '--port', '8787', '--mode', 'cache']);
+});
+
+test('proxy args: custom port honored', () => {
+  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 9191), ['proxy', '--port', '9191', '--mode', 'cache']);
 });

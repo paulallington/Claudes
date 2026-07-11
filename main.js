@@ -24,6 +24,7 @@ const WorkspaceScrub = require('./lib/workspace-scrub');
 const { buildTtsRequest, buildVoicesRequest } = require('./lib/voice-request');
 const { normalizeVoiceSettings, redactVoiceSettings } = require('./lib/voice-settings');
 const { extractSpeakableText, lastAssistantUuid, splitSentences } = require('./lib/voice-text');
+const { buildHeadroomProxyArgs } = require('./lib/headroom-env');
 const { columnTranscriptPath, resolveTranscriptPath, isUnderProjectsRoot } = require('./lib/voice-transcript-path');
 const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice-personality');
 const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
@@ -4928,8 +4929,7 @@ function stopHeadroomProxyProcess() {
 function startHeadroomProxyProcess(onLine) {
   return new Promise((resolve) => {
     let cfg = null; try { cfg = readConfig(); } catch { /* ignore */ }
-    const args = ['proxy', '--port', String(headroomPort())];
-    if (cfg && cfg.useHeadroomMemory) args.push('--memory');
+    const args = buildHeadroomProxyArgs(cfg, headroomPort());
     let child;
     try {
       child = spawn('headroom', args, { windowsHide: true });
