@@ -25,6 +25,7 @@ const { buildTtsRequest, buildVoicesRequest } = require('./lib/voice-request');
 const { normalizeVoiceSettings, redactVoiceSettings } = require('./lib/voice-settings');
 const { extractSpeakableText, lastAssistantUuid, splitSentences } = require('./lib/voice-text');
 const { buildHeadroomProxyArgs } = require('./lib/headroom-env');
+const { planHeadroomWatchdog } = require('./lib/headroom-watchdog');
 const { columnTranscriptPath, resolveTranscriptPath, isUnderProjectsRoot } = require('./lib/voice-transcript-path');
 const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice-personality');
 const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
@@ -175,6 +176,7 @@ function markHeadroomInstalled(version, viaBinary) {
   if (!wasInstalled) {
     if (viaBinary) maybeAutoUpdateHeadroom(); // update needs a resolvable binary
     maybeAutoStartHeadroom();                 // no-op unless opted in / already up
+    startHeadroomWatchdog();                  // supervise a frozen ("up but silent") proxy
   }
 }
 // If the first probe misses, retry a few times — the binary may become
@@ -5108,16 +5110,65 @@ ipcMain.handle('headroom:serviceStop', async () => {
 });
 // Force-restart: the escape hatch for a stuck "started but not answering" proxy.
 // Kill our child, drop any in-flight start, wait for the port to free, start fresh.
-ipcMain.handle('headroom:serviceRestart', async () => {
-  if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
-  diagLog('[headroom] restart requested');
+// Shared by the manual Restart button and the health watchdog below.
+async function restartHeadroomProxy(reason) {
+  diagLog('[headroom] restart (' + reason + ')');
   broadcastServiceLog('Restarting Headroom proxy…');
   stopHeadroomProxyProcess();
   _headroomStartInflight = null;
   _shaperStateApplied = false;
   await new Promise((r) => setTimeout(r, 1200)); // let the port release
   return startHeadroomManagedProxy();
+}
+ipcMain.handle('headroom:serviceRestart', async () => {
+  if (!headroomStatus.installed) return { ok: false, error: 'headroom not installed' };
+  return restartHeadroomProxy('manual');
 });
+// Health watchdog — nothing else notices a proxy that goes "up but silent"
+// (the process stays alive but stops answering /health), so the only recovery
+// used to be the manual Restart above. Poll /health while the user has Headroom
+// on; planHeadroomWatchdog trips an auto-restart after a few consecutive misses,
+// backed off and capped so a proxy that can't stay up doesn't restart-loop.
+const HEADROOM_WATCHDOG_POLL_MS = 30 * 1000;
+let _headroomWatchdogTimer = null;
+let _headroomWatchdogState = { consecutiveFailures: 0, restartTimestamps: [] };
+let _headroomWatchdogBusy = false; // a restart it kicked off is still settling
+let _headroomGaveUpLogged = false; // one-shot the give-up notice per outage
+async function headroomWatchdogTick() {
+  // Don't probe while a start/restart is in flight — a mid-boot proxy reads as
+  // unhealthy and would trip a needless second restart.
+  if (_headroomWatchdogBusy || _headroomStartInflight) return;
+  let cfg = null; try { cfg = readConfig(); } catch { /* ignore */ }
+  const enabled = !!(cfg && cfg.useHeadroom);
+  const installed = !!headroomStatus.installed;
+  let healthy = false;
+  if (enabled && installed) { try { healthy = await probeHeadroomHealth(); } catch { healthy = false; } }
+  const d = planHeadroomWatchdog(_headroomWatchdogState, { enabled, installed, healthy, now: Date.now() });
+  _headroomWatchdogState = { consecutiveFailures: d.consecutiveFailures, restartTimestamps: d.restartTimestamps };
+  if (d.action !== 'giveUp') _headroomGaveUpLogged = false;
+  if (d.action === 'restart') {
+    _headroomWatchdogBusy = true;
+    diagLog('[headroom] watchdog: proxy unresponsive — auto-restarting (delay ' + d.delayMs + 'ms)');
+    broadcastServiceLog('Headroom proxy stopped responding — restarting automatically…');
+    try {
+      if (d.delayMs) await new Promise((r) => setTimeout(r, d.delayMs));
+      await restartHeadroomProxy('watchdog: unresponsive');
+    } catch (e) {
+      diagLog('[headroom] watchdog restart failed:', (e && e.message) || String(e));
+    } finally {
+      _headroomWatchdogBusy = false;
+    }
+  } else if (d.action === 'giveUp' && !_headroomGaveUpLogged) {
+    _headroomGaveUpLogged = true;
+    diagLog('[headroom] watchdog: giving up after repeated restarts — manual intervention needed');
+    broadcastServiceLog('Headroom proxy keeps failing after several restarts — use Restart, or see headroom-proxy.log.');
+  }
+}
+function startHeadroomWatchdog() {
+  if (_headroomWatchdogTimer) return;
+  _headroomWatchdogTimer = setInterval(() => { headroomWatchdogTick().catch(() => { /* never throw from a timer */ }); }, HEADROOM_WATCHDOG_POLL_MS);
+  if (_headroomWatchdogTimer.unref) _headroomWatchdogTimer.unref();
+}
 // Output shaper — proxy-wide, but hot-togglable with no restart via the proxy's
 // /admin/runtime-env channel. `_postShaperEnv(on)` flips the live override.
 function _postShaperEnv(on) {
