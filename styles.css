@@ -1543,6 +1543,21 @@ html[data-platform="darwin"] #toolbar {
   line-height: 28px;
 }
 
+/* Marks a column as running the Codex CLI rather than Claude (see
+   createColumnHeader). Sits inline next to the column title. */
+.column-header .col-codex-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  border-radius: 3px;
+  background: rgba(120, 170, 255, 0.18);
+  color: #a9c7ff;
+  vertical-align: middle;
+}
+
 .column-header .col-title.editing,
 .project-item .project-name.editing,
 .workspace-item .workspace-name.editing {

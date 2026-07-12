@@ -3715,10 +3715,22 @@ function createColumnHeader(id, customTitle, opts) {
   title.addEventListener('dblclick', function () {
     startTitleEdit(id, title);
   });
+  // cmd columns (Codex, launch configs) have no Claude slash commands, so a
+  // Codex badge replaces the starburst and the compact/teleport/effort controls
+  // below are suppressed — they would be broken affordances there.
+  if (opts.cmd === 'codex') {
+    var codexBadge = document.createElement('span');
+    codexBadge.className = 'col-codex-badge';
+    codexBadge.textContent = 'Codex';
+    codexBadge.title = 'This column runs the Codex CLI, not Claude';
+    title.appendChild(codexBadge);
+  }
+
   var actions = document.createElement('span');
   actions.className = 'col-actions';
 
-  if (!opts.isDiff) {
+  var claudeChrome = window.CodexSpawn.columnUsesClaudeChrome({ cmd: opts.cmd });
+  if (!opts.isDiff && claudeChrome) {
     var compactBtn = document.createElement('span');
     compactBtn.className = 'col-action';
     compactBtn.title = 'Compact context (/compact)';
@@ -4158,7 +4170,7 @@ function addColumn(args, targetRow, opts) {
   // rather than parseInt('') === NaN.
   col.id = 'col-' + id;
 
-  var header = createColumnHeader(id, opts.title);
+  var header = createColumnHeader(id, opts.title, { cmd: opts.cmd || null });
 
   // Drop a banner above the terminal so the user can see at a glance which
   // backend each column is talking to. Two flavours:
