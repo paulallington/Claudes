@@ -108,11 +108,37 @@ const PLACEHOLDER_LINE = JSON.stringify({
   }
 });
 
-test('parseCodexRateLimits: classifies by window_minutes, not position (placeholder)', () => {
-  const out = parseCodexRateLimits(PLACEHOLDER_LINE);
-  assert.deepStrictEqual(out.five_hour, null);
-  assert.strictEqual(out.seven_day.utilization, 0);
-  assert.strictEqual(out.seven_day.window_minutes, 10080);
+test('parseCodexRateLimits: a lone uninitialized placeholder block is skipped, not surfaced as weekly 0%', () => {
+  // No session (five_hour) window, and the only window present (weekly) is
+  // 0% -> the observed fresh-session placeholder shape. With nothing else
+  // in the file, there's no usable reading at all.
+  assert.strictEqual(parseCodexRateLimits(PLACEHOLDER_LINE), null);
+});
+
+test('parseCodexRateLimits: missing window_minutes falls back to positional classification', () => {
+  const line = JSON.stringify({
+    type: 'event_msg',
+    payload: { type: 'token_count', rate_limits: {
+      primary: { used_percent: 30 },
+      secondary: { used_percent: 8 }
+    } }
+  });
+  const out = parseCodexRateLimits(line);
+  assert.strictEqual(out.five_hour.utilization, 30);
+  assert.strictEqual(out.seven_day.utilization, 8);
+});
+
+test('parseCodexRateLimits: a legit weekly-only NONZERO block surfaces its week (not skipped)', () => {
+  const line = JSON.stringify({
+    type: 'event_msg',
+    payload: { type: 'token_count', rate_limits: {
+      primary: { used_percent: 11, window_minutes: 10080 },
+      secondary: null
+    } }
+  });
+  const out = parseCodexRateLimits(line);
+  assert.strictEqual(out.five_hour, null);
+  assert.strictEqual(out.seven_day.utilization, 11);
 });
 
 test('parseCodexRateLimits: prefers most-recent session-bearing block over a newer placeholder', () => {
@@ -146,13 +172,39 @@ test('mergeCodexReadings: newest-complete wins when multiple readings have five_
   assert.strictEqual(out.seven_day.utilization, 12);
 });
 
-test('mergeCodexReadings: falls back to weekly-only when nothing has five_hour', () => {
+test('mergeCodexReadings: an all-zero session-less reading is a placeholder and is not surfaced', () => {
   const out = mergeCodexReadings([
     { five_hour: null, seven_day: { utilization: 0 } },
     null
   ]);
+  assert.strictEqual(out, null);
+});
+
+test('mergeCodexReadings: falls back to a genuine (nonzero) weekly-only reading when nothing has five_hour', () => {
+  const out = mergeCodexReadings([
+    { five_hour: null, seven_day: { utilization: 7 } },
+    null
+  ]);
   assert.strictEqual(out.five_hour, null);
-  assert.strictEqual(out.seven_day.utilization, 0);
+  assert.strictEqual(out.seven_day.utilization, 7);
+});
+
+test('mergeCodexReadings: per-window freshness — newer complete reading masks an older weekly-0 placeholder-shaped reading', () => {
+  const out = mergeCodexReadings([
+    { five_hour: null, seven_day: { utilization: 0 } },
+    { five_hour: { utilization: 46 }, seven_day: { utilization: 12 } }
+  ]);
+  assert.strictEqual(out.five_hour.utilization, 46);
+  assert.strictEqual(out.seven_day.utilization, 12);
+});
+
+test('mergeCodexReadings: per-window freshness — a NEWER weekly-only nonzero reading beats an older complete reading\'s week', () => {
+  const out = mergeCodexReadings([
+    { five_hour: null, seven_day: { utilization: 99 } },
+    { five_hour: { utilization: 46 }, seven_day: { utilization: 12 } }
+  ]);
+  assert.strictEqual(out.five_hour.utilization, 46);
+  assert.strictEqual(out.seven_day.utilization, 99);
 });
 
 test('mergeCodexReadings: empty/all-null -> null', () => {
