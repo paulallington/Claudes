@@ -50,45 +50,51 @@ test('no input -> null (safe)', () => {
 });
 
 test('proxy args: absent mode falls back to cache (subscription-safe default)', () => {
-  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 8787), ['proxy', '--port', '8787', '--mode', 'cache']);
-  assert.deepStrictEqual(buildHeadroomProxyArgs(undefined, 8787), ['proxy', '--port', '8787', '--mode', 'cache']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 8787), ['proxy', '--port', '8787', '--no-http2', '--mode', 'cache']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs(undefined, 8787), ['proxy', '--port', '8787', '--no-http2', '--mode', 'cache']);
 });
 
 test('proxy args: cache mode -> --mode cache', () => {
-  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'cache' }, 8787), ['proxy', '--port', '8787', '--mode', 'cache']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'cache' }, 8787), ['proxy', '--port', '8787', '--no-http2', '--mode', 'cache']);
 });
 
 test('proxy args: token mode -> --mode token', () => {
-  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'token' }, 8787), ['proxy', '--port', '8787', '--mode', 'token']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'token' }, 8787), ['proxy', '--port', '8787', '--no-http2', '--mode', 'token']);
 });
 
 test('proxy args: off mode -> --no-optimize (no --mode)', () => {
-  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'off' }, 8787), ['proxy', '--port', '8787', '--no-optimize']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'off' }, 8787), ['proxy', '--port', '8787', '--no-http2', '--no-optimize']);
 });
 
 test('proxy args: unknown mode falls back to cache', () => {
-  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'bogus' }, 8787), ['proxy', '--port', '8787', '--mode', 'cache']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'bogus' }, 8787), ['proxy', '--port', '8787', '--no-http2', '--mode', 'cache']);
 });
 
 test('proxy args: memory adds --memory before the mode flag', () => {
   assert.deepStrictEqual(buildHeadroomProxyArgs({ useHeadroomMemory: true, headroomMode: 'token' }, 8787),
-    ['proxy', '--port', '8787', '--memory', '--mode', 'token']);
+    ['proxy', '--port', '8787', '--no-http2', '--memory', '--mode', 'token']);
 });
 
 test('proxy args: memory + off -> --memory --no-optimize', () => {
   assert.deepStrictEqual(buildHeadroomProxyArgs({ useHeadroomMemory: true, headroomMode: 'off' }, 8787),
-    ['proxy', '--port', '8787', '--memory', '--no-optimize']);
+    ['proxy', '--port', '8787', '--no-http2', '--memory', '--no-optimize']);
 });
 
 test('proxy args: mode is case-insensitive', () => {
-  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'TOKEN' }, 8787), ['proxy', '--port', '8787', '--mode', 'token']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs({ headroomMode: 'TOKEN' }, 8787), ['proxy', '--port', '8787', '--no-http2', '--mode', 'token']);
 });
 
 test('proxy args: invalid port falls back to 8787', () => {
-  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 0), ['proxy', '--port', '8787', '--mode', 'cache']);
-  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 99999), ['proxy', '--port', '8787', '--mode', 'cache']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 0), ['proxy', '--port', '8787', '--no-http2', '--mode', 'cache']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 99999), ['proxy', '--port', '8787', '--no-http2', '--mode', 'cache']);
 });
 
 test('proxy args: custom port honored', () => {
-  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 9191), ['proxy', '--port', '9191', '--mode', 'cache']);
+  assert.deepStrictEqual(buildHeadroomProxyArgs({}, 9191), ['proxy', '--port', '9191', '--no-http2', '--mode', 'cache']);
+});
+
+test('proxy args: always includes --no-http2 (HTTP/2 stream-cancel freeze guard)', () => {
+  assert.ok(buildHeadroomProxyArgs({}, 8787).includes('--no-http2'));
+  assert.ok(buildHeadroomProxyArgs({ headroomMode: 'off' }, 8787).includes('--no-http2'));
+  assert.ok(buildHeadroomProxyArgs({ useHeadroomMemory: true }, 8787).includes('--no-http2'));
 });
