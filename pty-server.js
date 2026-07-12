@@ -146,11 +146,17 @@ const ENV_BLOCKLIST = new Set([
 ]);
 function sanitiseEnv(input) {
   if (!input || typeof input !== 'object') return null;
+  // Windows env names are case-insensitive, so a renderer could send `node_options`
+  // / `path` / `ld_preload` and have the OS treat them as the blocked variable.
+  // Canonicalise to uppercase for the check on win32; keep exact case on Unix
+  // (names are case-sensitive there) so the Unix behaviour is unchanged.
+  const win = process.platform === 'win32';
   const out = {};
   for (const k of Object.keys(input)) {
     if (typeof input[k] !== 'string') continue;
-    if (ENV_BLOCKLIST.has(k)) continue;
-    if (/^LD_/.test(k) || /^DYLD_/.test(k)) continue;
+    const key = win ? k.toUpperCase() : k;
+    if (ENV_BLOCKLIST.has(key)) continue;
+    if (/^LD_/.test(key) || /^DYLD_/.test(key)) continue;
     out[k] = input[k];
   }
   return out;

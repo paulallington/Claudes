@@ -717,12 +717,18 @@ function writeAutomations(data) {
 // has { id, trigger, label, body }. Triggered in the renderer by typing
 // "\trigger" in a column terminal.
 function readSnippets() {
-  try { return JSON.parse(fs.readFileSync(SNIPPETS_FILE, 'utf8')); }
-  catch { return { snippets: [] }; }
+  ensureConfigDir();
+  // Atomic read with .bak recovery / corrupt-file quarantine (same as config +
+  // automations) so a crash mid-write can't truncate the whole snippet library
+  // and have the next save cement the loss.
+  const { data } = readJsonWithRecovery(SNIPPETS_FILE);
+  const result = (data && typeof data === 'object') ? data : { snippets: [] };
+  if (!Array.isArray(result.snippets)) result.snippets = [];
+  return result;
 }
 function writeSnippets(data) {
   ensureConfigDir();
-  fs.writeFileSync(SNIPPETS_FILE, JSON.stringify(data, null, 2), 'utf8');
+  atomicWriteJson(SNIPPETS_FILE, data);
 }
 
 function ensureAgentRunsDir(automationId, agentId) {
