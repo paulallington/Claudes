@@ -13472,6 +13472,15 @@ function renderPlanLimitsMiniFrom(el, d, stale) {
   el.classList.toggle('stale', !!stale);
   el.innerHTML = '';
 
+  // Brand the Claude bar only when the Codex bar is stacked above it, so the two
+  // identical Session/Week bars are distinguishable. Solo, it stays uncaptioned.
+  if (codexBarVisible) {
+    var title = document.createElement('div');
+    title.className = 'plan-limits-mini-title';
+    title.textContent = 'Claude';
+    el.appendChild(title);
+  }
+
   function row(label, slot) {
     if (!slot) return null;
     var pct = slot.utilization || 0;
@@ -13503,6 +13512,142 @@ function renderPlanLimitsMiniFrom(el, d, stale) {
   if (weekRow) el.appendChild(weekRow);
   // Re-attach the hover popover after innerHTML wipe.
   if (typeof updatePlanLimitsPopover === 'function') updatePlanLimitsPopover();
+}
+
+// --- Codex usage mini-bar ---
+// Codex (ChatGPT auth) has no live usage endpoint; main scrapes the newest
+// rate-limit event out of its session rollout JSONL and returns it in the same
+// { five_hour, seven_day } shape as the Claude bar. Rendered directly above the
+// Claude bar and only when Codex is installed and has produced usage data.
+var lastGoodCodexLimitsData = null;
+// Whether the Codex bar is currently shown. Drives the "CLAUDE" caption on the
+// Claude bar below — the brand labels only appear when both bars are stacked, so
+// a lone Claude bar stays uncluttered.
+var codexBarVisible = false;
+
+function setCodexBarVisible(v) {
+  if (codexBarVisible === v) return;
+  codexBarVisible = v;
+  // The Claude bar's caption depends on this flag — re-render it from last-good
+  // so the "CLAUDE" label appears/disappears in lockstep with the Codex bar.
+  var claudeEl = document.getElementById('plan-limits-mini');
+  if (claudeEl && lastGoodPlanLimitsData) {
+    renderPlanLimitsMiniFrom(claudeEl, lastGoodPlanLimitsData, claudeEl.classList.contains('stale'));
+  }
+}
+
+function renderCodexLimitsMini(result) {
+  var el = document.getElementById('codex-limits-mini');
+  if (!el) return;
+  var ok = result && result.ok && result.data;
+  if (!ok) {
+    // Between polls / transient read failure: keep the last-good snapshot rather
+    // than flickering the bar out. Genuine "no codex" / "no data" hides it.
+    if (lastGoodCodexLimitsData && result && (result.error === 'read-failed')) {
+      renderCodexLimitsMiniFrom(el, lastGoodCodexLimitsData);
+    } else {
+      el.classList.add('hidden');
+      setCodexBarVisible(false);
+    }
+    return;
+  }
+  lastGoodCodexLimitsData = result.data;
+  renderCodexLimitsMiniFrom(el, result.data);
+}
+
+function renderCodexLimitsMiniFrom(el, d) {
+  if (!d || (!d.five_hour && !d.seven_day)) {
+    el.classList.add('hidden');
+    setCodexBarVisible(false);
+    return;
+  }
+  el.classList.remove('hidden');
+  el.innerHTML = '';
+
+  var title = document.createElement('div');
+  title.className = 'plan-limits-mini-title';
+  title.textContent = 'Codex';
+  el.appendChild(title);
+
+  function row(label, slot) {
+    if (!slot) return null;
+    var pct = slot.utilization || 0;
+    var r = document.createElement('div');
+    r.className = 'plan-limits-mini-row';
+    var lbl = document.createElement('span');
+    lbl.className = 'plan-limits-mini-label';
+    lbl.textContent = label;
+    var bar = document.createElement('div');
+    bar.className = 'plan-limits-mini-bar';
+    var fill = document.createElement('div');
+    fill.className = 'plan-limits-mini-fill';
+    fill.style.width = Math.min(100, Math.max(0, pct)) + '%';
+    if (pct >= 90) fill.classList.add('critical');
+    else if (pct >= 70) fill.classList.add('warning');
+    bar.appendChild(fill);
+    var pctEl = document.createElement('span');
+    pctEl.className = 'plan-limits-mini-pct';
+    pctEl.textContent = Math.round(pct) + '%';
+    r.appendChild(lbl);
+    r.appendChild(bar);
+    r.appendChild(pctEl);
+    return r;
+  }
+
+  var sessionRow = row('Session', d.five_hour);
+  var weekRow = row('Week', d.seven_day);
+  if (sessionRow) el.appendChild(sessionRow);
+  if (weekRow) el.appendChild(weekRow);
+  updateCodexLimitsPopover();
+  setCodexBarVisible(true);
+}
+
+// Hover popover mirroring the Claude bar's — Session/Week with reset times.
+function updateCodexLimitsPopover() {
+  var mini = document.getElementById('codex-limits-mini');
+  if (!mini) return;
+  var pop = mini.querySelector('.plan-limits-mini-popover');
+  if (!pop) {
+    pop = document.createElement('div');
+    pop.className = 'plan-limits-mini-popover';
+    mini.appendChild(pop);
+  }
+  function fmtSlot(label, slot) {
+    if (!slot) return '';
+    var pct = Math.round(slot.utilization || 0);
+    var html = '<div class="plan-limits-popover-slot">' +
+      '<div class="plan-limits-popover-row">' +
+        '<span class="plan-limits-popover-label">' + label + '</span>' +
+        '<span class="plan-limits-popover-pct">' + pct + '%</span>' +
+      '</div>';
+    if (slot.resets_at) {
+      var when = new Date(slot.resets_at);
+      var hhmm = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      var datePart = when.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+      html += '<div class="plan-limits-popover-sub">Resets ' + datePart +
+        ' at ' + hhmm + ' (in ' + fmtResetsIn(slot.resets_at) + ')</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+  var d = lastGoodCodexLimitsData;
+  var slots = '';
+  if (d) {
+    slots += fmtSlot('Session', d.five_hour);
+    slots += fmtSlot('Week', d.seven_day);
+  }
+  if (!slots) slots = '<div class="plan-limits-popover-sub">Loading Codex usage…</div>';
+  pop.innerHTML = '<div class="plan-limits-popover-hint" style="opacity:.7;margin-bottom:2px;">Codex</div>' + slots;
+}
+
+function loadCodexLimits(force) {
+  if (!window.electronAPI || !window.electronAPI.getCodexLimits) return Promise.resolve();
+  return window.electronAPI.getCodexLimits(!!force).then(function (r) {
+    renderCodexLimitsMini(r);
+    return r;
+  }).catch(function () {
+    renderCodexLimitsMini({ ok: false, error: 'read-failed' });
+  });
 }
 
 function loadPlanLimits(force) {
@@ -13779,7 +13924,10 @@ var planLimitsPollTimer = null;
 
 function startPlanLimitsPolling() {
   if (planLimitsPollTimer) return;
-  planLimitsPollTimer = setInterval(function () { loadPlanLimits(false); }, PLAN_LIMITS_POLL_MS);
+  planLimitsPollTimer = setInterval(function () {
+    loadPlanLimits(false);
+    loadCodexLimits(false);
+  }, PLAN_LIMITS_POLL_MS);
 }
 function stopPlanLimitsPolling() {
   if (planLimitsPollTimer) { clearInterval(planLimitsPollTimer); planLimitsPollTimer = null; }
@@ -13816,6 +13964,7 @@ window.addEventListener('focus', function () {
     ? Date.now() - lastPlanLimitsResult.fetchedAt
     : Infinity;
   if (age > PLAN_LIMITS_FOCUS_STALE_MS) loadPlanLimits(false);
+  loadCodexLimits(false);
   startPlanLimitsPolling();
 });
 window.addEventListener('blur', stopPlanLimitsPolling);
@@ -13849,6 +13998,7 @@ if (lastGoodPlanLimitsData) {
 // which meant a backgrounded launch (auto-start, taskbar click) left the
 // mini-bar empty until focus returned. Just fire the fetch — it's cheap.
 loadPlanLimits(false);
+loadCodexLimits(false);
 startPlanLimitsPolling();
 
 // Click the mini-bar to open the full Usage modal.

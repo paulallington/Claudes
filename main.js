@@ -43,6 +43,7 @@ const {
 } = require('./lib/interactive-scheduled');
 const { appendWithRotation } = require('./lib/voice-debug-log');
 const { codexLookupCommand, parseWhichOutput } = require('./lib/codex-spawn');
+const { parseCodexRateLimits, pickLatestRolloutPath } = require('./lib/codex-limits');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -3583,6 +3584,71 @@ ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
 
 ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
   try { return detectPlanLimitCrossings(prev, next); } catch { return []; }
+});
+
+// Codex plan usage. Codex (ChatGPT auth) has no OAuth /usage endpoint like
+// Claude's — instead it stamps a `rate_limits` block into every token_count
+// event of its session rollout JSONL. We locate the most-recently-touched
+// rollout, tail it, and scrape the newest rate-limit event. Shaped identically
+// to getPlanLimits so the sidebar mini-bar renderer is shared.
+const CODEX_USAGE_CACHE_MS = 30_000;
+let codexUsageCache = { data: null, fetchedAt: 0 };
+// Only the tail of a rollout carries the latest rate_limits; rollouts can grow
+// large, so read the last chunk rather than the whole file.
+const CODEX_ROLLOUT_TAIL_BYTES = 128 * 1024;
+
+function listCodexRollouts(dir) {
+  const out = [];
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const ent of entries) {
+    const full = path.join(dir, ent.name);
+    if (ent.isDirectory()) {
+      out.push(...listCodexRollouts(full));
+    } else if (ent.isFile() && ent.name.endsWith('.jsonl')) {
+      try { out.push({ path: full, mtimeMs: fs.statSync(full).mtimeMs }); } catch { /* vanished mid-scan */ }
+    }
+  }
+  return out;
+}
+
+function readFileTail(file, maxBytes) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const start = size > maxBytes ? size - maxBytes : 0;
+    const len = size - start;
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, start);
+    return buf.toString('utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+ipcMain.handle('usage:getCodexLimits', async (_event, force) => {
+  const now = Date.now();
+  if (!force && codexUsageCache.data && (now - codexUsageCache.fetchedAt) < CODEX_USAGE_CACHE_MS) {
+    return { ok: true, data: codexUsageCache.data, fetchedAt: codexUsageCache.fetchedAt, cached: true };
+  }
+  if (!hasCodex()) {
+    return { ok: false, error: 'not-installed', message: 'Codex CLI not found on PATH.' };
+  }
+  const sessionsDir = path.join(os.homedir(), '.codex', 'sessions');
+  const latest = pickLatestRolloutPath(listCodexRollouts(sessionsDir));
+  if (!latest) {
+    return { ok: false, error: 'no-sessions', message: 'No Codex session rollouts found yet.' };
+  }
+  try {
+    const data = parseCodexRateLimits(readFileTail(latest, CODEX_ROLLOUT_TAIL_BYTES));
+    if (!data) {
+      return { ok: false, error: 'no-usage', message: 'No rate-limit data in the latest Codex session yet.' };
+    }
+    codexUsageCache = { data, fetchedAt: now };
+    return { ok: true, data, fetchedAt: now, cached: false };
+  } catch (e) {
+    return { ok: false, error: 'read-failed', message: e.message };
+  }
 });
 
 const { fuzzyRank } = require('./lib/fuzzy-rank');

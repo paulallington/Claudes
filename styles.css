@@ -2787,6 +2787,21 @@ html[data-platform="darwin"] #toolbar {
   margin-top: 8px;
 }
 
+/* macOS: with the sidebar collapsed, the explorer panel slides to the window's
+   left edge and its tab row lands under the native traffic-light buttons. Push
+   it down to clear them, mirroring the sidebar-header's 32px reservation. Only
+   applies while the explorer itself is the leftmost visible panel. */
+html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel .explorer-tabs {
+  margin-top: 32px;
+}
+
+/* macOS: sidebar AND explorer both collapsed → the toolbar's left controls are
+   now the leftmost element under the traffic lights. Inset them past the
+   buttons (a horizontal row, so push right rather than down). */
+html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #main-area .toolbar-left {
+  padding-left: 72px;
+}
+
 .explorer-tab {
   flex: 1;
   padding: 0 4px;
@@ -4831,6 +4846,27 @@ html[data-platform="darwin"] #toolbar {
 }
 
 .plan-limits-mini.hidden { display: none; }
+
+/* Codex usage bar — same chrome as the Claude bar, stacked directly above it.
+   No click target (there's no Codex usage modal), so drop the pointer cursor
+   and sit it flush against the Claude bar below. A small caption disambiguates
+   the two otherwise-identical Session/Week bars. */
+.codex-limits-mini {
+  cursor: default;
+  margin-bottom: 4px;
+}
+.codex-limits-mini:hover { border-color: var(--border-subtle); }
+
+/* Brand caption shown on each bar when Codex + Claude are stacked, so the two
+   otherwise-identical Session/Week bars are unambiguous. */
+.plan-limits-mini-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  opacity: 0.75;
+}
 
 /* Stale: showing last-good snapshot while the API is in a rate-limit cooldown.
    Dimmed so the user can tell at a glance the numbers aren't live; hover the
