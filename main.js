@@ -5845,11 +5845,13 @@ ipcMain.handle('automations:create', (event, config) => {
     }, agentConfig, { id: newId });
   });
 
-  // Second pass: remap runAfter references from temp IDs to real IDs
+  // Second pass: remap runAfter references from temp IDs to real IDs, and strip
+  // any renderer-supplied isolation.clonePath (main-owned; set by setupAgentClone).
   agents.forEach(agent => {
     if (agent.runAfter && agent.runAfter.length > 0) {
       agent.runAfter = agent.runAfter.map(ref => idMap[ref] || ref);
     }
+    agent.isolation = sanitiseIsolation(agent.isolation, null);
   });
 
   const automation = {
@@ -5867,14 +5869,52 @@ ipcMain.handle('automations:create', (event, config) => {
   return automation;
 });
 
+// --- Automation isolation/clone safety (Codex audit Critical 2) ---
+// clonePath is MAIN-owned: only setupAgentClone computes it (sanitised, under the
+// agent-repos base). The renderer must never set it or it becomes an arbitrary
+// rmSync target. sanitiseIsolation drops any renderer-supplied clonePath and keeps
+// the existing main-set one; sanitiseManager does the same for a manager config.
+function sanitiseIsolation(incoming, existing) {
+  const inc = incoming && typeof incoming === 'object' ? incoming : {};
+  return {
+    enabled: !!inc.enabled,
+    clonePath: (existing && typeof existing.clonePath === 'string') ? existing.clonePath : null
+  };
+}
+function sanitiseManager(incoming, existing) {
+  if (!incoming || typeof incoming !== 'object') return incoming;
+  const out = Object.assign({}, incoming);
+  if (out.isolation || (existing && existing.isolation)) {
+    out.isolation = sanitiseIsolation(out.isolation, existing && existing.isolation);
+  }
+  return out;
+}
+// Recursive deletes are bounded to their base dir before running, so a clonePath/id
+// persisted by an older exploit (or any future input gap) can't escape and delete
+// arbitrary directories. clonePath must sit under the agent-repos base; run dirs
+// under AUTOMATIONS_RUNS_DIR.
+function safeRemoveClone(clonePath, baseDir) {
+  if (!clonePath || typeof clonePath !== 'string') return;
+  try { assertInsideParent(clonePath, baseDir || AGENTS_DIR_DEFAULT); }
+  catch { console.error('[automations] refused clone delete outside base:', clonePath); return; }
+  try { fs.rmSync(clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+function safeRemoveRunDir(runDir) {
+  try { assertInsideParent(runDir, AUTOMATIONS_RUNS_DIR); }
+  catch { console.error('[automations] refused run-dir delete outside base:', runDir); return; }
+  try { fs.rmSync(runDir, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
 ipcMain.handle('automations:update', (event, automationId, updates) => {
   const data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
   if (!automation) return null;
-  const safeFields = ['name', 'enabled', 'manager', 'runWindow'];
+  const safeFields = ['name', 'enabled', 'runWindow'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) automation[field] = updates[field];
   });
+  // manager can carry an isolation.clonePath — sanitise it (main-owned clonePath).
+  if (updates.manager !== undefined) automation.manager = sanitiseManager(updates.manager, automation.manager);
   writeAutomations(data);
   return automation;
 });
@@ -5886,11 +5926,13 @@ ipcMain.handle('automations:updateAgent', (event, automationId, agentId, updates
   const agent = automation.agents.find(ag => ag.id === agentId);
   if (!agent) return null;
   const safeFields = ['name', 'prompt', 'schedule', 'runMode', 'runAfter', 'runOnUpstreamFailure',
-    'passUpstreamContext', 'isolation', 'enabled', 'skipPermissions', 'firstStartOnly', 'dbConnectionString', 'dbReadOnly',
+    'passUpstreamContext', 'enabled', 'skipPermissions', 'firstStartOnly', 'dbConnectionString', 'dbReadOnly',
     'endpointId', 'endpointModel', 'sessionMode', 'mcpServers', 'maxDurationMs'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) agent[field] = updates[field];
   });
+  // isolation carries clonePath (main-owned rmSync target) — sanitise, never take raw.
+  if (updates.isolation !== undefined) agent.isolation = sanitiseIsolation(updates.isolation, agent.isolation);
   writeAutomations(data);
   return agent;
 });
@@ -5921,6 +5963,11 @@ ipcMain.handle('automations:addAgent', (event, automationId, agentConfig) => {
     lastAttentionItems: null,
     currentRunStartedAt: null
   }, agentConfig);
+  // id and clonePath are MAIN-owned: ignore any renderer-supplied override (a
+  // renderer `id` enabled `../` traversal into the run-history delete path; a
+  // renderer clonePath became an arbitrary rmSync target).
+  agent.id = generateAgentId();
+  agent.isolation = sanitiseIsolation(agent.isolation, null);
   automation.agents.push(agent);
   writeAutomations(data);
   return agent;
@@ -5933,14 +5980,14 @@ ipcMain.handle('automations:removeAgent', (event, automationId, agentId) => {
   const agent = automation.agents.find(ag => ag.id === agentId);
   if (!agent) return { removed: false };
 
-  // Clean up clone directory if isolated
-  if (agent.isolation && agent.isolation.enabled && agent.isolation.clonePath) {
-    try { fs.rmSync(agent.isolation.clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
+  // Clean up clone directory if isolated (bounded to the agent-repos base)
+  if (agent.isolation && agent.isolation.enabled) {
+    safeRemoveClone(agent.isolation.clonePath, data.agentReposBaseDir);
   }
 
-  // Clean up run history
+  // Clean up run history (bounded to the runs base)
   const runDir = path.join(AUTOMATIONS_RUNS_DIR, automationId, agentId);
-  try { fs.rmSync(runDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  safeRemoveRunDir(runDir);
 
   // Remove references from other agents' runAfter arrays
   automation.agents.forEach(ag => {
@@ -5962,15 +6009,15 @@ ipcMain.handle('automations:delete', (event, automationId) => {
   const automation = data.automations.find(a => a.id === automationId);
   if (automation) {
     automation.agents.forEach(agent => {
-      if (agent.isolation && agent.isolation.enabled && agent.isolation.clonePath) {
-        try { fs.rmSync(agent.isolation.clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
+      if (agent.isolation && agent.isolation.enabled) {
+        safeRemoveClone(agent.isolation.clonePath, data.agentReposBaseDir);
       }
     });
   }
   data.automations = data.automations.filter(a => a.id !== automationId);
   writeAutomations(data);
   const runDir = path.join(AUTOMATIONS_RUNS_DIR, automationId);
-  try { fs.rmSync(runDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  safeRemoveRunDir(runDir);
   return true;
 });
 
@@ -5982,15 +6029,15 @@ ipcMain.handle('automations:deleteAllForProject', (event, projectPath) => {
   // Clean up clone directories and run history
   toDelete.forEach(automation => {
     automation.agents.forEach(agent => {
-      if (agent.isolation && agent.isolation.enabled && agent.isolation.clonePath) {
-        try { fs.rmSync(agent.isolation.clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
+      if (agent.isolation && agent.isolation.enabled) {
+        safeRemoveClone(agent.isolation.clonePath, data.agentReposBaseDir);
       }
     });
-    if (automation.manager && automation.manager.isolation && automation.manager.isolation.clonePath) {
-      try { fs.rmSync(automation.manager.isolation.clonePath, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (automation.manager && automation.manager.isolation && automation.manager.isolation.enabled) {
+      safeRemoveClone(automation.manager.isolation.clonePath, data.agentReposBaseDir);
     }
     const runDir = path.join(AUTOMATIONS_RUNS_DIR, automation.id);
-    try { fs.rmSync(runDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    safeRemoveRunDir(runDir);
   });
 
   data.automations = data.automations.filter(a => a.projectPath.replace(/\\/g, '/') !== normalized);
@@ -6126,14 +6173,28 @@ function sanitiseDirSegment(name) {
 // expected parent directory. Combined with sanitiseDirSegment, this catches
 // any future regression where a segment leaks past the sanitiser.
 function assertInsideParent(child, parent) {
-  const c = path.resolve(child);
   const p = path.resolve(parent);
-  if (c === p) return c;
-  const sep = p.endsWith(path.sep) ? '' : path.sep;
-  const ok = process.platform === 'win32'
-    ? c.toLowerCase().startsWith((p + sep).toLowerCase())
-    : c.startsWith(p + sep);
-  if (!ok) throw new Error('refused: child path escapes parent');
+  const c = path.resolve(child);
+  const contains = (par, ch) => {
+    if (ch === par) return false; // strictly inside — never the parent itself (would delete the base)
+    const sep = par.endsWith(path.sep) ? '' : path.sep;
+    return process.platform === 'win32'
+      ? ch.toLowerCase().startsWith((par + sep).toLowerCase())
+      : ch.startsWith(par + sep);
+  };
+  if (!contains(p, c)) throw new Error('refused: child path escapes parent');
+  // If the child already exists (the deletion case), re-check against realpaths so
+  // a symlinked component can't point a "contained" path outside the parent. Skip
+  // when the child doesn't exist yet (e.g. a clone target being created) to avoid a
+  // false negative when the home dir itself sits behind a symlink (macOS /Users).
+  try {
+    const rc = fs.realpathSync(c);
+    const rp = fs.realpathSync(p);
+    if (!contains(rp, rc)) throw new Error('refused: child path escapes parent (symlink)');
+  } catch (e) {
+    if (e && /escapes parent/.test(e.message)) throw e;
+    /* child or parent not resolvable yet — the lexical check above stands */
+  }
   return c;
 }
 
