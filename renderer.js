@@ -3743,13 +3743,9 @@ function createColumnHeader(id, customTitle, opts) {
       wsSend({ type: 'write', id: id, data: '/compact\n' });
     });
 
-    var teleportBtn = document.createElement('span');
-    teleportBtn.className = 'col-action';
-    teleportBtn.title = 'Teleport to claude.ai (/teleport)';
-    teleportBtn.textContent = '\u21F1';
-    teleportBtn.addEventListener('click', function () {
-      wsSend({ type: 'write', id: id, data: '/teleport\n' });
-    });
+    // Teleport used to live here as an always-visible button. It now only
+    // exists as a row inside the col-overflow menu (see showColumnOverflowMenu),
+    // rebuilt fresh on each open and calling the same wsSend('/teleport').
 
     var effortSelect = document.createElement('select');
     effortSelect.className = 'col-effort';
@@ -3782,7 +3778,6 @@ function createColumnHeader(id, customTitle, opts) {
     });
 
     actions.appendChild(compactBtn);
-    actions.appendChild(teleportBtn);
     actions.appendChild(effortSelect);
   }
 
@@ -3807,56 +3802,23 @@ function createColumnHeader(id, customTitle, opts) {
     ctxMeter.appendChild(ctxText);
     actions.appendChild(ctxMeter);
 
-    var restartBtn = document.createElement('span');
-    restartBtn.className = 'col-restart';
-    restartBtn.dataset.id = String(id);
-    restartBtn.title = 'Restart';
-    restartBtn.textContent = '↻';
-    actions.appendChild(restartBtn);
-
-    // Clear scrollback — saves typing `clear` when triaging long sessions.
-    var clearBtn = document.createElement('span');
-    clearBtn.className = 'col-clear';
-    clearBtn.dataset.id = String(id);
-    clearBtn.title = 'Clear terminal';
-    clearBtn.textContent = '⌫';
-    clearBtn.addEventListener('click', function (e) {
+    // Restart / clear / sessions / play-full / play-summary (and teleport, for
+    // Claude-chrome columns) used to be individual always-visible header buttons.
+    // They're now rows inside a single overflow (⋯) menu — see
+    // showColumnOverflowMenu, which rebuilds them fresh on each open and calls
+    // the exact same underlying actions (restartColumn / terminal.clear() /
+    // showColumnSessionPicker / playColumnReply / wsSend('/teleport')).
+    var overflowBtn = document.createElement('span');
+    overflowBtn.className = 'col-action col-overflow';
+    overflowBtn.dataset.id = String(id);
+    overflowBtn.title = 'More actions';
+    overflowBtn.textContent = '⋯';
+    overflowBtn.addEventListener('click', function (e) {
       e.stopPropagation();
-      var c = allColumns.get(id);
-      if (c && c.terminal) c.terminal.clear();
+      var rect = overflowBtn.getBoundingClientRect();
+      showColumnOverflowMenu(id, rect.left, rect.bottom);
     });
-    actions.appendChild(clearBtn);
-
-    // Recent sessions picker — opens a small floating menu of the project's
-    // most-recent sessions; clicking one swaps this column to that session
-    // via restartColumn().
-    var sessionsBtn = document.createElement('span');
-    sessionsBtn.className = 'col-sessions';
-    sessionsBtn.dataset.id = String(id);
-    sessionsBtn.title = 'Switch to a recent session';
-    sessionsBtn.textContent = '⏳';
-    sessionsBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      showColumnSessionPicker(id, e.clientX, e.clientY);
-    });
-    actions.appendChild(sessionsBtn);
-
-    // Voice playback — speak the column's latest reply on demand. Full reads the
-    // whole reply; summary reads a condensed version. Both work regardless of the
-    // voice enable toggle (explicit user action), needing only a configured voice.
-    var playFullBtn = document.createElement('span');
-    playFullBtn.className = 'col-play-full';
-    playFullBtn.dataset.id = String(id);
-    playFullBtn.title = 'Play reply';
-    playFullBtn.textContent = '🔊';
-    actions.appendChild(playFullBtn);
-
-    var playSummaryBtn = document.createElement('span');
-    playSummaryBtn.className = 'col-play-summary';
-    playSummaryBtn.dataset.id = String(id);
-    playSummaryBtn.title = 'Play summary';
-    playSummaryBtn.textContent = '❝';
-    actions.appendChild(playSummaryBtn);
+    actions.appendChild(overflowBtn);
   }
 
   var minimizeBtn = document.createElement('span');
@@ -4784,15 +4746,10 @@ function addColumn(args, targetRow, opts) {
     setFocusedColumn(id, { userFocus: true });
   });
 
-  header.querySelector('.col-restart').addEventListener('click', function () {
-    restartColumn(id);
-  });
-  header.querySelector('.col-play-full').addEventListener('click', function () {
-    playColumnReply(id, 'full');
-  });
-  header.querySelector('.col-play-summary').addEventListener('click', function () {
-    playColumnReply(id, 'summary');
-  });
+  // Restart / play-full / play-summary no longer have dedicated inline header
+  // buttons to bind to — they're wired directly inside showColumnOverflowMenu
+  // (rows built fresh on each open call restartColumn(id) / playColumnReply(id, ...)
+  // themselves rather than delegating to a persistent element).
   header.querySelector('.col-close').addEventListener('click', function () {
     removeColumn(id);
   });
@@ -6702,6 +6659,106 @@ function showColumnSessionPicker(colId, clientX, clientY) {
   }).catch(function () {
     loading.textContent = 'Failed to load sessions.';
   });
+}
+
+// Column header overflow (⋯) menu — collapses the rarely-used per-column
+// actions (teleport, restart, clear, sessions, play reply/summary) that used
+// to be individual always-visible header buttons. Rows are rebuilt fresh on
+// every open (same create-on-open/destroy-on-close shape as
+// showColumnSessionPicker above) rather than reparenting persistent DOM nodes,
+// because every one of these actions already has a trivial direct call
+// (restartColumn(id), terminal.clear(), showColumnSessionPicker(id, x, y),
+// playColumnReply(id, mode), wsSend(/teleport)) — recreating rows that call
+// those directly is lower-risk than moving live nodes with delegated
+// listeners in and out of the DOM.
+//
+// The play-full/play-summary rows keep the original `col-play-full` /
+// `col-play-summary` classes + `dataset.id` so refreshVoiceButtonStates()
+// (which does a document-wide querySelectorAll for those classes on every
+// play/pause/end event) keeps finding and highlighting them while the menu
+// is open, exactly like the old inline buttons did.
+function showColumnOverflowMenu(id, x, y) {
+  var col = allColumns.get(id);
+  if (!col) return;
+
+  var prior = document.querySelector('.col-overflow-menu');
+  if (prior) prior.remove();
+
+  var menu = document.createElement('div');
+  menu.className = 'col-overflow-menu project-context-menu';
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  // showColumnSessionPicker (above) relies solely on the base .project-context-menu
+  // rule to become visible, but that rule's default is `display: none` — every
+  // OTHER working context menu in this file (showColumnContextMenu, the
+  // project-context-menu singleton) sets display:block explicitly, so this one
+  // does too rather than assume the same shape is actually visible.
+  menu.style.display = 'block';
+
+  function close() {
+    menu.remove();
+    document.removeEventListener('mousedown', outside, true);
+  }
+  function outside(ev) {
+    if (!menu.contains(ev.target)) close();
+  }
+
+  function addRow(glyph, label, action) {
+    var item = document.createElement('div');
+    item.className = 'project-context-item col-overflow-item';
+    item.dataset.id = String(id);
+    var icon = document.createElement('span');
+    icon.className = 'col-overflow-icon';
+    icon.textContent = glyph;
+    var labelEl = document.createElement('span');
+    labelEl.className = 'col-overflow-label';
+    labelEl.textContent = label;
+    item.appendChild(icon);
+    item.appendChild(labelEl);
+    item.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      action();
+      close();
+    });
+    menu.appendChild(item);
+    return item;
+  }
+
+  // Teleport isn't created for Codex (or other non-Claude-chrome cmd) columns.
+  if (window.CodexSpawn.columnUsesClaudeChrome({ cmd: col.cmd })) {
+    addRow('↖', 'Teleport to claude.ai', function () {
+      wsSend({ type: 'write', id: id, data: '/teleport\n' });
+    });
+  }
+
+  addRow('↻', 'Restart', function () {
+    restartColumn(id);
+  });
+
+  addRow('⌫', 'Clear terminal', function () {
+    var c = allColumns.get(id);
+    if (c && c.terminal) c.terminal.clear();
+  });
+
+  addRow('⏳', 'Recent sessions', function () {
+    showColumnSessionPicker(id, x, y);
+  });
+
+  var playFullRow = addRow('🔊', 'Play reply', function () {
+    playColumnReply(id, 'full');
+  });
+  playFullRow.classList.add('col-play-full');
+
+  var playSummaryRow = addRow('❝', 'Play summary', function () {
+    playColumnReply(id, 'summary');
+  });
+  playSummaryRow.classList.add('col-play-summary');
+
+  document.body.appendChild(menu);
+  // Sync the freshly-built play rows to any in-progress playback state.
+  refreshVoiceButtonStates();
+
+  setTimeout(function () { document.addEventListener('mousedown', outside, true); }, 0);
 }
 
 // ============================================================
