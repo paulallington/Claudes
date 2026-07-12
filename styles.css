@@ -1294,18 +1294,23 @@ html[data-platform="darwin"] #toolbar {
    Shown only when the `codex` CLI is detected (see #btn-spawn-codex wiring). */
 .spawn-codex-action {
   display: block;
-  width: 100%;
+  width: auto;
+  margin: 2px 8px 4px;
   text-align: left;
   padding: 6px 12px;
-  background: transparent;
-  border: none;
-  color: var(--text-body);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--accent);
   font-family: inherit;
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
 }
 .spawn-codex-action:hover {
-  background: var(--hover-medium);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-bright);
 }
 /* Scoped hidden state — NOT a global .hidden. Hidden until hasCodex() confirms
    the CLI is installed, then removed on both the button and its divider. */
