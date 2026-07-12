@@ -4933,7 +4933,11 @@ function startHeadroomProxyProcess(onLine) {
     const args = buildHeadroomProxyArgs(cfg, headroomPort());
     let child;
     try {
-      child = spawn('headroom', args, { windowsHide: true });
+      // Spawn with an explicit writable cwd. A packaged macOS app launches with
+      // cwd = "/", and `headroom --memory` creates its DB at `Path.cwd()/.headroom`
+      // → "/.headroom" on a read-only volume, which crashes the proxy on startup.
+      // Anchoring to the home dir puts the memory DB at ~/.headroom instead.
+      child = spawn('headroom', args, { windowsHide: true, cwd: os.homedir() });
     } catch (e) {
       resolve({ ok: false, error: String((e && e.message) || e) });
       return;
