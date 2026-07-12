@@ -10882,7 +10882,7 @@ function saveSpawnOptions() {
     customArgs: optCustomArgs.value,
     endpointId: currentEndpointId || null,
     endpointModel: currentEndpointModel || null,
-    codexApprovalMode: optCodexApproval ? optCodexApproval.value : 'auto'
+    codexApprovalMode: optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL
   };
   saveConfig();
 }
