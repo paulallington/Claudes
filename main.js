@@ -404,13 +404,41 @@ function sweepMcpTmp() {
 //   - ~/.claudes/                 (this app's config)
 //   - ~/.claude/                  (Claude CLI's data — sessions, history)
 // Symlink escapes are blocked via realpath when the target exists.
+// Filesystem roots the user has authorized for fs/git IPC access. A path is
+// authorized only if it was already on disk at startup (a pre-existing project,
+// seeded once below BEFORE the renderer loads) or the user picked it through the
+// native directory dialog this session. `config:saveProjects` persists whatever
+// project array the renderer sends, so WITHOUT this gate a compromised renderer
+// could add `/` (or `C:\`) as a project and then use the fs/git IPC to read every
+// file the user can. Membership here — not mere presence in config.projects —
+// is what grants access; unauthorized persisted paths are ignored.
+const authorizedProjectRoots = new Set();
+let authorizedRootsSeeded = false;
+function seedAuthorizedProjectRoots() {
+  if (authorizedRootsSeeded) return;
+  authorizedRootsSeeded = true;
+  try {
+    const cfg = readConfig();
+    if (cfg && Array.isArray(cfg.projects)) {
+      for (const p of cfg.projects) {
+        if (p && typeof p.path === 'string' && p.path) authorizedProjectRoots.add(path.resolve(p.path));
+      }
+    }
+  } catch { /* ignore — only the built-in roots stay authorized */ }
+}
+function authorizeProjectRoot(dir) {
+  if (typeof dir === 'string' && dir) authorizedProjectRoots.add(path.resolve(dir));
+}
 function listAllowedRoots() {
   const roots = [path.resolve(CONFIG_DIR), path.resolve(path.join(os.homedir(), '.claude'))];
   try {
     const cfg = readConfig();
     if (Array.isArray(cfg.projects)) {
       for (const p of cfg.projects) {
-        if (p && typeof p.path === 'string' && p.path) roots.push(path.resolve(p.path));
+        if (p && typeof p.path === 'string' && p.path) {
+          const resolved = path.resolve(p.path);
+          if (authorizedProjectRoots.has(resolved)) roots.push(resolved);
+        }
       }
     }
   } catch { /* fall through with built-in roots */ }
@@ -1277,6 +1305,11 @@ ipcMain.handle('dialog:openDirectory', async () => {
     properties: ['openDirectory']
   });
   if (result.canceled || result.filePaths.length === 0) return null;
+  // The user picked this directory through the native dialog — authorize it as a
+  // project root so fs/git IPC works once the renderer persists it (see
+  // listAllowedRoots). Paths the renderer injects without this dialog stay
+  // unauthorized and are ignored by assertInsideAllowedRoots.
+  authorizeProjectRoot(result.filePaths[0]);
   return result.filePaths[0];
 });
 
@@ -8518,6 +8551,7 @@ if (!gotLock) {
   }
 
   app.whenReady().then(async () => {
+    seedAuthorizedProjectRoots(); // authorize pre-existing project roots BEFORE the renderer can persist new ones
     reconcileInterruptedHeadlessRuns();
     await startPtyServer();
     startHookServer();
