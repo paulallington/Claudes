@@ -22,6 +22,8 @@ var themeSelect = document.getElementById('theme-select');
 var btnAddOptions = document.getElementById('btn-add-options');
 var btnSpawnCodex = document.getElementById('btn-spawn-codex');
 var spawnCodexDivider = document.getElementById('spawn-codex-divider');
+var optCodexApproval = document.getElementById('opt-codex-approval');
+var codexApprovalRow = document.getElementById('opt-codex-approval-row');
 var spawnDropdown = document.getElementById('spawn-dropdown');
 var optPermissionMode = document.getElementById('opt-permission-mode');
 var optRemoteControl = document.getElementById('opt-remote-control');
@@ -10711,7 +10713,8 @@ btnAdd.addEventListener('click', async function () {
 if (btnSpawnCodex) {
   btnSpawnCodex.addEventListener('click', function (e) {
     e.stopPropagation();
-    var spec = window.CodexSpawn.buildCodexSpawn(null);
+    var preset = optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
+    var spec = window.CodexSpawn.buildCodexSpawn(null, preset);
     addColumn(spec.args, null, spec.opts);
     closeSpawnDropdown();
   });
@@ -10873,7 +10876,8 @@ function saveSpawnOptions() {
     worktree: optWorktree.value,
     customArgs: optCustomArgs.value,
     endpointId: currentEndpointId || null,
-    endpointModel: currentEndpointModel || null
+    endpointModel: currentEndpointModel || null,
+    codexApprovalMode: optCodexApproval ? optCodexApproval.value : 'auto'
   };
   saveConfig();
 }
@@ -10890,6 +10894,9 @@ function loadSpawnOptions() {
   optModel.value = opts.model || '';
   optWorktree.value = opts.worktree || '';
   optCustomArgs.value = opts.customArgs || '';
+  if (optCodexApproval) {
+    optCodexApproval.value = opts.codexApprovalMode || window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
+  }
 
   // First call on app boot always defaults to cloud (Anthropic), regardless of
   // what was saved. Subsequent calls (project switches within the session)
@@ -10945,6 +10952,14 @@ optStripMcps.addEventListener('change', onSpawnOptionChanged);
 optModel.addEventListener('change', onSpawnOptionChanged);
 optWorktree.addEventListener('input', onSpawnOptionChanged);
 optCustomArgs.addEventListener('input', onSpawnOptionChanged);
+// Codex approval preset persists per-project. Use saveSpawnOptions DIRECTLY (not
+// onSpawnOptionChanged) so the Claude "+ Spawn · …" tag summary is left untouched.
+if (optCodexApproval) {
+  optCodexApproval.addEventListener('change', function () { saveSpawnOptions(); });
+  // Keep the dropdown open while the native select is used.
+  optCodexApproval.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+  optCodexApproval.addEventListener('click', function (e) { e.stopPropagation(); });
+}
 
 // --- Headroom toggle wiring ---
 // The checkbox reflects a GLOBAL flag (config.useHeadroom), and is only usable
@@ -11010,6 +11025,7 @@ function initCodexUI() {
     if (!present) return;
     btnSpawnCodex.classList.remove('codex-hidden');
     if (spawnCodexDivider) spawnCodexDivider.classList.remove('codex-hidden');
+    if (codexApprovalRow) codexApprovalRow.classList.remove('codex-hidden');
   }).catch(function () { /* leave hidden on error */ });
 }
 
