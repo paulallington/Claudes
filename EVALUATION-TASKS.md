@@ -77,6 +77,16 @@ escalation paths if the first line fails, i.e. defense-in-depth, not drive-by RC
 overlapped the tracked backlog above were excluded. The two Criticals were code-verified by Claude;
 spot-check the rest against current line numbers before fixing (main.js/renderer.js drift).
 
+## Progress (Codex-verified, tested, shipped)
+
+**v1.9.50** — Critical 1 *same-session* closed (main-owned `authorizedProjectRoots`, seeded pre-renderer, extended only by the native dialog); Critical 2 handler-path clonePath/id + run-dir `../` traversal + symlink escape + `child===parent` + the direct `fs:writeFile` config-write vector closed (sanitiseIsolation/Manager, bounded deletes, `assertInsideParent` realpath, id-preservation, managed-config denylist).
+
+**v1.9.51** — run-history read id validation (traversal); `git:diff` untracked fallback contained; Windows env blocklist case-fold (High #3); atomic snippet writes (Medium #1); sticky-notes/launch:getConfigs/workspace:scrubArtifacts contained to allowed roots (High #7, partial).
+
+**Still open — need YOUR product decision (not zero-break):** Critical 1 *cross-restart* provenance (config:saveProjects persists + startup seed re-trusts); Critical 2 `agentReposBaseDir` is renderer-settable so setupAgentClone/manager deletes are unbounded (pinning it breaks "clones anywhere"); High #1 endpoint tokens to renderer (needs opaque-id refactor); High #4 `file:` nav; High #5 external-editor exec; High #6 sync destination; High #7 remainder (`launch:readEnvFile`/`scanCsproj` are browse-bound; headless spawn dir).
+
+**Still open — safe but needs runtime/feature testing:** High #8 config-write races; Medium #2 manager-config dropped on create; Medium #3 concurrency races; Medium #4 tail-IPC interval caps; Low interruption-detection gating.
+
 ## Codex — Critical
 
 - [ ] **Renderer can self-authorize arbitrary FS roots.** `listAllowedRoots()` trusts every
