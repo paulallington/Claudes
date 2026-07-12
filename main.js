@@ -3589,10 +3589,12 @@ ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
 });
 
 // Codex plan usage. Codex (ChatGPT auth) has no OAuth /usage endpoint like
-// Claude's — instead it stamps a `rate_limits` block into every token_count
-// event of its session rollout JSONL. We locate the most-recently-touched
-// rollout, tail it, and scrape the newest rate-limit event. Shaped identically
-// to getPlanLimits so the sidebar mini-bar renderer is shared.
+// Claude's — instead it stamps a `rate_limits` block into token_count events
+// of its session rollout JSONL. We read the newest few recent rollouts
+// (age-bounded, see CODEX_ROLLOUT_MAX_AGE_MS below), parse each, and merge
+// the freshest reading per account-level window (five_hour/seven_day),
+// ignoring uninitialized placeholder blocks. Shaped identically to
+// getPlanLimits so the sidebar mini-bar renderer is shared.
 const CODEX_USAGE_CACHE_MS = 30_000;
 let codexUsageCache = { data: null, fetchedAt: 0 };
 // Only the tail of a rollout carries the latest rate_limits; rollouts can grow
@@ -3603,6 +3605,13 @@ const CODEX_ROLLOUT_TAIL_BYTES = 128 * 1024;
 // until it earns its own real headers. Merge across the newest few rollouts
 // so a fresh column doesn't "lose" the real numbers from a sibling session.
 const CODEX_ROLLOUT_MERGE_COUNT = 8;
+// Rollout JSONL carries no reliable user identity, and ~/.codex/auth.json is
+// shared mutable state — a stale rollout among the newest N could belong to
+// a previously signed-in Codex account. Age-bounding relative to the newest
+// rollout's own mtime narrows (but does not eliminate) that cross-account
+// exposure: a rollout older than this, relative to the newest one, is
+// dropped from the merge even if it would otherwise fit within the top N.
+const CODEX_ROLLOUT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 function listCodexRollouts(dir) {
   const out = [];
@@ -3642,8 +3651,11 @@ ipcMain.handle('usage:getCodexLimits', async (_event, force) => {
     return { ok: false, error: 'not-installed', message: 'Codex CLI not found on PATH.' };
   }
   const sessionsDir = path.join(os.homedir(), '.codex', 'sessions');
-  const rollouts = listCodexRollouts(sessionsDir)
-    .sort((a, b) => (b.mtimeMs || 0) - (a.mtimeMs || 0))
+  const sortedRollouts = listCodexRollouts(sessionsDir)
+    .sort((a, b) => (b.mtimeMs || 0) - (a.mtimeMs || 0));
+  const newestMtimeMs = sortedRollouts.length ? (sortedRollouts[0].mtimeMs || 0) : 0;
+  const rollouts = sortedRollouts
+    .filter(r => newestMtimeMs - (r.mtimeMs || 0) <= CODEX_ROLLOUT_MAX_AGE_MS)
     .slice(0, CODEX_ROLLOUT_MERGE_COUNT);
   if (!rollouts.length) {
     return { ok: false, error: 'no-sessions', message: 'No Codex session rollouts found yet.' };
