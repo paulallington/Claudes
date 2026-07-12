@@ -2851,9 +2851,13 @@ ipcMain.handle('git:diff', async (event, projectPath, filePath, staged) => {
     const args = staged ? ['diff', '--cached', '--', filePath] : ['diff', '--', filePath];
     return await runGit(projectPath, args, 5000);
   } catch {
-    // For untracked files, show full content as additions
+    // For untracked files, show full content as additions — but contain the read
+    // to an allowed root. git rejected the path above; without this an untracked
+    // fallback with a `../../.ssh/id_rsa` filePath would read an arbitrary file and
+    // return it as a "diff". assertInsideAllowedRoots throws for an escape → ''.
     try {
-      const content = await fs.promises.readFile(path.join(projectPath, filePath), 'utf8');
+      const safe = assertInsideAllowedRoots(path.join(projectPath, filePath));
+      const content = await fs.promises.readFile(safe, 'utf8');
       return content.split('\n').map(line => '+' + line).join('\n');
     } catch {
       return '';
