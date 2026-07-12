@@ -5,8 +5,7 @@ const assert = require('node:assert');
 const {
   normalizeSlot,
   parseCodexRateLimits,
-  pickLatestRolloutPath,
-  mergeCodexReadings
+  pickLatestRolloutPath
 } = require('../lib/codex-limits');
 
 // A real token_count line as Codex writes it (trimmed to the fields we read).
@@ -91,28 +90,22 @@ test('pickLatestRolloutPath: empty/invalid -> null', () => {
   assert.strictEqual(pickLatestRolloutPath(null), null);
 });
 
-// A real placeholder line: a fresh Codex session hasn't received real
-// rate-limit headers yet, so the weekly (10080min) window sits in the
-// `primary` slot with `secondary:null`.
-const PLACEHOLDER_LINE = JSON.stringify({
-  timestamp: '2026-07-12T19:20:45.240Z',
-  type: 'event_msg',
-  payload: {
-    type: 'token_count',
-    rate_limits: {
-      limit_id: 'codex',
-      primary: { used_percent: 0, window_minutes: 10080, resets_at: 1784488704 },
-      secondary: null,
-      plan_type: 'prolite'
-    }
-  }
-});
-
-test('parseCodexRateLimits: a lone uninitialized placeholder block is skipped, not surfaced as weekly 0%', () => {
-  // No session (five_hour) window, and the only window present (weekly) is
-  // 0% -> the observed fresh-session placeholder shape. With nothing else
-  // in the file, there's no usable reading at all.
-  assert.strictEqual(parseCodexRateLimits(PLACEHOLDER_LINE), null);
+test('parseCodexRateLimits: fresh session with weekly window in primary slot -> seven_day only (session hidden, not resurrected)', () => {
+  // Pro Lite often has no 5-hour window at all; a fresh session's reading can
+  // put the weekly window in the `primary` slot with `secondary: null`. This
+  // must classify by window_minutes (10080 -> seven_day) and leave five_hour
+  // null rather than mislabeling it as the session bar.
+  const line = JSON.stringify({
+    type: 'event_msg',
+    payload: { type: 'token_count', rate_limits: {
+      primary: { used_percent: 1, window_minutes: 10080 },
+      secondary: null
+    } }
+  });
+  const out = parseCodexRateLimits(line);
+  assert.strictEqual(out.five_hour, null);
+  assert.strictEqual(out.seven_day.utilization, 1);
+  assert.strictEqual(out.seven_day.window_minutes, 10080);
 });
 
 test('parseCodexRateLimits: missing window_minutes falls back to positional classification', () => {
@@ -126,89 +119,4 @@ test('parseCodexRateLimits: missing window_minutes falls back to positional clas
   const out = parseCodexRateLimits(line);
   assert.strictEqual(out.five_hour.utilization, 30);
   assert.strictEqual(out.seven_day.utilization, 8);
-});
-
-test('parseCodexRateLimits: a legit weekly-only NONZERO block surfaces its week (not skipped)', () => {
-  const line = JSON.stringify({
-    type: 'event_msg',
-    payload: { type: 'token_count', rate_limits: {
-      primary: { used_percent: 11, window_minutes: 10080 },
-      secondary: null
-    } }
-  });
-  const out = parseCodexRateLimits(line);
-  assert.strictEqual(out.five_hour, null);
-  assert.strictEqual(out.seven_day.utilization, 11);
-});
-
-test('parseCodexRateLimits: prefers most-recent session-bearing block over a newer placeholder', () => {
-  const wellFormed = JSON.stringify({
-    type: 'event_msg',
-    payload: { type: 'token_count', rate_limits: {
-      primary: { used_percent: 46, window_minutes: 300, resets_at: 1783876257 },
-      secondary: { used_percent: 12, window_minutes: 10080, resets_at: 1784463057 }
-    } }
-  });
-  const out = parseCodexRateLimits(wellFormed + '\n' + PLACEHOLDER_LINE + '\n');
-  assert.strictEqual(out.five_hour.utilization, 46);
-  assert.strictEqual(out.seven_day.utilization, 12);
-});
-
-test('mergeCodexReadings: returns the first complete (five_hour-bearing) reading', () => {
-  const out = mergeCodexReadings([
-    { five_hour: null, seven_day: { utilization: 0 } },
-    { five_hour: { utilization: 46 }, seven_day: { utilization: 12 } }
-  ]);
-  assert.strictEqual(out.five_hour.utilization, 46);
-  assert.strictEqual(out.seven_day.utilization, 12);
-});
-
-test('mergeCodexReadings: newest-complete wins when multiple readings have five_hour', () => {
-  const out = mergeCodexReadings([
-    { five_hour: { utilization: 46 }, seven_day: { utilization: 12 } },
-    { five_hour: { utilization: 55 }, seven_day: { utilization: 61 } }
-  ]);
-  assert.strictEqual(out.five_hour.utilization, 46);
-  assert.strictEqual(out.seven_day.utilization, 12);
-});
-
-test('mergeCodexReadings: an all-zero session-less reading is a placeholder and is not surfaced', () => {
-  const out = mergeCodexReadings([
-    { five_hour: null, seven_day: { utilization: 0 } },
-    null
-  ]);
-  assert.strictEqual(out, null);
-});
-
-test('mergeCodexReadings: falls back to a genuine (nonzero) weekly-only reading when nothing has five_hour', () => {
-  const out = mergeCodexReadings([
-    { five_hour: null, seven_day: { utilization: 7 } },
-    null
-  ]);
-  assert.strictEqual(out.five_hour, null);
-  assert.strictEqual(out.seven_day.utilization, 7);
-});
-
-test('mergeCodexReadings: per-window freshness — newer complete reading masks an older weekly-0 placeholder-shaped reading', () => {
-  const out = mergeCodexReadings([
-    { five_hour: null, seven_day: { utilization: 0 } },
-    { five_hour: { utilization: 46 }, seven_day: { utilization: 12 } }
-  ]);
-  assert.strictEqual(out.five_hour.utilization, 46);
-  assert.strictEqual(out.seven_day.utilization, 12);
-});
-
-test('mergeCodexReadings: per-window freshness — a NEWER weekly-only nonzero reading beats an older complete reading\'s week', () => {
-  const out = mergeCodexReadings([
-    { five_hour: null, seven_day: { utilization: 99 } },
-    { five_hour: { utilization: 46 }, seven_day: { utilization: 12 } }
-  ]);
-  assert.strictEqual(out.five_hour.utilization, 46);
-  assert.strictEqual(out.seven_day.utilization, 99);
-});
-
-test('mergeCodexReadings: empty/all-null -> null', () => {
-  assert.strictEqual(mergeCodexReadings([]), null);
-  assert.strictEqual(mergeCodexReadings([null]), null);
-  assert.strictEqual(mergeCodexReadings(null), null);
 });
