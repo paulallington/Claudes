@@ -1290,6 +1290,30 @@ html[data-platform="darwin"] #toolbar {
   margin: 4px 0;
 }
 
+/* Codex spawn action — a first-class button at the top of the spawn dropdown.
+   Shown only when the `codex` CLI is detected (see #btn-spawn-codex wiring). */
+.spawn-codex-action {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-body);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.spawn-codex-action:hover {
+  background: var(--hover-medium);
+}
+/* Scoped hidden state — NOT a global .hidden. Hidden until hasCodex() confirms
+   the CLI is installed, then removed on both the button and its divider. */
+.spawn-codex-action.codex-hidden,
+.spawn-divider.codex-hidden {
+  display: none;
+}
+
 .spawn-hint {
   padding: 4px 12px 6px;
   font-size: 10px;

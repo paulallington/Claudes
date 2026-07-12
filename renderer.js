@@ -20,6 +20,8 @@ var claudeMdStatus = document.getElementById('claudemd-status');
 var themeSelect = document.getElementById('theme-select');
 
 var btnAddOptions = document.getElementById('btn-add-options');
+var btnSpawnCodex = document.getElementById('btn-spawn-codex');
+var spawnCodexDivider = document.getElementById('spawn-codex-divider');
 var spawnDropdown = document.getElementById('spawn-dropdown');
 var optPermissionMode = document.getElementById('opt-permission-mode');
 var optRemoteControl = document.getElementById('opt-remote-control');
@@ -10690,6 +10692,18 @@ btnAdd.addEventListener('click', async function () {
     btnAdd.disabled = false;
   }
 });
+// Spawn Codex — a first-class action in the spawn dropdown. Deliberately
+// bypasses buildSpawnArgs() and every Claude-only spawn option: a Codex column
+// is just a cmd column running `codex`, which the rest of the app already
+// treats as "not Claude" (no headroom/voice/session machinery attaches).
+if (btnSpawnCodex) {
+  btnSpawnCodex.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var spec = window.CodexSpawn.buildCodexSpawn(null);
+    addColumn(spec.args, null, spec.opts);
+    closeSpawnDropdown();
+  });
+}
 btnAddRow.addEventListener('click', addRow);
 btnToggleSidebar.addEventListener('click', toggleSidebar);
 themeSelect.addEventListener('change', function () {
@@ -10975,6 +10989,18 @@ function initHeadroomUI() {
   }
 }
 
+// Reveal the "Spawn Codex" dropdown action only when the `codex` CLI is on PATH.
+// Hidden by default (codex-hidden) so the affordance never appears — and never
+// errors — on machines without Codex installed.
+function initCodexUI() {
+  if (!btnSpawnCodex || !window.electronAPI || !window.electronAPI.hasCodex) return;
+  window.electronAPI.hasCodex().then(function (present) {
+    if (!present) return;
+    btnSpawnCodex.classList.remove('codex-hidden');
+    if (spawnCodexDivider) spawnCodexDivider.classList.remove('codex-hidden');
+  }).catch(function () { /* leave hidden on error */ });
+}
+
 if (optUseHeadroom) {
   optUseHeadroom.addEventListener('change', function () {
     config.useHeadroom = optUseHeadroom.checked;
@@ -11209,6 +11235,7 @@ function initHeadroomServiceUI() {
 }
 
 initHeadroomUI();
+initCodexUI();
 initHeadroomServiceUI();
 
 // Default-effort selectors are app-global (not per-project), so they bypass
