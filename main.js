@@ -1984,9 +1984,11 @@ function stickyKey(projectPath, workspaceId) {
 
 function stickyNotesFile(projectPath, workspaceId) {
   const dir = path.join(projectPath, '.claudes');
-  return (workspaceId == null)
-    ? path.join(dir, 'sticky-notes.json')
-    : path.join(dir, 'sticky-notes-' + workspaceId + '.json');
+  if (workspaceId == null) return path.join(dir, 'sticky-notes.json');
+  // workspaceId lands in the filename — strip anything that isn't a safe id token
+  // so it can't traverse out of .claudes. Legit ids are UUIDs ([0-9a-f-]), unchanged.
+  const wid = String(workspaceId).replace(/[^A-Za-z0-9_-]/g, '');
+  return path.join(dir, 'sticky-notes-' + wid + '.json');
 }
 
 function writeStickyNotesAtomic(projectPath, workspaceId, notes) {
@@ -2024,6 +2026,7 @@ function flushPendingStickyNotes() {
 }
 
 ipcMain.handle('sticky-notes:load', (event, projectPath, workspaceId) => {
+  try { assertInsideAllowedRoots(projectPath); } catch { return []; }
   const notesFile = stickyNotesFile(projectPath, workspaceId);
   if (!fs.existsSync(notesFile)) return [];
   let raw;
@@ -2064,6 +2067,7 @@ ipcMain.handle('sticky-notes:load', (event, projectPath, workspaceId) => {
 });
 
 ipcMain.handle('sticky-notes:save', (event, projectPath, workspaceId, notes) => {
+  try { assertInsideAllowedRoots(projectPath); } catch { return; }
   scheduleWriteStickyNotes(projectPath, workspaceId, notes);
 });
 
@@ -2071,6 +2075,7 @@ ipcMain.handle('sticky-notes:save', (event, projectPath, workspaceId, notes) => 
 // Implementation lives in lib/workspace-scrub.js so it's testable without booting Electron.
 ipcMain.handle('workspace:scrubArtifacts', (event, projectPath, wsId) => {
   try {
+    assertInsideAllowedRoots(projectPath); // scrub deletes under projectPath/.claudes — contain it
     return WorkspaceScrub.scrubArtifactsImpl(projectPath, wsId);
   } catch (err) {
     console.error('workspace:scrubArtifacts failed:', err);
@@ -3359,6 +3364,7 @@ function detectPyProjectScripts(projectPath) {
 }
 
 ipcMain.handle('launch:getConfigs', (event, projectPath) => {
+  try { assertInsideAllowedRoots(projectPath); } catch { return []; }
   let configs = [];
   // VS Code launch.json
   const launchPath = path.join(projectPath, '.vscode', 'launch.json');
