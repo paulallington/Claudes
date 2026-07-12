@@ -3724,7 +3724,9 @@ function createColumnHeader(id, customTitle, opts) {
     var codexBadge = document.createElement('span');
     codexBadge.className = 'col-codex-badge';
     codexBadge.textContent = 'Codex';
-    codexBadge.title = 'This column runs the Codex CLI, not Claude';
+    codexBadge.title = opts.codexLabel
+      ? ('Codex CLI · ' + opts.codexLabel)
+      : 'This column runs the Codex CLI, not Claude';
     title.appendChild(codexBadge);
   }
 
@@ -4172,7 +4174,10 @@ function addColumn(args, targetRow, opts) {
   // rather than parseInt('') === NaN.
   col.id = 'col-' + id;
 
-  var header = createColumnHeader(id, opts.title, { cmd: opts.cmd || null });
+  var codexLabel = (opts.cmd === 'codex' && window.CodexSpawn)
+    ? window.CodexSpawn.codexApprovalLabelFromArgs(args || [])
+    : null;
+  var header = createColumnHeader(id, opts.title, { cmd: opts.cmd || null, codexLabel: codexLabel });
 
   // Drop a banner above the terminal so the user can see at a glance which
   // backend each column is talking to. Two flavours:
