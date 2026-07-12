@@ -3592,8 +3592,13 @@ ipcMain.handle('usage:detectThresholdCrossings', (_event, prev, next) => {
 // Codex plan usage. Codex (ChatGPT auth) has no OAuth /usage endpoint like
 // Claude's — instead it stamps a `rate_limits` block into every token_count
 // event of its session rollout JSONL. We locate the most-recently-touched
-// rollout, tail it, and scrape the newest rate-limit event. Shaped identically
-// to getPlanLimits so the sidebar mini-bar renderer is shared.
+// rollout, tail it, and scrape the newest rate-limit event. Usage windows
+// reset/refresh, so the freshest reading is authoritative — we do not merge
+// across rollouts or resurrect a stale window from an older file; a reading
+// with no five_hour window (e.g. Pro Lite accounts, which often have none)
+// correctly hides the session bar rather than showing a stale percentage.
+// Shaped identically to getPlanLimits so the sidebar mini-bar renderer is
+// shared.
 const CODEX_USAGE_CACHE_MS = 30_000;
 let codexUsageCache = { data: null, fetchedAt: 0 };
 // Only the tail of a rollout carries the latest rate_limits; rollouts can grow

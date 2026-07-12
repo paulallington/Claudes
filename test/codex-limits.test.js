@@ -89,3 +89,34 @@ test('pickLatestRolloutPath: empty/invalid -> null', () => {
   assert.strictEqual(pickLatestRolloutPath([]), null);
   assert.strictEqual(pickLatestRolloutPath(null), null);
 });
+
+test('parseCodexRateLimits: fresh session with weekly window in primary slot -> seven_day only (session hidden, not resurrected)', () => {
+  // Pro Lite often has no 5-hour window at all; a fresh session's reading can
+  // put the weekly window in the `primary` slot with `secondary: null`. This
+  // must classify by window_minutes (10080 -> seven_day) and leave five_hour
+  // null rather than mislabeling it as the session bar.
+  const line = JSON.stringify({
+    type: 'event_msg',
+    payload: { type: 'token_count', rate_limits: {
+      primary: { used_percent: 1, window_minutes: 10080 },
+      secondary: null
+    } }
+  });
+  const out = parseCodexRateLimits(line);
+  assert.strictEqual(out.five_hour, null);
+  assert.strictEqual(out.seven_day.utilization, 1);
+  assert.strictEqual(out.seven_day.window_minutes, 10080);
+});
+
+test('parseCodexRateLimits: missing window_minutes falls back to positional classification', () => {
+  const line = JSON.stringify({
+    type: 'event_msg',
+    payload: { type: 'token_count', rate_limits: {
+      primary: { used_percent: 30 },
+      secondary: { used_percent: 8 }
+    } }
+  });
+  const out = parseCodexRateLimits(line);
+  assert.strictEqual(out.five_hour.utilization, 30);
+  assert.strictEqual(out.seven_day.utilization, 8);
+});
