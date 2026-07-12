@@ -5994,10 +5994,14 @@ ipcMain.handle('automations:addAgent', (event, automationId, agentConfig) => {
     lastAttentionItems: null,
     currentRunStartedAt: null
   }, agentConfig);
-  // id and clonePath are MAIN-owned: ignore any renderer-supplied override (a
-  // renderer `id` enabled `../` traversal into the run-history delete path; a
-  // renderer clonePath became an arbitrary rmSync target).
-  agent.id = generateAgentId();
+  // clonePath is MAIN-owned — never take it from the renderer (it became an
+  // arbitrary rmSync target). The id is kept ONLY if it's a safe token: the edit
+  // flow persists new agents with their `temp_`/`agent_` id and other agents'
+  // runAfter links reference it, so we must preserve legit ids — but reject any id
+  // carrying path separators / `..` that could traverse the run-history path.
+  if (!(typeof agent.id === 'string' && /^[A-Za-z0-9_-]+$/.test(agent.id))) {
+    agent.id = generateAgentId();
+  }
   agent.isolation = sanitiseIsolation(agent.isolation, null);
   automation.agents.push(agent);
   writeAutomations(data);
