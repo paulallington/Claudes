@@ -6,8 +6,53 @@ const {
   codexLookupCommand,
   parseWhichOutput,
   buildCodexSpawn,
-  columnUsesClaudeChrome
+  columnUsesClaudeChrome,
+  CODEX_APPROVAL_PRESETS,
+  DEFAULT_CODEX_APPROVAL,
+  codexApprovalArgs,
+  codexApprovalLabelFromArgs
 } = require('../lib/codex-spawn');
+
+test('CODEX_APPROVAL_PRESETS: exact keys and order', () => {
+  assert.deepStrictEqual(
+    CODEX_APPROVAL_PRESETS.map(function (p) { return p.key; }),
+    ['read-only', 'auto', 'full-access', 'yolo', 'codex-default']
+  );
+  assert.strictEqual(DEFAULT_CODEX_APPROVAL, 'auto');
+});
+
+test('codexApprovalArgs: maps each preset to its flags', () => {
+  assert.deepStrictEqual(codexApprovalArgs('read-only'), ['-a', 'untrusted', '-s', 'read-only']);
+  assert.deepStrictEqual(codexApprovalArgs('auto'), ['-a', 'on-request', '-s', 'workspace-write']);
+  assert.deepStrictEqual(codexApprovalArgs('full-access'), ['-a', 'never', '-s', 'danger-full-access']);
+  assert.deepStrictEqual(codexApprovalArgs('yolo'), ['--dangerously-bypass-approvals-and-sandbox']);
+  assert.deepStrictEqual(codexApprovalArgs('codex-default'), []);
+});
+
+test('codexApprovalArgs: unknown/undefined -> [] (codex default)', () => {
+  assert.deepStrictEqual(codexApprovalArgs('bogus'), []);
+  assert.deepStrictEqual(codexApprovalArgs(undefined), []);
+});
+
+test('codexApprovalArgs: returns a fresh array (no shared mutation)', () => {
+  var a = codexApprovalArgs('auto');
+  a.push('x');
+  assert.deepStrictEqual(codexApprovalArgs('auto'), ['-a', 'on-request', '-s', 'workspace-write']);
+});
+
+test('codexApprovalLabelFromArgs: reverse-maps flags to labels', () => {
+  assert.strictEqual(codexApprovalLabelFromArgs(['-a', 'on-request', '-s', 'workspace-write']), 'Auto');
+  assert.strictEqual(codexApprovalLabelFromArgs(['--dangerously-bypass-approvals-and-sandbox']), 'Yolo (bypass)');
+  assert.strictEqual(codexApprovalLabelFromArgs([]), 'Codex default');
+  assert.strictEqual(codexApprovalLabelFromArgs(['--weird']), 'Custom');
+});
+
+test('buildCodexSpawn: preset drives args; omitted preset stays []', () => {
+  assert.deepStrictEqual(buildCodexSpawn('D:/p', 'auto').args, ['-a', 'on-request', '-s', 'workspace-write']);
+  assert.deepStrictEqual(buildCodexSpawn('D:/p', 'yolo').args, ['--dangerously-bypass-approvals-and-sandbox']);
+  assert.deepStrictEqual(buildCodexSpawn('D:/p').args, []);
+  assert.strictEqual(buildCodexSpawn('D:/p', 'auto').opts.cmd, 'codex');
+});
 
 test('codexLookupCommand: where on win32, which elsewhere', () => {
   assert.strictEqual(codexLookupCommand('win32'), 'where');
