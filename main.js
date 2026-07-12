@@ -44,7 +44,7 @@ const {
 } = require('./lib/interactive-scheduled');
 const { appendWithRotation } = require('./lib/voice-debug-log');
 const { codexLookupCommand, parseWhichOutput } = require('./lib/codex-spawn');
-const { parseCodexRateLimits, pickLatestRolloutPath } = require('./lib/codex-limits');
+const { parseCodexRateLimits, pickLatestRolloutPath, mergeCodexReadings } = require('./lib/codex-limits');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -3598,6 +3598,11 @@ let codexUsageCache = { data: null, fetchedAt: 0 };
 // Only the tail of a rollout carries the latest rate_limits; rollouts can grow
 // large, so read the last chunk rather than the whole file.
 const CODEX_ROLLOUT_TAIL_BYTES = 128 * 1024;
+// Codex's 5h/weekly limits are account-level rolling windows, not per-session
+// — a brand-new rollout only carries a placeholder (weekly-only) reading
+// until it earns its own real headers. Merge across the newest few rollouts
+// so a fresh column doesn't "lose" the real numbers from a sibling session.
+const CODEX_ROLLOUT_MERGE_COUNT = 8;
 
 function listCodexRollouts(dir) {
   const out = [];
@@ -3637,12 +3642,17 @@ ipcMain.handle('usage:getCodexLimits', async (_event, force) => {
     return { ok: false, error: 'not-installed', message: 'Codex CLI not found on PATH.' };
   }
   const sessionsDir = path.join(os.homedir(), '.codex', 'sessions');
-  const latest = pickLatestRolloutPath(listCodexRollouts(sessionsDir));
-  if (!latest) {
+  const rollouts = listCodexRollouts(sessionsDir)
+    .sort((a, b) => (b.mtimeMs || 0) - (a.mtimeMs || 0))
+    .slice(0, CODEX_ROLLOUT_MERGE_COUNT);
+  if (!rollouts.length) {
     return { ok: false, error: 'no-sessions', message: 'No Codex session rollouts found yet.' };
   }
   try {
-    const data = parseCodexRateLimits(readFileTail(latest, CODEX_ROLLOUT_TAIL_BYTES));
+    const readings = rollouts.map(r => {
+      try { return parseCodexRateLimits(readFileTail(r.path, CODEX_ROLLOUT_TAIL_BYTES)); } catch { return null; }
+    });
+    const data = mergeCodexReadings(readings);
     if (!data) {
       return { ok: false, error: 'no-usage', message: 'No rate-limit data in the latest Codex session yet.' };
     }
