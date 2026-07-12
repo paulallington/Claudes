@@ -6610,14 +6610,16 @@ function showColumnSessionPicker(colId, clientX, clientY) {
 
   var menu = document.createElement('div');
   menu.className = 'col-session-picker project-context-menu';
-  menu.style.left = clientX + 'px';
-  menu.style.top = clientY + 'px';
   var loading = document.createElement('div');
   loading.className = 'project-context-item';
   loading.style.opacity = '0.6';
   loading.textContent = 'Loading recent sessions…';
   menu.appendChild(loading);
   document.body.appendChild(menu);
+  var pickerRect = menu.getBoundingClientRect();
+  var pickerPos = window.MenuPosition.clampMenuPosition(clientX, clientY, pickerRect.width, pickerRect.height, window.innerWidth, window.innerHeight);
+  menu.style.left = pickerPos.left + 'px';
+  menu.style.top = pickerPos.top + 'px';
 
   function close() { menu.remove(); document.removeEventListener('mousedown', outside, true); }
   function outside(ev) { if (!menu.contains(ev.target)) close(); }
@@ -6686,8 +6688,6 @@ function showColumnOverflowMenu(id, x, y) {
 
   var menu = document.createElement('div');
   menu.className = 'col-overflow-menu project-context-menu';
-  menu.style.left = x + 'px';
-  menu.style.top = y + 'px';
   // showColumnSessionPicker (above) relies solely on the base .project-context-menu
   // rule to become visible, but that rule's default is `display: none` — every
   // OTHER working context menu in this file (showColumnContextMenu, the
@@ -6755,6 +6755,10 @@ function showColumnOverflowMenu(id, x, y) {
   playSummaryRow.classList.add('col-play-summary');
 
   document.body.appendChild(menu);
+  var overflowRect = menu.getBoundingClientRect();
+  var overflowPos = window.MenuPosition.clampMenuPosition(x, y, overflowRect.width, overflowRect.height, window.innerWidth, window.innerHeight);
+  menu.style.left = overflowPos.left + 'px';
+  menu.style.top = overflowPos.top + 'px';
   // Sync the freshly-built play rows to any in-progress playback state.
   refreshVoiceButtonStates();
 
