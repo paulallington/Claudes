@@ -113,6 +113,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setAutoUpdateClaude: (enabled) => ipcRenderer.invoke('config:setAutoUpdateClaude', enabled),
   getTerminalSettings: () => ipcRenderer.invoke('config:getTerminalSettings'),
   setTerminalSettings: (settings) => ipcRenderer.invoke('config:setTerminalSettings', settings),
+  hasCodex: () => ipcRenderer.invoke('config:hasCodex'),
   getHeadroomStatus: () => ipcRenderer.invoke('headroom:status'),
   onHeadroomStatus: (cb) => ipcRenderer.on('headroom:status-changed', (_e, st) => cb(st)),
   getHeadroomServiceStatus: () => ipcRenderer.invoke('headroom:serviceStatus'),

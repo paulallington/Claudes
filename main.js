@@ -42,6 +42,7 @@ const {
   filterMcpDefs
 } = require('./lib/interactive-scheduled');
 const { appendWithRotation } = require('./lib/voice-debug-log');
+const { codexLookupCommand, parseWhichOutput } = require('./lib/codex-spawn');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -6632,6 +6633,23 @@ function getClaudePath() {
   if (!claudePath) claudePath = findClaudePath();
   return claudePath;
 }
+
+// Detect whether the `codex` CLI is on PATH. Cached for the session (the result
+// won't change while the app runs). Mirrors findClaudePath(); a missing binary
+// simply means the "Spawn Codex" affordance is never offered.
+let codexAvailable = null;
+function hasCodex() {
+  if (codexAvailable !== null) return codexAvailable;
+  try {
+    const out = execFileSync(codexLookupCommand(process.platform), ['codex'], { encoding: 'utf8' });
+    codexAvailable = !!parseWhichOutput(out);
+  } catch {
+    codexAvailable = false;
+  }
+  return codexAvailable;
+}
+
+ipcMain.handle('config:hasCodex', () => hasCodex());
 
 function parseAgentResult(output) {
   const result = { summary: '', attentionItems: [] };
