@@ -610,6 +610,9 @@ var FONT_SIZE_DEFAULT = 14;
 var wsPort = 3456;
 var wsAuthToken = null;
 var wsHasConnectedBefore = false;
+var wsReconnectAttempt = 0;
+var wsReconnectTimer = null;
+var wsServerDownToast = null;
 
 function connectWS() {
   // Per-launch token presented as a subprotocol. pty-server rejects the WS
@@ -618,6 +621,11 @@ function connectWS() {
   var protocols = wsAuthToken ? ['claudes-auth-' + wsAuthToken] : undefined;
   ws = new WebSocket('ws://127.0.0.1:' + wsPort, protocols);
   ws.onopen = function () {
+    wsReconnectAttempt = 0;
+    if (wsServerDownToast) {
+      wsServerDownToast.remove();
+      wsServerDownToast = null;
+    }
     if (wsHasConnectedBefore) {
       reattachAllColumns();
     } else {
@@ -743,7 +751,9 @@ function connectWS() {
     // of hammering a stale one forever. On reconnect, ws.onopen → reattachAllColumns
     // fires; ptys that died with the old server come back as 'reattach-failed',
     // which auto-respawns them with --resume.
-    setTimeout(function () {
+    wsReconnectAttempt++;
+    var doReconnect = function () {
+      wsReconnectTimer = null;
       if (window.electronAPI && window.electronAPI.getPtyPort) {
         window.electronAPI.getPtyPort().then(function (p) {
           if (p) wsPort = p;
@@ -752,7 +762,28 @@ function connectWS() {
       } else {
         connectWS();
       }
-    }, 2000);
+    };
+    var backoff = window.ReconnectBackoff;
+    var delay = backoff ? backoff.reconnectDelay(wsReconnectAttempt) : 2000;
+    delay += Math.floor(Math.random() * 500); // light jitter to avoid thundering herd
+    if (backoff && backoff.shouldShowServerDown(wsReconnectAttempt) && !wsServerDownToast) {
+      wsServerDownToast = showToast('Terminal server is down — reconnecting…', {
+        kind: 'error',
+        duration: 0,
+        action: {
+          label: 'Retry now',
+          onClick: function () {
+            wsServerDownToast = null;
+            if (wsReconnectTimer !== null) {
+              clearTimeout(wsReconnectTimer);
+              wsReconnectTimer = null;
+            }
+            doReconnect();
+          }
+        }
+      });
+    }
+    wsReconnectTimer = setTimeout(doReconnect, delay);
   };
 }
 
