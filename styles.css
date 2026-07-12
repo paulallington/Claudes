@@ -346,7 +346,7 @@ html[data-platform="darwin"] .sidebar-header {
 }
 
 #sidebar button, #sidebar .project-item, #sidebar .project-remove,
-#sidebar .plan-limits-mini {
+#sidebar .plan-limits-mini, #headroom-service {
   -webkit-app-region: no-drag;
 }
 
