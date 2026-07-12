@@ -3711,7 +3711,7 @@ function createColumnHeader(id, customTitle, opts) {
   header.className = 'column-header';
   var title = document.createElement('span');
   title.className = 'col-title';
-  title.textContent = customTitle || ('Claude #' + id);
+  title.textContent = customTitle || ((opts.cmd === 'codex' ? 'Codex #' : 'Claude #') + id);
   title.addEventListener('dblclick', function () {
     startTitleEdit(id, title);
   });

@@ -22,12 +22,14 @@ test('parseWhichOutput: returns first non-empty line, else null', () => {
   assert.strictEqual(parseWhichOutput(''), null);
 });
 
-test('buildCodexSpawn: cmd=codex, empty args, Codex title, no Claude flags', () => {
+test('buildCodexSpawn: cmd=codex, empty args, no hardcoded title, no Claude flags', () => {
   const spec = buildCodexSpawn('D:/proj');
   assert.deepStrictEqual(spec.args, []);
   assert.strictEqual(spec.opts.cmd, 'codex');
-  assert.strictEqual(spec.opts.title, 'Codex');
   assert.strictEqual(spec.opts.cwd, 'D:/proj');
+  // No hardcoded title — the header derives "Codex #<id>" so the column name
+  // doesn't duplicate the "Codex" badge.
+  assert.ok(!('title' in spec.opts));
   // Guard: nothing Claude-specific leaks in.
   assert.ok(!('endpointId' in spec.opts));
   assert.ok(!('env' in spec.opts));
