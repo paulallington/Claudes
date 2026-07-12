@@ -2325,9 +2325,40 @@ ipcMain.handle('fs:readFile', (event, filePath) => {
   }
 });
 
+// Config files the renderer must never write directly — they drive privileged
+// behaviour (allowed FS roots via projects.json; automation clone/delete targets
+// via automations.json; encrypted endpoint tokens via endpoints.json) and are
+// mutated only through their dedicated, validated IPC handlers. fs:writeFile is a
+// project-file editor primitive (the file editor in renderer.js is its only
+// caller) with no legitimate reason to touch these, so refusing them changes no
+// real behaviour while removing a direct config-injection/tamper vector.
+const PROTECTED_CONFIG_BASENAMES = new Set([
+  'projects.json', 'projects-dev.json',
+  'automations.json', 'automations-dev.json',
+  'endpoints.json', 'endpoints-dev.json',
+  'snippets.json', 'snippets-dev.json',
+  'loops.json', 'loops-dev.json'
+]);
+let CONFIG_DIR_REAL = path.resolve(CONFIG_DIR);
+try { CONFIG_DIR_REAL = fs.realpathSync(CONFIG_DIR); } catch { /* created lazily; lexical form is fine */ }
+function isProtectedConfigFile(targetPath) {
+  const forms = new Set([path.resolve(targetPath)]);
+  try { forms.add(fs.realpathSync(path.resolve(targetPath))); } catch { /* may not exist yet */ }
+  for (const f of forms) {
+    const dir = path.dirname(f);
+    if ((dir === path.resolve(CONFIG_DIR) || dir === CONFIG_DIR_REAL) && PROTECTED_CONFIG_BASENAMES.has(path.basename(f))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 ipcMain.handle('fs:writeFile', (event, filePath, content) => {
   try {
     const safe = assertInsideAllowedRoots(filePath);
+    if (isProtectedConfigFile(safe)) {
+      return { success: false, error: 'refused: managed app config is not directly writable' };
+    }
     if (typeof content !== 'string') return { success: false, error: 'content must be a string' };
     if (Buffer.byteLength(content, 'utf8') > FS_WRITE_MAX_BYTES) {
       return { success: false, error: 'content exceeds write size cap (5MB)' };
