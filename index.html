@@ -291,6 +291,8 @@
             <button id="btn-add" title="Spawn Claude (Ctrl+Shift+T)">+ Spawn Claude</button>
             <button id="btn-add-options" title="Spawn options" class="spawn-chevron">&#9662;</button>
             <div id="spawn-dropdown" class="spawn-dropdown hidden">
+              <button type="button" id="btn-spawn-codex" class="spawn-codex-action codex-hidden" title="Launch the Codex CLI in a new column">+ Spawn Codex</button>
+              <div class="spawn-divider codex-hidden" id="spawn-codex-divider"></div>
               <label class="spawn-option" id="opt-headroom-label">
                 <input type="checkbox" id="opt-use-headroom"> Use Headroom
                 <span class="spawn-help" title="Route this column's Claude through the Headroom optimization proxy (headroom wrap claude — cuts token usage). Global toggle: applies to every project until turned off. Skipped automatically on local-endpoint columns.">?</span>
@@ -1537,6 +1539,7 @@
   <script src="./lib/clawd-position.js"></script>
   <script src="./lib/clawd-widget.js"></script>
   <script src="./lib/permission-mode.js"></script>
+  <script src="./lib/codex-spawn.js"></script>
   <script src="./lib/effort-relaunch.js"></script>
   <script src="./lib/spawn-session.js"></script>
   <script src="./lib/resize-scheduler.js"></script>

@@ -20,6 +20,8 @@ var claudeMdStatus = document.getElementById('claudemd-status');
 var themeSelect = document.getElementById('theme-select');
 
 var btnAddOptions = document.getElementById('btn-add-options');
+var btnSpawnCodex = document.getElementById('btn-spawn-codex');
+var spawnCodexDivider = document.getElementById('spawn-codex-divider');
 var spawnDropdown = document.getElementById('spawn-dropdown');
 var optPermissionMode = document.getElementById('opt-permission-mode');
 var optRemoteControl = document.getElementById('opt-remote-control');
@@ -3709,14 +3711,26 @@ function createColumnHeader(id, customTitle, opts) {
   header.className = 'column-header';
   var title = document.createElement('span');
   title.className = 'col-title';
-  title.textContent = customTitle || ('Claude #' + id);
+  title.textContent = customTitle || ((opts.cmd === 'codex' ? 'Codex #' : 'Claude #') + id);
   title.addEventListener('dblclick', function () {
     startTitleEdit(id, title);
   });
+  // cmd columns (Codex, launch configs) have no Claude slash commands, so a
+  // Codex badge replaces the starburst and the compact/teleport/effort controls
+  // below are suppressed — they would be broken affordances there.
+  if (opts.cmd === 'codex') {
+    var codexBadge = document.createElement('span');
+    codexBadge.className = 'col-codex-badge';
+    codexBadge.textContent = 'Codex';
+    codexBadge.title = 'This column runs the Codex CLI, not Claude';
+    title.appendChild(codexBadge);
+  }
+
   var actions = document.createElement('span');
   actions.className = 'col-actions';
 
-  if (!opts.isDiff) {
+  var claudeChrome = window.CodexSpawn.columnUsesClaudeChrome({ cmd: opts.cmd });
+  if (!opts.isDiff && claudeChrome) {
     var compactBtn = document.createElement('span');
     compactBtn.className = 'col-action';
     compactBtn.title = 'Compact context (/compact)';
@@ -4156,7 +4170,7 @@ function addColumn(args, targetRow, opts) {
   // rather than parseInt('') === NaN.
   col.id = 'col-' + id;
 
-  var header = createColumnHeader(id, opts.title);
+  var header = createColumnHeader(id, opts.title, { cmd: opts.cmd || null });
 
   // Drop a banner above the terminal so the user can see at a glance which
   // backend each column is talking to. Two flavours:
@@ -10690,6 +10704,18 @@ btnAdd.addEventListener('click', async function () {
     btnAdd.disabled = false;
   }
 });
+// Spawn Codex — a first-class action in the spawn dropdown. Deliberately
+// bypasses buildSpawnArgs() and every Claude-only spawn option: a Codex column
+// is just a cmd column running `codex`, which the rest of the app already
+// treats as "not Claude" (no headroom/voice/session machinery attaches).
+if (btnSpawnCodex) {
+  btnSpawnCodex.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var spec = window.CodexSpawn.buildCodexSpawn(null);
+    addColumn(spec.args, null, spec.opts);
+    closeSpawnDropdown();
+  });
+}
 btnAddRow.addEventListener('click', addRow);
 btnToggleSidebar.addEventListener('click', toggleSidebar);
 themeSelect.addEventListener('change', function () {
@@ -10975,6 +11001,18 @@ function initHeadroomUI() {
   }
 }
 
+// Reveal the "Spawn Codex" dropdown action only when the `codex` CLI is on PATH.
+// Hidden by default (codex-hidden) so the affordance never appears — and never
+// errors — on machines without Codex installed.
+function initCodexUI() {
+  if (!btnSpawnCodex || !window.electronAPI || !window.electronAPI.hasCodex) return;
+  window.electronAPI.hasCodex().then(function (present) {
+    if (!present) return;
+    btnSpawnCodex.classList.remove('codex-hidden');
+    if (spawnCodexDivider) spawnCodexDivider.classList.remove('codex-hidden');
+  }).catch(function () { /* leave hidden on error */ });
+}
+
 if (optUseHeadroom) {
   optUseHeadroom.addEventListener('change', function () {
     config.useHeadroom = optUseHeadroom.checked;
@@ -11209,6 +11247,7 @@ function initHeadroomServiceUI() {
 }
 
 initHeadroomUI();
+initCodexUI();
 initHeadroomServiceUI();
 
 // Default-effort selectors are app-global (not per-project), so they bypass
