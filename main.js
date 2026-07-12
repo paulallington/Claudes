@@ -752,7 +752,14 @@ function pruneAgentRuns(dir) {
   } catch { /* ignore */ }
 }
 
+// Run-history ids arrive straight from IPC. Reject anything that isn't a safe
+// token so automationId/agentId can't traverse out of AUTOMATIONS_RUNS_DIR into an
+// arbitrary directory read. Every legit id is auto_/agent_/temp_/_manager.
+function isSafeRunSegment(s) {
+  return typeof s === 'string' && /^[A-Za-z0-9_-]+$/.test(s);
+}
 function getAgentHistory(automationId, agentId, count) {
+  if (!isSafeRunSegment(automationId) || !isSafeRunSegment(agentId)) return [];
   const dir = path.join(AUTOMATIONS_RUNS_DIR, automationId, agentId);
   try {
     const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse();
@@ -6131,6 +6138,7 @@ ipcMain.handle('automations:getAgentHistory', (event, automationId, agentId, cou
 });
 
 ipcMain.handle('automations:getAgentRunDetail', (event, automationId, agentId, startedAt) => {
+  if (!isSafeRunSegment(automationId) || !isSafeRunSegment(agentId)) return null;
   const dir = path.join(AUTOMATIONS_RUNS_DIR, automationId, agentId);
   try {
     const filename = new Date(startedAt).toISOString().replace(/[:.]/g, '-') + '.json';
@@ -6702,6 +6710,7 @@ ipcMain.handle('automations:getManagerStatus', (event, automationId) => {
 });
 
 ipcMain.handle('automations:getManagerHistory', (event, automationId, count) => {
+  if (!isSafeRunSegment(automationId)) return [];
   const dir = path.join(AUTOMATIONS_RUNS_DIR, automationId, '_manager');
   try {
     const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse();
