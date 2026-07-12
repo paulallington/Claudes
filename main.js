@@ -5115,16 +5115,25 @@ ipcMain.handle('headroom:serviceStop', async () => {
 // the port-release wait) so a poll can't probe a mid-restart proxy and trip a
 // second restart.
 let _headroomWatchdogBusy = false;
-async function restartHeadroomProxy(reason, extraDelayMs) {
+let _headroomShuttingDown = false; // set on quit so an in-flight restart can't respawn the proxy we're killing
+// opts.delayMs: backoff before acting (watchdog). opts.guard: re-checked AFTER the
+// delay, immediately before we kill+respawn — lets a watchdog restart abort if the
+// world changed during its wait (user hit Stop so the child is gone, disabled
+// Headroom, or we started quitting). Manual restart passes neither and always runs.
+async function restartHeadroomProxy(reason, opts) {
+  opts = opts || {};
   _headroomWatchdogBusy = true;
   try {
-    if (extraDelayMs) await new Promise((r) => setTimeout(r, extraDelayMs)); // watchdog backoff
+    if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs)); // watchdog backoff
+    if (_headroomShuttingDown) { diagLog('[headroom] restart skipped (' + reason + '): shutting down'); return { ok: false, aborted: true }; }
+    if (opts.guard && !opts.guard()) { diagLog('[headroom] restart aborted (' + reason + '): precondition no longer holds'); return { ok: false, aborted: true }; }
     diagLog('[headroom] restart (' + reason + ')');
     broadcastServiceLog('Restarting Headroom proxy…');
     stopHeadroomProxyProcess();
     _headroomStartInflight = null;
     _shaperStateApplied = false;
     await new Promise((r) => setTimeout(r, 1200)); // let the port release
+    if (_headroomShuttingDown) { diagLog('[headroom] restart abandoned (' + reason + '): shutting down'); return { ok: false, aborted: true }; }
     return await startHeadroomManagedProxy();
   } finally {
     _headroomWatchdogBusy = false;
@@ -5163,7 +5172,16 @@ async function headroomWatchdogTick() {
     diagLog('[headroom] watchdog: proxy unresponsive — auto-restarting (delay ' + d.delayMs + 'ms)');
     broadcastServiceLog('Headroom proxy stopped responding — restarting automatically…');
     try {
-      await restartHeadroomProxy('watchdog: unresponsive', d.delayMs);
+      await restartHeadroomProxy('watchdog: unresponsive', {
+        delayMs: d.delayMs,
+        // Re-checked after the backoff, just before we act: bail if the user
+        // stopped the proxy (child gone) or turned Headroom off during the wait.
+        guard: () => {
+          if (!headroomProxyChild) return false;
+          let g = null; try { g = readConfig(); } catch { /* ignore */ }
+          return !!(g && g.useHeadroom);
+        },
+      });
     } catch (e) {
       diagLog('[headroom] watchdog restart failed:', (e && e.message) || String(e));
     }
@@ -8552,6 +8570,7 @@ app.on('before-quit', () => {
   }
   clawdTails.clear();
   step('stopHeadroomProxyProcess');
+  _headroomShuttingDown = true;    // block any in-flight watchdog restart from respawning the proxy
   stopHeadroomWatchdog();          // stop supervising before we intentionally kill the proxy
   stopHeadroomProxyProcess();
   step('killPtyServer');
