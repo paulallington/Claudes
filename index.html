@@ -292,6 +292,16 @@
             <button id="btn-add-options" title="Spawn options" class="spawn-chevron">&#9662;</button>
             <div id="spawn-dropdown" class="spawn-dropdown hidden">
               <button type="button" id="btn-spawn-codex" class="spawn-codex-action codex-hidden" title="Launch the Codex CLI in a new column">+ Spawn Codex</button>
+              <div class="spawn-option spawn-codex-approval-row codex-hidden" id="opt-codex-approval-row" title="Approval/sandbox level Codex starts with. Sandbox enforcement is OS-level (Seatbelt/Landlock); on Windows Codex may not fully sandbox.">
+                <label for="opt-codex-approval">Approval:</label>
+                <select id="opt-codex-approval">
+                  <option value="read-only">Read Only</option>
+                  <option value="auto">Auto</option>
+                  <option value="full-access">Full Access</option>
+                  <option value="yolo">Yolo (bypass)</option>
+                  <option value="codex-default">Codex default</option>
+                </select>
+              </div>
               <div class="spawn-divider codex-hidden" id="spawn-codex-divider"></div>
               <label class="spawn-option" id="opt-headroom-label">
                 <input type="checkbox" id="opt-use-headroom"> Use Headroom

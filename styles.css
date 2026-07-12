@@ -1314,6 +1314,18 @@ html[data-platform="darwin"] #toolbar {
   display: none;
 }
 
+.spawn-codex-approval-row {
+  justify-content: space-between;
+}
+.spawn-codex-approval-row select {
+  margin-left: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.spawn-codex-approval-row.codex-hidden {
+  display: none;
+}
+
 .spawn-hint {
   padding: 4px 12px 6px;
   font-size: 10px;
