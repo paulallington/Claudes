@@ -44,7 +44,7 @@ const {
 } = require('./lib/interactive-scheduled');
 const { appendWithRotation } = require('./lib/voice-debug-log');
 const { codexLookupCommand, parseWhichOutput } = require('./lib/codex-spawn');
-const { parseCodexRateLimits, pickLatestRolloutPath, mergeCodexReadings } = require('./lib/codex-limits');
+const { parseCodexRateLimits, mergeCodexReadings } = require('./lib/codex-limits');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
