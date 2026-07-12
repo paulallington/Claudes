@@ -613,14 +613,17 @@ var wsHasConnectedBefore = false;
 var wsReconnectAttempt = 0;
 var wsReconnectTimer = null;
 var wsServerDownToast = null;
+var wsConnecting = false;
 
 function connectWS() {
   // Per-launch token presented as a subprotocol. pty-server rejects the WS
   // handshake if the token is missing or wrong, so a drive-by browser page
   // pointed at ws://127.0.0.1:<port> can't open a connection.
+  wsConnecting = true;
   var protocols = wsAuthToken ? ['claudes-auth-' + wsAuthToken] : undefined;
   ws = new WebSocket('ws://127.0.0.1:' + wsPort, protocols);
   ws.onopen = function () {
+    wsConnecting = false;
     wsReconnectAttempt = 0;
     if (wsServerDownToast) {
       wsServerDownToast.remove();
@@ -744,6 +747,7 @@ function connectWS() {
     }
   };
   ws.onclose = function () {
+    wsConnecting = false;
     // The socket can close because pty-server crashed and main auto-restarted
     // it (lib/pty-restart-policy). The new server normally re-binds the same
     // preferred port, but if that port is briefly still held it falls back to an
@@ -773,6 +777,7 @@ function connectWS() {
         action: {
           label: 'Retry now',
           onClick: function () {
+            if (wsConnecting) return; // a connect attempt is already in flight
             wsServerDownToast = null;
             if (wsReconnectTimer !== null) {
               clearTimeout(wsReconnectTimer);

@@ -40,6 +40,9 @@ if [ -n "$CHANGES" ]; then
   exit 1
 fi
 
+echo "==> Running tests..."
+npm test
+
 # Update version in package.json
 node -e "
   const pkg = require('./package.json');
@@ -48,9 +51,6 @@ node -e "
 "
 git add package.json
 echo "==> Updated package.json to v${VERSION}"
-
-echo "==> Running tests..."
-npm test
 
 # Commit
 git commit -m "v${VERSION}"
