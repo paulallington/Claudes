@@ -6610,16 +6610,24 @@ function showColumnSessionPicker(colId, clientX, clientY) {
 
   var menu = document.createElement('div');
   menu.className = 'col-session-picker project-context-menu';
+  menu.style.display = 'block';
   var loading = document.createElement('div');
   loading.className = 'project-context-item';
   loading.style.opacity = '0.6';
   loading.textContent = 'Loading recent sessions…';
   menu.appendChild(loading);
   document.body.appendChild(menu);
-  var pickerRect = menu.getBoundingClientRect();
-  var pickerPos = window.MenuPosition.clampMenuPosition(clientX, clientY, pickerRect.width, pickerRect.height, window.innerWidth, window.innerHeight);
-  menu.style.left = pickerPos.left + 'px';
-  menu.style.top = pickerPos.top + 'px';
+
+  // Rows are added asynchronously (below), which can grow the menu taller
+  // than the initial "Loading…" row — re-clamp after populating so a picker
+  // opened near the bottom edge doesn't spill past it once it grows.
+  function place() {
+    var rect = menu.getBoundingClientRect();
+    var pos = window.MenuPosition.clampMenuPosition(clientX, clientY, rect.width, rect.height, window.innerWidth, window.innerHeight);
+    menu.style.left = pos.left + 'px';
+    menu.style.top = pos.top + 'px';
+  }
+  place();
 
   function close() { menu.remove(); document.removeEventListener('mousedown', outside, true); }
   function outside(ev) { if (!menu.contains(ev.target)) close(); }
@@ -6638,6 +6646,7 @@ function showColumnSessionPicker(colId, clientX, clientY) {
       none.style.opacity = '0.6';
       none.textContent = 'No other recent sessions.';
       menu.appendChild(none);
+      place();
       return;
     }
     others.slice(0, 12).forEach(function (s) {
@@ -6658,6 +6667,7 @@ function showColumnSessionPicker(colId, clientX, clientY) {
         if (title) item.textContent = (title.length > 60 ? title.slice(0, 60) + '…' : title) + '  ·  ' + when.toLocaleString();
       }).catch(function () { /* keep id-based label */ });
     });
+    place();
   }).catch(function () {
     loading.textContent = 'Failed to load sessions.';
   });
