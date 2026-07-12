@@ -1592,14 +1592,14 @@ html[data-platform="darwin"] #toolbar {
   flex-shrink: 0;
 }
 
-/* Hide less-critical column actions on narrow columns */
+/* Hide less-critical column actions on narrow columns. Restart / clear /
+   sessions / play-full / play-summary / teleport no longer sit inline at all
+   (they live in the .col-overflow menu), so the only things left to hide here
+   are the compact/effort/delta/ctx-meter controls. The overflow trigger (⋯)
+   and the window controls (minimise / maximise / kill ×) must always stay
+   visible so they never fall off a narrow or popped-out header. */
 @container (max-width: 250px) {
-  .col-action, .col-effort, .col-delta-pill, .col-ctx-meter { display: none; }
-}
-/* Very narrow column: drop the remaining non-essential actions so the
-   minimise / maximise / kill (×) controls never overflow off the header. */
-@container (max-width: 190px) {
-  .col-restart, .col-clear, .col-sessions, .col-play-full, .col-play-summary { display: none; }
+  .col-action:not(.col-overflow), .col-effort, .col-delta-pill, .col-ctx-meter { display: none; }
 }
 
 .col-action {
@@ -1765,47 +1765,47 @@ html[data-platform="darwin"] #toolbar {
   animation: pulse-attention 1.2s ease-in-out infinite;
 }
 
-.column-header .col-restart {
-  cursor: pointer;
-  color: var(--text-dim);
+/* Overflow (⋯) trigger — same base look as the other .col-action icons, just
+   guaranteed visible at every breakpoint (see the @container rule above). */
+.col-overflow {
   font-size: 14px;
-  line-height: 1;
-  padding: 2px 6px;
-  border-radius: 3px;
 }
 
-.column-header .col-restart:hover {
-  background: var(--accent);
-  color: var(--text-bright);
+/* Overflow menu — a project-context-menu variant listing the rarely-used
+   column actions (teleport, restart, clear, sessions, play reply/summary) as
+   icon + label rows. Double-classed selector (not just .col-overflow-menu) so
+   this reliably beats the later, equally-specific .project-context-menu rule's
+   min-width regardless of source order. */
+.project-context-menu.col-overflow-menu {
+  min-width: 190px;
 }
 
-.column-header .col-play-full,
-.column-header .col-play-summary {
-  cursor: pointer;
-  color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1;
-  padding: 2px 6px;
-  border-radius: 3px;
+.col-overflow-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.column-header .col-play-summary {
-  font-size: 11px;
+.col-overflow-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
 }
 
-.column-header .col-play-full:hover,
-.column-header .col-play-summary:hover {
-  background: var(--accent);
-  color: var(--text-bright);
+.col-overflow-label {
+  white-space: nowrap;
 }
 
-.column-header .col-play-full.voice-playing,
-.column-header .col-play-summary.voice-playing {
+/* Play reply/summary rows keep the col-play-full/col-play-summary classes so
+   refreshVoiceButtonStates() can keep highlighting them while the menu is
+   open — same playing/paused affordance the old inline buttons had. */
+.col-overflow-item.col-play-full.voice-playing,
+.col-overflow-item.col-play-summary.voice-playing {
   color: var(--accent);
 }
 
-.column-header .col-play-full.voice-paused,
-.column-header .col-play-summary.voice-paused {
+.col-overflow-item.col-play-full.voice-paused,
+.col-overflow-item.col-play-summary.voice-paused {
   opacity: 0.7;
 }
 
@@ -7934,17 +7934,6 @@ html[data-theme="light"] .term-search-count { color: #57606a; }
 html[data-theme="light"] .term-search-btn { color: #1f2328; }
 html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); color: #000; }
 
-/* Header clear-terminal button — same shape as the restart pill. */
-.col-clear {
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 12px;
-  color: #9ca3af;
-  user-select: none;
-}
-.col-clear:hover { background: rgba(255,255,255,0.06); color: #e5e7eb; }
-
 /* Syntax-highlighted preview overlay for the inline file editor. Shown when
    the user clicks 'Preview' in the editor footer; the textarea is hidden
    beneath. Inherits Prism's tomorrow theme colours but keeps the editor's
@@ -7967,16 +7956,6 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
 .fileeditor-preview.hidden { display: none; }
 .fileeditor-preview code { background: transparent; padding: 0; }
 
-/* Column header sessions/clear pills — same shape as col-restart. */
-.col-sessions {
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 12px;
-  color: #9ca3af;
-  user-select: none;
-}
-.col-sessions:hover { background: rgba(255,255,255,0.06); color: #e5e7eb; }
 .col-session-picker { min-width: 280px; max-height: 360px; overflow: auto; }
 
 /* Extensions manager modal — wider dialog so list rows can breathe, body
