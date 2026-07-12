@@ -1,28 +1,48 @@
 # Claudes
 
-Multi-column Claude Code terminal desktop app built with Electron.
+Multi-column Claude Code terminal desktop app built with Electron. Also spawns Codex CLI columns and arbitrary commands.
 
 ## Architecture
 
 Electron main process spawns `pty-server.js` as a **child process under system Node.js** (not Electron's bundled Node). This is critical — node-pty's prebuilt binaries only work with system Node, and electron-rebuild fails on this system. Never try to load node-pty directly in Electron's process.
 
-Communication: Electron renderer <-> WebSocket <-> pty-server.js <-> node-pty <-> Claude CLI
+Communication: Electron renderer <-> WebSocket <-> pty-server.js <-> node-pty <-> Claude/Codex CLI
+
+- **The WebSocket is authenticated.** main mints a per-launch 256-bit token and passes it to pty-server via env; the renderer presents it as the `Sec-WebSocket-Protocol` subprotocol on the handshake. `handleProtocols` rejects any connection with a missing/wrong token, closing the drive-by-RCE hole (any local page could otherwise `new WebSocket('ws://127.0.0.1:<port>')` and spawn processes). Do not regress this.
+- **pty-server patches node-pty at runtime** (top of `pty-server.js`): it `chmod +x`'s the `spawn-helper` prebuild and rewrites `unixTerminal.js`'s asar-unpacked path. Pragmatic but string-fragile — it silently breaks if node-pty changes those internals, and mutating installed files will fight code signing if macOS builds are ever signed.
 
 ## Key Files
 
-- `main.js` — Electron main process, window management, IPC handlers (config, sessions, file explorer, git, CLAUDE.md editor)
-- `pty-server.js` — Standalone WebSocket server + node-pty. Runs under system Node.js. Accepts `cmd` param to spawn arbitrary processes (not just Claude)
-- `preload.js` — Context bridge exposing IPC to renderer
-- `renderer.js` — All frontend logic: project management, row/column layout, xterm terminals, spawn options, explorer panel, CLAUDE.md modal
-- `index.html` — App shell with sidebar, explorer panel, toolbar, modals
-- `styles.css` — Dark theme
+- `main.js` — Electron main process (large, ~8.6k lines): window management + ~40 IPC handler families (config, sessions, file explorer, git, CLAUDE.md editor, headroom, codex, automations, endpoints, headless, mcp, usage, hooks, layouts, popout, …), plus the macOS auto-updater.
+- `pty-server.js` — Standalone WebSocket server + node-pty. Runs under system Node.js. Accepts a `cmd` param to spawn arbitrary processes (not just Claude), gated by the handshake token above.
+- `preload.js` — Context bridge exposing IPC to renderer (~250 flat methods).
+- `renderer.js` — All frontend logic (very large, ~19.9k lines): project management, row/column layout, xterm terminals, spawn options, explorer panel, CLAUDE.md modal, and every panel below.
+- `index.html` — App shell with sidebar, explorer panel, toolbar, modals.
+- `styles.css` — Dark theme.
+- `platform-detect.js` — Tiny shared platform helper.
+- `lib/*.js` — **Pure, `npm`-tested modules** — the project's main strategy for making logic testable outside Electron. When adding non-trivial logic, extract the pure core into `lib/` with a test rather than growing main.js/renderer.js. Most use a UMD pattern (module.exports for Node/tests + `window.*` for the sandboxed renderer, which cannot `require()`).
 
 ## Build & Run
 
 ```bash
 npm install    # No postinstall/electron-rebuild needed
 npm start      # Launches Electron app
+npm test       # node --test over test/*.test.js (pure lib/ coverage)
 ```
+
+Note: `npm test` is **not** run by `release.sh` or CI today — see EVALUATION-TASKS.md.
+
+## Subsystems
+
+Each has a design/spec under `docs/superpowers/specs/` (and often a plan under `plans/`); the testable core lives in `lib/`.
+
+- **Headroom** (`lib/headroom-env.js`, `lib/headroom-watchdog.js`, `headroom:` handlers) — an app-managed local proxy that Claude columns route through for rate-limit headroom. Binding is env-only: `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` (default 8787) + `ENABLE_TOOL_SEARCH=true` + optional `ANTHROPIC_MODEL=<model>[1m]` to re-activate the 1M window (a custom base URL otherwise caps at 200k). Proxy spawned as `headroom proxy --port <p> --no-http2 [--memory] [--mode cache|token | --no-optimize]`; `--no-http2` is mandatory (shared-connection HTTP/2 corrupts TLS under the frequent stream cancels of multi-column use). Mode is start-time only — restart the proxy to change it; `cache` is the subscription-safe default. main probes the `headroom` binary at startup, can auto-start/auto-update it, and a health watchdog auto-restarts a frozen ("up but silent") proxy **it owns and started**. "API error · Retrying" in a column is a real upstream 429/5xx relayed through the proxy, not an app bug; proxy logs live in `~/.headroom/logs/proxy.log`.
+- **Codex columns** (`lib/codex-spawn.js`, `lib/codex-limits.js`, `codex:`/`spawn` paths) — spawn the Codex CLI as a column. Approval presets map to Codex flags (`-a` approval, `-s` sandbox, plus a bypass flag). **Codex runs direct, never through Headroom** — ChatGPT-subscription Codex ignores `OPENAI_BASE_URL`, so Headroom stays Claude-only. Codex has no usage endpoint; usage is scraped from `rate_limits` in the `~/.codex/sessions` rollout JSONL.
+- **Automations / Manager mode** (`automations:` handlers, `docs/ideas/manager-mode.md`) — scheduled/collaborative agent runs, incl. a manager agent that clones and coordinates worker agents. Clone paths are sanitised per-segment inside a base dir (an escape here once enabled arbitrary dir deletion).
+- **Endpoints / per-agent connections** (`endpoint:` handlers) — custom API base URLs/tokens per column. Tokens are `safeStorage`-encrypted and never returned to the renderer.
+- **Headless spawn mode** (`lib/headless-helpers.js`, `headless:` handlers) — run a prompt against a project without an interactive column.
+- **MCP project inheritance** (`lib/mcp-project.js`, `mcp:` handlers) — projects can inherit/override MCP server config.
+- **Scheduled / interactive sessions** (`lib/interactive-scheduled.js`) — cron-style loops and interactive scheduled runs.
 
 ## Releasing
 
@@ -34,9 +54,23 @@ Use the `/release` slash command:
 /release 2.1.0     # explicit version
 ```
 
-This commits all outstanding changes, then runs `release.sh` which bumps `package.json` version, tags, pushes, builds the NSIS installer, and creates a GitHub Release with the artifacts. Requires `gh` CLI to be authenticated. Installed apps auto-update from GitHub Releases via `electron-updater`.
+This commits all outstanding changes, then runs `release.sh` which bumps `package.json` version, tags, pushes, builds the installers, and creates a GitHub Release with the artifacts. Requires `gh` CLI to be authenticated. Can also be run manually: `./release.sh [major|minor|patch|x.y.z]`.
 
-Can also be run manually: `./release.sh [major|minor|patch|x.y.z]`
+Auto-update is **platform-split**:
+- **Windows/Linux** use `electron-updater` against the GitHub Release (NSIS blockmaps + `latest.yml`; SHA512-verified).
+- **macOS** uses a **custom GitHub-polling updater** (`darwinCheckForUpdates` in main.js) — Squirrel.Mac refuses to apply unsigned updates, so builds are unsigned and the updater downloads the `-mac-<arch>.dmg` release asset directly and opens it. There is currently **no checksum/signature verification** on that path (tracked in EVALUATION-TASKS.md).
+
+## Security
+
+The app had a 4-agent security audit — see `docs/security/2026-05-06-audit-report.md` for the fixed criticals and the deferred items. Established posture to **preserve**:
+
+- pty-server WS is 127.0.0.1-bound + handshake-token-authed (above), with DoS caps (payload size, pty count, write size).
+- Renderer-supplied `env` is blocklist-filtered before merge (`NODE_OPTIONS`, `NODE_PATH`, `LD_*`, `DYLD_*`, `PYTHONPATH`, `PERL5LIB`, `RUBYOPT`, `PATH`, …) so an allow-listed `claude` invocation can't be turned into RCE.
+- BrowserWindows run `contextIsolation:true, nodeIntegration:false, sandbox:true` behind a strict CSP, with `setWindowOpenHandler` / `will-navigate` locked down.
+- All fs/git IPC passes through `assertInsideAllowedRoots` (realpath + symlink checks); git handlers use `execFile` arg arrays with ref-name validation.
+- Secrets (ElevenLabs key, endpoint tokens) are `safeStorage`-encrypted and never returned to the renderer.
+
+Deferred/open items (SSRF in `endpoint:fetchModels`, plaintext `dbConnectionString`, pty `cmd` allow-list, `reattach` ownership, `hooks:configure` consent, and more) live in `EVALUATION-TASKS.md` alongside the broader gaps/issues backlog.
 
 ## UI Conventions
 
@@ -55,7 +89,8 @@ Can also be run manually: `./release.sh [major|minor|patch|x.y.z]`
   ```json
   { "sessions": [ ... ], "workspaces": { "<ws id>": { "sessions": [ ... ] } } }
   ```
-  Primary's columns live in the top-level `sessions` array; each sub-workspace's columns live under `workspaces.<id>.sessions`. Legacy files with just `{ "sessions": [...] }` are read as Primary with an implicit empty `workspaces: {}`; the first save upgrades the shape. Writes are atomic (tmp + rename).
+  Primary's columns live in the top-level `sessions` array; each sub-workspace's columns live under `workspaces.<id>.sessions`. Legacy files with just `{ "sessions": [...] }` are read as Primary with an implicit empty `workspaces: {}`; the first save upgrades the shape. Writes are atomic (`lib/config-io.js` `atomicWriteJson`: same-dir tmp + fsync + rename, with `.bak` roll-aside and corrupt-file quarantine/recovery on read).
+- `config:saveProjects` has an empty-over-nonempty data-loss guard and merges on-disk `voice`/`terminal`/sync state back before persisting (`preserveManagedSettings`) — do not regress this or it clobbers settings the user just changed.
 - Each per-column session entry optionally carries a `cwd` field — the working directory the column was spawned in. Omitted when equal to the project root, so existing files without `cwd` keep working unchanged. On restore, missing-on-disk values fall back to project root with a console warning (handled via `electronAPI.pathExists` pre-flight).
 - Each per-column session entry also optionally carries a `targetBranch` field — auto-detected by the Git tab from the Claude CLI session JSONL's last `gitBranch` value. When set, the Git tab renders branch-relative read-only data (commits, ahead/behind, diff vs base) for `targetBranch` rather than the project root's currently-checked-out branch. Mutation actions (stage/commit/push) disable until the user checks out that branch. Persisted only as a hint — `autoBindColumnTarget` re-derives it on focus regardless.
 - Claude sessions detected by scanning `~/.claude/projects/<path-key>/` for `.jsonl` files
@@ -69,6 +104,10 @@ Reads Claude's replies aloud via ElevenLabs. **Before touching anything voice-re
 - **Don't regress session attribution:** the session-sync poll is read-only for `sessionId` (it once stole sibling columns' sessions); `detectSession` is acquire-only; fresh local spawns get a deterministic `--session-id` kept out of persisted `cmdArgs`.
 - **`config:saveProjects` must preserve on-disk `voice`/`terminal`** (`preserveManagedSettings`) or it clobbers settings the user just changed.
 - Pure libs: `voice-text.js`, `terminal-reply.js`, `voice-transcript-path.js`, `voice-settings.js`, `voice-request.js`, `voice-personality.js`, `session-target.js`, `spawn-session.js` (each `npm`-tested).
+
+## Known Issues / Backlog
+
+`EVALUATION-TASKS.md` (repo root) holds the prioritised gaps/issues backlog from the full app evaluation — High/Medium/Low, each keyed to `file:line`. Consult and update it when working on anything it covers.
 
 <!-- aidp-orchestrator-start -->
 ## AI-Driven Project Orchestrator
