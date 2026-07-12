@@ -45,6 +45,7 @@ const {
 const { appendWithRotation } = require('./lib/voice-debug-log');
 const { codexLookupCommand, parseWhichOutput } = require('./lib/codex-spawn');
 const { parseCodexRateLimits, pickLatestRolloutPath } = require('./lib/codex-limits');
+const { parseChecksumFile, checksumsMatch } = require('./lib/update-checksum');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -4268,6 +4269,52 @@ function setupDarwinUpdater() {
     });
   }
 
+  // Fetches a small text asset (the sha256 sidecar), following redirects the
+  // same way downloadFile does — GitHub release asset URLs 302 to S3.
+  function fetchAssetText(url) {
+    return new Promise((resolve, reject) => {
+      function get(href, redirects) {
+        const u = new URL(href);
+        const req = https.request({
+          method: 'GET',
+          hostname: u.hostname,
+          path: u.pathname + u.search,
+          headers: { 'User-Agent': 'Claudes-Updater' }
+        }, (res) => {
+          if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+            res.resume();
+            if (redirects > 5) return reject(new Error('too many redirects'));
+            return get(res.headers.location, redirects + 1);
+          }
+          if (res.statusCode !== 200) {
+            res.resume();
+            return reject(new Error('HTTP ' + res.statusCode));
+          }
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => resolve(body));
+          res.on('error', reject);
+        });
+        req.on('error', reject);
+        req.setTimeout(15000, () => req.destroy(new Error('timeout')));
+        req.end();
+      }
+      get(url, 0);
+    });
+  }
+
+  // sha256 hex digest of a downloaded file, streamed (DMGs can be large).
+  function computeFileSha256(filePath) {
+    return new Promise((resolve, reject) => {
+      const hash = crypto.createHash('sha256');
+      const stream = fs.createReadStream(filePath);
+      stream.on('error', reject);
+      stream.on('data', (chunk) => hash.update(chunk));
+      stream.on('end', () => resolve(hash.digest('hex')));
+    });
+  }
+
   async function checkForUpdates(opts) {
     const manual = !!(opts && opts.manual);
     try {
@@ -4306,6 +4353,28 @@ function setupDarwinUpdater() {
         await downloadFile(asset.browser_download_url, target, (pct) => {
           mainWindow?.webContents.send('update:progress', { percent: pct });
         });
+
+        // Integrity check: verify the downloaded DMG against the CI-published
+        // sha256 sidecar before trusting it. Unsigned builds have no other
+        // tamper/corruption detection on this path.
+        const sidecar = (release.assets || []).find((a) => a.name === asset.name + '.sha256');
+        if (sidecar) {
+          const sidecarText = await fetchAssetText(sidecar.browser_download_url);
+          const expected = parseChecksumFile(sidecarText, asset.name);
+          const actual = await computeFileSha256(target);
+          if (!expected || !checksumsMatch(expected, actual)) {
+            try { fs.unlinkSync(target); } catch (_) { /* best-effort cleanup */ }
+            console.error('[darwin-updater] checksum mismatch for', asset.name, { expected, actual });
+            mainWindow?.webContents.send('update:error', {
+              message: 'Update failed integrity check (sha256 mismatch)'
+            });
+            return { error: 'checksum-mismatch' };
+          }
+          console.log('[darwin-updater] checksum verified for', asset.name);
+        } else {
+          console.warn('[darwin-updater] no sha256 sidecar for', asset.name, '— skipping integrity check');
+        }
+
         downloadedDmgPath = target;
         mainWindow?.webContents.send('update:downloaded', {
           version,

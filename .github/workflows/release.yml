@@ -10,7 +10,21 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install
+
+      - run: npm test
+
   build-windows:
+    needs: [test]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +47,7 @@ jobs:
             dist/latest.yml
 
   build-macos:
+    needs: [test]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,16 +61,25 @@ jobs:
       - name: Build macOS installer
         run: npx electron-builder --mac --publish never
 
+      - name: Generate DMG checksums
+        working-directory: dist
+        run: |
+          for f in Claudes-*-mac-*.dmg; do
+            shasum -a 256 "$f" > "$f.sha256"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos-artifacts
           path: |
             dist/Claudes-*.dmg
+            dist/Claudes-*.dmg.sha256
             dist/Claudes-*.zip
             dist/Claudes-*.zip.blockmap
             dist/latest-mac.yml
 
   build-linux:
+    needs: [test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -6,16 +6,21 @@ not listed here (pty-server token auth, Electron sandbox/CSP, path containment, 
 
 ## High
 
-- [ ] **Wire tests into the release pipeline.** Add `npm test` as a required job in
+- [x] **Wire tests into the release pipeline.** Add `npm test` as a required job in
   `.github/workflows/release.yml` and run it in `release.sh` before tagging. *(fix first)*
-- [ ] **Harden `release.sh`.** Refuse dirty trees instead of blind `git add -A`; push the branch
+- [x] **Harden `release.sh`.** Refuse dirty trees instead of blind `git add -A`; push the branch
   before tagging (or delete the tag on failure) so a failed build never leaves an orphan tag.
-- [ ] **Verify the macOS update chain.** Builds are unsigned and the custom updater downloads the
-  DMG with no checksum/signature check (`main.js:4190-4333`). Sign + notarize, or at minimum verify
-  a sha256 pinned in the release workflow.
-- [ ] **WS reconnect backoff + status.** Renderer retries a fixed 2s forever with no backoff and no
-  "terminal server is down" UX when pty-server gives up (`renderer.js:746-756`). Add exponential
-  backoff and a surfaced status state.
+- [x] **Verify the macOS update chain (sha256 path).** `build-macos` now writes a `<dmg>.sha256`
+  sidecar per DMG and ships it as a release artifact, and the darwin updater fetches + verifies it
+  (`lib/update-checksum.js`) before setting `downloadedDmgPath`; a mismatch deletes the file and
+  surfaces `update:error`, and releases without a sidecar still update (backward-compatible warning).
+  Signing/notarization intentionally deferred (out of scope per maintainer) — the "at minimum verify
+  a sha256" bar is met, but this is corruption/single-asset-tamper protection over the same TLS path,
+  not a substitute for signing against a full release compromise.
+- [x] **WS reconnect backoff + status.** Reconnect now backs off exponentially (`lib/reconnect-backoff.js`:
+  1s→30s cap + jitter) instead of a fixed 2s, and after ~4 failed attempts surfaces a persistent
+  "Terminal server is down — reconnecting…" toast with a Retry action that clears on reconnect
+  (`renderer.js` ws.onclose). Live-port re-fetch + column reattach preserved.
 - [ ] **Begin decomposing the monolith.** `renderer.js` (~19.9k lines) and `main.js` (~8.6k lines)
   have 0% direct test coverage. Plan a staged extraction of subsystems into testable modules
   (continue the lib/ pattern). Large effort — plan separately.
