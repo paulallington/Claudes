@@ -6,13 +6,15 @@ not listed here (pty-server token auth, Electron sandbox/CSP, path containment, 
 
 ## High
 
-- [ ] **Wire tests into the release pipeline.** Add `npm test` as a required job in
+- [x] **Wire tests into the release pipeline.** Add `npm test` as a required job in
   `.github/workflows/release.yml` and run it in `release.sh` before tagging. *(fix first)*
-- [ ] **Harden `release.sh`.** Refuse dirty trees instead of blind `git add -A`; push the branch
+- [x] **Harden `release.sh`.** Refuse dirty trees instead of blind `git add -A`; push the branch
   before tagging (or delete the tag on failure) so a failed build never leaves an orphan tag.
 - [ ] **Verify the macOS update chain.** Builds are unsigned and the custom updater downloads the
   DMG with no checksum/signature check (`main.js:4190-4333`). Sign + notarize, or at minimum verify
-  a sha256 pinned in the release workflow.
+  a sha256 pinned in the release workflow. *(CI half done: `build-macos` now writes a
+  `<dmg>.sha256` sidecar per DMG and ships it as a release artifact; the darwin updater still needs
+  to fetch and verify it before opening the DMG.)*
 - [ ] **WS reconnect backoff + status.** Renderer retries a fixed 2s forever with no backoff and no
   "terminal server is down" UX when pty-server gives up (`renderer.js:746-756`). Add exponential
   backoff and a surfaced status state.

@@ -31,11 +31,13 @@ esac
 
 echo "==> Releasing Claudes v${VERSION} (was v${CURRENT})"
 
-# Stage all outstanding changes first
+# Refuse to run on a dirty tree — commit or stash first.
+# (The /release slash command commits outstanding changes before calling this script.)
 CHANGES=$(git status --porcelain)
 if [ -n "$CHANGES" ]; then
-  echo "==> Staging outstanding changes..."
-  git add -A
+  echo "ERROR: working tree is dirty. Commit or stash your changes before releasing." >&2
+  echo "$CHANGES" >&2
+  exit 1
 fi
 
 # Update version in package.json
@@ -47,15 +49,20 @@ node -e "
 git add package.json
 echo "==> Updated package.json to v${VERSION}"
 
-# Commit and tag
-git commit -m "v${VERSION}"
-git tag "v${VERSION}"
-echo "==> Committed and tagged v${VERSION}"
+echo "==> Running tests..."
+npm test
 
-# Push
+# Commit
+git commit -m "v${VERSION}"
+echo "==> Committed v${VERSION}"
+
+# Push the branch first, then tag — a failed branch push never leaves an orphan tag.
 git push
-git push --tags
-echo "==> Pushed to origin"
+echo "==> Pushed branch to origin"
+
+git tag "v${VERSION}"
+git push origin "v${VERSION}" || { git tag -d "v${VERSION}"; echo "ERROR: failed to push tag v${VERSION}; local tag removed." >&2; exit 1; }
+echo "==> Tagged and pushed v${VERSION}"
 
 echo ""
 echo "==> Tag v${VERSION} pushed. GitHub Actions will build and release for Windows + macOS + Linux."
