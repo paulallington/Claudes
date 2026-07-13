@@ -83,9 +83,28 @@ spot-check the rest against current line numbers before fixing (main.js/renderer
 
 **v1.9.51** — run-history read id validation (traversal); `git:diff` untracked fallback contained; Windows env blocklist case-fold (High #3); atomic snippet writes (Medium #1); sticky-notes/launch:getConfigs/workspace:scrubArtifacts contained to allowed roots (High #7, partial).
 
-**Still open — need YOUR product decision (not zero-break):** Critical 1 *cross-restart* provenance (config:saveProjects persists + startup seed re-trusts); Critical 2 `agentReposBaseDir` is renderer-settable so setupAgentClone/manager deletes are unbounded (pinning it breaks "clones anywhere"); High #1 endpoint tokens to renderer (needs opaque-id refactor); High #4 `file:` nav; High #5 external-editor exec; High #6 sync destination; High #7 remainder (`launch:readEnvFile`/`scanCsproj` are browse-bound; headless spawn dir).
+### Remaining actions (triaged 2026-07-13 — paused; maintainer prefers NO migrations / breaking changes)
 
-**Still open — safe but needs runtime/feature testing:** High #8 config-write races; Medium #2 manager-config dropped on create; Medium #3 concurrency races; Medium #4 tail-IPC interval caps; Low interruption-detection gating.
+**🟢 Safe — no migration, no breaking change (verify-then-fix when resumed):**
+- Medium #4 **tail-IPC interval leak** — stop the per-column 150ms polling interval on `webContents` `destroyed` (+ a generous cap). Pure cleanup. `main.js:3791,3818`, `preload.js:248`.
+- High #4 **`file:` navigation lockdown** — block post-load nav to arbitrary local HTML (or exact-match packaged `index.html`). Zero-break *iff* no legit post-load `file:` nav — verify first. `main.js` `will-navigate`.
+- High #7 remainder — **headless spawn-dir containment**: add `assertInsideAllowedRoots` to the headless spawn dir. Zero-break *iff* the dir is always an authorized project — verify first.
+- Low **interruption-detection gate** — move the resumed-session detection outside the `col.hasUserInput` condition. `renderer.js:646`. Eyeball in UI.
+
+**🔴 Requires a migration or a breaking change (parked per maintainer):**
+- Critical 1 *cross-restart* — persisted authorized-roots file + **first-run migration** (config:saveProjects persists + startup seed re-trusts).
+- Critical 2 — `agentReposBaseDir` is renderer-settable, so setupAgentClone/manager deletes are unbounded; only closable by **pinning the clone location** (loses "clones anywhere").
+- High #1 endpoint tokens to renderer — needs an opaque-id **refactor** of the endpoint-edit flow.
+- High #5 external-editor exec — editor allowlist would **reject existing custom editor configs**.
+- High #6 sync destination — picker-binding **changes existing sync setups**.
+- High #7 remainder — `launch:readEnvFile` / `scanCsproj` are **browse-bound** (restricting breaks "browse anywhere").
+
+**🟡 No migration, but a behavior change needing runtime/feature testing (grey zone):**
+- High #8 config-write races — serialize config mutations through one queue (subtle timing change).
+- Medium #2 manager-config dropped on create — bug fix that *enables* a dropped feature; touches the clone-setup flow.
+- Medium #3 concurrency races — reserve run slots before async prep (changes scheduling behavior).
+
+_Residual security exposure across all parked items is defense-in-depth — it requires a renderer compromise (XSS past sandbox+CSP) to reach. Parking is a reasonable risk posture._
 
 ## Codex — Critical
 
