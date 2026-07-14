@@ -49,6 +49,23 @@ test('no input -> null (safe)', () => {
   assert.strictEqual(buildHeadroomEnv({}), null);
 });
 
+test('hasMcp true -> ENABLE_TOOL_SEARCH omitted (tool_search_deferral would swallow mcp__* tools)', () => {
+  const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false, hasMcp: true });
+  assert.ok(!('ENABLE_TOOL_SEARCH' in env));
+  assert.strictEqual(env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:8787');
+});
+
+test('hasMcp true + oneM -> still sets ANTHROPIC_MODEL, still no ENABLE_TOOL_SEARCH', () => {
+  const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false, hasMcp: true, oneM: true, oneMModel: 'claude-opus-4-8' });
+  assert.strictEqual(env.ANTHROPIC_MODEL, 'claude-opus-4-8[1m]');
+  assert.ok(!('ENABLE_TOOL_SEARCH' in env));
+});
+
+test('hasMcp explicitly false -> ENABLE_TOOL_SEARCH still set', () => {
+  const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false, hasMcp: false });
+  assert.strictEqual(env.ENABLE_TOOL_SEARCH, 'true');
+});
+
 const DEFAULT_TIMEOUT_RETRY_TAIL = [
   '--request-timeout-seconds', '900',
   '--anthropic-buffered-request-timeout-seconds', '900',
