@@ -4552,6 +4552,15 @@ function addColumn(args, targetRow, opts) {
       // the init sequences — re-apply them here so the reattached terminal
       // matches what Claude expects.
       terminal.write('\x1b[?25l\x1b[?1004h');
+      // Reattach rebinds a live pty (no respawn), but a LATER respawn of this column
+      // reads col.hasMcp to keep MCP inlined under Headroom. The create path sets it;
+      // reattach returns early, so populate it async here (non-blocking) too.
+      if (!cmd && window.electronAPI && window.electronAPI.buildProjectMcpConfig) {
+        window.electronAPI.buildProjectMcpConfig(mcpProjectRoot).then(function (r) {
+          var c = allColumns.get(id);
+          if (c) c.hasMcp = !!(r && r.hasMcp);
+        }).catch(function () { /* leave hasMcp unset on failure */ });
+      }
       wsSend({ type: 'reattach', id: id, cols: terminal.cols, rows: terminal.rows });
       return;
     }
