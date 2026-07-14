@@ -735,7 +735,7 @@ function connectWS() {
           if (col3.env) respawnMsg.env = col3.env;
           // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
           // Re-derived from the live global flag; never persisted on the column.
-          maybeBindHeadroom(respawnMsg, { hasEndpoint: !!(col3.endpointId || col3.env), isClaude: !col3.cmd });
+          maybeBindHeadroom(respawnMsg, { hasEndpoint: !!(col3.endpointId || col3.env), isClaude: !col3.cmd, hasMcp: !!(col3 && col3.hasMcp) });
           col3.terminal.clear();
           gatedWsSend(respawnMsg);
           setColumnActivity(msg.id, 'working');
@@ -4099,7 +4099,7 @@ function createExitOverlay(id, exitCode, col) {
     if (col.env) sendMsg.env = col.env;
     // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
     // Re-derived from the live global flag; passthrough for endpoint/arbitrary cmd.
-    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd });
+    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp) });
     gatedWsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
@@ -4581,6 +4581,9 @@ function addColumn(args, targetRow, opts) {
     }
     var __stripped = sendMsg.args.indexOf('--mcp-config') !== -1;   // Strip MCPs toggle already scoped it → no inherited MCP
     var __hasMcp = !__stripped && !!(mcpRes && mcpRes.hasMcp);
+    // Persist so respawn/reattach paths keep MCP inlined (Headroom tool-search off) without re-resolving.
+    var __col = allColumns.get(id);
+    if (__col) __col.hasMcp = __hasMcp;
     maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd, hasMcp: __hasMcp });
     if (mcpRes) sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
 
@@ -6129,7 +6132,7 @@ async function restartColumn(id) {
   if (col.env) sendMsg.env = col.env;
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
   // Passthrough for arbitrary-cmd/endpoint columns; re-derived from live flag.
-  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd });
+  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp) });
   gatedWsSend(sendMsg);
   // Re-evaluate stale-hook health from a clean slate for the new session: if
   // hooks now reach the column it will never re-flag; if they still don't, the
