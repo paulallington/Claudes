@@ -5851,16 +5851,16 @@ ipcMain.handle('mcp:buildProjectConfig', (event, projectPath) => {
     const projectDefault = (data.projectMcpDefaults && data.projectMcpDefaults[norm]) || null;
     const discovered = discoverProjectMcpServers(projectPath);
     const res = resolveProjectMcpSpawn(projectDefault, discovered);
-    if (res.inherit) return { inherit: true };
+    if (res.inherit) return { inherit: true, hasMcp: !!res.hasMcp };
     fs.mkdirSync(MCP_TMP_DIR, { recursive: true, mode: 0o700 });
     const file = path.join(MCP_TMP_DIR, `col_${process.pid}_${Date.now()}_${Math.floor(Math.random() * 1e6)}.json`);
     const tmp = file + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(res.config), { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmp, file);
-    return { mcpConfigPath: file, strict: true };
+    return { mcpConfigPath: file, strict: true, hasMcp: !!res.hasMcp };
   } catch (err) {
     console.warn('[mcp] buildProjectConfig failed, falling back to inherit-all:', err && err.message);
-    return { inherit: true };
+    return { inherit: true, hasMcp: false };
   }
 });
 

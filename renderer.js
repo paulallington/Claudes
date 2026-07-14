@@ -833,7 +833,8 @@ function maybeBindHeadroom(msg, ctx) {
     hasEndpoint: !!(ctx && ctx.hasEndpoint),
     isClaude: !(ctx && ctx.isClaude === false),
     oneM: !!(config && config.useHeadroom1m !== false),
-    oneMModel: (config && config.headroom1mModel) || 'claude-opus-4-8'
+    oneMModel: (config && config.headroom1mModel) || 'claude-opus-4-8',
+    hasMcp: !!(ctx && ctx.hasMcp)
   });
   if (env) msg.env = Object.assign({}, msg.env, env);
 }
@@ -4562,20 +4563,26 @@ function addColumn(args, targetRow, opts) {
     var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: claudeArgs };
     if (cmd) sendMsg.cmd = cmd;
     if (opts.env) sendMsg.env = opts.env;
-    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd });
 
     // Project-scoped MCP: for claude columns, resolve the project's inherited-server
     // selection and append --mcp-config/--strict-mcp-config. No-op when inheriting
     // all (returns {inherit:true}) or when "Strip MCPs" already put --mcp-config in
     // args (appendProjectMcpArgs guards that). Never blocks the spawn on failure.
+    // Resolved BEFORE maybeBindHeadroom so hasMcp is known when we decide whether
+    // to enable Headroom's tool-search deferral (it would otherwise swallow mcp__*
+    // tool schemas out of reach — see lib/headroom-env.js).
+    var mcpRes = null;
     if (!cmd && window.electronAPI && window.electronAPI.buildProjectMcpConfig && window.McpProject) {
       try {
-        var mcpRes = await window.electronAPI.buildProjectMcpConfig(mcpProjectRoot);
-        sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
+        mcpRes = await window.electronAPI.buildProjectMcpConfig(mcpProjectRoot);
       } catch (e) {
         vlog('spawn', { colId: id, mcpErr: String(e && e.message) });
       }
     }
+    var __stripped = sendMsg.args.indexOf('--mcp-config') !== -1;   // Strip MCPs toggle already scoped it → no inherited MCP
+    var __hasMcp = !__stripped && !!(mcpRes && mcpRes.hasMcp);
+    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd, hasMcp: __hasMcp });
+    if (mcpRes) sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
 
     vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
     gatedWsSend(sendMsg);
