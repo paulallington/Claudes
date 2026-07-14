@@ -34,19 +34,25 @@ const DISCOVERED = {
 };
 
 test('resolveProjectMcpSpawn: null default -> inherit', () => {
-  assert.deepStrictEqual(resolveProjectMcpSpawn(null, DISCOVERED), { inherit: true });
+  assert.deepStrictEqual(resolveProjectMcpSpawn(null, DISCOVERED), { inherit: true, hasMcp: true });
+});
+
+test('resolveProjectMcpSpawn: null default, no discovered servers -> inherit, no mcp', () => {
+  assert.deepStrictEqual(resolveProjectMcpSpawn(null, {}), { inherit: true, hasMcp: false });
 });
 
 test('resolveProjectMcpSpawn: explicit subset -> scoped config', () => {
   const r = resolveProjectMcpSpawn(['github'], DISCOVERED);
   assert.strictEqual(r.inherit, false);
   assert.deepStrictEqual(r.config, { mcpServers: { github: { command: 'gh-mcp' } } });
+  assert.strictEqual(r.hasMcp, true);
 });
 
 test('resolveProjectMcpSpawn: empty array -> scoped empty config (none)', () => {
   const r = resolveProjectMcpSpawn([], DISCOVERED);
   assert.strictEqual(r.inherit, false);
   assert.deepStrictEqual(r.config, { mcpServers: {} });
+  assert.strictEqual(r.hasMcp, false);
 });
 
 // --- appendProjectMcpArgs ---
