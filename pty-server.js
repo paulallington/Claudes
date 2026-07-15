@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { execFile, execFileSync } = require('child_process');
+const SpawnResolve = require('./lib/spawn-resolve');
 
 // node-pty ships a `spawn-helper` binary under prebuilds/<platform-arch>/ on
 // macOS that posix_spawn execs as argv[0]. npm strips the executable bit when
@@ -213,6 +214,24 @@ function findClaude() {
 }
 
 const CLAUDE_PATH = findClaude();
+
+// A renderer-supplied `cmd` is a bare name (e.g. 'codex'). On Windows node-pty's
+// CreateProcess can't resolve a bare name via PATHEXT and the first `where` hit is
+// often a non-executable shell shim, so pty.spawn throws "error code: 2". Resolve
+// to the full .cmd/.exe path up front (same mechanism as CLAUDE_PATH) so the direct
+// spawn succeeds and we avoid the fragile cmd.exe wrapper. Bare names only; absolute
+// or path-qualified cmds are used as-is. On any failure, return the original cmd so
+// behaviour is never worse than before.
+function resolveSpawnCommand(cmd) {
+  if (!cmd || !SpawnResolve.needsResolution(cmd)) return cmd;
+  const lookup = process.platform === 'win32' ? 'where' : 'which';
+  try {
+    const out = execFileSync(lookup, [cmd], { encoding: 'utf8', env: { ...process.env, PATH: AUGMENTED_PATH } });
+    return SpawnResolve.pickExecutable(out, process.platform) || cmd;
+  } catch {
+    return cmd;
+  }
+}
 
 // Run claude update at startup (non-blocking). Off by default — the resolved
 // CLAUDE_PATH is whatever `which`/`where` returns first, so a malicious
@@ -431,8 +450,9 @@ function handleConnection(ws, req) {
         const sessIdx = argList.indexOf('--session-id');
         const resumeTarget = resumeIdx !== -1 ? argList[resumeIdx + 1] : (sessIdx !== -1 ? '(new:' + argList[sessIdx + 1] + ')' : null);
         breadcrumb('create', { id, cols: safeCols, rows: safeRows, cmd: cmd ? String(cmd).slice(0, 60) : 'claude', resume: resumeTarget });
+        const spawnCmd = cmd ? resolveSpawnCommand(cmd) : CLAUDE_PATH;
         try {
-          p = pty.spawn(cmd || CLAUDE_PATH, args || [], ptyOpts);
+          p = pty.spawn(spawnCmd, args || [], ptyOpts);
         } catch (err) {
           // Direct spawn failed — usually because the bare name didn't
           // resolve via PATHEXT (e.g. .cmd shims like npm.cmd, yarn.cmd).
