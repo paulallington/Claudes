@@ -3,7 +3,6 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { execFile, execFileSync } = require('child_process');
-const SpawnResolve = require('./lib/spawn-resolve');
 
 // node-pty ships a `spawn-helper` binary under prebuilds/<platform-arch>/ on
 // macOS that posix_spawn execs as argv[0]. npm strips the executable bit when
@@ -215,6 +214,36 @@ function findClaude() {
 
 const CLAUDE_PATH = findClaude();
 
+// Resolving a bare command name (e.g. 'codex') to a full executable path.
+// INLINED (not require('./lib/...')) on purpose: pty-server.js runs under
+// system Node from app.asar.unpacked/, and lib/ is packed inside app.asar —
+// a require('./lib/...') there throws MODULE_NOT_FOUND and crash-loops the
+// whole terminal server. Mirrors diagLogDir's inlining above. Keep this in
+// step with lib/spawn-resolve.js, the unit-tested mirror (same convention as
+// lib/diag-log-dir.js mirroring diagLogDir).
+function needsResolution(cmd) {
+  if (!cmd || typeof cmd !== 'string') return false;
+  if (cmd.indexOf('/') !== -1 || cmd.indexOf('\\') !== -1) return false;
+  if (/^[A-Za-z]:/.test(cmd)) return false;
+  return true;
+}
+
+function pickExecutable(whichOutput, platform) {
+  const lines = String(whichOutput || '').split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (lines.length === 0) return null;
+
+  if (platform === 'win32') {
+    for (const line of lines) {
+      if (/\.(com|exe|bat|cmd)$/i.test(line)) return line;
+    }
+    return lines[0];
+  }
+
+  return lines[0];
+}
+
 // A renderer-supplied `cmd` is a bare name (e.g. 'codex'). On Windows node-pty's
 // CreateProcess can't resolve a bare name via PATHEXT and the first `where` hit is
 // often a non-executable shell shim, so pty.spawn throws "error code: 2". Resolve
@@ -223,11 +252,11 @@ const CLAUDE_PATH = findClaude();
 // or path-qualified cmds are used as-is. On any failure, return the original cmd so
 // behaviour is never worse than before.
 function resolveSpawnCommand(cmd) {
-  if (!cmd || !SpawnResolve.needsResolution(cmd)) return cmd;
+  if (!cmd || !needsResolution(cmd)) return cmd;
   const lookup = process.platform === 'win32' ? 'where' : 'which';
   try {
     const out = execFileSync(lookup, [cmd], { encoding: 'utf8', env: { ...process.env, PATH: AUGMENTED_PATH } });
-    return SpawnResolve.pickExecutable(out, process.platform) || cmd;
+    return pickExecutable(out, process.platform) || cmd;
   } catch {
     return cmd;
   }
