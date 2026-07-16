@@ -220,7 +220,7 @@ const CLAUDE_PATH = findClaude();
 // a require('./lib/...') there throws MODULE_NOT_FOUND and crash-loops the
 // whole terminal server. Mirrors diagLogDir's inlining above. Keep this in
 // step with lib/spawn-resolve.js, the unit-tested mirror (same convention as
-// pty-coalesce.js mirroring the inlined coalescer).
+// lib/diag-log-dir.js mirroring diagLogDir).
 function needsResolution(cmd) {
   if (!cmd || typeof cmd !== 'string') return false;
   if (cmd.indexOf('/') !== -1 || cmd.indexOf('\\') !== -1) return false;
