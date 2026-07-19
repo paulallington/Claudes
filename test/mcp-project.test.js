@@ -5,7 +5,8 @@ const assert = require('node:assert');
 const {
   readbackMcpSelection,
   resolveProjectMcpSpawn,
-  appendProjectMcpArgs
+  appendProjectMcpArgs,
+  matchesProjectScope
 } = require('../lib/mcp-project');
 
 // --- readbackMcpSelection ---
@@ -78,4 +79,26 @@ test('appendProjectMcpArgs: returns a new array (no mutation)', () => {
   const out = appendProjectMcpArgs(base, { mcpConfigPath: '/tmp/x.json', strict: true });
   assert.notStrictEqual(out, base);
   assert.deepStrictEqual(base, ['--bare']);
+});
+
+// --- matchesProjectScope ---
+
+test('matchesProjectScope: exact root matches', () => {
+  assert.strictEqual(matchesProjectScope('D:/Git Repos/Claudes', 'D:/Git Repos/Claudes'), true);
+});
+test('matchesProjectScope: worktree subpath matches', () => {
+  assert.strictEqual(matchesProjectScope('D:/Git Repos/Claudes/.claude/worktrees/x', 'D:/Git Repos/Claudes'), true);
+});
+test('matchesProjectScope: backslash key normalizes to match', () => {
+  assert.strictEqual(matchesProjectScope('D:\\Git Repos\\Claudes\\sub', 'D:/Git Repos/Claudes'), true);
+});
+test('matchesProjectScope: trailing slash on root still matches', () => {
+  assert.strictEqual(matchesProjectScope('D:/Git Repos/Claudes/sub', 'D:/Git Repos/Claudes/'), true);
+});
+test('matchesProjectScope: sibling dir does NOT match', () => {
+  assert.strictEqual(matchesProjectScope('D:/Git Repos/ClaudesOther', 'D:/Git Repos/Claudes'), false);
+});
+test('matchesProjectScope: empty/nullish returns false', () => {
+  assert.strictEqual(matchesProjectScope('', 'D:/Git Repos/Claudes'), false);
+  assert.strictEqual(matchesProjectScope('D:/x', ''), false);
 });

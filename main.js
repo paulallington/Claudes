@@ -31,7 +31,7 @@ const { upsertPersonalityBlock, extractPersonalityBlock } = require('./lib/voice
 const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
 const { buildExploreAgentFile, EXPLORE_AGENT_REL } = require('./lib/explore-agent');
 const { tagBackgroundEvent } = require('./lib/voice-background');
-const { resolveProjectMcpSpawn } = require('./lib/mcp-project');
+const { resolveProjectMcpSpawn, matchesProjectScope } = require('./lib/mcp-project');
 const WebSocket = require('ws');
 const {
   buildInteractiveArgs,
@@ -7532,9 +7532,8 @@ function discoverProjectMcpServers(projectPath) {
     const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
     addAll(cfg.mcpServers, 'user');
     if (cfg.projects && projectPath) {
-      const norm = String(projectPath).replace(/\\/g, '/');
       for (const [p, pcfg] of Object.entries(cfg.projects)) {
-        if (p.replace(/\\/g, '/') === norm && pcfg && pcfg.mcpServers) {
+        if (matchesProjectScope(p, projectPath) && pcfg && pcfg.mcpServers) {
           addAll(pcfg.mcpServers, 'project');
         }
       }
