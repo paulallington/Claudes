@@ -19694,6 +19694,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   var servers = {}; // name -> config
   var editingName = null;
   var isNew = false;
+  var inheritDirty = false;
 
   function showForm(show) {
     // Use inline style instead of .hidden class — the app doesn't have a
@@ -19810,8 +19811,8 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   if (newBtn) newBtn.addEventListener('click', startNew);
   if (saveBtn) saveBtn.addEventListener('click', save);
   if (delBtn) delBtn.addEventListener('click', del);
-  if (closeBtn) closeBtn.addEventListener('click', function () { modal.classList.add('hidden'); });
-  modal.addEventListener('click', function (e) { if (e.target === modal) modal.classList.add('hidden'); });
+  if (closeBtn) closeBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', function (e) { if (e.target === modal) closeModal(); });
   ['mcp-name', 'mcp-command', 'mcp-args', 'mcp-env'].forEach(function (id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('keydown', function (e) { e.stopPropagation(); });
@@ -19866,11 +19867,43 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     // Once the user touches a box, the selection becomes explicit.
     inheritListEl.setAttribute('data-had-selection', selection === null ? 'false' : 'true');
     window.electronAPI.setProjectMcpDefault(projectPath, selection);
+    inheritDirty = true;
+  }
+
+  function maybeOfferRespawn() {
+    if (!inheritDirty || !projectPath) return;
+    inheritDirty = false;
+    // projectStates is keyed by the raw project path for the Primary
+    // workspace (stateKey(path, null) === path) — the modal only ever
+    // knows the raw path, so look it up directly. Read-only: never
+    // create a state here.
+    var st = projectStates.get(projectPath);
+    if (!st || !st.columns) return;
+    var descriptors = [];
+    st.columns.forEach(function (col, id) {
+      descriptors.push({ id: id, isClaude: !col.cmd, stripped: (col.cmdArgs || []).indexOf('--mcp-config') !== -1 });
+    });
+    var ids = window.McpProject.mcpEligibleRespawnColumns(descriptors);
+    if (!ids.length) return;
+    showToast('MCP servers changed. Respawn ' + ids.length + ' column' + (ids.length === 1 ? '' : 's') + ' to apply?', {
+      duration: 0,
+      kind: 'info',
+      action: {
+        label: 'Respawn',
+        onClick: function () { ids.forEach(function (id) { try { restartColumn(id); } catch (e) {} }); }
+      }
+    });
+  }
+
+  function closeModal() {
+    modal.classList.add('hidden');
+    maybeOfferRespawn();
   }
 
   window.openMcpModal = function (projPath) {
     if (!projPath || !window.electronAPI || !window.electronAPI.readMcp) return;
     projectPath = projPath;
+    inheritDirty = false;
     pathLabel.textContent = projPath + '/.mcp.json';
     modal.classList.remove('hidden');
     showForm(false);
