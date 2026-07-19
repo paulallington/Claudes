@@ -6139,9 +6139,27 @@ async function restartColumn(id) {
     sendMsg.args = buildResumeArgs(col);
   }
   if (col.env) sendMsg.env = col.env;
+
+  // Re-resolve the project's scoped MCP config so a respawn reflects the CURRENT
+  // inherited-server tick set (the Claude CLI loads MCP only at process start, so
+  // this is how a modal tick change goes live). Skip custom `cmd` columns and
+  // columns already carrying --mcp-config (per-column "Strip MCPs" wins). Mirror
+  // of the initial-spawn resolution; never blocks the respawn on failure.
+  var __stripped = sendMsg.args.indexOf('--mcp-config') !== -1;
+  var __rHasMcp = !!(col && col.hasMcp);
+  if (!col.cmd && !__stripped && window.electronAPI && window.electronAPI.buildProjectMcpConfig && window.McpProject) {
+    var __mcpRes = null;
+    try { __mcpRes = await window.electronAPI.buildProjectMcpConfig(col.projectKey); }
+    catch (e) { __mcpRes = null; }
+    if (__mcpRes) {
+      __rHasMcp = !!__mcpRes.hasMcp;
+      col.hasMcp = __rHasMcp;
+      sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, __mcpRes);
+    }
+  }
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
-  // Passthrough for arbitrary-cmd/endpoint columns; re-derived from live flag.
-  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp) });
+  // Passthrough for arbitrary-cmd/endpoint columns; hasMcp from the fresh resolve.
+  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: __rHasMcp });
   gatedWsSend(sendMsg);
   // Re-evaluate stale-hook health from a clean slate for the new session: if
   // hooks now reach the column it will never re-flag; if they still don't, the
