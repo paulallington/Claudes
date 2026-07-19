@@ -728,7 +728,7 @@ function connectWS() {
             id: msg.id,
             cols: col3.terminal.cols,
             rows: col3.terminal.rows,
-            cwd: col3.cwd,
+            cwd: window.SessionTarget.resolveSessionLookupCwd(col3, col3.projectKey),
             args: buildResumeArgs(col3)
           };
           if (col3.cmd) respawnMsg.cmd = col3.cmd;
@@ -4089,7 +4089,7 @@ function createExitOverlay(id, exitCode, col) {
   restartBtn.addEventListener('click', function () {
     overlay.remove();
     fitTerminal(col.terminal, col.fitAddon);
-    var sendMsg = { type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: col.cwd };
+    var sendMsg = { type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey) };
     if (col.cmd) {
       sendMsg.cmd = col.cmd;
       sendMsg.args = col.cmdArgs || [];
@@ -6189,7 +6189,7 @@ function tryEndpointFailover(colId) {
         id: colId,
         cols: col.terminal.cols,
         rows: col.terminal.rows,
-        cwd: col.cwd,
+        cwd: window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey),
         args: col.sessionId ? buildResumeArgs(col) : (col.cmdArgs || [])
       };
       respawnMsg.env = envBlock;
