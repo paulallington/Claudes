@@ -6,7 +6,8 @@ const {
   readbackMcpSelection,
   resolveProjectMcpSpawn,
   appendProjectMcpArgs,
-  matchesProjectScope
+  matchesProjectScope,
+  mcpEligibleRespawnColumns
 } = require('../lib/mcp-project');
 
 // --- readbackMcpSelection ---
@@ -101,4 +102,32 @@ test('matchesProjectScope: sibling dir does NOT match', () => {
 test('matchesProjectScope: empty/nullish returns false', () => {
   assert.strictEqual(matchesProjectScope('', 'D:/Git Repos/Claudes'), false);
   assert.strictEqual(matchesProjectScope('D:/x', ''), false);
+});
+
+// --- mcpEligibleRespawnColumns ---
+
+test('mcpEligibleRespawnColumns: keeps real claude columns', () => {
+  const out = mcpEligibleRespawnColumns([
+    { id: 'a', isClaude: true, stripped: false },
+    { id: 'b', isClaude: true, stripped: false },
+  ]);
+  assert.deepStrictEqual(out, ['a', 'b']);
+});
+test('mcpEligibleRespawnColumns: excludes custom cmd columns', () => {
+  const out = mcpEligibleRespawnColumns([
+    { id: 'a', isClaude: true, stripped: false },
+    { id: 'c', isClaude: false, stripped: false },
+  ]);
+  assert.deepStrictEqual(out, ['a']);
+});
+test('mcpEligibleRespawnColumns: excludes strip-MCPs columns', () => {
+  const out = mcpEligibleRespawnColumns([
+    { id: 'a', isClaude: true, stripped: false },
+    { id: 's', isClaude: true, stripped: true },
+  ]);
+  assert.deepStrictEqual(out, ['a']);
+});
+test('mcpEligibleRespawnColumns: empty / nullish input', () => {
+  assert.deepStrictEqual(mcpEligibleRespawnColumns([]), []);
+  assert.deepStrictEqual(mcpEligibleRespawnColumns(null), []);
 });
