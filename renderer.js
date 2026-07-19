@@ -3097,7 +3097,7 @@ function restoreSessions(projectPath, workspaceId) {
       var exists = false;
       if (e.sessionId && window.electronAPI && window.electronAPI.sessionExists) {
         try {
-          exists = await window.electronAPI.sessionExists(e.cwd || projectPath, e.sessionId);
+          exists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(e, projectPath), e.sessionId);
         } catch (_) { exists = false; }
       }
       if (e.sessionId && !exists) {
@@ -3238,7 +3238,7 @@ function restoreSessions(projectPath, workspaceId) {
         }
         var rowOpts = { workspaceId: workspaceId };
         if (e.title) rowOpts.title = e.title;
-        if (e.cwd) {
+        if (e.cwd && e.cwdSource !== 'auto-worktree') {
           var stillExists = await window.electronAPI.pathExists(e.cwd);
           if (stillExists) {
             rowOpts.cwd = e.cwd;
@@ -3274,7 +3274,7 @@ function restoreSessions(projectPath, workspaceId) {
         var ment = minimizedEntries[me];
         var minRowOpts = { workspaceId: workspaceId };
         if (ment.title) minRowOpts.title = ment.title;
-        if (ment.cwd) {
+        if (ment.cwd && ment.cwdSource !== 'auto-worktree') {
           var mExists = await window.electronAPI.pathExists(ment.cwd);
           if (mExists) {
             minRowOpts.cwd = ment.cwd;
@@ -6126,12 +6126,12 @@ async function restartColumn(id) {
   // Claude columns (not custom `cmd` columns), and only when we have a checker.
   if (!col.cmd && col.sessionId && window.electronAPI && window.electronAPI.sessionExists) {
     try {
-      var stillExists = await window.electronAPI.sessionExists(col.cwd || col.projectKey, col.sessionId);
+      var stillExists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey), col.sessionId);
       if (!stillExists) col.sessionId = null;
     } catch (e) { /* if the check fails, fall through and resume as before */ }
   }
 
-  var sendMsg = { type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: col.cwd };
+  var sendMsg = { type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey) };
   if (col.cmd) {
     sendMsg.cmd = col.cmd;
     sendMsg.args = col.cmdArgs || [];
