@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { isUsableSessionTarget, shouldBindHookSession, resolveInputColumn } = require('../lib/session-target');
+const { isUsableSessionTarget, shouldBindHookSession, resolveInputColumn, resolveSessionLookupCwd } = require('../lib/session-target');
 
 test('isUsableSessionTarget is true only for a session with size > 0', () => {
   assert.equal(isUsableSessionTarget({ size: 1 }), true);
@@ -109,4 +109,35 @@ test('resolveInputColumn picks a single recent candidate', () => {
 test('resolveInputColumn returns null for a single stale candidate', () => {
   const now = 10000;
   assert.equal(resolveInputColumn([{ colId: 'a', lastInputAt: now - 6000 }], now), null);
+});
+
+test('resolveSessionLookupCwd redirects auto-worktree bindings to the project root', () => {
+  assert.equal(
+    resolveSessionLookupCwd({ cwd: '/proj/.worktrees/foo', cwdSource: 'auto-worktree' }, '/proj'),
+    '/proj'
+  );
+});
+
+test('resolveSessionLookupCwd uses the entry cwd for a manual binding', () => {
+  assert.equal(
+    resolveSessionLookupCwd({ cwd: '/proj/sub', cwdSource: 'manual' }, '/proj'),
+    '/proj/sub'
+  );
+});
+
+test('resolveSessionLookupCwd uses the entry cwd when cwdSource is unset', () => {
+  assert.equal(
+    resolveSessionLookupCwd({ cwd: '/proj/sub' }, '/proj'),
+    '/proj/sub'
+  );
+});
+
+test('resolveSessionLookupCwd falls back to projectRoot when there is no cwd', () => {
+  assert.equal(resolveSessionLookupCwd({}, '/proj'), '/proj');
+  assert.equal(resolveSessionLookupCwd({ cwd: null }, '/proj'), '/proj');
+});
+
+test('resolveSessionLookupCwd falls back to projectRoot for a null/undefined entry', () => {
+  assert.equal(resolveSessionLookupCwd(null, '/proj'), '/proj');
+  assert.equal(resolveSessionLookupCwd(undefined, '/proj'), '/proj');
 });
