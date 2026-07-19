@@ -19682,6 +19682,14 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   var delBtn = document.getElementById('mcp-delete');
   var pathLabel = document.getElementById('mcp-project-path');
   var inheritListEl = document.getElementById('mcp-inherit-list');
+  var inheritRefreshBtn = document.getElementById('mcp-inherit-refresh');
+  function reloadInheritList() {
+    if (!projectPath || !window.electronAPI || !window.electronAPI.discoverMcpServers) return;
+    window.electronAPI.discoverMcpServers(projectPath).then(function (res) {
+      renderInheritList((res && res.servers) || [], (res && res.projectDefault) || null);
+    }).catch(function () { renderInheritList([], null); });
+  }
+  if (inheritRefreshBtn) inheritRefreshBtn.addEventListener('click', reloadInheritList);
   var projectPath = null;
   var servers = {}; // name -> config
   var editingName = null;
@@ -19873,9 +19881,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       renderList();
     });
     if (window.electronAPI.discoverMcpServers) {
-      window.electronAPI.discoverMcpServers(projPath).then(function (res) {
-        renderInheritList((res && res.servers) || [], (res && res.projectDefault) || null);
-      }).catch(function () { renderInheritList([], null); });
+      reloadInheritList();
     }
   };
 })();
