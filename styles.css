@@ -8130,6 +8130,20 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
   margin-bottom: 12px;
   line-height: 1.4;
 }
+.mcp-inherit-refresh {
+  margin-left: 8px;
+  font-size: 11px;
+  padding: 1px 8px;
+  background: transparent;
+  border: 1px solid var(--border-dim, #333);
+  color: var(--text-dim, #666);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mcp-inherit-refresh:hover {
+  color: var(--text-primary, #e0e0e0);
+  border-color: var(--text-dim, #666);
+}
 /* Spread servers across the modal width instead of a single narrow column;
    overrides .automation-permissions' flex column (id beats class). */
 #mcp-inherit-list {

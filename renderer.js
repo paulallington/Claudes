@@ -6139,9 +6139,27 @@ async function restartColumn(id) {
     sendMsg.args = buildResumeArgs(col);
   }
   if (col.env) sendMsg.env = col.env;
+
+  // Re-resolve the project's scoped MCP config so a respawn reflects the CURRENT
+  // inherited-server tick set (the Claude CLI loads MCP only at process start, so
+  // this is how a modal tick change goes live). Skip custom `cmd` columns and
+  // columns already carrying --mcp-config (per-column "Strip MCPs" wins). Mirror
+  // of the initial-spawn resolution; never blocks the respawn on failure.
+  var __stripped = sendMsg.args.indexOf('--mcp-config') !== -1;
+  var __rHasMcp = !!(col && col.hasMcp);
+  if (!col.cmd && !__stripped && window.electronAPI && window.electronAPI.buildProjectMcpConfig && window.McpProject) {
+    var __mcpRes = null;
+    try { __mcpRes = await window.electronAPI.buildProjectMcpConfig(col.projectKey); }
+    catch (e) { __mcpRes = null; }
+    if (__mcpRes) {
+      __rHasMcp = !!__mcpRes.hasMcp;
+      col.hasMcp = __rHasMcp;
+      sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, __mcpRes);
+    }
+  }
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
-  // Passthrough for arbitrary-cmd/endpoint columns; re-derived from live flag.
-  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp) });
+  // Passthrough for arbitrary-cmd/endpoint columns; hasMcp from the fresh resolve.
+  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: __rHasMcp });
   gatedWsSend(sendMsg);
   // Re-evaluate stale-hook health from a clean slate for the new session: if
   // hooks now reach the column it will never re-flag; if they still don't, the
@@ -19664,10 +19682,30 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   var delBtn = document.getElementById('mcp-delete');
   var pathLabel = document.getElementById('mcp-project-path');
   var inheritListEl = document.getElementById('mcp-inherit-list');
+  var inheritRefreshBtn = document.getElementById('mcp-inherit-refresh');
+  function reloadInheritList() {
+    if (!projectPath || !window.electronAPI || !window.electronAPI.discoverMcpServers) return Promise.resolve();
+    return window.electronAPI.discoverMcpServers(projectPath).then(function (res) {
+      renderInheritList((res && res.servers) || [], (res && res.projectDefault) || null);
+    }).catch(function () { renderInheritList([], null); });
+  }
+  if (inheritRefreshBtn) inheritRefreshBtn.addEventListener('click', reloadInheritList);
   var projectPath = null;
   var servers = {}; // name -> config
   var editingName = null;
   var isNew = false;
+  var inheritSigAtOpen = '';
+  var mcpRespawnToast = null;
+
+  function currentInheritSig() {
+    var names = [];
+    if (inheritListEl) {
+      inheritListEl.querySelectorAll('.mcp-inherit-cb').forEach(function (cb) {
+        if (cb.checked) names.push(cb.getAttribute('data-server'));
+      });
+    }
+    return names.sort().join(' ');
+  }
 
   function showForm(show) {
     // Use inline style instead of .hidden class — the app doesn't have a
@@ -19784,8 +19822,8 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   if (newBtn) newBtn.addEventListener('click', startNew);
   if (saveBtn) saveBtn.addEventListener('click', save);
   if (delBtn) delBtn.addEventListener('click', del);
-  if (closeBtn) closeBtn.addEventListener('click', function () { modal.classList.add('hidden'); });
-  modal.addEventListener('click', function (e) { if (e.target === modal) modal.classList.add('hidden'); });
+  if (closeBtn) closeBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', function (e) { if (e.target === modal) closeModal(); });
   ['mcp-name', 'mcp-command', 'mcp-args', 'mcp-env'].forEach(function (id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('keydown', function (e) { e.stopPropagation(); });
@@ -19842,9 +19880,55 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     window.electronAPI.setProjectMcpDefault(projectPath, selection);
   }
 
+  function maybeOfferRespawn() {
+    if (!projectPath) return;
+    if (currentInheritSig() === inheritSigAtOpen) return;
+    // Project MCP defaults are project-root-wide, so a tick change affects
+    // columns in every workspace, not just Primary. projectStates is keyed
+    // by stateKey(path, workspaceId): the bare projectPath for Primary,
+    // projectPath + '::' + wsId for sub-workspaces. Aggregate columns from
+    // every matching entry. Read-only: never create a state here.
+    var descriptors = [];
+    projectStates.forEach(function (st, key) {
+      if (key !== projectPath && key.indexOf(projectPath + '::') !== 0) return;
+      if (!st || !st.columns) return;
+      st.columns.forEach(function (col, id) {
+        descriptors.push({ id: id, isClaude: !col.cmd, stripped: (col.cmdArgs || []).indexOf('--mcp-config') !== -1 });
+      });
+    });
+    var ids = window.McpProject.mcpEligibleRespawnColumns(descriptors);
+    if (!ids.length) return;
+    if (mcpRespawnToast && mcpRespawnToast.parentNode) {
+      mcpRespawnToast.parentNode.removeChild(mcpRespawnToast);
+    }
+    mcpRespawnToast = null;
+    mcpRespawnToast = showToast('MCP servers changed. Respawn ' + ids.length + ' column' + (ids.length === 1 ? '' : 's') + ' to apply?', {
+      duration: 0,
+      kind: 'info',
+      action: {
+        label: 'Respawn',
+        onClick: function () { ids.forEach(function (id) { try { restartColumn(id); } catch (e) {} }); }
+      }
+    });
+    var dismissBtn = document.createElement('button');
+    dismissBtn.className = 'toast-action';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', function () {
+      if (mcpRespawnToast && mcpRespawnToast.parentNode) mcpRespawnToast.parentNode.removeChild(mcpRespawnToast);
+      mcpRespawnToast = null;
+    });
+    mcpRespawnToast.appendChild(dismissBtn);
+  }
+
+  function closeModal() {
+    modal.classList.add('hidden');
+    maybeOfferRespawn();
+  }
+
   window.openMcpModal = function (projPath) {
     if (!projPath || !window.electronAPI || !window.electronAPI.readMcp) return;
     projectPath = projPath;
+    inheritSigAtOpen = '';
     pathLabel.textContent = projPath + '/.mcp.json';
     modal.classList.remove('hidden');
     showForm(false);
@@ -19855,9 +19939,7 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       renderList();
     });
     if (window.electronAPI.discoverMcpServers) {
-      window.electronAPI.discoverMcpServers(projPath).then(function (res) {
-        renderInheritList((res && res.servers) || [], (res && res.projectDefault) || null);
-      }).catch(function () { renderInheritList([], null); });
+      reloadInheritList().then(function () { inheritSigAtOpen = currentInheritSig(); });
     }
   };
 })();
