@@ -99,6 +99,9 @@ test('matchesProjectScope: trailing slash on root still matches', () => {
 test('matchesProjectScope: sibling dir does NOT match', () => {
   assert.strictEqual(matchesProjectScope('D:/Git Repos/ClaudesOther', 'D:/Git Repos/Claudes'), false);
 });
+test('matchesProjectScope: case-differing drive letter/path still matches', () => {
+  assert.strictEqual(matchesProjectScope('d:/Git Repos/Claudes/sub', 'D:/Git Repos/Claudes'), true);
+});
 test('matchesProjectScope: empty/nullish returns false', () => {
   assert.strictEqual(matchesProjectScope('', 'D:/Git Repos/Claudes'), false);
   assert.strictEqual(matchesProjectScope('D:/x', ''), false);
