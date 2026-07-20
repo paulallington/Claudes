@@ -960,6 +960,40 @@ function updateActivityIndicator(id) {
   }
 }
 
+// Ambient badge in the column header showing when a column is bound to a
+// non-root cwd (worktree auto-bind or manual cwd) — see lib/git-target.js
+// describeColumnTarget for the show/label/title decision logic, which this
+// function purely consumes. Called at column creation and everywhere
+// col.cwd/col.cwdSource are mutated after the fact (autoBindColumnTarget)
+// so the badge tracks the live binding, not just the spawn-time one.
+function updateColumnTargetBadge(id) {
+  var col = allColumns.get(id);
+  if (!col || !col.headerEl) return;
+  var desc = window.GitTarget.describeColumnTarget({
+    cwd: col.cwd,
+    projectRoot: col.projectKey,
+    cwdSource: col.cwdSource,
+    isDiff: !!col.isDiff
+  });
+  var badge = col.headerEl.querySelector('.col-target-badge');
+  if (!desc.show) {
+    if (badge) badge.remove();
+    return;
+  }
+  if (!badge) {
+    badge = document.createElement('span');
+    var actionsEl = col.headerEl.querySelector('.col-actions');
+    if (actionsEl) {
+      col.headerEl.insertBefore(badge, actionsEl);
+    } else {
+      col.headerEl.appendChild(badge);
+    }
+  }
+  badge.className = 'col-target-badge col-target-badge-' + desc.kind;
+  badge.textContent = desc.label;
+  badge.title = desc.title;
+}
+
 function updateSidebarActivity() {
   if (popoutMode) return; // sidebar not rendered in popout windows
   // Bucket counts by (projectKey, workspaceId) — no cross-workspace rollup.
@@ -4927,6 +4961,7 @@ function addColumn(args, targetRow, opts) {
   // Make the header effort badge reflect the column's actual launch effort.
   var effortBadgeEl = header.querySelector('.col-effort');
   if (effortBadgeEl && colData.effort && isValidEffort(colData.effort)) effortBadgeEl.value = colData.effort;
+  updateColumnTargetBadge(id);
   startContextMeterPoll(id);
   setFocusedColumn(id);
   if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
@@ -5084,8 +5119,10 @@ function addDiffColumn(diffData, opts) {
       existingCol.diffData = diffData;
       existingCol.diffMode = existingCol.diffMode || 'unified';
       existingCol.customTitle = opts.title || diffData.filePath || 'Diff';
+      existingCol.cwd = opts.cwd || gitTargetCwd();
       var titleEl = existingCol.headerEl.querySelector('.col-title');
       if (titleEl) titleEl.textContent = existingCol.customTitle;
+      updateColumnTargetBadge(existingDiffId);
       var diffBody = existingCol.element.querySelector('.diff-body');
       if (isFileList) {
         loadCommitDiff(diffBody, existingCol);
@@ -5165,6 +5202,7 @@ function addDiffColumn(diffData, opts) {
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
+  updateColumnTargetBadge(id);
 
   // Toggle button handler
   toggleBtn.addEventListener('click', function () {
@@ -6195,7 +6233,7 @@ function tryEndpointFailover(colId) {
         badge.className = 'col-failover-badge';
         badge.textContent = '↺ failover';
         badge.title = 'Auto-failed-over to ' + preset.fallbackId;
-        col.headerEl.appendChild(badge);
+        col.headerEl.insertBefore(badge, col.headerEl.querySelector('.col-actions'));
       }
 
       // Re-create the pty with the same column id and the fallback env.
@@ -7761,7 +7799,7 @@ function autoBindColumnTarget(colId) {
       var changed = false;
       if (col.cwd !== newCwd) { col.cwd = newCwd; changed = true; }
       if (col.cwdSource !== 'auto-worktree') { col.cwdSource = 'auto-worktree'; changed = true; }
-      if (changed) persistSessions(col.projectKey, col.workspaceId);
+      if (changed) { persistSessions(col.projectKey, col.workspaceId); updateColumnTargetBadge(colId); }
       return;
     }
 
@@ -7772,6 +7810,25 @@ function autoBindColumnTarget(colId) {
       col.cwd = col.projectKey;
       col.cwdSource = undefined;
       persistSessions(col.projectKey, col.workspaceId);
+      updateColumnTargetBadge(colId);
+      return;
+    }
+
+    // A non-manual, non-auto-worktree binding (e.g. a diff column that
+    // inherited a worktree cwd at creation time via gitTargetCwd(), with no
+    // cwdSource of its own) has no JSONL evidence trail to re-check above.
+    // Only release it once its directory is confirmed gone — clearing it
+    // just because worktree detection found nothing would fight a binding
+    // that's still perfectly valid.
+    if (col.cwd && normalizePathForCompare(col.cwd) !== normalizePathForCompare(col.projectKey)) {
+      return isTargetPresent(col.cwd).then(function (present) {
+        if (!present) {
+          col.cwd = col.projectKey;
+          col.cwdSource = undefined;
+          persistSessions(col.projectKey, col.workspaceId);
+          updateColumnTargetBadge(colId);
+        }
+      });
     }
   }).catch(function () { /* best-effort */ });
 }
@@ -7845,6 +7902,8 @@ function updateGitTargetIndicator(opts) {
 
   var hint = document.createElement('div');
   hint.className = 'git-target-hint';
+  if (opts.directoryMissing) hint.classList.add('git-target-hint-error');
+  else if (opts.notARepo) hint.classList.add('git-target-hint-warn');
   hint.textContent = fullText;
   if (titleText) hint.setAttribute('title', titleText);
   gitHeaderEl.appendChild(hint);

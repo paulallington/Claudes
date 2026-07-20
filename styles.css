@@ -1339,15 +1339,61 @@ html[data-platform="darwin"] #toolbar {
   font-style: italic;
 }
 
+/* Chip showing the Git tab's bound target (worktree/cwd) or a problem state
+   (directory missing / not a git repo) — see updateGitTargetIndicator.
+   Neutral tint for a normal binding, warning tints for the problem states. */
 .git-target-hint {
-  padding: 4px 12px 6px;
-  padding-top: 4px;
+  display: inline-block;
+  box-sizing: border-box;
+  max-width: calc(100% - 24px);
+  margin: 2px 12px 6px;
+  padding: 2px 8px;
   font-size: 10px;
-  color: var(--text-muted);
+  line-height: 15px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.git-target-hint.git-target-hint-warn {
+  background: rgba(245, 166, 35, 0.16);
+  color: #f5a623;
+}
+
+.git-target-hint.git-target-hint-error {
+  background: rgba(233, 69, 96, 0.16);
+  color: #ff8a9a;
+}
+
+/* Light theme: the dark-mode translucent white wash is invisible on the
+   light --bg-panel, and the warn/error text colours (tuned for a dark
+   backdrop) don't meet contrast on white — reuse existing theme-aware
+   accent vars instead of inventing new hex values. */
+[data-theme="light"] .git-target-hint {
+  background: var(--hover-strong);
+}
+
+/* Chose to restore the warn/error background tints here (rather than settle
+   for a text-colour-only distinction) so the three chip states read the
+   same way in both themes — these two rules are HIGHER specificity than the
+   base [data-theme="light"] .git-target-hint above ((0,3,0) vs (0,2,0): the
+   attribute selector counts once for both, but each rule below adds a
+   second class), so they win for background too, not just colour, on
+   specificity alone — source order is irrelevant here. rgba values are
+   low-opacity tints of --color-yellow/--accent's light-theme hex
+   (#9a6700 / #d1304a). */
+[data-theme="light"] .git-target-hint.git-target-hint-warn {
+  background: rgba(154, 103, 0, 0.12);
+  color: var(--color-yellow);
+}
+
+[data-theme="light"] .git-target-hint.git-target-hint-error {
+  background: rgba(209, 48, 74, 0.12);
+  color: var(--accent);
 }
 
 /* --- Column Layout --- */
@@ -1438,13 +1484,26 @@ html[data-platform="darwin"] #toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   min-height: 28px;
   padding: 0 8px;
   background: var(--bg-toolbar);
   font-size: 12px;
   color: var(--text-secondary);
   user-select: none;
+  /* Hard backstop only, not the primary defence: .col-title and both ambient
+     badges (.col-target-badge, .col-failover-badge) are flex-shrink:1+ with
+     min-width floors below their content size (see each rule), so they
+     absorb negative free space by shrinking/ellipsising rather than by
+     forcing the row to overflow. .col-actions (the window controls) stays
+     flex-shrink:0 — it must never shrink or clip. This `overflow: hidden`
+     only fires if the container gets narrower than the sum of every item's
+     min-width floor, which the min-width choices below are picked to avoid
+     in practice. .row is overflow:hidden and each .column paints atomically
+     (position:relative, z-index:auto), so without this the spill would be
+     invisible rather than visibly clipping: it'd just vanish under the next
+     column's opaque background. */
+  overflow: hidden;
 }
 
 /* --- Activity Pulse Indicators --- */
@@ -1550,12 +1609,29 @@ html[data-platform="darwin"] #toolbar {
 .column-header .col-title {
   font-weight: 500;
   cursor: default;
-  max-width: calc(100% - 180px);
+  /* .column-header is flex-wrap:nowrap, so there's no fixed-px budget to
+     defend a wrap point against — every shrinkable sibling degrades by
+     ellipsising instead of by wrapping or clipping mid-glyph.
+     flex-shrink:2 puts the title in the middle of the shrink priority
+     order: shrink is proportional and simultaneous, not sequential, but each
+     item sheds a fraction of its own width proportional to its shrink
+     factor, so .col-target-badge (flex-shrink:3, ambient info, also visible
+     in the Git panel) always sheds a larger fraction of its own width first
+     and reaches its floor soonest, then the title (flex-shrink:2), then
+     .col-failover-badge (flex-shrink:1, an active-fault signal — should
+     keep the most of its text once other content already has a tooltip),
+     and .col-actions (flex-shrink:0, the window controls) never shrinks at
+     all. min-width:4ch is a floor, not a budget: it's a font-relative unit
+     (roughly "how wide is a character", not a fixed pixel estimate of any
+     specific string), so the title always keeps a handful of characters
+     visible rather than being squeezed to a bare ellipsis while a sibling
+     badge keeps its full width. If every floor together still doesn't fit,
+     .column-header's overflow:hidden is the backstop — see its comment. */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
-  flex-shrink: 1;
+  min-width: 4ch;
+  flex: 0 2 auto;
   height: 28px;
   line-height: 28px;
 }
@@ -1575,6 +1651,60 @@ html[data-platform="darwin"] #toolbar {
   vertical-align: middle;
 }
 
+/* Ambient badge for columns bound to a non-root cwd (worktree auto-bind or
+   manual cwd) — see lib/git-target.js describeColumnTarget. Sits between the
+   title and the action controls (compact/effort/overflow/etc). It's the
+   lowest-priority item in the header (also visible as the Git panel's
+   target chip, so losing characters here loses nothing that isn't shown
+   elsewhere): flex-shrink:3 makes it give up room before .col-title or
+   .col-failover-badge do, shrinking down toward min-width:0 and ellipsising
+   ("⎇ fo…") rather than staying full width and forcing something more
+   important to clip. */
+.column-header .col-target-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  border-radius: 3px;
+  vertical-align: middle;
+  flex-shrink: 3;
+  min-width: 3.2em;
+  /* Hard cap regardless of glyph width — truncateLeaf's 17-char budget
+     (2-char prefix + 14-char leaf + "…") can still render wider than
+     expected for an all-caps label at 10px/600 Segoe UI, so don't rely on
+     character count alone to bound the box. This is an upper cap only — it
+     only ever makes the badge smaller than it would otherwise render, so
+     unlike a shrink-budget it can't be "wrong" in the way that broke this
+     header before. */
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.column-header .col-target-badge-worktree {
+  background: rgba(170, 120, 255, 0.18);
+  color: #c3a9ff;
+}
+
+.column-header .col-target-badge-cwd {
+  background: rgba(90, 200, 190, 0.18);
+  color: #8fe3d8;
+}
+
+/* Light theme: the lavender/teal text tints are tuned for a dark badge
+   background and read as near-invisible on white — swap in the closest
+   existing theme-aware accent vars rather than new hex values. */
+[data-theme="light"] .column-header .col-target-badge-worktree {
+  color: var(--color-magenta);
+}
+
+[data-theme="light"] .column-header .col-target-badge-cwd {
+  color: var(--color-cyan);
+}
+
 .column-header .col-title.editing,
 .project-item .project-name.editing,
 .workspace-item .workspace-name.editing {
@@ -1589,6 +1719,22 @@ html[data-platform="darwin"] #toolbar {
   white-space: nowrap;
 }
 
+/* .col-title.editing sits inside the tight, non-wrapping .column-header row
+   (see the flex-wrap:nowrap note above .col-title). The shared rule above
+   sets overflow:visible so the sidebar rename cases (project/workspace name,
+   which aren't flex-squeezed the same way) don't clip the caret — but in a
+   narrow column that same overflow:visible lets in-edit text spill over the
+   target badge and action buttons instead of scrolling within its own box.
+   Same specificity (0,3,0) as the shared rule above, placed later, so this
+   wins for the column-header case only; project/workspace editing is
+   untouched. contenteditable elements auto-scroll to keep the caret in view
+   even with overflow:hidden, so renaming stays usable without painting over
+   the controls. */
+.column-header .col-title.editing {
+  overflow: hidden;
+  text-overflow: clip;
+}
+
 .col-actions {
   display: flex;
   align-items: center;
@@ -1597,14 +1743,70 @@ html[data-platform="darwin"] #toolbar {
   flex-shrink: 0;
 }
 
+/* Both tiers below are usability calls, not clip-prevention arithmetic —
+   .col-title/.col-target-badge/.col-failover-badge are shrinkable (see their
+   rules above) and .column-header's overflow:hidden is the structural
+   backstop, so nothing in this file clips as a *result* of these thresholds
+   firing late or not at all. What they control is how early low-value
+   ambient chrome (the worktree/cwd badge, context meter, effort selector)
+   gets out of the title's way, purely for readability on a visibly narrow
+   column. 420px is where those three start crowding the title noticeably;
+   pick a different round number if that stops feeling right — there's no
+   pixel budget anywhere here for a new value to violate.
+
+   .col-ctx-meter's base rule (further below) declares `display: inline-flex`
+   itself, at bare (0,1,0) specificity, and it sits AFTER this block in
+   source order — so a bare `.col-ctx-meter { display: none }` here would
+   lose the specificity tie on source order and never actually hide it (the
+   same trap .col-target-badge's own qualified selector, below, already
+   exists to avoid). .col-effort's base rule doesn't declare `display` at
+   all so a bare selector would technically work for it alone, but all three
+   are qualified under .column-header here for one consistent, order-proof
+   (0,2,0) that beats every base rule regardless of future edits:
+     .column-header .col-target-badge  base rule specificity (0,2,0)
+     .column-header .col-ctx-meter     base rule specificity (0,1,0)
+     .column-header .col-effort        base rule specificity (0,1,0)
+   this tier's selectors are also (0,2,0), so they win outright against
+   .col-ctx-meter/.col-effort (whose base rules are only (0,1,0)) and win
+   .col-target-badge's tie via source order — this block is declared after
+   .col-target-badge's own (0,2,0) base rule above, so "later wins" applies —
+   matching the existing 250px tier's approach below. */
+@container (max-width: 420px) {
+  .column-header .col-target-badge,
+  .column-header .col-ctx-meter,
+  .column-header .col-effort {
+    display: none;
+  }
+}
+
 /* Hide less-critical column actions on narrow columns. Restart / clear /
    sessions / play-full / play-summary / teleport no longer sit inline at all
    (they live in the .col-overflow menu), so the only things left to hide here
-   are the compact/effort/delta/ctx-meter controls. The overflow trigger (⋯)
-   and the window controls (minimise / maximise / kill ×) must always stay
-   visible so they never fall off a narrow or popped-out header. */
+   are the compact/effort/delta/ctx-meter controls (plus the worktree/cwd
+   target badge — the title itself is the higher-value info at this width,
+   and the Git panel chip still carries the binding). The overflow trigger
+   (⋯) and the window controls (minimise / maximise / kill ×) must always
+   stay visible so they never fall off a narrow or popped-out header — they
+   stay flex-shrink:0 in .col-actions regardless of this tier. Like the tier
+   above, this is a usability threshold (things are getting genuinely tight,
+   so shed more chrome) rather than a clip-prevention one — .col-title and
+   the ambient badges are shrinkable and .column-header's overflow:hidden is
+   the real backstop. */
 @container (max-width: 250px) {
-  .col-action:not(.col-overflow), .col-effort, .col-delta-pill, .col-ctx-meter { display: none; }
+  .col-action:not(.col-overflow), .col-effort, .col-delta-pill { display: none; }
+  /* .col-target-badge and .col-ctx-meter need their own qualified selectors.
+     .col-target-badge's base rule (.column-header .col-target-badge) is
+     (0,2,0) and would beat an unqualified (0,1,0) selector outright.
+     .col-ctx-meter's base rule declares `display: inline-flex` at bare
+     (0,1,0), the same specificity an unqualified selector here would have,
+     and that base rule sits AFTER this block in source — so the tie would
+     go to source order and the meter would stay visible. Qualifying both
+     under .column-header makes them (0,2,0), which beats both base rules
+     outright regardless of source order. */
+  .column-header .col-target-badge,
+  .column-header .col-ctx-meter {
+    display: none;
+  }
 }
 
 .col-action {
@@ -7661,6 +7863,26 @@ body.mode-popout #btn-add-project {
   border-radius: 8px;
   margin-left: 6px;
   font-variant-numeric: tabular-nums;
+  /* Inserted as a direct child of .column-header (see renderer.js,
+     tryEndpointFailover), before .col-actions, so it's a flex item of the
+     nowrap header row in its own right, not a descendant of an already
+     flex-shrink:0 box. It only appears after an actual runtime failover, so
+     it's an active-degraded-state signal, not ambient chrome — it should
+     keep more of its text than the title or the ambient target badge once
+     space runs out, so flex-shrink:1 is the lowest non-zero shrink factor in
+     the row (target badge: 3, title: 2, this: 1, .col-actions/window
+     controls: 0 — never shrinks). min-width:3.5em is a floor, not a budget,
+     so it always keeps enough width for its glyph; overflow/text-overflow
+     let it ellipsise ("↺ fail…") under real pressure instead of wrapping to
+     a second line inside its own border, which would reproduce a two-row
+     header by a different route. Not added to either @container hide tier
+     for the same reason: it's a genuinely active signal, not the kind of
+     low-priority chrome those tiers shed for readability. */
+  flex-shrink: 1;
+  min-width: 3.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-search-controls {
