@@ -7875,6 +7875,7 @@ function refreshGitStatus(force) {
       lastGitRaw = null;
       while (gitHeaderEl.firstChild) gitHeaderEl.removeChild(gitHeaderEl.firstChild);
       while (gitChangesEl.firstChild) gitChangesEl.removeChild(gitChangesEl.firstChild);
+      if (gitCommitAreaEl) gitCommitAreaEl.style.display = 'none';
       updateGitTargetIndicator({ directoryMissing: true });
       done();
       return;
@@ -8118,13 +8119,16 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
   updateActiveProjectBranchLabels(branch);
   while (gitHeaderEl.firstChild) gitHeaderEl.removeChild(gitHeaderEl.firstChild);
   while (gitChangesEl.firstChild) gitChangesEl.removeChild(gitChangesEl.firstChild);
-  // Conflict / mid-operation banner. Fired async; the banner is inserted at
-  // the top of gitChangesEl when state shows merging/rebasing/cherry-picking.
-  renderGitOpBanner();
-
-  gitHeaderEl.classList.remove('git-readonly');
 
   var panelState = window.GitTarget.describeGitPanelState({ isRepo: isRepo, branch: branch });
+
+  if (panelState.actionsEnabled) {
+    // Conflict / mid-operation banner. Fired async; the banner is inserted at
+    // the top of gitChangesEl when state shows merging/rebasing/cherry-picking.
+    renderGitOpBanner();
+  }
+
+  gitHeaderEl.classList.remove('git-readonly');
 
   // Branch row (clickable branch switcher + pull/push/stash buttons)
   var row = document.createElement('div');
@@ -8139,10 +8143,6 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
     row.appendChild(branchLabel);
     gitHeaderEl.appendChild(row);
     if (gitCommitAreaEl) gitCommitAreaEl.style.display = 'none';
-    var noRepoMsg = document.createElement('div');
-    noRepoMsg.className = 'git-empty';
-    noRepoMsg.textContent = 'This folder is not tracked by git.';
-    gitChangesEl.appendChild(noRepoMsg);
     return;
   }
 
