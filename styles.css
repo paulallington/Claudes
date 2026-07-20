@@ -1369,6 +1369,22 @@ html[data-platform="darwin"] #toolbar {
   color: #ff8a9a;
 }
 
+/* Light theme: the dark-mode translucent white wash is invisible on the
+   light --bg-panel, and the warn/error text colours (tuned for a dark
+   backdrop) don't meet contrast on white — reuse existing theme-aware
+   accent vars instead of inventing new hex values. */
+[data-theme="light"] .git-target-hint {
+  background: var(--hover-strong);
+}
+
+[data-theme="light"] .git-target-hint.git-target-hint-warn {
+  color: var(--color-yellow);
+}
+
+[data-theme="light"] .git-target-hint.git-target-hint-error {
+  color: var(--accent);
+}
+
 /* --- Column Layout --- */
 
 #columns-container {
@@ -1569,7 +1585,14 @@ html[data-platform="darwin"] #toolbar {
 .column-header .col-title {
   font-weight: 500;
   cursor: default;
-  max-width: calc(100% - 180px);
+  /* Budget = ~180px for the always-visible flex-shrink:0 siblings in
+     .col-actions (compact/effort/overflow/minimize/maximize/close — the
+     delta pill and context meter start [hidden] and don't factor into the
+     common case) + ~120px worst-case for .col-target-badge (margin-left 6
+     + padding 10 + up to a 17-character label — a 2-char "⎇ "/"→ " prefix
+     plus a 14-char leaf truncated to "…", at ~6px/char for 10px/600 Segoe
+     UI). Keep this in sync if either sibling's box model changes. */
+  max-width: calc(100% - 300px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1621,6 +1644,17 @@ html[data-platform="darwin"] #toolbar {
   color: #8fe3d8;
 }
 
+/* Light theme: the lavender/teal text tints are tuned for a dark badge
+   background and read as near-invisible on white — swap in the closest
+   existing theme-aware accent vars rather than new hex values. */
+[data-theme="light"] .column-header .col-target-badge-worktree {
+  color: var(--color-magenta);
+}
+
+[data-theme="light"] .column-header .col-target-badge-cwd {
+  color: var(--color-cyan);
+}
+
 .column-header .col-title.editing,
 .project-item .project-name.editing,
 .workspace-item .workspace-name.editing {
@@ -1646,11 +1680,13 @@ html[data-platform="darwin"] #toolbar {
 /* Hide less-critical column actions on narrow columns. Restart / clear /
    sessions / play-full / play-summary / teleport no longer sit inline at all
    (they live in the .col-overflow menu), so the only things left to hide here
-   are the compact/effort/delta/ctx-meter controls. The overflow trigger (⋯)
-   and the window controls (minimise / maximise / kill ×) must always stay
-   visible so they never fall off a narrow or popped-out header. */
+   are the compact/effort/delta/ctx-meter controls (plus the worktree/cwd
+   target badge — the title itself is the higher-value info at this width,
+   and the Git panel chip still carries the binding). The overflow trigger
+   (⋯) and the window controls (minimise / maximise / kill ×) must always
+   stay visible so they never fall off a narrow or popped-out header. */
 @container (max-width: 250px) {
-  .col-action:not(.col-overflow), .col-effort, .col-delta-pill, .col-ctx-meter { display: none; }
+  .col-action:not(.col-overflow), .col-effort, .col-delta-pill, .col-ctx-meter, .col-target-badge { display: none; }
 }
 
 .col-action {
