@@ -972,7 +972,8 @@ function updateColumnTargetBadge(id) {
   var desc = window.GitTarget.describeColumnTarget({
     cwd: col.cwd,
     projectRoot: col.projectKey,
-    cwdSource: col.cwdSource
+    cwdSource: col.cwdSource,
+    isDiff: !!col.isDiff
   });
   var badge = col.headerEl.querySelector('.col-target-badge');
   if (!desc.show) {
@@ -7808,6 +7809,24 @@ function autoBindColumnTarget(colId) {
       col.cwdSource = undefined;
       persistSessions(col.projectKey, col.workspaceId);
       updateColumnTargetBadge(colId);
+      return;
+    }
+
+    // A non-manual, non-auto-worktree binding (e.g. a diff column that
+    // inherited a worktree cwd at creation time via gitTargetCwd(), with no
+    // cwdSource of its own) has no JSONL evidence trail to re-check above.
+    // Only release it once its directory is confirmed gone — clearing it
+    // just because worktree detection found nothing would fight a binding
+    // that's still perfectly valid.
+    if (col.cwd && col.cwd !== col.projectKey) {
+      return isTargetPresent(col.cwd).then(function (present) {
+        if (!present) {
+          col.cwd = col.projectKey;
+          col.cwdSource = undefined;
+          persistSessions(col.projectKey, col.workspaceId);
+          updateColumnTargetBadge(colId);
+        }
+      });
     }
   }).catch(function () { /* best-effort */ });
 }
