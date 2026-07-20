@@ -7431,6 +7431,7 @@ var btnToggleExplorer = document.getElementById('btn-toggle-explorer');
 var fileTreeEl = document.getElementById('file-tree');
 var gitChangesEl = document.getElementById('git-changes');
 var gitHeaderEl = document.getElementById('git-header');
+var gitCommitAreaEl = document.getElementById('git-commit-area');
 var runConfigsEl = document.getElementById('run-configs');
 var runListView = document.getElementById('run-list-view');
 var runEditorView = document.getElementById('run-editor-view');
@@ -7896,7 +7897,7 @@ function refreshGitStatus(force) {
         var rawKey = JSON.stringify(results[0]) + '|' + results[1] + '|' + JSON.stringify(results[2]) + '|' + results[3].length + '|' + JSON.stringify(results[4]) + '|' + results[7] + '|' + JSON.stringify(results[8]);
         if (rawKey === lastGitRaw) return;
         lastGitRaw = rawKey;
-        renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[8]);
+        renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[8], results[7]);
         updateGitTargetIndicator({ notARepo: !results[7] });
       }).then(done, done);
       return;
@@ -7905,7 +7906,7 @@ function refreshGitStatus(force) {
     lastGitRaw = null;
     Promise.all(fetchAll).then(function (results) {
       lastGitRaw = JSON.stringify(results[0]) + '|' + results[1] + '|' + JSON.stringify(results[2]) + '|' + results[3].length + '|' + JSON.stringify(results[4]) + '|' + results[7] + '|' + JSON.stringify(results[8]);
-      renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[8]);
+      renderGitStatus(results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[8], results[7]);
       updateGitTargetIndicator({ notARepo: !results[7] });
     }).then(done, done);
   }, done);
@@ -8112,7 +8113,7 @@ function updateActiveProjectBranchLabels(branch) {
   }
 }
 
-function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstagedStats, stagedStats, diffVsBase) {
+function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstagedStats, stagedStats, diffVsBase, isRepo) {
   graphLaneState = null;
   updateActiveProjectBranchLabels(branch);
   while (gitHeaderEl.firstChild) gitHeaderEl.removeChild(gitHeaderEl.firstChild);
@@ -8123,14 +8124,31 @@ function renderGitStatus(files, branch, aheadBehind, stashes, graphLog, unstaged
 
   gitHeaderEl.classList.remove('git-readonly');
 
+  var panelState = window.GitTarget.describeGitPanelState({ isRepo: isRepo, branch: branch });
+
   // Branch row (clickable branch switcher + pull/push/stash buttons)
   var row = document.createElement('div');
   row.className = 'git-branch-row';
   row.style.position = 'relative';
 
   var branchLabel = document.createElement('span');
-  branchLabel.className = 'git-branch-name git-branch-clickable';
-  branchLabel.textContent = '\u2387 ' + (branch || 'detached') + ' \u25BE';
+  branchLabel.className = 'git-branch-name';
+
+  if (!panelState.actionsEnabled) {
+    branchLabel.textContent = panelState.label;
+    row.appendChild(branchLabel);
+    gitHeaderEl.appendChild(row);
+    if (gitCommitAreaEl) gitCommitAreaEl.style.display = 'none';
+    var noRepoMsg = document.createElement('div');
+    noRepoMsg.className = 'git-empty';
+    noRepoMsg.textContent = 'This folder is not tracked by git.';
+    gitChangesEl.appendChild(noRepoMsg);
+    return;
+  }
+
+  if (gitCommitAreaEl) gitCommitAreaEl.style.display = '';
+  branchLabel.classList.add('git-branch-clickable');
+  branchLabel.textContent = '\u2387 ' + panelState.label + ' \u25BE';
   branchLabel.title = 'Switch branch';
   branchLabel.addEventListener('click', function (e) {
     e.stopPropagation();
