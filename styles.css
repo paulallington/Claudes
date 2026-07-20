@@ -1768,12 +1768,20 @@ html[data-platform="darwin"] #toolbar {
    (⋯) and the window controls (minimise / maximise / kill ×) must always
    stay visible so they never fall off a narrow or popped-out header. */
 @container (max-width: 250px) {
-  .col-action:not(.col-overflow), .col-effort, .col-delta-pill, .col-ctx-meter { display: none; }
-  /* .col-target-badge needs its own qualified selector — the base rule
-     at .column-header .col-target-badge is (0,2,0) specificity and would
-     otherwise beat this unqualified (0,1,0) selector regardless of the
-     container query matching. */
-  .column-header .col-target-badge { display: none; }
+  .col-action:not(.col-overflow), .col-effort, .col-delta-pill { display: none; }
+  /* .col-target-badge and .col-ctx-meter need their own qualified selectors.
+     .col-target-badge's base rule (.column-header .col-target-badge) is
+     (0,2,0) and would beat an unqualified (0,1,0) selector outright.
+     .col-ctx-meter's base rule declares `display: inline-flex` at bare
+     (0,1,0), the same specificity an unqualified selector here would have,
+     and that base rule sits AFTER this block in source — so the tie would
+     go to source order and the meter would stay visible. Qualifying both
+     under .column-header makes them (0,2,0), which beats both base rules
+     outright regardless of source order. */
+  .column-header .col-target-badge,
+  .column-header .col-ctx-meter {
+    display: none;
+  }
 }
 
 .col-action {
