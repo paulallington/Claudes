@@ -1491,16 +1491,18 @@ html[data-platform="darwin"] #toolbar {
   font-size: 12px;
   color: var(--text-secondary);
   user-select: none;
-  /* Hard backstop: .col-actions and the ambient badges are flex-shrink:0, so
-     once .col-title bottoms out at its min-width:0 there is nothing left to
-     absorb further negative space — it would otherwise paint past the header
-     box. .row is overflow:hidden and each .column paints atomically
-     (position:relative, z-index:auto), so without this the spill is
-     invisible: it just vanishes under the next column's opaque background
-     instead of visibly clipping. This does not by itself guarantee the
-     window controls stay visible at every width — the @container tiers
-     below do that by shedding lower-priority content before the intrinsic
-     minimum is reached. */
+  /* Hard backstop only, not the primary defence: .col-title and both ambient
+     badges (.col-target-badge, .col-failover-badge) are flex-shrink:1+ with
+     min-width floors below their content size (see each rule), so they
+     absorb negative free space by shrinking/ellipsising rather than by
+     forcing the row to overflow. .col-actions (the window controls) stays
+     flex-shrink:0 — it must never shrink or clip. This `overflow: hidden`
+     only fires if the container gets narrower than the sum of every item's
+     min-width floor, which the min-width choices below are picked to avoid
+     in practice. .row is overflow:hidden and each .column paints atomically
+     (position:relative, z-index:auto), so without this the spill would be
+     invisible rather than visibly clipping: it'd just vanish under the next
+     column's opaque background. */
   overflow: hidden;
 }
 
@@ -1608,15 +1610,25 @@ html[data-platform="darwin"] #toolbar {
   font-weight: 500;
   cursor: default;
   /* .column-header is flex-wrap:nowrap, so there's no fixed-px budget to
-     defend a wrap point against — the title just shrinks to whatever room
-     is left after its flex-shrink:0 siblings (.col-actions, .col-target-badge,
-     .activity-dot) claim their space, and ellipsises instead of clipping to
-     zero. */
+     defend a wrap point against — every shrinkable sibling degrades by
+     ellipsising instead of by wrapping or clipping mid-glyph.
+     flex-shrink:2 puts the title in the middle of the shrink priority
+     order: .col-target-badge (flex-shrink:3, ambient info, also visible in
+     the Git panel) gives up room first, then the title, then
+     .col-failover-badge (flex-shrink:1, an active-fault signal — should
+     keep the most of its text once other content already has a tooltip),
+     and .col-actions (flex-shrink:0, the window controls) never shrinks at
+     all. min-width:4ch is a floor, not a budget: it's a font-relative unit
+     (roughly "how wide is a character", not a fixed pixel estimate of any
+     specific string), so the title always keeps a handful of characters
+     visible rather than being squeezed to a bare ellipsis while a sibling
+     badge keeps its full width. If every floor together still doesn't fit,
+     .column-header's overflow:hidden is the backstop — see its comment. */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
-  flex: 0 1 auto;
+  min-width: 4ch;
+  flex: 0 2 auto;
   height: 28px;
   line-height: 28px;
 }
@@ -1638,8 +1650,13 @@ html[data-platform="darwin"] #toolbar {
 
 /* Ambient badge for columns bound to a non-root cwd (worktree auto-bind or
    manual cwd) — see lib/git-target.js describeColumnTarget. Sits between the
-   title and the action controls (compact/effort/overflow/etc), so it must
-   not shrink or it would visually collide with those controls when narrow. */
+   title and the action controls (compact/effort/overflow/etc). It's the
+   lowest-priority item in the header (also visible as the Git panel's
+   target chip, so losing characters here loses nothing that isn't shown
+   elsewhere): flex-shrink:3 makes it give up room before .col-title or
+   .col-failover-badge do, shrinking down toward min-width:0 and ellipsising
+   ("⎇ fo…") rather than staying full width and forcing something more
+   important to clip. */
 .column-header .col-target-badge {
   display: inline-block;
   margin-left: 6px;
@@ -1649,11 +1666,15 @@ html[data-platform="darwin"] #toolbar {
   font-weight: 600;
   border-radius: 3px;
   vertical-align: middle;
-  flex-shrink: 0;
+  flex-shrink: 3;
+  min-width: 0;
   /* Hard cap regardless of glyph width — truncateLeaf's 17-char budget
      (2-char prefix + 14-char leaf + "…") can still render wider than
      expected for an all-caps label at 10px/600 Segoe UI, so don't rely on
-     character count alone to bound the box. */
+     character count alone to bound the box. This is an upper cap only — it
+     only ever makes the badge smaller than it would otherwise render, so
+     unlike a shrink-budget it can't be "wrong" in the way that broke this
+     header before. */
   max-width: 110px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1719,20 +1740,16 @@ html[data-platform="darwin"] #toolbar {
   flex-shrink: 0;
 }
 
-/* Higher tier, above the 250px one below: with the worktree/cwd target badge
-   showing, none of .column-header's other content can shrink (activity dot,
-   badge and .col-actions are all flex-shrink:0), so the un-hideable budget
-   is 16px header padding + ~14px activity dot + ~330px of .col-actions
-   (compact ⌘ ~20 + .col-effort's 58px max-width + delta pill ~60 + ⋯/min/
-   max/× ~89 + six 1px inter-item gaps) + up to 116px badge (110px max-width
-   + 6px margin) ≈ 476px before .col-title has a single pixel to shrink into.
-   Rounded up to 480px for a small safety margin — 420px was tried first but
-   undershoots the badge-present worst case by ~56px, which would leave this
-   tier engaging too late and the 250px tier as the only remaining backstop.
-   Hides the same three controls the 250px tier already hides (target badge,
-   ctx meter, effort), just earlier, so title gets more room sooner; the
-   250px tier below still hides a superset (also compact/delta), so the two
-   compose without fighting.
+/* Both tiers below are usability calls, not clip-prevention arithmetic —
+   .col-title/.col-target-badge/.col-failover-badge are shrinkable (see their
+   rules above) and .column-header's overflow:hidden is the structural
+   backstop, so nothing in this file clips as a *result* of these thresholds
+   firing late or not at all. What they control is how early low-value
+   ambient chrome (the worktree/cwd badge, context meter, effort selector)
+   gets out of the title's way, purely for readability on a visibly narrow
+   column. 420px is where those three start crowding the title noticeably;
+   pick a different round number if that stops feeling right — there's no
+   pixel budget anywhere here for a new value to violate.
 
    .col-ctx-meter's base rule (further below) declares `display: inline-flex`
    itself, at bare (0,1,0) specificity, and it sits AFTER this block in
@@ -1751,7 +1768,7 @@ html[data-platform="darwin"] #toolbar {
    .col-target-badge's tie via source order — this block is declared after
    .col-target-badge's own (0,2,0) base rule above, so "later wins" applies —
    matching the existing 250px tier's approach below. */
-@container (max-width: 480px) {
+@container (max-width: 420px) {
   .column-header .col-target-badge,
   .column-header .col-ctx-meter,
   .column-header .col-effort {
@@ -1766,7 +1783,12 @@ html[data-platform="darwin"] #toolbar {
    target badge — the title itself is the higher-value info at this width,
    and the Git panel chip still carries the binding). The overflow trigger
    (⋯) and the window controls (minimise / maximise / kill ×) must always
-   stay visible so they never fall off a narrow or popped-out header. */
+   stay visible so they never fall off a narrow or popped-out header — they
+   stay flex-shrink:0 in .col-actions regardless of this tier. Like the tier
+   above, this is a usability threshold (things are getting genuinely tight,
+   so shed more chrome) rather than a clip-prevention one — .col-title and
+   the ambient badges are shrinkable and .column-header's overflow:hidden is
+   the real backstop. */
 @container (max-width: 250px) {
   .col-action:not(.col-overflow), .col-effort, .col-delta-pill { display: none; }
   /* .col-target-badge and .col-ctx-meter need their own qualified selectors.
@@ -7839,17 +7861,23 @@ body.mode-popout #btn-add-project {
   margin-left: 6px;
   font-variant-numeric: tabular-nums;
   /* Appended as a direct child of .column-header (see renderer.js,
-     handleColumnExit's fallback path), after .col-actions, so it's a flex
-     item of the nowrap header row in its own right, not a descendant of an
-     already flex-shrink:0 box. Without these it defaults to flex-shrink:1
-     and min-width:auto, making it a second thing (besides .col-title) that
-     absorbs negative free space — its text would wrap to two lines inside
-     its own border before .col-title finishes shrinking, reproducing a
-     two-row header by a different route. Not added to either @container
-     hide tier: unlike the target badge, it only appears after an actual
-     runtime failover, so it stays visible as an active-degraded-state
-     signal rather than being treated as ambient/low-priority chrome. */
-  flex-shrink: 0;
+     tryEndpointFailover), after .col-actions, so it's a flex item of the
+     nowrap header row in its own right, not a descendant of an already
+     flex-shrink:0 box. It only appears after an actual runtime failover, so
+     it's an active-degraded-state signal, not ambient chrome — it should
+     keep more of its text than the title or the ambient target badge once
+     space runs out, so flex-shrink:1 is the lowest non-zero shrink factor in
+     the row (target badge: 3, title: 2, this: 1, .col-actions/window
+     controls: 0 — never shrinks). min-width:0 plus overflow/text-overflow
+     let it ellipsise ("↺ fail…") under real pressure instead of wrapping to
+     a second line inside its own border, which would reproduce a two-row
+     header by a different route. Not added to either @container hide tier
+     for the same reason: it's a genuinely active signal, not the kind of
+     low-priority chrome those tiers shed for readability. */
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

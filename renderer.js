@@ -5119,8 +5119,10 @@ function addDiffColumn(diffData, opts) {
       existingCol.diffData = diffData;
       existingCol.diffMode = existingCol.diffMode || 'unified';
       existingCol.customTitle = opts.title || diffData.filePath || 'Diff';
+      existingCol.cwd = opts.cwd || gitTargetCwd();
       var titleEl = existingCol.headerEl.querySelector('.col-title');
       if (titleEl) titleEl.textContent = existingCol.customTitle;
+      updateColumnTargetBadge(existingDiffId);
       var diffBody = existingCol.element.querySelector('.diff-body');
       if (isFileList) {
         loadCommitDiff(diffBody, existingCol);
@@ -7818,7 +7820,7 @@ function autoBindColumnTarget(colId) {
     // Only release it once its directory is confirmed gone — clearing it
     // just because worktree detection found nothing would fight a binding
     // that's still perfectly valid.
-    if (col.cwd && col.cwd !== col.projectKey) {
+    if (col.cwd && normalizePathForCompare(col.cwd) !== normalizePathForCompare(col.projectKey)) {
       return isTargetPresent(col.cwd).then(function (present) {
         if (!present) {
           col.cwd = col.projectKey;
@@ -7900,8 +7902,8 @@ function updateGitTargetIndicator(opts) {
 
   var hint = document.createElement('div');
   hint.className = 'git-target-hint';
-  if (opts.directoryMissing) hint.classList.add('git-target-hint-warn');
-  else if (opts.notARepo) hint.classList.add('git-target-hint-error');
+  if (opts.directoryMissing) hint.classList.add('git-target-hint-error');
+  else if (opts.notARepo) hint.classList.add('git-target-hint-warn');
   hint.textContent = fullText;
   if (titleText) hint.setAttribute('title', titleText);
   gitHeaderEl.appendChild(hint);
