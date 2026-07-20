@@ -180,6 +180,67 @@ test('describeColumnTarget: leaf longer than 14 chars is truncated with ellipsis
   assert.equal(result.kind, 'cwd');
 });
 
+test('describeColumnTarget: isDiff + auto-worktree binding gives an accurate diff title', () => {
+  assert.deepStrictEqual(
+    describeColumnTarget({
+      cwd: '/home/paul/worktrees/feature-x',
+      projectRoot: '/home/paul/project',
+      cwdSource: 'auto-worktree',
+      isDiff: true,
+    }),
+    {
+      show: true,
+      kind: 'worktree',
+      label: '⎇ feature-x',
+      title: 'Diff target: /home/paul/worktrees/feature-x',
+    }
+  );
+});
+
+test('describeColumnTarget: isDiff + manual cwd binding gives an accurate diff title', () => {
+  assert.deepStrictEqual(
+    describeColumnTarget({
+      cwd: '/home/paul/subdir',
+      projectRoot: '/home/paul/project',
+      cwdSource: 'manual',
+      isDiff: true,
+    }),
+    {
+      show: true,
+      kind: 'cwd',
+      label: '→ subdir',
+      title: 'Diff target: /home/paul/subdir',
+    }
+  );
+});
+
+test('describeColumnTarget: isDiff with no binding still returns the empty shape', () => {
+  assert.deepStrictEqual(
+    describeColumnTarget({ cwd: null, projectRoot: '/project', cwdSource: undefined, isDiff: true }),
+    { show: false, kind: null, label: '', title: '' }
+  );
+  assert.deepStrictEqual(
+    describeColumnTarget({ cwd: '/project', projectRoot: '/project', cwdSource: 'auto-worktree', isDiff: true }),
+    { show: false, kind: null, label: '', title: '' }
+  );
+});
+
+test('describeColumnTarget: regression — non-diff auto-worktree title unchanged', () => {
+  assert.deepStrictEqual(
+    describeColumnTarget({
+      cwd: '/home/paul/worktrees/feature-x',
+      projectRoot: '/home/paul/project',
+      cwdSource: 'auto-worktree',
+    }),
+    {
+      show: true,
+      kind: 'worktree',
+      label: '⎇ feature-x',
+      title: 'Git tab bound to /home/paul/worktrees/feature-x — display only; this column runs in the project root',
+    }
+  );
+});
+
 test('describeColumnTarget: bare drive root has no meaningful leaf, falls back to full normalised cwd', () => {
   assert.deepStrictEqual(
     describeColumnTarget({
