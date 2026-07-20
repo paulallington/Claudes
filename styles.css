@@ -1377,11 +1377,19 @@ html[data-platform="darwin"] #toolbar {
   background: var(--hover-strong);
 }
 
+/* Chose to restore the warn/error background tints here (rather than settle
+   for a text-colour-only distinction) so the three chip states read the
+   same way in both themes — these two rules are equal specificity to and
+   later than the base [data-theme="light"] .git-target-hint above, so they
+   win for background too, not just colour. rgba values are low-opacity
+   tints of --color-yellow/--accent's light-theme hex (#9a6700 / #d1304a). */
 [data-theme="light"] .git-target-hint.git-target-hint-warn {
+  background: rgba(154, 103, 0, 0.12);
   color: var(--color-yellow);
 }
 
 [data-theme="light"] .git-target-hint.git-target-hint-error {
+  background: rgba(209, 48, 74, 0.12);
   color: var(--accent);
 }
 
@@ -1473,7 +1481,7 @@ html[data-platform="darwin"] #toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   min-height: 28px;
   padding: 0 8px;
   background: var(--bg-toolbar);
@@ -1585,19 +1593,16 @@ html[data-platform="darwin"] #toolbar {
 .column-header .col-title {
   font-weight: 500;
   cursor: default;
-  /* Budget = ~180px for the always-visible flex-shrink:0 siblings in
-     .col-actions (compact/effort/overflow/minimize/maximize/close — the
-     delta pill and context meter start [hidden] and don't factor into the
-     common case) + ~120px worst-case for .col-target-badge (margin-left 6
-     + padding 10 + up to a 17-character label — a 2-char "⎇ "/"→ " prefix
-     plus a 14-char leaf truncated to "…", at ~6px/char for 10px/600 Segoe
-     UI). Keep this in sync if either sibling's box model changes. */
-  max-width: calc(100% - 300px);
+  /* .column-header is flex-wrap:nowrap, so there's no fixed-px budget to
+     defend a wrap point against — the title just shrinks to whatever room
+     is left after its flex-shrink:0 siblings (.col-actions, .col-target-badge,
+     .activity-dot) claim their space, and ellipsises instead of clipping to
+     zero. */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
-  flex-shrink: 1;
+  flex: 0 1 auto;
   height: 28px;
   line-height: 28px;
 }
@@ -1631,6 +1636,13 @@ html[data-platform="darwin"] #toolbar {
   border-radius: 3px;
   vertical-align: middle;
   flex-shrink: 0;
+  /* Hard cap regardless of glyph width — truncateLeaf's 17-char budget
+     (2-char prefix + 14-char leaf + "…") can still render wider than
+     expected for an all-caps label at 10px/600 Segoe UI, so don't rely on
+     character count alone to bound the box. */
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -1686,7 +1698,12 @@ html[data-platform="darwin"] #toolbar {
    (⋯) and the window controls (minimise / maximise / kill ×) must always
    stay visible so they never fall off a narrow or popped-out header. */
 @container (max-width: 250px) {
-  .col-action:not(.col-overflow), .col-effort, .col-delta-pill, .col-ctx-meter, .col-target-badge { display: none; }
+  .col-action:not(.col-overflow), .col-effort, .col-delta-pill, .col-ctx-meter { display: none; }
+  /* .col-target-badge needs its own qualified selector — the base rule
+     at .column-header .col-target-badge is (0,2,0) specificity and would
+     otherwise beat this unqualified (0,1,0) selector regardless of the
+     container query matching. */
+  .column-header .col-target-badge { display: none; }
 }
 
 .col-action {

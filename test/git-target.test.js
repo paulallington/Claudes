@@ -241,6 +241,22 @@ test('describeColumnTarget: regression — non-diff auto-worktree title unchange
   );
 });
 
+test('describeColumnTarget: leaf with an astral character is truncated on code-point boundaries, not mid-surrogate-pair', () => {
+  // 13 ASCII chars + one astral emoji (2 UTF-16 code units) + 5 more ASCII
+  // chars = 19 code points / 20 UTF-16 units. A naive .slice(0, 14) on
+  // code units would land inside the emoji's surrogate pair (13 ASCII +
+  // 1 lone high surrogate), corrupting it into a replacement glyph.
+  const leaf = 'a'.repeat(13) + '\u{1F680}' + 'b'.repeat(5);
+  const result = describeColumnTarget({
+    cwd: '/home/paul/' + leaf,
+    projectRoot: '/home/paul/project',
+    cwdSource: 'manual',
+  });
+  assert.equal(result.label, '→ ' + 'a'.repeat(13) + '\u{1F680}' + '…');
+  assert.equal(result.show, true);
+  assert.equal(result.kind, 'cwd');
+});
+
 test('describeColumnTarget: bare drive root has no meaningful leaf, falls back to full normalised cwd', () => {
   assert.deepStrictEqual(
     describeColumnTarget({
