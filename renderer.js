@@ -6233,7 +6233,7 @@ function tryEndpointFailover(colId) {
         badge.className = 'col-failover-badge';
         badge.textContent = '↺ failover';
         badge.title = 'Auto-failed-over to ' + preset.fallbackId;
-        col.headerEl.appendChild(badge);
+        col.headerEl.insertBefore(badge, col.headerEl.querySelector('.col-actions'));
       }
 
       // Re-create the pty with the same column id and the fallback env.

@@ -1613,8 +1613,11 @@ html[data-platform="darwin"] #toolbar {
      defend a wrap point against — every shrinkable sibling degrades by
      ellipsising instead of by wrapping or clipping mid-glyph.
      flex-shrink:2 puts the title in the middle of the shrink priority
-     order: .col-target-badge (flex-shrink:3, ambient info, also visible in
-     the Git panel) gives up room first, then the title, then
+     order: shrink is proportional and simultaneous, not sequential, but each
+     item sheds a fraction of its own width proportional to its shrink
+     factor, so .col-target-badge (flex-shrink:3, ambient info, also visible
+     in the Git panel) always sheds a larger fraction of its own width first
+     and reaches its floor soonest, then the title (flex-shrink:2), then
      .col-failover-badge (flex-shrink:1, an active-fault signal — should
      keep the most of its text once other content already has a tooltip),
      and .col-actions (flex-shrink:0, the window controls) never shrinks at
@@ -1667,7 +1670,7 @@ html[data-platform="darwin"] #toolbar {
   border-radius: 3px;
   vertical-align: middle;
   flex-shrink: 3;
-  min-width: 0;
+  min-width: 3.2em;
   /* Hard cap regardless of glyph width — truncateLeaf's 17-char budget
      (2-char prefix + 14-char leaf + "…") can still render wider than
      expected for an all-caps label at 10px/600 Segoe UI, so don't rely on
@@ -7860,22 +7863,23 @@ body.mode-popout #btn-add-project {
   border-radius: 8px;
   margin-left: 6px;
   font-variant-numeric: tabular-nums;
-  /* Appended as a direct child of .column-header (see renderer.js,
-     tryEndpointFailover), after .col-actions, so it's a flex item of the
+  /* Inserted as a direct child of .column-header (see renderer.js,
+     tryEndpointFailover), before .col-actions, so it's a flex item of the
      nowrap header row in its own right, not a descendant of an already
      flex-shrink:0 box. It only appears after an actual runtime failover, so
      it's an active-degraded-state signal, not ambient chrome — it should
      keep more of its text than the title or the ambient target badge once
      space runs out, so flex-shrink:1 is the lowest non-zero shrink factor in
      the row (target badge: 3, title: 2, this: 1, .col-actions/window
-     controls: 0 — never shrinks). min-width:0 plus overflow/text-overflow
+     controls: 0 — never shrinks). min-width:3.5em is a floor, not a budget,
+     so it always keeps enough width for its glyph; overflow/text-overflow
      let it ellipsise ("↺ fail…") under real pressure instead of wrapping to
      a second line inside its own border, which would reproduce a two-row
      header by a different route. Not added to either @container hide tier
      for the same reason: it's a genuinely active signal, not the kind of
      low-priority chrome those tiers shed for readability. */
   flex-shrink: 1;
-  min-width: 0;
+  min-width: 3.5em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
