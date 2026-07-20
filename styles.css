@@ -1339,15 +1339,34 @@ html[data-platform="darwin"] #toolbar {
   font-style: italic;
 }
 
+/* Chip showing the Git tab's bound target (worktree/cwd) or a problem state
+   (directory missing / not a git repo) — see updateGitTargetIndicator.
+   Neutral tint for a normal binding, warning tints for the problem states. */
 .git-target-hint {
-  padding: 4px 12px 6px;
-  padding-top: 4px;
+  display: inline-block;
+  box-sizing: border-box;
+  max-width: calc(100% - 24px);
+  margin: 2px 12px 6px;
+  padding: 2px 8px;
   font-size: 10px;
-  color: var(--text-muted);
+  line-height: 15px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.git-target-hint.git-target-hint-warn {
+  background: rgba(245, 166, 35, 0.16);
+  color: #f5a623;
+}
+
+.git-target-hint.git-target-hint-error {
+  background: rgba(233, 69, 96, 0.16);
+  color: #ff8a9a;
 }
 
 /* --- Column Layout --- */
@@ -1573,6 +1592,33 @@ html[data-platform="darwin"] #toolbar {
   background: rgba(120, 170, 255, 0.18);
   color: #a9c7ff;
   vertical-align: middle;
+}
+
+/* Ambient badge for columns bound to a non-root cwd (worktree auto-bind or
+   manual cwd) — see lib/git-target.js describeColumnTarget. Sits between the
+   title and the action controls (compact/effort/overflow/etc), so it must
+   not shrink or it would visually collide with those controls when narrow. */
+.column-header .col-target-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  border-radius: 3px;
+  vertical-align: middle;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.column-header .col-target-badge-worktree {
+  background: rgba(170, 120, 255, 0.18);
+  color: #c3a9ff;
+}
+
+.column-header .col-target-badge-cwd {
+  background: rgba(90, 200, 190, 0.18);
+  color: #8fe3d8;
 }
 
 .column-header .col-title.editing,

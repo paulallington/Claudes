@@ -960,6 +960,39 @@ function updateActivityIndicator(id) {
   }
 }
 
+// Ambient badge in the column header showing when a column is bound to a
+// non-root cwd (worktree auto-bind or manual cwd) — see lib/git-target.js
+// describeColumnTarget for the show/label/title decision logic, which this
+// function purely consumes. Called at column creation and everywhere
+// col.cwd/col.cwdSource are mutated after the fact (autoBindColumnTarget)
+// so the badge tracks the live binding, not just the spawn-time one.
+function updateColumnTargetBadge(id) {
+  var col = allColumns.get(id);
+  if (!col || !col.headerEl) return;
+  var desc = window.GitTarget.describeColumnTarget({
+    cwd: col.cwd,
+    projectRoot: col.projectKey,
+    cwdSource: col.cwdSource
+  });
+  var badge = col.headerEl.querySelector('.col-target-badge');
+  if (!desc.show) {
+    if (badge) badge.remove();
+    return;
+  }
+  if (!badge) {
+    badge = document.createElement('span');
+    var actionsEl = col.headerEl.querySelector('.col-actions');
+    if (actionsEl) {
+      col.headerEl.insertBefore(badge, actionsEl);
+    } else {
+      col.headerEl.appendChild(badge);
+    }
+  }
+  badge.className = 'col-target-badge col-target-badge-' + desc.kind;
+  badge.textContent = desc.label;
+  badge.title = desc.title;
+}
+
 function updateSidebarActivity() {
   if (popoutMode) return; // sidebar not rendered in popout windows
   // Bucket counts by (projectKey, workspaceId) — no cross-workspace rollup.
@@ -4927,6 +4960,7 @@ function addColumn(args, targetRow, opts) {
   // Make the header effort badge reflect the column's actual launch effort.
   var effortBadgeEl = header.querySelector('.col-effort');
   if (effortBadgeEl && colData.effort && isValidEffort(colData.effort)) effortBadgeEl.value = colData.effort;
+  updateColumnTargetBadge(id);
   startContextMeterPoll(id);
   setFocusedColumn(id);
   if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
@@ -5165,6 +5199,7 @@ function addDiffColumn(diffData, opts) {
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
+  updateColumnTargetBadge(id);
 
   // Toggle button handler
   toggleBtn.addEventListener('click', function () {
@@ -7761,7 +7796,7 @@ function autoBindColumnTarget(colId) {
       var changed = false;
       if (col.cwd !== newCwd) { col.cwd = newCwd; changed = true; }
       if (col.cwdSource !== 'auto-worktree') { col.cwdSource = 'auto-worktree'; changed = true; }
-      if (changed) persistSessions(col.projectKey, col.workspaceId);
+      if (changed) { persistSessions(col.projectKey, col.workspaceId); updateColumnTargetBadge(colId); }
       return;
     }
 
@@ -7772,6 +7807,7 @@ function autoBindColumnTarget(colId) {
       col.cwd = col.projectKey;
       col.cwdSource = undefined;
       persistSessions(col.projectKey, col.workspaceId);
+      updateColumnTargetBadge(colId);
     }
   }).catch(function () { /* best-effort */ });
 }
@@ -7845,6 +7881,8 @@ function updateGitTargetIndicator(opts) {
 
   var hint = document.createElement('div');
   hint.className = 'git-target-hint';
+  if (opts.directoryMissing) hint.classList.add('git-target-hint-warn');
+  else if (opts.notARepo) hint.classList.add('git-target-hint-error');
   hint.textContent = fullText;
   if (titleText) hint.setAttribute('title', titleText);
   gitHeaderEl.appendChild(hint);
