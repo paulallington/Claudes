@@ -16,7 +16,7 @@ test('resolveGlobalPauseUi shows the paused banner/toggle when globalEnabled is 
   assert.deepEqual(resolveGlobalPauseUi({ globalEnabled: false }), {
     paused: true,
     showBanner: true,
-    bannerText: 'Automations are paused — no scheduled runs will start.',
+    bannerText: 'Scheduler paused — no scheduled runs will start.',
     toggleGlyph: '▶',
     toggleTitle: 'Resume scheduler',
   });
@@ -70,23 +70,23 @@ test('resolveAutomationCardStatus: a missing automation renders the paused shape
   });
 });
 
-test('resolveAutomationCardStatus: running outranks a global pause on an enabled automation', () => {
+test('resolveAutomationCardStatus: running outranks a global pause on an enabled automation, and is not dimmed', () => {
   const automation = { enabled: true, agents: [{ currentRunStartedAt: 123 }] };
   assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: false, automation }), {
     statusClass: 'automation-running',
     badgeClass: 'badge-running',
     badgeText: 'running...',
-    dimmed: true,
+    dimmed: false,
   });
 });
 
-test('resolveAutomationCardStatus: error outranks a global pause on an enabled automation', () => {
+test('resolveAutomationCardStatus: error outranks a global pause on an enabled automation, and is not dimmed', () => {
   const automation = { enabled: true, agents: [{ lastRunStatus: 'error' }] };
   assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: false, automation }), {
     statusClass: 'automation-error',
     badgeClass: 'badge-error',
     badgeText: 'error',
-    dimmed: true,
+    dimmed: false,
   });
 });
 
