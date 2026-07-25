@@ -32,6 +32,44 @@ test('resolveAutomationCardStatus: disabled outranks everything, including globa
   });
 });
 
+test('resolveAutomationCardStatus: an empty agents array is treated as idle, never throws', () => {
+  const automation = { enabled: true, agents: [] };
+  assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: true, automation }), {
+    statusClass: 'automation-idle',
+    badgeClass: 'badge-idle',
+    badgeText: 'idle',
+    dimmed: false,
+  });
+});
+
+test('resolveAutomationCardStatus: a missing agents array is treated as idle, never throws', () => {
+  const automation = { enabled: true };
+  assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: true, automation }), {
+    statusClass: 'automation-idle',
+    badgeClass: 'badge-idle',
+    badgeText: 'idle',
+    dimmed: false,
+  });
+});
+
+test('resolveAutomationCardStatus: a missing automation renders the idle shape, never throws', () => {
+  assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: true }), {
+    statusClass: 'automation-idle',
+    badgeClass: 'badge-idle',
+    badgeText: 'idle',
+    dimmed: false,
+  });
+});
+
+test('resolveAutomationCardStatus: a missing automation renders the paused shape when globally paused, never throws', () => {
+  assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: false }), {
+    statusClass: 'automation-paused',
+    badgeClass: 'badge-paused',
+    badgeText: 'paused',
+    dimmed: true,
+  });
+});
+
 test('resolveAutomationCardStatus: running outranks a global pause on an enabled automation', () => {
   const automation = { enabled: true, agents: [{ currentRunStartedAt: 123 }] };
   assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: false, automation }), {
