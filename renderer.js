@@ -74,6 +74,7 @@ var headroomDashboardLink = document.getElementById('headroom-dashboard-link');
 var headroomRequiredNote = document.getElementById('headroom-required-note');
 var headroomInstallLink = document.getElementById('headroom-install-link');
 var optHeadroom1m = document.getElementById('opt-headroom-1m');
+var optHeadroom1mModel = document.getElementById('opt-headroom-1m-model');
 var optHeadroomMemory = document.getElementById('opt-headroom-memory');
 var optHeadroomMode = document.getElementById('opt-headroom-mode');
 var optHeadroomShaper = document.getElementById('opt-headroom-shaper');
@@ -11180,6 +11181,26 @@ function applyHeadroomUiState() {
   // defaults ON (undefined !== false).
   var subsUsable = headroomInstalled && !!(config && config.useHeadroom);
   if (optHeadroom1m) { optHeadroom1m.disabled = !subsUsable; optHeadroom1m.checked = !!(config && config.useHeadroom1m !== false); }
+  if (optHeadroom1mModel) {
+    var CM1m = window.ClaudeModels;
+    if (CM1m && !optHeadroom1mModel.options.length) {
+      optHeadroom1mModel.innerHTML = CM1m.MODELS
+        .filter(function (m) { return m.pickable && m.contextWindow >= 1000000; })
+        .map(function (m) {
+          return '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.label) + '</option>';
+        }).join('');
+    }
+    var pinned1m = (config && config.headroom1mModel) ||
+      (CM1m && CM1m.DEFAULT_1M_MODEL) || '';
+    optHeadroom1mModel.value = pinned1m;
+    // A stale/hand-edited config value that is no longer offered would leave the
+    // select blank and silently fall back — snap it to the default instead.
+    if (!optHeadroom1mModel.value && optHeadroom1mModel.options.length) {
+      optHeadroom1mModel.selectedIndex = 0;
+    }
+    optHeadroom1mModel.disabled = !subsUsable ||
+      !(config && config.useHeadroom1m !== false);
+  }
   if (headroomSubs) headroomSubs.classList.toggle('is-disabled', !subsUsable);
   // Memory + Output shaper are PROXY-WIDE, so they live on the top-level service
   // control and are gated only on Headroom being installed — not on any single
@@ -11236,6 +11257,18 @@ if (optHeadroom1m) {
     config.useHeadroom1m = optHeadroom1m.checked;
     saveConfig();
     updateSpawnButtonLabel();
+    applyHeadroomUiState();   // keeps the 1M model select's enabled state in sync
+  });
+}
+// The 1M pin used to be an invisible config key with no writer, so its
+// hardcoded fallback silently became the value and every column ran a
+// superseded model for a whole generation. Surfacing it is the fix that stops
+// that recurring — only 1M-capable models are offered, since a model without
+// the window can't be pinned to it.
+if (optHeadroom1mModel) {
+  optHeadroom1mModel.addEventListener('change', function () {
+    config.headroom1mModel = optHeadroom1mModel.value;
+    saveConfig();
   });
 }
 if (optHeadroomMemory) {
