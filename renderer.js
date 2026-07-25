@@ -31,6 +31,30 @@ var optBare = document.getElementById('opt-bare');
 var optStripMcps = document.getElementById('opt-strip-mcps');
 var optHeadless = document.getElementById('opt-headless');
 var optModel = document.getElementById('opt-model');
+
+// Model picker options, built from lib/claude-models.js so the spawn modal, the
+// automation agent form, the Headroom 1M pin, the cost table and the context
+// meter can never disagree about which models exist. Two groups, because they
+// mean different things: an alias tracks whatever the CLI resolves as newest,
+// while a pinned id locks the column to an exact version for reproducibility.
+function buildModelOptionsHtml(selected) {
+  var CM = window.ClaudeModels;
+  var sel = selected || '';
+  function opt(value, label) {
+    return '<option value="' + escapeHtml(value) + '"' +
+      (sel === value ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+  }
+  var html = opt('', 'Default');
+  if (!CM) return html;   // catalogue missing: degrade to Default rather than lie
+  html += '<optgroup label="Latest">';
+  CM.ALIASES.forEach(function (m) { html += opt(m.id, m.label); });
+  html += '</optgroup><optgroup label="Pinned version">';
+  CM.MODELS.forEach(function (m) { if (m.pickable) html += opt(m.id, m.label); });
+  html += '</optgroup>';
+  return html;
+}
+
+if (optModel) optModel.innerHTML = buildModelOptionsHtml(optModel.value);
 var optModelRow = document.getElementById('opt-model-row');
 var optEndpoint = document.getElementById('opt-endpoint');
 var optEndpointModelRow = document.getElementById('opt-endpoint-model-row');
@@ -14300,7 +14324,7 @@ function renderUsageSummary(data) {
   var earliestTs = Infinity, latestTs = 0;
 
   function emptyModelTokens() {
-    return { opus: {input:0,output:0,cache:0}, sonnet: {input:0,output:0,cache:0}, haiku: {input:0,output:0,cache:0}, unknown: {input:0,output:0,cache:0} };
+    return { fable: {input:0,output:0,cache:0}, opus: {input:0,output:0,cache:0}, sonnet: {input:0,output:0,cache:0}, haiku: {input:0,output:0,cache:0}, unknown: {input:0,output:0,cache:0} };
   }
   var allModelTokens = emptyModelTokens();
   var week7ModelTokens = emptyModelTokens();
@@ -14993,6 +15017,8 @@ function renderCostTab(c) {
   if (!c) return;
   var totalEl = document.getElementById('cost-total');
   if (totalEl) totalEl.textContent = fmtUsd(c.total);
+  var fableEl = document.getElementById('cost-fable');
+  if (fableEl) fableEl.textContent = fmtUsd(c.byModel && c.byModel.fable);
   var opusEl = document.getElementById('cost-opus');
   if (opusEl) opusEl.textContent = fmtUsd(c.byModel && c.byModel.opus);
   var sonnetEl = document.getElementById('cost-sonnet');
@@ -16225,15 +16251,7 @@ function renderAgentConnectionSection(agent) {
   var modelOpts;
   var refreshBtn = '';
   if (!selectedId) {
-    var cloudModels = [
-      { v: '', t: 'Default' },
-      { v: 'sonnet', t: 'Sonnet (latest)' },
-      { v: 'opus', t: 'Opus (latest)' },
-      { v: 'haiku', t: 'Haiku (latest)' }
-    ];
-    modelOpts = cloudModels.map(function (m) {
-      return '<option value="' + m.v + '"' + (selectedModel === m.v ? ' selected' : '') + '>' + m.t + '</option>';
-    }).join('');
+    modelOpts = buildModelOptionsHtml(selectedModel);
   } else {
     var cached = endpointModelsCache[selectedId];
     var preset = endpointPresets.find(function (p) { return p.id === selectedId; });
