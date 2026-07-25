@@ -14,3 +14,5 @@ out/
 test-results/
 playwright-report/
 .tokensave/
+.review-scope.txt
+.review-diff.txt
