@@ -31,3 +31,13 @@ test('resolveAutomationCardStatus: disabled outranks everything, including globa
     dimmed: false,
   });
 });
+
+test('resolveAutomationCardStatus: running outranks a global pause on an enabled automation', () => {
+  const automation = { enabled: true, agents: [{ currentRunStartedAt: 123 }] };
+  assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: false, automation }), {
+    statusClass: 'automation-running',
+    badgeClass: 'badge-running',
+    badgeText: 'running...',
+    dimmed: true,
+  });
+});
