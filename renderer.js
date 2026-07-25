@@ -17730,11 +17730,15 @@ document.getElementById('btn-automations-flyout-close').addEventListener('click'
 document.getElementById('btn-automations-global-toggle').addEventListener('click', function () {
   window.electronAPI.toggleAutomationsGlobal().then(function () {
     refreshAutomationsFlyout();
-    // refreshAutomations() covers the banner+cards when a project is active,
-    // but it bails before the settings fetch when there's none — keep this
-    // call too so the banner still updates on the no-project path.
-    refreshGlobalPausedBanner();
+    // refreshAutomations() re-renders the cards (dimmed/paused) and, when a
+    // project is active, the banner too via its own settings fetch. But its
+    // no-project branch force-hides the banner synchronously without
+    // consulting settings — so still call refreshGlobalPausedBanner() to
+    // give the real global state the final say on the banner when no
+    // project is selected (its async settings fetch always lands after
+    // that synchronous hide).
     refreshAutomations();
+    refreshGlobalPausedBanner();
   });
 });
 
