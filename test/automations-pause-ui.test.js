@@ -41,3 +41,13 @@ test('resolveAutomationCardStatus: running outranks a global pause on an enabled
     dimmed: true,
   });
 });
+
+test('resolveAutomationCardStatus: error outranks a global pause on an enabled automation', () => {
+  const automation = { enabled: true, agents: [{ lastRunStatus: 'error' }] };
+  assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: false, automation }), {
+    statusClass: 'automation-error',
+    badgeClass: 'badge-error',
+    badgeText: 'error',
+    dimmed: true,
+  });
+});
