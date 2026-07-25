@@ -14157,15 +14157,19 @@ function promptPauseAutomations(c) {
   // Non-blocking inline confirm (replaces the renderer-blocking window.confirm).
   confirmDialog(
     'You\'ve crossed 90% of your weekly limit (' + Math.round(c.value) + '%).\n\n' +
-    'Pause all your automations? You can re-enable them any time from the Automations panel.',
+    'Pause all your automations? This stops every scheduled run across all projects until you resume it — use the Pause scheduler / Resume scheduler control in the Automations flyout (toolbar), or the banner in the Automations panel.',
     { okLabel: 'Pause all', cancelLabel: 'Not now' }
   ).then(function (ok) {
     if (!ok) return;
     // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
     window.electronAPI.getAutomationSettings().then(function (settings) {
       if (settings && settings.globalEnabled) {
-        window.electronAPI.toggleAutomationsGlobal();
+        return window.electronAPI.toggleAutomationsGlobal();
       }
+    }).then(function () {
+      refreshGlobalPausedBanner();
+      refreshAutomations();
+      refreshAutomationsFlyout();
     }).catch(function () { /* ignore — silent failure is acceptable here */ });
   });
 }
@@ -15366,6 +15370,20 @@ function runWindowBadgeHtml(auto) {
 // Automations Tab
 // ============================================================
 
+function applyGlobalPausedBannerUi(settings) {
+  var banner = document.getElementById('automations-global-paused-banner');
+  var ui = window.AutomationsPauseUi.resolveGlobalPauseUi({ globalEnabled: settings && settings.globalEnabled });
+  if (banner) banner.classList.toggle('hidden', !ui.showBanner);
+  var textEl = document.getElementById('automations-global-paused-banner-text');
+  if (textEl) textEl.textContent = ui.bannerText;
+  return ui.paused;
+}
+
+function refreshGlobalPausedBanner() {
+  if (!window.electronAPI || !window.electronAPI.getAutomationSettings) return Promise.resolve(false);
+  return window.electronAPI.getAutomationSettings().then(applyGlobalPausedBannerUi);
+}
+
 function refreshAutomations() {
   if (importInProgress) return; // Don't overwrite import progress panel
   var listEl = document.getElementById('automations-list');
@@ -15377,13 +15395,24 @@ function refreshAutomations() {
     listEl.innerHTML = '';
     if (noProjectEl) noProjectEl.style.display = '';
     if (searchBar) searchBar.style.display = 'none';
+    // A global scheduler pause is true regardless of which project is
+    // selected, so the banner is settings-driven here too, not force-hidden.
+    refreshGlobalPausedBanner();
     document.getElementById('btn-pause-all-automations').style.display = 'none';
     document.getElementById('btn-resume-all-automations').style.display = 'none';
     return;
   }
   if (noProjectEl) noProjectEl.style.display = 'none';
 
-  window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
+  Promise.all([
+    window.electronAPI.getAutomationSettings(),
+    window.electronAPI.getAutomationsForProject(activeProjectKey)
+  ]).then(function (results) {
+    var settings = results[0];
+    var automations = results[1];
+    var globalEnabled = settings && settings.globalEnabled;
+    applyGlobalPausedBannerUi(settings);
+
     automationsForProject = automations;
     if (searchBar) searchBar.style.display = automations.length > 0 ? '' : 'none';
 
@@ -15409,7 +15438,7 @@ function refreshAutomations() {
         return nameMatch || agentMatch;
       });
     }
-    renderAutomationCards(automations, listEl);
+    renderAutomationCards(automations, listEl, globalEnabled);
   });
   updateAutomationsTabIndicator();
 }
@@ -15445,7 +15474,7 @@ function isManualAutomation(automation) {
   return independentAgents.every(function (ag) { return ag.schedule && ag.schedule.type === 'manual'; });
 }
 
-function renderAutomationCards(automations, container) {
+function renderAutomationCards(automations, container, globalEnabled) {
   container.innerHTML = '';
   if (automations.length === 0) {
     container.innerHTML = '<p style="opacity:0.5;text-align:center;padding:2rem 1rem;font-size:12px;">No automations configured.<br>Click + to create one.</p>';
@@ -15479,21 +15508,12 @@ function renderAutomationCards(automations, container) {
     card.className = 'automation-card';
     var isSimple = automation.agents.length === 1;
 
-    var anyRunning = automation.agents.some(function (ag) { return !!ag.currentRunStartedAt; });
-    var anyError = automation.agents.some(function (ag) { return ag.lastRunStatus === 'error'; });
-
-    var statusClass = 'automation-idle';
-    var badgeClass = 'badge-idle';
-    var badgeText = 'idle';
-
-    if (!automation.enabled) {
-      statusClass = 'automation-disabled'; badgeClass = 'badge-disabled'; badgeText = 'disabled';
-    } else if (anyRunning) {
-      statusClass = 'automation-running'; badgeClass = 'badge-running'; badgeText = 'running...';
-    } else if (anyError) {
-      statusClass = 'automation-error'; badgeClass = 'badge-error'; badgeText = 'error';
-    }
+    var cardStatus = window.AutomationsPauseUi.resolveAutomationCardStatus({ globalEnabled: globalEnabled, automation: automation });
+    var statusClass = cardStatus.statusClass;
+    var badgeClass = cardStatus.badgeClass;
+    var badgeText = cardStatus.badgeText;
     card.classList.add(statusClass);
+    if (cardStatus.dimmed) card.classList.add('automation-globally-paused');
 
     if (isSimple) {
       var agent = automation.agents[0];
@@ -17272,6 +17292,18 @@ document.getElementById('btn-resume-all-automations').addEventListener('click', 
   window.electronAPI.setAllAutomationsEnabled(activeProjectKey, true).then(function () { refreshAutomations(); });
 });
 
+document.getElementById('btn-automations-global-paused-resume').addEventListener('click', function () {
+  window.electronAPI.getAutomationSettings().then(function (settings) {
+    if (!settings || settings.globalEnabled === false) {
+      return window.electronAPI.toggleAutomationsGlobal();
+    }
+  }).catch(function () { /* ignore — refresh below reflects real state either way */ }).then(function () {
+    refreshGlobalPausedBanner();
+    refreshAutomations();
+    refreshAutomationsFlyout();
+  });
+});
+
 document.getElementById('btn-export-automations').addEventListener('click', function () {
   if (!activeProjectKey) { alert('Select a project first.'); return; }
   if (automationsForProject.length === 0) { alert('No automations to export.'); return; }
@@ -17554,9 +17586,13 @@ function refreshAutomationsFlyout() {
     var listEl = document.getElementById('automations-flyout-list');
     var countsEl = document.getElementById('automations-flyout-counts');
 
+    var globalUi = window.AutomationsPauseUi.resolveGlobalPauseUi({ globalEnabled: data.globalEnabled });
     var globalBtn = document.getElementById('btn-automations-global-toggle');
-    globalBtn.innerHTML = data.globalEnabled ? '&#10074;&#10074;' : '&#9654;';
-    globalBtn.title = data.globalEnabled ? 'Pause all automations' : 'Resume all automations';
+    var globalGlyphEl = document.getElementById('automations-global-toggle-glyph');
+    var globalLabelEl = document.getElementById('automations-global-toggle-label');
+    if (globalGlyphEl) globalGlyphEl.textContent = globalUi.toggleGlyph;
+    if (globalLabelEl) globalLabelEl.textContent = globalUi.toggleTitle;
+    globalBtn.title = globalUi.toggleTitle;
 
     var activeCount = 0;
     var attentionCount = 0;
@@ -17836,6 +17872,9 @@ document.getElementById('btn-automations-flyout-close').addEventListener('click'
 document.getElementById('btn-automations-global-toggle').addEventListener('click', function () {
   window.electronAPI.toggleAutomationsGlobal().then(function () {
     refreshAutomationsFlyout();
+    // refreshAutomations() re-renders the cards (dimmed/paused) and always
+    // refreshes the banner too, project-active or not.
+    refreshAutomations();
   });
 });
 

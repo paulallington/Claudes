@@ -160,12 +160,17 @@
               <button class="explorer-refresh" id="btn-add-automation" title="New Automation">+</button>
               <button class="explorer-refresh" id="btn-import-automations" title="Import Automations">&#8615;</button>
               <button class="explorer-refresh" id="btn-export-automations" title="Export All">&#8613;</button>
-              <button class="explorer-refresh" id="btn-pause-all-automations" title="Pause All Automations">&#10074;&#10074;</button>
-              <button class="explorer-refresh" id="btn-resume-all-automations" title="Resume All Automations">&#9654;</button>
+              <button class="explorer-refresh" id="btn-pause-all-automations" title="Disable all automations in this project">&#10074;&#10074;</button>
+              <button class="explorer-refresh" id="btn-resume-all-automations" title="Enable all automations in this project">&#9654;</button>
               <button class="explorer-refresh" id="btn-automations-runwindow-panel" title="Global run window">&#128344;</button>
               <button class="explorer-refresh" id="btn-refresh-automations" title="Refresh">&#8635;</button>
               <button id="btn-clear-automations" class="explorer-refresh" title="Clear All Automations">&#128465;</button>
             </div>
+          </div>
+          <div id="automations-global-paused-banner" class="automations-global-paused-banner hidden">
+            <span class="automations-global-paused-banner-icon">&#9888;</span>
+            <span id="automations-global-paused-banner-text" class="automations-global-paused-banner-text"></span>
+            <button id="btn-automations-global-paused-resume" class="automations-global-paused-banner-resume">Resume</button>
           </div>
           <div id="automations-runwindow-strip" class="automations-runwindow-strip hidden" title="Click to edit the run window">
             <span class="automations-runwindow-strip-dot"></span>
@@ -416,7 +421,10 @@
           <span id="automations-flyout-counts" class="automations-flyout-counts"></span>
         </div>
         <div class="automations-flyout-actions">
-          <button id="btn-automations-global-toggle" class="automations-global-toggle" title="Pause/Resume all automations">&#9654;</button>
+          <button id="btn-automations-global-toggle" class="automations-global-toggle" title="Pause scheduler">
+            <span id="automations-global-toggle-glyph" class="automations-global-toggle-glyph">&#10074;&#10074;</span>
+            <span id="automations-global-toggle-label" class="automations-global-toggle-label">Pause scheduler</span>
+          </button>
           <div class="automations-runwindow-wrap" style="position:relative;display:inline-block;">
             <button id="btn-automations-runwindow" class="automations-flyout-action" title="Run window">&#128344;</button>
             <span id="automations-runwindow-indicator" class="automations-runwindow-indicator hidden"></span>
@@ -1569,6 +1577,7 @@
   <script src="./lib/claude-models.js"></script>
   <script src="./lib/headroom-env.js"></script>
   <script src="./lib/mcp-project.js"></script>
+  <script src="./lib/automations-pause-ui.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>
