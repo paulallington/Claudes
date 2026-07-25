@@ -30,7 +30,9 @@ npm start      # Launches Electron app
 npm test       # node --test over test/*.test.js (pure lib/ coverage)
 ```
 
-Note: `npm test` is **not** run by `release.sh` or CI today — see EVALUATION-TASKS.md.
+Note: `release.sh` **does** run `npm test` and aborts on failure — observed on the v1.9.56/57/58 releases. (This previously said it did not; `/release-gate` was written partly on that assumption, so its stated justification is weaker than it reads.) Whether CI runs the suite independently is unverified — see EVALUATION-TASKS.md.
+
+`npm test` needs **no `node_modules`** — the `lib/` modules are pure and the suite is `node:test`, so it passes in a bare worktree. That is a trap worth knowing: a green suite there says nothing about whether the *app* runs, since `index.html` loads xterm from `./node_modules/@xterm/…`. Run `npm install` in a worktree before `npm start`, and never junction/symlink `node_modules` from the main checkout — `git worktree remove` follows the link and deletes the real one.
 
 ## Subsystems
 
@@ -54,7 +56,7 @@ Use the `/release` slash command:
 /release 2.1.0     # explicit version
 ```
 
-This commits all outstanding changes, then runs `release.sh` which bumps `package.json` version, tags, pushes, builds the installers, and creates a GitHub Release with the artifacts. Requires `gh` CLI to be authenticated. Can also be run manually: `./release.sh [major|minor|patch|x.y.z]`.
+This commits all outstanding changes, then runs `release.sh`, which runs `npm test` (aborting on failure), bumps `package.json`, commits, tags, and pushes. **The installers are then built by GitHub Actions, not locally** — the tag push is what triggers the Windows/macOS/Linux build, and the Release appears once that workflow finishes, so `release.sh` returning does not mean artifacts exist yet. Watch https://github.com/paulallington/Claudes/actions. Can also be run manually: `./release.sh [major|minor|patch|x.y.z]`.
 
 Auto-update is **platform-split**:
 - **Windows/Linux** use `electron-updater` against the GitHub Release (NSIS blockmaps + `latest.yml`; SHA512-verified).
@@ -132,7 +134,7 @@ Reads Claude's replies aloud via ElevenLabs. **Before touching anything voice-re
 implementer-electron + tester-node + ux-reviewer can run TDD cycles in parallel on non-overlapping behaviors.
 7. **Refactor pass** (optional, only when ALL behaviors GREEN) — same implementer agent, refactor prompt, run tests after each step, commit `refactor:` separately. Skip if already clean.
 8. **Quality gate** — `npm test`. ALL must pass (zero errors, including pre-existing). 3 failures → escalate
-9. **Review** — reviewer agent on `git diff main...HEAD`. Review-fix loop: Critical → fix → re-commit → re-gate → re-review (max 2 cycles)
+9. **Review** — reviewer agent on `git diff master...HEAD`. Review-fix loop: Critical → fix → re-commit → re-gate → re-review (max 2 cycles)
 10. **Exit worktree** — `ExitWorktree(action: "keep")`
 11. **Merge and ship** — merge worktree → integration branch → main. Conflict check at each merge, verify after each, revert main on failure. Worktree cleanup (unlock + remove + branch -d) then integration branch cleanup. See Merge Protocol in `_aidp-orchestrator.md`
 12. **Escalate** — user only for architectural decisions or merge conflicts
