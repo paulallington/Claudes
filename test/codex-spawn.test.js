@@ -10,6 +10,8 @@ const {
   CODEX_APPROVAL_PRESETS,
   DEFAULT_CODEX_APPROVAL,
   codexApprovalArgs,
+  codexTuningArgs,
+  codexTuningFromArgs,
   codexApprovalLabelFromArgs
 } = require('../lib/codex-spawn');
 
@@ -90,4 +92,57 @@ test('columnUsesClaudeChrome: true for Claude, false for cmd columns', () => {
   assert.strictEqual(columnUsesClaudeChrome(null), true);
   assert.strictEqual(columnUsesClaudeChrome({ cmd: 'codex' }), false);
   assert.strictEqual(columnUsesClaudeChrome({ cmd: 'dotnet' }), false);
+});
+
+// --- model / effort / service-tier tuning -----------------------------------
+// Every axis is opt-in: omitted or empty emits nothing, so a Codex column
+// spawned without an explicit choice must be byte-identical to one spawned by
+// the old two-argument signature. That backward compatibility is the point.
+
+test('tuning: omitted or empty emits no flags (falls back to config.toml)', () => {
+  assert.deepStrictEqual(codexTuningArgs(undefined), []);
+  assert.deepStrictEqual(codexTuningArgs({}), []);
+  assert.deepStrictEqual(codexTuningArgs({ model: '', effort: '', tier: '' }), []);
+  // the old 2-arg call must be unchanged by this feature
+  assert.deepStrictEqual(
+    buildCodexSpawn(null, 'yolo').args,
+    ['--dangerously-bypass-approvals-and-sandbox']
+  );
+});
+
+test('tuning: model is a flag, effort and tier are -c config overrides', () => {
+  assert.deepStrictEqual(
+    codexTuningArgs({ model: 'gpt-5.6-sol', effort: 'ultra', tier: 'priority' }),
+    ['--model', 'gpt-5.6-sol',
+     '-c', 'model_reasoning_effort=ultra',
+     '-c', 'service_tier=priority']
+  );
+});
+
+test('tuning: values that would corrupt argv are refused', () => {
+  // whitespace would split into extra argv entries; a leading dash reads as a flag
+  assert.deepStrictEqual(codexTuningArgs({ model: 'a b' }), []);
+  assert.deepStrictEqual(codexTuningArgs({ effort: '--dangerously-bypass-approvals-and-sandbox' }), []);
+  assert.deepStrictEqual(codexTuningArgs({ tier: '   ' }), []);
+});
+
+test('approval badge survives appended tuning flags', () => {
+  // regression: the reverse map compares the WHOLE array, so without stripping
+  // the tuning flags every tuned column would have reported 'Custom'
+  const tuned = buildCodexSpawn(null, 'auto', { model: 'gpt-5.6-sol', effort: 'max' }).args;
+  assert.strictEqual(codexApprovalLabelFromArgs(tuned), 'Auto');
+  const bypass = buildCodexSpawn(null, 'yolo', { tier: 'priority' }).args;
+  assert.strictEqual(codexApprovalLabelFromArgs(bypass), 'Yolo (bypass)');
+  // tuning alone, no preset, is still 'Codex default' not 'Custom'
+  assert.strictEqual(codexApprovalLabelFromArgs(codexTuningArgs({ model: 'gpt-5.6-terra' })), 'Codex default');
+});
+
+test('tuning round-trips back out of cmdArgs', () => {
+  const args = buildCodexSpawn(null, 'read-only',
+    { model: 'gpt-5.3-codex-spark', effort: 'low', tier: 'default' }).args;
+  assert.deepStrictEqual(codexTuningFromArgs(args), {
+    model: 'gpt-5.3-codex-spark', effort: 'low', tier: 'default'
+  });
+  assert.deepStrictEqual(codexTuningFromArgs([]), { model: '', effort: '', tier: '' });
+  assert.deepStrictEqual(codexTuningFromArgs(null), { model: '', effort: '', tier: '' });
 });

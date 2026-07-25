@@ -24,6 +24,34 @@ var btnSpawnCodex = document.getElementById('btn-spawn-codex');
 var spawnCodexDivider = document.getElementById('spawn-codex-divider');
 var optCodexApproval = document.getElementById('opt-codex-approval');
 var codexApprovalRow = document.getElementById('opt-codex-approval-row');
+var optCodexModel = document.getElementById('opt-codex-model');
+var optCodexEffort = document.getElementById('opt-codex-effort');
+var optCodexTier = document.getElementById('opt-codex-tier');
+var codexModelRow = document.getElementById('opt-codex-model-row');
+var codexEffortRow = document.getElementById('opt-codex-effort-row');
+var codexTierRow = document.getElementById('opt-codex-tier-row');
+
+// Populate the Codex model/effort/tier pickers from lib/codex-models.js. Each
+// carries a leading "Codex default" option whose value is '' — meaning "emit no
+// flag", so the CLI falls back to ~/.codex/config.toml and a user who never
+// touches these gets exactly the old behaviour.
+function initCodexPickers() {
+  var CM = window.CodexModels;
+  if (!CM) return;
+  function fill(sel, list, inheritLabel) {
+    if (!sel || sel.options.length) return;
+    var html = '<option value="">' + escapeHtml(inheritLabel) + '</option>';
+    list.forEach(function (m) {
+      html += '<option value="' + escapeHtml(m.id) + '"' +
+        (m.hint ? ' title="' + escapeHtml(m.hint) + '"' : '') + '>' +
+        escapeHtml(m.label) + '</option>';
+    });
+    sel.innerHTML = html;
+  }
+  fill(optCodexModel, CM.CODEX_MODELS, 'Codex default');
+  fill(optCodexEffort, CM.CODEX_EFFORTS, 'Codex default');
+  fill(optCodexTier, CM.CODEX_TIERS, 'Codex default');
+}
 var spawnDropdown = document.getElementById('spawn-dropdown');
 var optPermissionMode = document.getElementById('opt-permission-mode');
 var optRemoteControl = document.getElementById('opt-remote-control');
@@ -10977,7 +11005,11 @@ if (btnSpawnCodex) {
   btnSpawnCodex.addEventListener('click', function (e) {
     e.stopPropagation();
     var preset = optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
-    var spec = window.CodexSpawn.buildCodexSpawn(null, preset);
+    var spec = window.CodexSpawn.buildCodexSpawn(null, preset, {
+      model: optCodexModel ? optCodexModel.value : '',
+      effort: optCodexEffort ? optCodexEffort.value : '',
+      tier: optCodexTier ? optCodexTier.value : ''
+    });
     addColumn(spec.args, null, spec.opts);
     closeSpawnDropdown();
   });
@@ -11150,7 +11182,10 @@ function saveSpawnOptions() {
     customArgs: optCustomArgs.value,
     endpointId: currentEndpointId || null,
     endpointModel: currentEndpointModel || null,
-    codexApprovalMode: optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL
+    codexApprovalMode: optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL,
+    codexModel: optCodexModel ? optCodexModel.value : '',
+    codexEffort: optCodexEffort ? optCodexEffort.value : '',
+    codexTier: optCodexTier ? optCodexTier.value : ''
   };
   saveConfig();
 }
@@ -11170,6 +11205,10 @@ function loadSpawnOptions() {
   if (optCodexApproval) {
     optCodexApproval.value = opts.codexApprovalMode || window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
   }
+  initCodexPickers();
+  if (optCodexModel) optCodexModel.value = opts.codexModel || '';
+  if (optCodexEffort) optCodexEffort.value = opts.codexEffort || '';
+  if (optCodexTier) optCodexTier.value = opts.codexTier || '';
 
   // First call on app boot always defaults to cloud (Anthropic), regardless of
   // what was saved. Subsequent calls (project switches within the session)
@@ -11238,6 +11277,12 @@ optCustomArgs.addEventListener('input', onSpawnOptionChanged);
 // onSpawnOptionChanged) so the Claude "+ Spawn · …" tag summary is left untouched.
 if (optCodexApproval) {
   optCodexApproval.addEventListener('change', function () { saveSpawnOptions(); });
+  [optCodexModel, optCodexEffort, optCodexTier].forEach(function (sel) {
+    if (!sel) return;
+    sel.addEventListener('change', function () { saveSpawnOptions(); });
+    sel.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+    sel.addEventListener('click', function (e) { e.stopPropagation(); });
+  });
   // Keep the dropdown open while the native select is used.
   optCodexApproval.addEventListener('mousedown', function (e) { e.stopPropagation(); });
   optCodexApproval.addEventListener('click', function (e) { e.stopPropagation(); });
@@ -11308,6 +11353,10 @@ function initCodexUI() {
     btnSpawnCodex.classList.remove('codex-hidden');
     if (spawnCodexDivider) spawnCodexDivider.classList.remove('codex-hidden');
     if (codexApprovalRow) codexApprovalRow.classList.remove('codex-hidden');
+    initCodexPickers();
+    [codexModelRow, codexEffortRow, codexTierRow].forEach(function (r) {
+      if (r) r.classList.remove('codex-hidden');
+    });
   }).catch(function () { /* leave hidden on error */ });
 }
 

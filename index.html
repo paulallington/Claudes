@@ -308,6 +308,18 @@
                   <option value="codex-default">Codex default</option>
                 </select>
               </div>
+              <div class="spawn-option spawn-codex-approval-row codex-hidden" id="opt-codex-model-row" title="Model Codex starts with (--model). Leave on 'Codex default' to inherit whatever ~/.codex/config.toml specifies.">
+                <label for="opt-codex-model">Model:</label>
+                <select id="opt-codex-model"></select>
+              </div>
+              <div class="spawn-option spawn-codex-approval-row codex-hidden" id="opt-codex-effort-row" title="Reasoning effort (model_reasoning_effort). Higher rungs think longer and consume more of your weekly allowance. Unsupported model/effort pairs are silently normalised by the CLI rather than rejected.">
+                <label for="opt-codex-effort">Effort:</label>
+                <select id="opt-codex-effort"></select>
+              </div>
+              <div class="spawn-option spawn-codex-approval-row codex-hidden" id="opt-codex-tier-row" title="Service tier (service_tier). 'Priority (faster)' is the priority-processing tier — noticeably quicker, but it may draw down your subscription allowance faster.">
+                <label for="opt-codex-tier">Speed:</label>
+                <select id="opt-codex-tier"></select>
+              </div>
               <div class="spawn-divider codex-hidden" id="spawn-codex-divider"></div>
               <label class="spawn-option" id="opt-headroom-label">
                 <input type="checkbox" id="opt-use-headroom"> Use Headroom
@@ -1559,6 +1571,7 @@
   <script src="./lib/clawd-position.js"></script>
   <script src="./lib/clawd-widget.js"></script>
   <script src="./lib/permission-mode.js"></script>
+  <script src="./lib/codex-models.js"></script>
   <script src="./lib/codex-spawn.js"></script>
   <script src="./lib/effort-relaunch.js"></script>
   <script src="./lib/spawn-session.js"></script>
