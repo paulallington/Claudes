@@ -7,6 +7,7 @@ const {
   DEFAULT_1M_MODEL,
   lookup,
   familyOf,
+  resolveModelId,
   contextWindowFor,
   pricesFor,
   supportsOneM,
@@ -109,4 +110,28 @@ test('MODELS is the ordered array of pinned entries', () => {
     'claude-haiku-4-5',
   ]);
   for (const m of MODELS) assert.strictEqual(m.isAlias, false);
+});
+
+// --- alias resolution -------------------------------------------------------
+// An alias carries no version, so it has no known context window. Anything
+// that needs a concrete id (Headroom's [1m] pin above all) must resolve first,
+// or the most obvious dropdown picks silently lose the 1M window.
+
+test('resolveModelId: aliases resolve to the newest pinned id in their family', () => {
+  assert.strictEqual(resolveModelId('opus'), 'claude-opus-5');
+  assert.strictEqual(resolveModelId('sonnet'), 'claude-sonnet-5');
+  assert.strictEqual(resolveModelId('haiku'), 'claude-haiku-4-5');
+});
+
+test('resolveModelId: concrete ids and unknown ids pass through unchanged', () => {
+  assert.strictEqual(resolveModelId('claude-opus-4-8'), 'claude-opus-4-8');
+  assert.strictEqual(resolveModelId('claude-made-up-9'), 'claude-made-up-9');
+  assert.strictEqual(resolveModelId(''), '');
+  assert.strictEqual(resolveModelId(null), null);
+});
+
+test('supportsOneM resolves aliases before deciding (regression: alias lost 1M)', () => {
+  assert.strictEqual(supportsOneM('opus'), true);
+  assert.strictEqual(supportsOneM('sonnet'), true);
+  assert.strictEqual(supportsOneM('haiku'), false);
 });

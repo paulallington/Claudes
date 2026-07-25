@@ -177,3 +177,22 @@ test('proxy args: timeout+retry flags present in all three modes', () => {
     assert.deepStrictEqual(args.slice(-6), DEFAULT_TIMEOUT_RETRY_TAIL);
   }
 });
+
+// Regression: picking the "Opus (latest)" alias in the spawn dropdown used to
+// inject ANTHROPIC_MODEL=opus with no [1m] suffix — silently dropping the 1M
+// window for one of the most likely picks in the list.
+test('alias model is resolved and still gets the [1m] pin', () => {
+  const env = buildHeadroomEnv({ enabled: true, oneM: true, oneMModel: 'opus' });
+  assert.strictEqual(env.ANTHROPIC_MODEL, 'claude-opus-5[1m]');
+  assert.strictEqual(
+    headroomModelWindow({ oneM: true, oneMModel: 'opus' }), 1000000
+  );
+});
+
+test('non-1M alias is pinned bare, with a 200k window', () => {
+  const env = buildHeadroomEnv({ enabled: true, oneM: true, oneMModel: 'haiku' });
+  assert.strictEqual(env.ANTHROPIC_MODEL, 'claude-haiku-4-5');
+  assert.strictEqual(
+    headroomModelWindow({ oneM: true, oneMModel: 'haiku' }), 200000
+  );
+});
