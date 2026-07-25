@@ -3170,7 +3170,19 @@ function restoreSessions(projectPath, workspaceId) {
       // the dropdown's --model instead of the pin the column was saved with
       // (and addColumn's detectedModel scan then re-persists that wrong value,
       // destroying the saved pin on the very next persistSessions).
-      resumeArgs = reconcileModelArgForRespawn(resumeArgs, e, isLocalResume);
+      // Reconcile against what will ACTUALLY be spawned, not against the saved
+      // entry. They differ on one path: when e.endpointId names a preset whose
+      // env can no longer be resolved (deleted, or an IPC failure), the fallback
+      // above drops endpointId/env from resumeRowOpts — so maybeBindHeadroom
+      // sees hasEndpoint:false and binds ANTHROPIC_MODEL, while keying this off
+      // `e` would still see the stale endpointId, decide Headroom does NOT own
+      // the model, and inject --model too. Both selectors, flag wins, 1M window
+      // silently gone — the exact drift this reconciler exists to prevent.
+      resumeArgs = reconcileModelArgForRespawn(resumeArgs, {
+        model: e.model,
+        endpointId: resumeRowOpts.endpointId,
+        env: resumeRowOpts.env
+      }, isLocalResume);
       resumeArgs = window.SpawnSession.planResumeArgs({ baseArgs: resumeArgs, sessionId: e.sessionId, exists: exists });
       return { resumeArgs: resumeArgs, resumeRowOpts: resumeRowOpts };
     }
@@ -4902,8 +4914,15 @@ function addColumn(args, targetRow, opts) {
   }
   // Detect the model from --model flag or ANTHROPIC_MODEL env, so the ctx meter
   // can pick the correct limit (200k vs 1M). Falls back to 'sonnet' (200k).
+  // Scan BACKWARDS: the CLI is last-wins on a repeated --model (verified — a
+  // bogus id followed by a real one runs the real one), and argv can genuinely
+  // repeat it, because buildSpawnArgs pushes the dropdown's --model and then
+  // appends the user's Custom args, which may contain their own. Taking the
+  // first match recorded a model the column was not running, and since
+  // col.model is re-persisted and now also drives the respawn reconciler, that
+  // wrong value would overwrite the user's hand-typed one on the next respawn.
   var detectedModel = null;
-  for (var mi = 0; mi < claudeArgs.length - 1; mi++) {
+  for (var mi = claudeArgs.length - 2; mi >= 0; mi--) {
     if (claudeArgs[mi] === '--model') { detectedModel = claudeArgs[mi + 1]; break; }
   }
   if (!detectedModel && opts.env && opts.env.ANTHROPIC_MODEL) {

@@ -348,3 +348,27 @@ test('reconcile: re-injection strips a [1m] window marker from the saved model',
   const out = reconcileModelArgForRespawn(['--effort', 'high'], 'claude-opus-5[1m]', false, false);
   assert.deepStrictEqual(out, ['--effort', 'high', '--model', 'claude-opus-5']);
 });
+
+// --- regression guards for the restore/respawn reconciler -------------------
+// m5: the legacy path (no saved pin) is the highest-value case in this file —
+// it is what guarantees an old sessions.json entry restores byte-identical.
+
+test('no saved pin: an existing --model is left completely untouched', () => {
+  const r = reconcileModelArgForRespawn;
+  assert.deepStrictEqual(
+    r(['--model', 'claude-opus-5', '--effort', 'high'], null, false, false),
+    ['--model', 'claude-opus-5', '--effort', 'high']
+  );
+  assert.deepStrictEqual(
+    r(['--model=claude-opus-5', '--effort', 'high'], null, false, false),
+    ['--model=claude-opus-5', '--effort', 'high']
+  );
+});
+
+test('repeated --model collapses to exactly one selector (CLI is last-wins)', () => {
+  const r = reconcileModelArgForRespawn;
+  assert.deepStrictEqual(
+    r(['--model', 'a', '--model', 'b'], 'claude-sonnet-5', false, false),
+    ['--model', 'claude-sonnet-5']
+  );
+});
