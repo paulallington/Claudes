@@ -5564,6 +5564,8 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 .automation-card.automation-attention { border-left-color: #f5a623; }
 .automation-card.automation-error { border-left-color: #ef4444; }
 .automation-card.automation-disabled { opacity: 0.5; }
+.automation-card.automation-paused { border-left-color: var(--color-yellow); }
+.automation-card.automation-globally-paused { opacity: 0.6; }
 
 .automation-section-separator {
   display: flex;
@@ -5634,6 +5636,7 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 .automation-status-badge.badge-error { background: rgba(239,68,68,0.2); color: #ef4444; }
 .automation-status-badge.badge-scheduled { background: rgba(99,102,241,0.2); color: #6366f1; }
 .automation-status-badge.badge-disabled { background: rgba(128,128,128,0.2); color: #888; }
+.automation-status-badge.badge-paused { background: rgba(255,214,10,0.15); color: var(--color-yellow); }
 
 .automation-card-next {
   font-size: 10px;
@@ -5968,7 +5971,19 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 }
 
 .automations-global-toggle {
+  display: flex !important;
+  align-items: center;
+  gap: 5px;
   font-size: 12px !important;
+}
+
+.automations-global-toggle-glyph {
+  font-size: 12px;
+}
+
+.automations-global-toggle-label {
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .automations-flyout-list {
@@ -6999,6 +7014,38 @@ body.mode-popout #btn-add-project {
 }
 .automations-runwindow-strip.active .automations-runwindow-strip-dot { background: var(--color-green); }
 .automations-runwindow-strip.paused .automations-runwindow-strip-dot { background: var(--color-yellow); }
+
+.automations-global-paused-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  background: rgba(255, 214, 10, 0.1);
+  border-bottom: 1px solid rgba(255, 214, 10, 0.3);
+  color: var(--color-yellow);
+}
+.automations-global-paused-banner.hidden { display: none; }
+.automations-global-paused-banner-icon {
+  flex: 0 0 auto;
+}
+.automations-global-paused-banner-text {
+  flex: 1;
+}
+.automations-global-paused-banner-resume {
+  flex: 0 0 auto;
+  background: rgba(255, 214, 10, 0.15);
+  border: 1px solid rgba(255, 214, 10, 0.4);
+  color: var(--color-yellow);
+  border-radius: 3px;
+  padding: 3px 8px;
+  font-size: 10px;
+  cursor: pointer;
+}
+.automations-global-paused-banner-resume:hover {
+  background: rgba(255, 214, 10, 0.25);
+}
 
 /* === Run Window Modal Section === */
 .automation-runwindow-section {
