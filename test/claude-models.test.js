@@ -45,8 +45,9 @@ test('alias handling: opus/sonnet/haiku resolve to "(latest)" alias entries', ()
   assert.strictEqual(haiku.isAlias, true);
 });
 
-test('ALIASES is an ordered array of the three CLI aliases', () => {
-  assert.deepStrictEqual(ALIASES.map((a) => a.id), ['opus', 'sonnet', 'haiku']);
+test('ALIASES is an ordered array of the CLI aliases', () => {
+  // `claude --model` documents these as the "latest" shorthands.
+  assert.deepStrictEqual(ALIASES.map((a) => a.id), ['fable', 'opus', 'sonnet', 'haiku']);
   for (const a of ALIASES) assert.strictEqual(a.isAlias, true);
 });
 
@@ -134,4 +135,10 @@ test('supportsOneM resolves aliases before deciding (regression: alias lost 1M)'
   assert.strictEqual(supportsOneM('opus'), true);
   assert.strictEqual(supportsOneM('sonnet'), true);
   assert.strictEqual(supportsOneM('haiku'), false);
+});
+
+test('fable alias resolves and is 1M-capable (CLI accepts `fable` as a latest alias)', () => {
+  assert.strictEqual(resolveModelId('fable'), 'claude-fable-5');
+  assert.strictEqual(supportsOneM('fable'), true);
+  assert.strictEqual(familyOf('fable'), 'fable');
 });
