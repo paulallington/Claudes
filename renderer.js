@@ -3150,10 +3150,12 @@ function restoreSessions(projectPath, workspaceId) {
 
       var resumeArgs;
       var resumeRowOpts = baseRowOpts;
+      var isLocalResume = false;
       if (e.endpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
         var envBlock = null;
         try { envBlock = await window.electronAPI.endpointGetEnv(e.endpointId); } catch (_) { envBlock = null; }
         if (envBlock) {
+          isLocalResume = true;
           resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ true);
           resumeRowOpts = Object.assign({}, baseRowOpts, { endpointId: e.endpointId, env: envBlock });
         } else {
@@ -3162,6 +3164,13 @@ function restoreSessions(projectPath, workspaceId) {
       } else {
         resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
       }
+      // `spawnArgs` above is built ONCE from the current global spawn dropdown,
+      // not from this entry's own saved model — reconcile against e.model the
+      // same way every respawn does, or a Headroom-OFF restore silently carries
+      // the dropdown's --model instead of the pin the column was saved with
+      // (and addColumn's detectedModel scan then re-persists that wrong value,
+      // destroying the saved pin on the very next persistSessions).
+      resumeArgs = reconcileModelArgForRespawn(resumeArgs, e, isLocalResume);
       resumeArgs = window.SpawnSession.planResumeArgs({ baseArgs: resumeArgs, sessionId: e.sessionId, exists: exists });
       return { resumeArgs: resumeArgs, resumeRowOpts: resumeRowOpts };
     }
@@ -3425,43 +3434,28 @@ function buildResumeArgs(col) {
   return reconcileModelArgForRespawn(args, col, isLocal);
 }
 
-// Reconcile a stored --model flag against whatever owns the model NOW, using
-// the same headroomOwnsModel() predicate buildSpawnArgs() decides with —
-// otherwise the two can drift on a Headroom toggle flip across a respawn:
-//   - Headroom was OFF at spawn (--model survives in cmdArgs) -> user turns
-//     Headroom ON -> respawn would inject ANTHROPIC_MODEL=<model>[1m] AND
-//     keep the stale --model flag; the flag wins over the env var, silently
-//     dropping the 1M window.
-//   - Headroom was ON at spawn (--model was never pushed, see buildSpawnArgs)
-//     -> user turns Headroom OFF -> respawn would carry neither selector and
-//     the column falls back to the CLI default instead of col.model.
-// So: strip --model when Headroom will own the binding, and (re)inject
-// --model <col.model> when it will not — mirroring buildSpawnArgs exactly.
+// Reconcile a stored --model flag against whatever owns the model NOW —
+// thin renderer wrapper around the pure, unit-tested lib/headroom-env.js
+// implementation. `col` is any col-shaped object carrying `.model`,
+// `.endpointId`, `.env` (a saved sessions.json entry qualifies directly).
+// Shared by every respawn (buildResumeArgs) AND restoreSessions'
+// buildResumeForEntry, so both paths reconcile the same way instead of one
+// silently overwriting the saved pin with the current dropdown value.
+//
+// hasEndpoint intentionally uses the same `!!(col.endpointId || col.env)`
+// expression every maybeBindHeadroom call site uses — NOT the narrower
+// `isLocal` param (which also requires env.ANTHROPIC_BASE_URL) — so this
+// can never drift from what actually binds Headroom for the column.
 function reconcileModelArgForRespawn(args, col, isLocal) {
   var headroomOwnsModel = window.HeadroomEnv && window.HeadroomEnv.headroomOwnsModel({
     headroomInstalled: headroomInstalled,
     useHeadroom: config && config.useHeadroom,
     useHeadroom1m: config && config.useHeadroom1m,
-    hasEndpoint: isLocal
+    hasEndpoint: !!(col.endpointId || col.env)
   });
-  var out = [];
-  var hadModel = false;
-  for (var i = 0; i < args.length; i++) {
-    if (args[i] === '--model' && i + 1 < args.length) {
-      hadModel = true;
-      if (headroomOwnsModel) { i++; continue; } // strip: env owns it now
-      out.push(args[i], args[i + 1]);
-      i++;
-      continue;
-    }
-    out.push(args[i]);
-  }
-  // isLocal columns never get a bare --model re-injected here — an endpoint
-  // preset's env block owns the model tier, same as buildSpawnArgs.
-  if (!headroomOwnsModel && !isLocal && !hadModel && col.model) {
-    out.push('--model', col.model);
-  }
-  return out;
+  return window.HeadroomEnv
+    ? window.HeadroomEnv.reconcileModelArgForRespawn(args, col.model, headroomOwnsModel, isLocal)
+    : args;
 }
 
 // Local Anthropic-compat servers (LM Studio etc.) accept low/medium/high/max
@@ -11201,12 +11195,15 @@ function spawnOpts(extra) {
     }
   }
   if (currentEndpointEnv) o.env = currentEndpointEnv;
-  // Every spawn path must carry the dropdown pick, not just the Spawn button:
-  // buildSpawnArgs deliberately omits --model when Headroom owns the binding,
-  // so a caller that passes no opts.model silently falls back to the 1M default
-  // and the column runs a model the user did not choose. Callers that set their
-  // own `model` in `extra` win, since the spread above lands first.
-  if (!o.model && optModel && optModel.value) o.model = optModel.value;
+  // Every Claude spawn path must carry the dropdown pick, not just the Spawn
+  // button: buildSpawnArgs deliberately omits --model when Headroom owns the
+  // binding, so a caller that passes no opts.model silently falls back to the
+  // 1M default and the column runs a model the user did not choose. Callers
+  // that set their own `model` in `extra` win, since the spread above lands
+  // first. Non-Claude columns (Codex, arbitrary --cmd) have no use for a
+  // Claude model id — stamping one on anyway just persists junk into
+  // sessions.json that the CLI can never consume.
+  if (!o.model && !o.cmd && optModel && optModel.value) o.model = optModel.value;
   return o;
 }
 

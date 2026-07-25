@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { buildHeadroomEnv, buildHeadroomProxyArgs, headroomModelWindow, headroomOwnsModel } = require('../lib/headroom-env');
+const { buildHeadroomEnv, buildHeadroomProxyArgs, headroomModelWindow, headroomOwnsModel, reconcileModelArgForRespawn } = require('../lib/headroom-env');
 
 test('enabled claude column -> base URL + tool search', () => {
   const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false });
@@ -238,4 +238,113 @@ test('headroomOwnsModel: useHeadroom1m undefined defaults to on (matches buildHe
 test('headroomOwnsModel: no input -> false (safe)', () => {
   assert.strictEqual(headroomOwnsModel(), false);
   assert.strictEqual(headroomOwnsModel({}), false);
+});
+
+// reconcileModelArgForRespawn: shared by every respawn (buildResumeArgs) AND
+// restoreSessions (buildResumeForEntry) so a saved per-column model is never
+// silently clobbered by whatever the global spawn dropdown currently reads.
+function countModelSelectors(args) {
+  var n = 0;
+  for (var i = 0; i < args.length; i++) {
+    if (args[i] === '--model') n++;
+    else if (typeof args[i] === 'string' && /^--model=/.test(args[i])) n++;
+  }
+  return n;
+}
+
+test('reconcile: Headroom owns model, no model pinned -> no --model, args untouched', () => {
+  const out = reconcileModelArgForRespawn(['--effort', 'high'], null, true, false);
+  assert.deepStrictEqual(out, ['--effort', 'high']);
+  assert.strictEqual(countModelSelectors(out), 0);
+});
+
+test('reconcile: Headroom owns model, model pinned -> --model stripped (env owns it)', () => {
+  const out = reconcileModelArgForRespawn(['--effort', 'high', '--model', 'claude-opus-5'], 'claude-opus-5', true, false);
+  assert.deepStrictEqual(out, ['--effort', 'high']);
+  assert.strictEqual(countModelSelectors(out), 0);
+});
+
+test('reconcile: Headroom off, no model pinned -> nothing injected', () => {
+  const out = reconcileModelArgForRespawn(['--effort', 'high'], null, false, false);
+  assert.deepStrictEqual(out, ['--effort', 'high']);
+  assert.strictEqual(countModelSelectors(out), 0);
+});
+
+test('reconcile: Headroom off, model pinned, no existing flag -> --model injected exactly once', () => {
+  const out = reconcileModelArgForRespawn(['--effort', 'high'], 'claude-opus-5', false, false);
+  assert.deepStrictEqual(out, ['--effort', 'high', '--model', 'claude-opus-5']);
+  assert.strictEqual(countModelSelectors(out), 1);
+});
+
+test('reconcile: Headroom off, alias model pinned -> alias re-injected verbatim (not resolved)', () => {
+  const out = reconcileModelArgForRespawn(['--effort', 'high'], 'opus', false, false);
+  assert.deepStrictEqual(out, ['--effort', 'high', '--model', 'opus']);
+});
+
+test('reconcile: Headroom off, model pinned, matching existing --model -> still exactly one selector', () => {
+  const out = reconcileModelArgForRespawn(['--model', 'claude-opus-5', '--effort', 'high'], 'claude-opus-5', false, false);
+  assert.deepStrictEqual(out, ['--effort', 'high', '--model', 'claude-opus-5']);
+  assert.strictEqual(countModelSelectors(out), 1);
+});
+
+// M1 regression: restoreSessions builds args once from the CURRENT global
+// spawn dropdown, so a stray --model in `args` can belong to the dropdown,
+// not this entry. The reconciler must never trust that value — it always
+// wins with the entry's own `model`, replacing whatever was already there.
+test("reconcile: stray --model from the CURRENT dropdown is replaced by the entry's own model", () => {
+  const out = reconcileModelArgForRespawn(['--model', 'claude-haiku-4-5', '--effort', 'high'], 'claude-sonnet-5', false, false);
+  assert.deepStrictEqual(out, ['--effort', 'high', '--model', 'claude-sonnet-5']);
+  assert.strictEqual(countModelSelectors(out), 1);
+});
+
+test('reconcile: isLocal -> no bare --model re-injected even with a model pinned (endpoint env owns the tier)', () => {
+  const out = reconcileModelArgForRespawn(['--effort', 'high'], 'claude-opus-5', false, true);
+  assert.deepStrictEqual(out, ['--effort', 'high']);
+  assert.strictEqual(countModelSelectors(out), 0);
+});
+
+test('reconcile: isLocal + Headroom owns -> --model still stripped', () => {
+  const out = reconcileModelArgForRespawn(['--model', 'claude-opus-5'], 'claude-opus-5', true, true);
+  assert.deepStrictEqual(out, []);
+});
+
+// m3: --model=<value> single-token shape (typable in the Custom args field)
+// must be recognised, not treated as "no existing selector" (which used to
+// let a second --model get appended alongside it).
+test('reconcile: --model=<value> shape is recognised and replaced by the pinned model, exactly once', () => {
+  const out = reconcileModelArgForRespawn(['--model=claude-opus-5', '--effort', 'high'], 'claude-opus-5', false, false);
+  assert.deepStrictEqual(out, ['--effort', 'high', '--model', 'claude-opus-5']);
+  assert.strictEqual(countModelSelectors(out), 1);
+});
+
+test('reconcile: --model=<value> shape is stripped when Headroom owns the binding', () => {
+  const out = reconcileModelArgForRespawn(['--model=claude-opus-5', '--effort', 'high'], 'claude-opus-5', true, false);
+  assert.deepStrictEqual(out, ['--effort', 'high']);
+  assert.strictEqual(countModelSelectors(out), 0);
+});
+
+// m3: a malformed trailing bare --model (no value) must never survive AND
+// must never cause a second --model to be appended alongside it.
+test('reconcile: trailing bare --model (malformed) is dropped and replaced by exactly one valid selector', () => {
+  const out = reconcileModelArgForRespawn(['--effort', 'high', '--model'], 'claude-opus-5', false, false);
+  assert.deepStrictEqual(out, ['--effort', 'high', '--model', 'claude-opus-5']);
+  assert.strictEqual(countModelSelectors(out), 1);
+});
+
+test('reconcile: trailing bare --model dropped with no model to fall back on -> no selector at all', () => {
+  const out = reconcileModelArgForRespawn(['--effort', 'high', '--model'], null, true, false);
+  assert.deepStrictEqual(out, ['--effort', 'high']);
+  assert.strictEqual(countModelSelectors(out), 0);
+});
+
+test('reconcile: empty/undefined args -> safe no-op', () => {
+  assert.deepStrictEqual(reconcileModelArgForRespawn([], 'claude-opus-5', false, false), ['--model', 'claude-opus-5']);
+  assert.deepStrictEqual(reconcileModelArgForRespawn(undefined, null, false, false), []);
+});
+
+// m4: re-injection strips a [1m] window marker rather than pinning it back
+// onto a plain --model flag (the marker only means something as an env var).
+test('reconcile: re-injection strips a [1m] window marker from the saved model', () => {
+  const out = reconcileModelArgForRespawn(['--effort', 'high'], 'claude-opus-5[1m]', false, false);
+  assert.deepStrictEqual(out, ['--effort', 'high', '--model', 'claude-opus-5']);
 });
