@@ -4914,17 +4914,10 @@ function addColumn(args, targetRow, opts) {
   }
   // Detect the model from --model flag or ANTHROPIC_MODEL env, so the ctx meter
   // can pick the correct limit (200k vs 1M). Falls back to 'sonnet' (200k).
-  // Scan BACKWARDS: the CLI is last-wins on a repeated --model (verified — a
-  // bogus id followed by a real one runs the real one), and argv can genuinely
-  // repeat it, because buildSpawnArgs pushes the dropdown's --model and then
-  // appends the user's Custom args, which may contain their own. Taking the
-  // first match recorded a model the column was not running, and since
-  // col.model is re-persisted and now also drives the respawn reconciler, that
-  // wrong value would overwrite the user's hand-typed one on the next respawn.
-  var detectedModel = null;
-  for (var mi = claudeArgs.length - 2; mi >= 0; mi--) {
-    if (claudeArgs[mi] === '--model') { detectedModel = claudeArgs[mi + 1]; break; }
-  }
+  // Last-wins across BOTH `--model x` and `--model=x` — see detectFlagValue for
+  // why (argv legitimately repeats the flag, and a mis-read gets persisted and
+  // then replayed over the user's own choice on respawn).
+  var detectedModel = window.SpawnSession.detectFlagValue(claudeArgs, '--model');
   if (!detectedModel && opts.env && opts.env.ANTHROPIC_MODEL) {
     detectedModel = opts.env.ANTHROPIC_MODEL;
   }
@@ -4936,10 +4929,11 @@ function addColumn(args, targetRow, opts) {
   }
   // Detect the effort this column was launched with, so the header badge and
   // every later respawn (buildResumeArgs) reflect/preserve it.
-  var detectedEffort = null;
-  for (var efi = 0; efi < claudeArgs.length - 1; efi++) {
-    if (claudeArgs[efi] === '--effort') { detectedEffort = claudeArgs[efi + 1]; break; }
-  }
+  // Same first-wins bug as --model had, and NOT cosmetic: col.effort is the
+  // source of truth for the header badge and buildResumeArgs rebuilds --effort
+  // from it, so a user who typed `--effort max` in Custom args was silently
+  // downgraded to the spawn-option default on their first respawn.
+  var detectedEffort = window.SpawnSession.detectFlagValue(claudeArgs, '--effort');
 
   var colData = {
     element: col,

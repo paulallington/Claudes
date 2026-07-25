@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { planFreshSessionId, randomUuidV4, planResumeArgs } = require('../lib/spawn-session');
+const { planFreshSessionId, randomUuidV4, planResumeArgs, detectFlagValue } = require('../lib/spawn-session');
 
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -91,4 +91,40 @@ test('randomUuidV4 returns a valid v4 uuid and two calls differ', () => {
   assert.match(a, UUID_V4_RE);
   assert.match(b, UUID_V4_RE);
   assert.notEqual(a, b);
+});
+
+// --- detectFlagValue --------------------------------------------------------
+// argv legitimately repeats these flags: buildSpawnArgs pushes the spawn-option
+// value and then appends the user's Custom args, which may carry their own. The
+// CLI is last-wins across both `--flag v` and `--flag=v` (verified against the
+// binary), and a mis-read is persisted then replayed over the user's own choice
+// on respawn — so this is behavioural, not cosmetic.
+
+test('detectFlagValue: last-wins on a repeated positional flag', () => {
+  assert.strictEqual(detectFlagValue(['--model', 'a', '--model', 'b'], '--model'), 'b');
+});
+
+test('detectFlagValue: understands the --flag=value shape, and mixes with it', () => {
+  assert.strictEqual(detectFlagValue(['--model=b'], '--model'), 'b');
+  assert.strictEqual(detectFlagValue(['--model', 'a', '--model=b'], '--model'), 'b');
+  assert.strictEqual(detectFlagValue(['--model=a', '--model', 'b'], '--model'), 'b');
+});
+
+test('detectFlagValue: user Custom args beat the spawn-option default', () => {
+  // dropdown pushed --model sonnet; user typed --model=opus in Custom args
+  assert.strictEqual(
+    detectFlagValue(['--model', 'claude-sonnet-5', '--model=claude-opus-5'], '--model'),
+    'claude-opus-5'
+  );
+  // same shape for effort — col.effort drives respawn, so this one downgraded
+  // a hand-typed `max` back to the default before this fix
+  assert.strictEqual(detectFlagValue(['--effort', 'high', '--effort', 'max'], '--effort'), 'max');
+});
+
+test('detectFlagValue: safe on absent, trailing-bare, empty and non-array input', () => {
+  assert.strictEqual(detectFlagValue(['-p', 'hi'], '--model'), null);
+  assert.strictEqual(detectFlagValue(['-p', '--model'], '--model'), null);
+  assert.strictEqual(detectFlagValue([], '--model'), null);
+  assert.strictEqual(detectFlagValue(null, '--model'), null);
+  assert.strictEqual(detectFlagValue(['--model', 'a'], ''), null);
 });
