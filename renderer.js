@@ -14035,8 +14035,12 @@ function promptPauseAutomations(c) {
     // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
     window.electronAPI.getAutomationSettings().then(function (settings) {
       if (settings && settings.globalEnabled) {
-        window.electronAPI.toggleAutomationsGlobal();
+        return window.electronAPI.toggleAutomationsGlobal();
       }
+    }).then(function () {
+      refreshGlobalPausedBanner();
+      refreshAutomations();
+      refreshAutomationsFlyout();
     }).catch(function () { /* ignore — silent failure is acceptable here */ });
   });
 }
@@ -15240,14 +15244,15 @@ function refreshAutomations() {
   var listEl = document.getElementById('automations-list');
   var noProjectEl = document.getElementById('automations-no-project');
   var searchBar = document.getElementById('automations-search-bar');
-  var banner = document.getElementById('automations-global-paused-banner');
   if (!listEl) return;
 
   if (!activeProjectKey) {
     listEl.innerHTML = '';
     if (noProjectEl) noProjectEl.style.display = '';
     if (searchBar) searchBar.style.display = 'none';
-    if (banner) banner.classList.add('hidden');
+    // A global scheduler pause is true regardless of which project is
+    // selected, so the banner is settings-driven here too, not force-hidden.
+    refreshGlobalPausedBanner();
     document.getElementById('btn-pause-all-automations').style.display = 'none';
     document.getElementById('btn-resume-all-automations').style.display = 'none';
     return;
@@ -17155,7 +17160,7 @@ document.getElementById('btn-automations-global-paused-resume').addEventListener
     if (!settings || settings.globalEnabled === false) {
       return window.electronAPI.toggleAutomationsGlobal();
     }
-  }).then(function () {
+  }).catch(function () { /* ignore — refresh below reflects real state either way */ }).then(function () {
     refreshGlobalPausedBanner();
     refreshAutomations();
     refreshAutomationsFlyout();
@@ -17730,15 +17735,9 @@ document.getElementById('btn-automations-flyout-close').addEventListener('click'
 document.getElementById('btn-automations-global-toggle').addEventListener('click', function () {
   window.electronAPI.toggleAutomationsGlobal().then(function () {
     refreshAutomationsFlyout();
-    // refreshAutomations() re-renders the cards (dimmed/paused) and, when a
-    // project is active, the banner too via its own settings fetch. But its
-    // no-project branch force-hides the banner synchronously without
-    // consulting settings — so still call refreshGlobalPausedBanner() to
-    // give the real global state the final say on the banner when no
-    // project is selected (its async settings fetch always lands after
-    // that synchronous hide).
+    // refreshAutomations() re-renders the cards (dimmed/paused) and always
+    // refreshes the banner too, project-active or not.
     refreshAutomations();
-    refreshGlobalPausedBanner();
   });
 });
 
