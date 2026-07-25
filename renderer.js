@@ -3263,7 +3263,12 @@ function restoreSessions(projectPath, workspaceId) {
       for (var i = 0; i < slice.length; i++) {
         var entry = slice[i];
         var sid = typeof entry === 'string' ? entry : entry && entry.sessionId;
-        if (!sid) continue;
+        var cmdVal = (typeof entry === 'object' && entry && entry.cmd) ? entry.cmd : null;
+        var cmdArgsVal = (typeof entry === 'object' && entry && Array.isArray(entry.cmdArgs)) ? entry.cmdArgs : [];
+        // A cmd entry (Codex, custom run config) has no sessionId to key on —
+        // it persists on cmd alone (see isPersistableColumn), so only bail
+        // when NEITHER is present.
+        if (!sid && !cmdVal) continue;
         var rowIdx = (typeof entry === 'object' && entry && typeof entry.rowIdx === 'number' && isFinite(entry.rowIdx)) ? entry.rowIdx : 0;
         var widthRatio = (typeof entry === 'object' && entry && typeof entry.widthRatio === 'number' && isFinite(entry.widthRatio) && entry.widthRatio > 0) ? entry.widthRatio : null;
         var title = (typeof entry === 'object' && entry && entry.title) ? entry.title : null;
@@ -3275,19 +3280,23 @@ function restoreSessions(projectPath, workspaceId) {
         // list so they don't create rows/affect rowHeightRatios. They restore
         // live-but-minimised into the dock after the grid is built.
         if (typeof entry === 'object' && entry && entry.minimized === true) {
-          var minEntry = { sessionId: sid, title: title };
+          var minEntry = { title: title };
+          if (sid) minEntry.sessionId = sid;
           if (cwd) minEntry.cwd = cwd;
           if (cwdSource) minEntry.cwdSource = cwdSource;
           if (endpointId) minEntry.endpointId = endpointId;
           if (model) minEntry.model = model;
+          if (cmdVal) { minEntry.cmd = cmdVal; minEntry.cmdArgs = cmdArgsVal; }
           minimizedEntries.push(minEntry);
           continue;
         }
-        var pushedEntry = { rowIdx: rowIdx, sessionId: sid, title: title, widthRatio: widthRatio };
+        var pushedEntry = { rowIdx: rowIdx, title: title, widthRatio: widthRatio };
+        if (sid) pushedEntry.sessionId = sid;
         if (cwd) pushedEntry.cwd = cwd;
         if (cwdSource) pushedEntry.cwdSource = cwdSource;
         if (endpointId) pushedEntry.endpointId = endpointId;
         if (model) pushedEntry.model = model;
+        if (cmdVal) { pushedEntry.cmd = cmdVal; pushedEntry.cmdArgs = cmdArgsVal; }
         entries.push(pushedEntry);
       }
       if (rowHeightRatios) {
@@ -3348,6 +3357,16 @@ function restoreSessions(projectPath, workspaceId) {
           }
         }
 
+        // cmd entries (Codex, custom run configs) replay their literal cmd +
+        // cmdArgs directly — no --resume, no --session-id, no endpoint
+        // rewriting, no Headroom binding. Codex runs direct, never through
+        // Headroom (see CLAUDE.md), and it never had a Claude session to
+        // resume in the first place.
+        if (window.SpawnSession.isCmdEntry(e)) {
+          addColumn(e.cmdArgs || [], targetRow, Object.assign({}, rowOpts, { cmd: e.cmd }));
+          continue;
+        }
+
         // Endpoint-aware resume: if this column was spawned against a non-cloud
         // endpoint preset, look up the preset's env block and rewrite args. If
         // the preset is gone (envBlock null) or no endpointId is recorded,
@@ -3384,8 +3403,12 @@ function restoreSessions(projectPath, workspaceId) {
             console.warn("Minimised column '" + (ment.title || ment.sessionId) + "' had cwd " + ment.cwd + " which no longer exists; restored at project root.");
           }
         }
-        var mBuilt = await buildResumeForEntry(ment, minRowOpts);
-        addColumn(mBuilt.resumeArgs, null, mBuilt.resumeRowOpts);
+        if (window.SpawnSession.isCmdEntry(ment)) {
+          addColumn(ment.cmdArgs || [], null, Object.assign({}, minRowOpts, { cmd: ment.cmd }));
+        } else {
+          var mBuilt = await buildResumeForEntry(ment, minRowOpts);
+          addColumn(mBuilt.resumeArgs, null, mBuilt.resumeRowOpts);
+        }
         // addColumn assigns id = ++globalColumnId and registers it synchronously.
         var newId = globalColumnId;
         minimizeColumn(newId);
@@ -5951,15 +5974,19 @@ function persistSessions(projectKey, workspaceId) {
       var rowEntries = [];
       for (var c2 = 0; c2 < row.columnIds.length; c2++) {
         var col2 = state.columns.get(row.columnIds[c2]);
-        if (!col2 || !col2.sessionId) continue;
+        // Claude columns need a sessionId to be resumable; cmd columns
+        // (Codex, custom run configs) have no transcript but persist on
+        // having a cmd to replay instead — see isPersistableColumn.
+        if (!col2 || !window.SpawnSession.isPersistableColumn(col2)) continue;
         var widthRatio = colWidths[c2] / totalColWidth;
         if (!hidden) col2.lastWidthRatio = widthRatio;
-        var entry = {
-          sessionId: col2.sessionId,
-          title: col2.customTitle || null,
-          rowIdx: compactRowIdx,
-          widthRatio: widthRatio
-        };
+        // Key order matches the pre-cmd-support shape exactly for the
+        // sessionId case (sessionId first) so a legacy Claude-only
+        // sessions.json round-trips byte-identically; cmd-only entries (no
+        // sessionId) simply omit the key rather than writing it null.
+        var entry = col2.sessionId
+          ? { sessionId: col2.sessionId, title: col2.customTitle || null, rowIdx: compactRowIdx, widthRatio: widthRatio }
+          : { title: col2.customTitle || null, rowIdx: compactRowIdx, widthRatio: widthRatio };
         if (col2.cwd && col2.cwd !== projectKey) entry.cwd = col2.cwd;
         if (col2.cwd && col2.cwd !== projectKey && col2.cwdSource) entry.cwdSource = col2.cwdSource;
         // Persist endpoint association so restored columns come back on the
@@ -5970,6 +5997,13 @@ function persistSessions(projectKey, workspaceId) {
         // the 1M default — omitted (not written null/undefined) when unset so
         // existing session files without the key keep restoring unchanged.
         if (col2.model) entry.model = col2.model;
+        // cmd columns (Codex, custom run configs) carry no sessionId — persist
+        // the literal cmd + original args instead so restore can replay the
+        // exact spawn (model/effort/tier are already baked into cmdArgs).
+        if (col2.cmd) {
+          entry.cmd = col2.cmd;
+          entry.cmdArgs = col2.cmdArgs || [];
+        }
         rowEntries.push(entry);
       }
 
@@ -5987,16 +6021,20 @@ function persistSessions(projectKey, workspaceId) {
     for (var mi = 0; mi < state.minimized.length; mi++) {
       var mid = state.minimized[mi];
       var mcol = state.columns.get(mid);
-      if (!mcol || !mcol.sessionId) continue;
-      var ment = {
-        sessionId: mcol.sessionId,
-        title: mcol.customTitle || null,
-        minimized: true
-      };
+      if (!mcol || !window.SpawnSession.isPersistableColumn(mcol)) continue;
+      // Key order matches the pre-cmd-support shape (sessionId first) when
+      // present, so legacy minimised Claude entries round-trip byte-identically.
+      var ment = mcol.sessionId
+        ? { sessionId: mcol.sessionId, title: mcol.customTitle || null, minimized: true }
+        : { title: mcol.customTitle || null, minimized: true };
       if (mcol.cwd && mcol.cwd !== projectKey) ment.cwd = mcol.cwd;
       if (mcol.cwd && mcol.cwd !== projectKey && mcol.cwdSource) ment.cwdSource = mcol.cwdSource;
       if (mcol.endpointId) ment.endpointId = mcol.endpointId;
       if (mcol.model) ment.model = mcol.model;
+      if (mcol.cmd) {
+        ment.cmd = mcol.cmd;
+        ment.cmdArgs = mcol.cmdArgs || [];
+      }
       sessionData.push(ment);
     }
   }

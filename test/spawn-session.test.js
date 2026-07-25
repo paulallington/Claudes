@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { planFreshSessionId, randomUuidV4, planResumeArgs, detectFlagValue } = require('../lib/spawn-session');
+const { planFreshSessionId, randomUuidV4, planResumeArgs, detectFlagValue, isPersistableColumn, isCmdEntry } = require('../lib/spawn-session');
 
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -127,4 +127,31 @@ test('detectFlagValue: safe on absent, trailing-bare, empty and non-array input'
   assert.strictEqual(detectFlagValue([], '--model'), null);
   assert.strictEqual(detectFlagValue(null, '--model'), null);
   assert.strictEqual(detectFlagValue(['--model', 'a'], ''), null);
+});
+
+// --- isPersistableColumn / isCmdEntry ---------------------------------------
+// These gate the Codex-column-survives-restart fix: a `cmd` column has no
+// sessionId (no Claude transcript) but must still be written to sessions.json,
+// and a persisted `cmd` entry must be flagged so restore bypasses Claude's
+// resume/endpoint/Headroom plumbing.
+
+test('isPersistableColumn: a Claude column with a sessionId persists', () => {
+  assert.equal(isPersistableColumn({ sessionId: 'abc', cmd: null }), true);
+});
+
+test('isPersistableColumn: a cmd column with no sessionId still persists', () => {
+  assert.equal(isPersistableColumn({ sessionId: null, cmd: 'codex' }), true);
+});
+
+test('isPersistableColumn: neither sessionId nor cmd does not persist', () => {
+  assert.equal(isPersistableColumn({ sessionId: null, cmd: null }), false);
+  assert.equal(isPersistableColumn(null), false);
+  assert.equal(isPersistableColumn(undefined), false);
+});
+
+test('isCmdEntry: true only when entry.cmd is truthy', () => {
+  assert.equal(isCmdEntry({ cmd: 'codex' }), true);
+  assert.equal(isCmdEntry({ cmd: null, sessionId: 'abc' }), false);
+  assert.equal(isCmdEntry({}), false);
+  assert.equal(isCmdEntry(null), false);
 });
