@@ -11,3 +11,13 @@ test('resolveGlobalPauseUi treats a missing globalEnabled as enabled (not paused
     toggleTitle: 'Pause scheduler',
   });
 });
+
+test('resolveGlobalPauseUi shows the paused banner/toggle when globalEnabled is explicitly false', () => {
+  assert.deepEqual(resolveGlobalPauseUi({ globalEnabled: false }), {
+    paused: true,
+    showBanner: true,
+    bannerText: 'Automations are paused — no scheduled runs will start.',
+    toggleGlyph: '▶',
+    toggleTitle: 'Resume scheduler',
+  });
+});
