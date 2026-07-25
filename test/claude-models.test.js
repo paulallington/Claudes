@@ -82,11 +82,11 @@ test('unknown/null/undefined ids return safe defaults without throwing', () => {
   assert.strictEqual(supportsOneM(null), false);
 });
 
-test('family fallback: an old/unversioned opus id gets legacy prices+context', () => {
-  const prices = pricesFor('claude-opus-4-1');
+test('family fallback: an unpinned opus id gets legacy prices+context', () => {
+  const prices = pricesFor('claude-opus-4-0-unpinned');
   assert.strictEqual(prices.input, 15);
   assert.strictEqual(prices.output, 75);
-  assert.strictEqual(contextWindowFor('claude-opus-4-1'), 200000);
+  assert.strictEqual(contextWindowFor('claude-opus-4-0-unpinned'), 200000);
 });
 
 test('derived cache prices are correct for opus-5 (cacheRead 0.5, cacheCreation 6.25)', () => {
@@ -102,6 +102,8 @@ test('MODELS is the ordered array of pinned entries', () => {
     'claude-opus-4-8',
     'claude-opus-4-7',
     'claude-opus-4-6',
+    'claude-opus-4-5',
+    'claude-opus-4-1',
     'claude-sonnet-5',
     'claude-sonnet-4-6',
     'claude-haiku-4-5',
