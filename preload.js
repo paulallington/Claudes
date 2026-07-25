@@ -130,6 +130,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   synthesizeVoiceFromTranscript: (opts) => ipcRenderer.invoke('voice:synthesizeFromTranscript', opts),
   synthesizeVoiceColumn: (opts) => ipcRenderer.invoke('voice:synthesizeColumn', opts),
   peekColumn: (o) => ipcRenderer.invoke('voice:peekColumn', o),
+  readColumnTranscript: (o) => ipcRenderer.invoke('handoff:readTranscript', o),
   synthesizeVoiceFreshFromColumn: (o) => ipcRenderer.invoke('voice:synthesizeFreshFromColumn', o),
   extractColumnSentences: (o) => ipcRenderer.invoke('voice:extractColumnSentences', o),
   getPersonality: () => ipcRenderer.invoke('voice:getPersonality'),

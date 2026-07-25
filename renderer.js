@@ -108,6 +108,7 @@ var optHeadroomShaper = document.getElementById('opt-headroom-shaper');
 var optHeadroomAutostart = document.getElementById('opt-headroom-autostart');
 var headroomSubs = document.getElementById('opt-headroom-subs');
 var headroomInstalled = false;  // resolved async from main; gates wrapping + UI
+var codexPresent = false;  // resolved async from main (initCodexUI); gates the handoff menu row too
 var headroomProbed = false;     // true once main's post-probe status has landed (gates the not-installed prompt so it doesn't flash before the probe)
 
 // Per-endpoint-class default effort applied at spawn. User-configurable in the
@@ -6988,6 +6989,13 @@ function showColumnOverflowMenu(id, x, y) {
     addRow('↖', 'Teleport to claude.ai', function () {
       wsSend({ type: 'write', id: id, data: '/teleport\n' });
     });
+    // Handing off FROM Codex isn't this feature — only offer it on Claude columns,
+    // and only once main has confirmed the codex CLI is actually on PATH.
+    if (codexPresent) {
+      addRow('⇥', 'Hand off to Codex', function () {
+        handoffColumnToCodex(id);
+      });
+    }
   }
 
   addRow('↻', 'Restart', function () {
@@ -7022,6 +7030,74 @@ function showColumnOverflowMenu(id, x, y) {
   refreshVoiceButtonStates();
 
   setTimeout(function () { document.addEventListener('mousedown', outside, true); }, 0);
+}
+
+// Hand off a Claude column's conversation to a fresh Codex column in the same
+// cwd: read the transcript, build a markdown handoff doc, write it under
+// <cwd>/.claudes/, then spawn Codex there seeded with a short pointer prompt.
+// Failure (missing/unreadable transcript, or one with no recoverable turns) is
+// surfaced via toast and nothing is spawned — a Codex column that silently
+// knows nothing is worse than no column at all.
+async function handoffColumnToCodex(id) {
+  var col = allColumns.get(id);
+  if (!col) return;
+  if (!col.sessionId || !col.projectKey) {
+    showToast('Hand off to Codex: this column has no Claude session yet', { kind: 'warn' });
+    return;
+  }
+  var cwd = col.cwd || col.projectKey;
+
+  var read = await window.electronAPI.readColumnTranscript({
+    projectKey: col.projectKey, cwd: cwd, sessionId: col.sessionId
+  });
+  if (!read || !read.ok) {
+    showToast('Hand off to Codex failed: transcript ' + ((read && read.error) || 'unreadable'), { kind: 'error' });
+    return;
+  }
+
+  var turns = window.CodexHandoff.extractTurns(read.content);
+  if (!turns.length) {
+    showToast('Hand off to Codex: nothing recoverable yet — the transcript may not be flushed to disk', { kind: 'warn' });
+    return;
+  }
+  var activity = window.CodexHandoff.extractActivity(read.content);
+
+  // Best-effort branch metadata — a handoff still succeeds without it.
+  var branch = null;
+  if (window.electronAPI.gitBranch) {
+    try { branch = await window.electronAPI.gitBranch(cwd); } catch (e) { /* optional */ }
+  }
+
+  var now = new Date();
+  var doc = window.CodexHandoff.buildHandoffDoc({
+    turns: turns,
+    activity: activity,
+    title: col.customTitle || ('Claude #' + id),
+    cwd: cwd,
+    branch: branch || null,
+    sessionId: col.sessionId,
+    generatedAt: now.toISOString()
+  });
+
+  var fileName = window.CodexHandoff.handoffFileName(now);
+  var relPath = '.claudes/' + fileName;
+  var fullPath = String(cwd).replace(/[\\/]+$/, '') + '/' + relPath;
+
+  var written = await window.electronAPI.writeFile(fullPath, doc);
+  if (!written || !written.success) {
+    showToast('Hand off to Codex failed: could not write ' + relPath + ' (' + ((written && written.error) || 'unknown') + ')', { kind: 'error' });
+    return;
+  }
+
+  var preset = optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
+  var spec = window.CodexSpawn.buildCodexSpawn(cwd, preset, {
+    model: optCodexModel ? optCodexModel.value : '',
+    effort: optCodexEffort ? optCodexEffort.value : '',
+    tier: optCodexTier ? optCodexTier.value : ''
+  });
+  spec.args = spec.args.concat([window.CodexHandoff.buildHandoffPrompt(relPath)]);
+  addColumn(spec.args, null, spec.opts);
+  showToast('Handed off to a new Codex column (' + turns.length + ' turn(s))', { kind: 'success' });
 }
 
 // ============================================================
@@ -11387,6 +11463,7 @@ function initHeadroomUI() {
 function initCodexUI() {
   if (!btnSpawnCodex || !window.electronAPI || !window.electronAPI.hasCodex) return;
   window.electronAPI.hasCodex().then(function (present) {
+    codexPresent = !!present;
     if (!present) return;
     btnSpawnCodex.classList.remove('codex-hidden');
     if (spawnCodexDivider) spawnCodexDivider.classList.remove('codex-hidden');

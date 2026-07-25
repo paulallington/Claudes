@@ -2381,6 +2381,9 @@ ipcMain.handle('fs:writeFile', (event, filePath, content) => {
     if (Buffer.byteLength(content, 'utf8') > FS_WRITE_MAX_BYTES) {
       return { success: false, error: 'content exceeds write size cap (5MB)' };
     }
+    // Create the parent dir (e.g. a project's .claudes/) if it doesn't exist yet —
+    // a no-op when it already does. Still inside the assertInsideAllowedRoots gate above.
+    try { fs.mkdirSync(path.dirname(safe), { recursive: true }); } catch { /* exists */ }
     fs.writeFileSync(safe, content, 'utf8');
     return { success: true };
   } catch (err) {
@@ -5689,6 +5692,27 @@ async function readVoiceTranscript(p) {
   }
   return content;
 }
+
+// Read a column's full Claude Code transcript for a Claude -> Codex handoff.
+// Reuses the same path resolution as voice (transcriptPath -> cwd-keyed ->
+// projectKey-keyed), but does NOT reuse fs:readFile — that handler is gated by
+// assertInsideAllowedRoots, which does not (and must not) cover ~/.claude/projects.
+// isUnderProjectsRoot is checked explicitly here too, in addition to inside
+// resolveColumnTranscriptPath, as defense-in-depth against a future refactor of
+// either path silently loosening it.
+ipcMain.handle('handoff:readTranscript', async (event, args) => {
+  const a = args || {};
+  try {
+    const thePath = resolveColumnTranscriptPath(a);
+    if (!thePath || !isUnderProjectsRoot(os.homedir(), thePath)) {
+      return { ok: false, error: 'no_transcript' };
+    }
+    const content = await fs.promises.readFile(thePath, 'utf8');
+    return { ok: true, content };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
 
 // Cheap peek: report the last assistant message uuid and whether there is any
 // speakable text, without synthesizing. Lets the renderer record a baseline
