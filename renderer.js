@@ -17730,7 +17730,11 @@ document.getElementById('btn-automations-flyout-close').addEventListener('click'
 document.getElementById('btn-automations-global-toggle').addEventListener('click', function () {
   window.electronAPI.toggleAutomationsGlobal().then(function () {
     refreshAutomationsFlyout();
+    // refreshAutomations() covers the banner+cards when a project is active,
+    // but it bails before the settings fetch when there's none — keep this
+    // call too so the banner still updates on the no-project path.
     refreshGlobalPausedBanner();
+    refreshAutomations();
   });
 });
 
