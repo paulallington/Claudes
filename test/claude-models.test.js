@@ -8,6 +8,7 @@ const {
   lookup,
   familyOf,
   resolveModelId,
+  stripWindowMarker,
   contextWindowFor,
   pricesFor,
   supportsOneM,
@@ -141,4 +142,32 @@ test('fable alias resolves and is 1M-capable (CLI accepts `fable` as a latest al
   assert.strictEqual(resolveModelId('fable'), 'claude-fable-5');
   assert.strictEqual(supportsOneM('fable'), true);
   assert.strictEqual(familyOf('fable'), 'fable');
+});
+
+// --- Headroom's [1m] window marker -----------------------------------------
+// The app injects ANTHROPIC_MODEL=<id>[1m], so that suffixed string is what
+// the CLI is told its model is and can come back to us in a session digest.
+// Left unnormalised it misses the exact-id lookup and silently reinstates the
+// legacy 200k / $15-$75 defaults this catalogue exists to kill.
+
+test('[1m] marker does not defeat the exact-id lookup', () => {
+  assert.strictEqual(contextWindowFor('claude-opus-5[1m]'), 1000000);
+  assert.deepStrictEqual(pricesFor('claude-opus-5[1m]'), pricesFor('claude-opus-5'));
+  assert.strictEqual(supportsOneM('claude-opus-5[1m]'), true);
+  assert.strictEqual(familyOf('claude-opus-5[1m]'), 'opus');
+});
+
+test('stripWindowMarker is exact and does not maul ordinary ids', () => {
+  assert.strictEqual(stripWindowMarker('claude-opus-5[1m]'), 'claude-opus-5');
+  assert.strictEqual(stripWindowMarker('claude-opus-5[1M]'), 'claude-opus-5');
+  assert.strictEqual(stripWindowMarker('claude-opus-5'), 'claude-opus-5');
+  assert.strictEqual(stripWindowMarker('claude-fable-5'), 'claude-fable-5');
+});
+
+test('resolving an already-suffixed id does not double-suffix it', () => {
+  const { buildHeadroomEnv } = require('../lib/headroom-env');
+  const env = buildHeadroomEnv({
+    enabled: true, oneM: true, oneMModel: 'claude-opus-5[1m]',
+  });
+  assert.strictEqual(env.ANTHROPIC_MODEL, 'claude-opus-5[1m]');
 });
