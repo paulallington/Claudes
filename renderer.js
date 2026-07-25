@@ -3287,7 +3287,7 @@ function restoreSessions(projectPath, workspaceId) {
           if (cwdSource) minEntry.cwdSource = cwdSource;
           if (endpointId) minEntry.endpointId = endpointId;
           if (model) minEntry.model = model;
-          if (cmdVal) { minEntry.cmd = cmdVal; minEntry.cmdArgs = cmdArgsVal; }
+          if (e && e.kind === 'codex') { minEntry.kind = 'codex'; minEntry.codexPreset = e.codexPreset; minEntry.codexModel = e.codexModel; minEntry.codexEffort = e.codexEffort; minEntry.codexTier = e.codexTier; }
           minimizedEntries.push(minEntry);
           continue;
         }
@@ -3297,7 +3297,7 @@ function restoreSessions(projectPath, workspaceId) {
         if (cwdSource) pushedEntry.cwdSource = cwdSource;
         if (endpointId) pushedEntry.endpointId = endpointId;
         if (model) pushedEntry.model = model;
-        if (cmdVal) { pushedEntry.cmd = cmdVal; pushedEntry.cmdArgs = cmdArgsVal; }
+        if (e && e.kind === 'codex') { pushedEntry.kind = 'codex'; pushedEntry.codexPreset = e.codexPreset; pushedEntry.codexModel = e.codexModel; pushedEntry.codexEffort = e.codexEffort; pushedEntry.codexTier = e.codexTier; }
         entries.push(pushedEntry);
       }
       if (rowHeightRatios) {
@@ -3363,10 +3363,14 @@ function restoreSessions(projectPath, workspaceId) {
         // rewriting, no Headroom binding. Codex runs direct, never through
         // Headroom (see CLAUDE.md), and it never had a Claude session to
         // resume in the first place.
-        if (window.SpawnSession.isCmdEntry(e)) {
-          addColumn(e.cmdArgs || [], targetRow, Object.assign({}, rowOpts, { cmd: e.cmd }));
+        var codexSpec = window.CodexSpawn.buildCodexRestore(e, rowOpts.cwd || projectPath, window.CodexModels);
+        if (codexSpec) {
+          addColumn(codexSpec.args, targetRow, Object.assign({}, rowOpts, codexSpec.opts));
           continue;
         }
+        // A legacy entry carrying a raw cmd/cmdArgs is the exact shape of the
+        // execution vector — drop it rather than honouring it.
+        if (e && e.cmd) { console.warn('Ignoring session entry with a raw cmd (not restorable for safety).'); continue; }
 
         // Endpoint-aware resume: if this column was spawned against a non-cloud
         // endpoint preset, look up the preset's env block and rewrite args. If
@@ -3404,8 +3408,9 @@ function restoreSessions(projectPath, workspaceId) {
             console.warn("Minimised column '" + (ment.title || ment.sessionId) + "' had cwd " + ment.cwd + " which no longer exists; restored at project root.");
           }
         }
-        if (window.SpawnSession.isCmdEntry(ment)) {
-          addColumn(ment.cmdArgs || [], null, Object.assign({}, minRowOpts, { cmd: ment.cmd }));
+        var minCodexSpec = window.CodexSpawn.buildCodexRestore(ment, minRowOpts.cwd || projectPath, window.CodexModels);
+        if (minCodexSpec) {
+          addColumn(minCodexSpec.args, null, Object.assign({}, minRowOpts, minCodexSpec.opts));
         } else {
           var mBuilt = await buildResumeForEntry(ment, minRowOpts);
           addColumn(mBuilt.resumeArgs, null, mBuilt.resumeRowOpts);
@@ -6002,8 +6007,12 @@ function persistSessions(projectKey, workspaceId) {
         // the literal cmd + original args instead so restore can replay the
         // exact spawn (model/effort/tier are already baked into cmdArgs).
         if (col2.cmd) {
-          entry.cmd = col2.cmd;
-          entry.cmdArgs = col2.cmdArgs || [];
+          // SECURITY: never persist the program name or free-form argv.
+          // sessions.json lives INSIDE the repo, so it is attacker-controlled;
+          // storing a `cmd` there turns a data file into an execution vector on
+          // project open. Store validated intent and rebuild the command from
+          // our own catalogue on restore instead.
+          Object.assign(entry, window.CodexSpawn.codexPersistShape(col2.cmdArgs || []));
         }
         rowEntries.push(entry);
       }
@@ -6033,8 +6042,8 @@ function persistSessions(projectKey, workspaceId) {
       if (mcol.endpointId) ment.endpointId = mcol.endpointId;
       if (mcol.model) ment.model = mcol.model;
       if (mcol.cmd) {
-        ment.cmd = mcol.cmd;
-        ment.cmdArgs = mcol.cmdArgs || [];
+        // See the security note in the grid loop above.
+        Object.assign(ment, window.CodexSpawn.codexPersistShape(mcol.cmdArgs || []));
       }
       sessionData.push(ment);
     }

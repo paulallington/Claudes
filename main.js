@@ -2384,6 +2384,12 @@ ipcMain.handle('fs:writeFile', (event, filePath, content) => {
     // Create the parent dir (e.g. a project's .claudes/) if it doesn't exist yet —
     // a no-op when it already does. Still inside the assertInsideAllowedRoots gate above.
     try { fs.mkdirSync(path.dirname(safe), { recursive: true }); } catch { /* exists */ }
+    // Re-assert containment AFTER creating the parent. assertInsideAllowedRoots
+    // falls back to a plain string-prefix check when the path does not exist yet
+    // (it cannot realpath a missing file), so a symlinked directory inside an
+    // allowed root would pass the first check and only resolve outside once
+    // mkdir materialised it. Now the parent exists, realpath is meaningful.
+    assertInsideAllowedRoots(safe);
     fs.writeFileSync(safe, content, 'utf8');
     return { success: true };
   } catch (err) {

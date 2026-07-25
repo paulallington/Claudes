@@ -12,6 +12,8 @@ const {
   codexApprovalArgs,
   codexTuningArgs,
   codexTuningFromArgs,
+  buildCodexRestore,
+  codexPersistShape,
   codexApprovalLabelFromArgs
 } = require('../lib/codex-spawn');
 
@@ -145,4 +147,65 @@ test('tuning round-trips back out of cmdArgs', () => {
   });
   assert.deepStrictEqual(codexTuningFromArgs([]), { model: '', effort: '', tier: '' });
   assert.deepStrictEqual(codexTuningFromArgs(null), { model: '', effort: '', tier: '' });
+});
+
+// --- SECURITY: sessions.json must never be able to name a program -----------
+// <project>/.claudes/sessions.json lives INSIDE the repository, so it is
+// attacker-controlled, and restoreSessions reads it automatically on project
+// open with no confirmation. Persisting a raw `cmd` there turned a data file
+// into an execution vector. The persisted shape is intent only; the command
+// comes from our constant and every value is validated against the catalogue.
+
+const CodexModels = require('../lib/codex-models');
+
+test('SECURITY: a raw cmd/cmdArgs entry is never honoured on restore', () => {
+  assert.strictEqual(
+    buildCodexRestore({ cmd: 'powershell', cmdArgs: ['-c', 'calc'] }, '/x', CodexModels),
+    null
+  );
+  assert.strictEqual(buildCodexRestore({ cmd: 'codex' }, '/x', CodexModels), null);
+  assert.strictEqual(buildCodexRestore(null, '/x', CodexModels), null);
+  assert.strictEqual(buildCodexRestore({ kind: 'notcodex' }, '/x', CodexModels), null);
+});
+
+test('SECURITY: restore always spawns OUR command, never the file\'s', () => {
+  const spec = buildCodexRestore({ kind: 'codex', codexPreset: 'yolo' }, '/x', CodexModels);
+  assert.strictEqual(spec.opts.cmd, 'codex');
+});
+
+test('SECURITY: unrecognised catalogue values are dropped, not passed through', () => {
+  const spec = buildCodexRestore({
+    kind: 'codex', codexPreset: 'yolo',
+    codexModel: 'powershell', codexEffort: '-c evil', codexTier: 'nonsense'
+  }, '/x', CodexModels);
+  assert.deepStrictEqual(spec.args, ['--dangerously-bypass-approvals-and-sandbox']);
+  assert.ok(!spec.args.join(' ').includes('powershell'));
+});
+
+test('SECURITY: an unknown preset falls back to the default, not to raw input', () => {
+  const spec = buildCodexRestore({ kind: 'codex', codexPreset: 'evil-preset' }, '/x', CodexModels);
+  assert.deepStrictEqual(spec.args, codexApprovalArgs(DEFAULT_CODEX_APPROVAL));
+});
+
+test('persist shape carries no program name and no free-form argv', () => {
+  const args = buildCodexSpawn('/x', 'yolo', { model: 'gpt-5.6-sol', effort: 'ultra' }).args
+    .concat(['Read .claudes/h.md first...']);          // handoff seed prompt
+  const shape = codexPersistShape(args);
+  assert.deepStrictEqual(shape, {
+    kind: 'codex', codexPreset: 'yolo',
+    codexModel: 'gpt-5.6-sol', codexEffort: 'ultra', codexTier: ''
+  });
+  assert.ok(!Object.prototype.hasOwnProperty.call(shape, 'cmd'));
+  assert.ok(!Object.prototype.hasOwnProperty.call(shape, 'cmdArgs'));
+});
+
+test('a persisted shape round-trips back to the same argv', () => {
+  const original = buildCodexSpawn('/x', 'auto', { model: 'gpt-5.6-sol', effort: 'xhigh', tier: 'priority' });
+  const restored = buildCodexRestore(codexPersistShape(original.args), '/x', CodexModels);
+  assert.deepStrictEqual(restored.args, original.args);
+});
+
+test('approval badge survives a trailing handoff prompt (M2 regression)', () => {
+  const args = buildCodexSpawn('/x', 'yolo', {}).args.concat(['Read .claudes/h.md first...']);
+  assert.strictEqual(codexApprovalLabelFromArgs(args), 'Yolo (bypass)');
 });
