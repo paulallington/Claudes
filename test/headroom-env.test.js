@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { buildHeadroomEnv, buildHeadroomProxyArgs } = require('../lib/headroom-env');
+const { buildHeadroomEnv, buildHeadroomProxyArgs, headroomModelWindow } = require('../lib/headroom-env');
 
 test('enabled claude column -> base URL + tool search', () => {
   const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false });
@@ -64,6 +64,19 @@ test('hasMcp true + oneM -> still sets ANTHROPIC_MODEL, still no ENABLE_TOOL_SEA
 test('hasMcp explicitly false -> ENABLE_TOOL_SEARCH still set', () => {
   const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false, hasMcp: false });
   assert.strictEqual(env.ENABLE_TOOL_SEARCH, 'true');
+});
+
+test('oneM with a non-1M-capable model pins the bare id, no [1m] suffix', () => {
+  const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false, oneM: true, oneMModel: 'claude-haiku-4-5' });
+  assert.strictEqual(env.ANTHROPIC_MODEL, 'claude-haiku-4-5');
+});
+
+test('headroomModelWindow: 1M model -> 1000000', () => {
+  assert.strictEqual(headroomModelWindow({ enabled: true, hasEndpoint: false, oneM: true, oneMModel: 'claude-opus-4-8' }), 1000000);
+});
+
+test('headroomModelWindow: non-1M model -> 200000', () => {
+  assert.strictEqual(headroomModelWindow({ enabled: true, hasEndpoint: false, oneM: true, oneMModel: 'claude-haiku-4-5' }), 200000);
 });
 
 const DEFAULT_TIMEOUT_RETRY_TAIL = [

@@ -735,7 +735,7 @@ function connectWS() {
           if (col3.env) respawnMsg.env = col3.env;
           // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
           // Re-derived from the live global flag; never persisted on the column.
-          maybeBindHeadroom(respawnMsg, { hasEndpoint: !!(col3.endpointId || col3.env), isClaude: !col3.cmd, hasMcp: !!(col3 && col3.hasMcp) });
+          maybeBindHeadroom(respawnMsg, { hasEndpoint: !!(col3.endpointId || col3.env), isClaude: !col3.cmd, hasMcp: !!(col3 && col3.hasMcp), oneMModel: col3.model });
           col3.terminal.clear();
           gatedWsSend(respawnMsg);
           setColumnActivity(msg.id, 'working');
@@ -828,12 +828,18 @@ function reattachAllColumns() {
 // spawn/respawn path routes through here so they all self-heal identically.
 function maybeBindHeadroom(msg, ctx) {
   if (!msg || !window.HeadroomEnv) return;
+  // ctx.oneMModel carries the user's dropdown pick (threaded from optModel.value
+  // at spawn time) so ANTHROPIC_MODEL — the one selector once Headroom owns the
+  // env block — reflects what the user actually chose, not just the configured
+  // 1M default.
+  var oneMModel = (ctx && ctx.oneMModel) || (config && config.headroom1mModel) ||
+    (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL);
   var env = window.HeadroomEnv.buildHeadroomEnv({
     enabled: !!(headroomInstalled && config && config.useHeadroom),
     hasEndpoint: !!(ctx && ctx.hasEndpoint),
     isClaude: !(ctx && ctx.isClaude === false),
     oneM: !!(config && config.useHeadroom1m !== false),
-    oneMModel: (config && config.headroom1mModel) || 'claude-opus-4-8',
+    oneMModel: oneMModel,
     hasMcp: !!(ctx && ctx.hasMcp)
   });
   if (env) msg.env = Object.assign({}, msg.env, env);
@@ -4099,7 +4105,7 @@ function createExitOverlay(id, exitCode, col) {
     if (col.env) sendMsg.env = col.env;
     // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
     // Re-derived from the live global flag; passthrough for endpoint/arbitrary cmd.
-    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp) });
+    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp), oneMModel: col.model });
     gatedWsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
@@ -4593,7 +4599,7 @@ function addColumn(args, targetRow, opts) {
     // Persist so respawn/reattach paths keep MCP inlined (Headroom tool-search off) without re-resolving.
     var __col = allColumns.get(id);
     if (__col) __col.hasMcp = __hasMcp;
-    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd, hasMcp: __hasMcp });
+    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd, hasMcp: __hasMcp, oneMModel: opts.model });
     if (mcpRes) sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
 
     vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
@@ -4822,6 +4828,12 @@ function addColumn(args, targetRow, opts) {
   }
   if (!detectedModel && opts.env && opts.env.ANTHROPIC_MODEL) {
     detectedModel = opts.env.ANTHROPIC_MODEL;
+  }
+  // Headroom-bound spawns intentionally skip pushing --model (see buildSpawnArgs)
+  // so ANTHROPIC_MODEL is the only selector — fall back to the dropdown pick
+  // passed through opts.model so the ctx meter still sees the right model.
+  if (!detectedModel && opts.model) {
+    detectedModel = opts.model;
   }
   // Detect the effort this column was launched with, so the header badge and
   // every later respawn (buildResumeArgs) reflect/preserve it.
@@ -6159,7 +6171,7 @@ async function restartColumn(id) {
   }
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
   // Passthrough for arbitrary-cmd/endpoint columns; hasMcp from the fresh resolve.
-  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: __rHasMcp });
+  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: __rHasMcp, oneMModel: col.model });
   gatedWsSend(sendMsg);
   // Re-evaluate stale-hook health from a clean slate for the new session: if
   // hooks now reach the column it will never re-flag; if they still don't, the
@@ -10849,6 +10861,10 @@ btnAdd.addEventListener('click', async function () {
       spawnOpts.cwd = resolved.path;
       spawnOpts.cwdSource = 'manual';
     }
+    // Threaded through to maybeBindHeadroom (via addColumn's opts.model) so a
+    // Headroom-bound spawn pins ANTHROPIC_MODEL to the dropdown pick even
+    // though buildSpawnArgs skips --model for that case (see below).
+    if (optModel.value) spawnOpts.model = optModel.value;
     var args = buildSpawnArgs(resolved);
     addColumn(args.length > 0 ? args : null, null, spawnOpts);
   } finally {
@@ -10950,8 +10966,14 @@ function buildSpawnArgs(resolved) {
   }
   // The CLI's --model flag overrides ANTHROPIC_MODEL env, so when an endpoint
   // preset is active we skip it — the env block already pins every model tier
-  // to the preset's model and CLI flags would override that.
-  if (optModel.value && !currentEndpointId) {
+  // to the preset's model and CLI flags would override that. Same reasoning
+  // extends to Headroom's 1M binding: pushing --model here would override the
+  // ANTHROPIC_MODEL=<model>[1m] maybeBindHeadroom is about to inject, silently
+  // dropping the 1M window — so let the env carry the choice instead (threaded
+  // through opts.model -> maybeBindHeadroom's oneMModel).
+  var headroomOwnsModel = !!(headroomInstalled && config && config.useHeadroom) &&
+    !currentEndpointId && (config && config.useHeadroom1m !== false);
+  if (optModel.value && !currentEndpointId && !headroomOwnsModel) {
     args.push('--model', optModel.value);
   }
   var worktree = optWorktree.value.trim();
@@ -13934,15 +13956,17 @@ function startContextMeterPoll(colId) {
       // denominator can never disagree with what the column actually got.
       if (!col.effectiveLimit && window.HeadroomEnv) {
         try {
-          var hrEnv = window.HeadroomEnv.buildHeadroomEnv({
+          var hrInput = {
             enabled: !!(headroomInstalled && config && config.useHeadroom),
             hasEndpoint: !!(col.endpointId || col.env),
             isClaude: !col.cmd,
             oneM: !!(config && config.useHeadroom1m !== false),
-            oneMModel: (config && config.headroom1mModel) || 'claude-opus-4-8'
-          });
-          if (hrEnv && hrEnv.ANTHROPIC_MODEL && /\[1m\]/i.test(hrEnv.ANTHROPIC_MODEL)) {
-            col.effectiveLimit = 1000000;
+            oneMModel: col.model || (config && config.headroom1mModel) ||
+              (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL)
+          };
+          var hrEnv = window.HeadroomEnv.buildHeadroomEnv(hrInput);
+          if (hrEnv) {
+            col.effectiveLimit = window.HeadroomEnv.headroomModelWindow(hrInput);
           }
         } catch (e) { /* fall through to pref/heuristic */ }
       }
