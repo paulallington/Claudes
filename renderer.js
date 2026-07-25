@@ -1212,6 +1212,7 @@ function snapshotProjectLayout(projectPath) {
             }) : [],
             env: c.env || null,
             endpointId: c.endpointId || null,
+            model: c.model || null,
             title: c.customTitle || null
           };
         }).filter(Boolean)
@@ -1330,7 +1331,8 @@ function restoreLayout(projectPath, layout) {
         title: colSpec.title || null,
         cmd: colSpec.cmd || null,
         env: colSpec.env || null,
-        endpointId: colSpec.endpointId || null
+        endpointId: colSpec.endpointId || null,
+        model: colSpec.model || null
       };
       var argList = colSpec.cmd ? (colSpec.cmdArgs || []) : null;
       addColumn(argList, row, opts);
@@ -2019,6 +2021,7 @@ function prepareAndPopOut(projectPath) {
         env: col.env || null,
         sessionId: col.sessionId || null,
         title: col.customTitle || null,
+        model: col.model || null,
         isDiff: !!col.isDiff
       });
     });
@@ -2056,6 +2059,7 @@ window.collectPopoutTransferForClose = function () {
       env: col.env || null,
       sessionId: col.sessionId || null,
       title: col.customTitle || null,
+      model: col.model || null,
       isDiff: !!col.isDiff
     });
   });
@@ -2086,6 +2090,7 @@ function applyTransferredColumns(projIdx, transfer) {
       env: entry.env,
       cwd: entry.cwd,
       cwdSource: entry.cwdSource || null,
+      model: entry.model || null,
       isDiff: entry.isDiff,
       workspaceId: null // popouts are Primary-only
     });
@@ -3208,6 +3213,7 @@ function restoreSessions(projectPath, workspaceId) {
         var cwd = (typeof entry === 'object' && entry && typeof entry.cwd === 'string' && entry.cwd) ? entry.cwd : null;
         var cwdSource = (typeof entry === 'object' && entry && typeof entry.cwdSource === 'string' && entry.cwdSource) ? entry.cwdSource : null;
         var endpointId = (typeof entry === 'object' && entry && entry.endpointId) ? entry.endpointId : null;
+        var model = (typeof entry === 'object' && entry && entry.model) ? entry.model : null;
         // Minimised entries are not part of the grid — route them to a separate
         // list so they don't create rows/affect rowHeightRatios. They restore
         // live-but-minimised into the dock after the grid is built.
@@ -3216,6 +3222,7 @@ function restoreSessions(projectPath, workspaceId) {
           if (cwd) minEntry.cwd = cwd;
           if (cwdSource) minEntry.cwdSource = cwdSource;
           if (endpointId) minEntry.endpointId = endpointId;
+          if (model) minEntry.model = model;
           minimizedEntries.push(minEntry);
           continue;
         }
@@ -3223,6 +3230,7 @@ function restoreSessions(projectPath, workspaceId) {
         if (cwd) pushedEntry.cwd = cwd;
         if (cwdSource) pushedEntry.cwdSource = cwdSource;
         if (endpointId) pushedEntry.endpointId = endpointId;
+        if (model) pushedEntry.model = model;
         entries.push(pushedEntry);
       }
       if (rowHeightRatios) {
@@ -3269,6 +3277,10 @@ function restoreSessions(projectPath, workspaceId) {
         }
         var rowOpts = { workspaceId: workspaceId };
         if (e.title) rowOpts.title = e.title;
+        // Threaded through to addColumn's opts.model -> maybeBindHeadroom's
+        // oneMModel, so a Headroom-bound column restores pinned to the model
+        // it was actually running, not the config's 1M default.
+        if (e.model) rowOpts.model = e.model;
         if (e.cwd && e.cwdSource !== 'auto-worktree') {
           var stillExists = await window.electronAPI.pathExists(e.cwd);
           if (stillExists) {
@@ -3305,6 +3317,7 @@ function restoreSessions(projectPath, workspaceId) {
         var ment = minimizedEntries[me];
         var minRowOpts = { workspaceId: workspaceId };
         if (ment.title) minRowOpts.title = ment.title;
+        if (ment.model) minRowOpts.model = ment.model;
         if (ment.cwd && ment.cwdSource !== 'auto-worktree') {
           var mExists = await window.electronAPI.pathExists(ment.cwd);
           if (mExists) {
@@ -3400,7 +3413,47 @@ function buildResumeArgs(col) {
   // enforces endpoint correctness (strips --bare/--model on the wrong endpoint
   // kind, clamps effort to a value that kind accepts).
   var args = EffortRelaunch.buildResumeArgsBase(col, isLocal, defaultEffortLocal);
-  return rewriteArgsForEndpoint(args, isLocal);
+  args = rewriteArgsForEndpoint(args, isLocal);
+  return reconcileModelArgForRespawn(args, col, isLocal);
+}
+
+// Reconcile a stored --model flag against whatever owns the model NOW, using
+// the same headroomOwnsModel() predicate buildSpawnArgs() decides with —
+// otherwise the two can drift on a Headroom toggle flip across a respawn:
+//   - Headroom was OFF at spawn (--model survives in cmdArgs) -> user turns
+//     Headroom ON -> respawn would inject ANTHROPIC_MODEL=<model>[1m] AND
+//     keep the stale --model flag; the flag wins over the env var, silently
+//     dropping the 1M window.
+//   - Headroom was ON at spawn (--model was never pushed, see buildSpawnArgs)
+//     -> user turns Headroom OFF -> respawn would carry neither selector and
+//     the column falls back to the CLI default instead of col.model.
+// So: strip --model when Headroom will own the binding, and (re)inject
+// --model <col.model> when it will not — mirroring buildSpawnArgs exactly.
+function reconcileModelArgForRespawn(args, col, isLocal) {
+  var headroomOwnsModel = window.HeadroomEnv && window.HeadroomEnv.headroomOwnsModel({
+    headroomInstalled: headroomInstalled,
+    useHeadroom: config && config.useHeadroom,
+    useHeadroom1m: config && config.useHeadroom1m,
+    hasEndpoint: isLocal
+  });
+  var out = [];
+  var hadModel = false;
+  for (var i = 0; i < args.length; i++) {
+    if (args[i] === '--model' && i + 1 < args.length) {
+      hadModel = true;
+      if (headroomOwnsModel) { i++; continue; } // strip: env owns it now
+      out.push(args[i], args[i + 1]);
+      i++;
+      continue;
+    }
+    out.push(args[i]);
+  }
+  // isLocal columns never get a bare --model re-injected here — an endpoint
+  // preset's env block owns the model tier, same as buildSpawnArgs.
+  if (!headroomOwnsModel && !isLocal && !hadModel && col.model) {
+    out.push('--model', col.model);
+  }
+  return out;
 }
 
 // Local Anthropic-compat servers (LM Studio etc.) accept low/medium/high/max
@@ -5870,6 +5923,10 @@ function persistSessions(projectKey, workspaceId) {
         // same local endpoint (LM Studio, Ollama, etc.) instead of defaulting
         // to whatever the global Spawn dropdown is currently pointing at.
         if (col2.endpointId) entry.endpointId = col2.endpointId;
+        // Persist the model the user picked so a restore doesn't fall back to
+        // the 1M default — omitted (not written null/undefined) when unset so
+        // existing session files without the key keep restoring unchanged.
+        if (col2.model) entry.model = col2.model;
         rowEntries.push(entry);
       }
 
@@ -5896,6 +5953,7 @@ function persistSessions(projectKey, workspaceId) {
       if (mcol.cwd && mcol.cwd !== projectKey) ment.cwd = mcol.cwd;
       if (mcol.cwd && mcol.cwd !== projectKey && mcol.cwdSource) ment.cwdSource = mcol.cwdSource;
       if (mcol.endpointId) ment.endpointId = mcol.endpointId;
+      if (mcol.model) ment.model = mcol.model;
       sessionData.push(ment);
     }
   }
@@ -10996,8 +11054,12 @@ function buildSpawnArgs(resolved) {
   // ANTHROPIC_MODEL=<model>[1m] maybeBindHeadroom is about to inject, silently
   // dropping the 1M window — so let the env carry the choice instead (threaded
   // through opts.model -> maybeBindHeadroom's oneMModel).
-  var headroomOwnsModel = !!(headroomInstalled && config && config.useHeadroom) &&
-    !currentEndpointId && (config && config.useHeadroom1m !== false);
+  var headroomOwnsModel = window.HeadroomEnv && window.HeadroomEnv.headroomOwnsModel({
+    headroomInstalled: headroomInstalled,
+    useHeadroom: config && config.useHeadroom,
+    useHeadroom1m: config && config.useHeadroom1m,
+    hasEndpoint: !!currentEndpointId
+  });
   if (optModel.value && !currentEndpointId && !headroomOwnsModel) {
     args.push('--model', optModel.value);
   }

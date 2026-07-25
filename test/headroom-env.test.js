@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { buildHeadroomEnv, buildHeadroomProxyArgs, headroomModelWindow } = require('../lib/headroom-env');
+const { buildHeadroomEnv, buildHeadroomProxyArgs, headroomModelWindow, headroomOwnsModel } = require('../lib/headroom-env');
 
 test('enabled claude column -> base URL + tool search', () => {
   const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false });
@@ -195,4 +195,47 @@ test('non-1M alias is pinned bare, with a 200k window', () => {
   assert.strictEqual(
     headroomModelWindow({ oneM: true, oneMModel: 'haiku' }), 200000
   );
+});
+
+// headroomOwnsModel: the shared "does Headroom own --model?" predicate used
+// by both buildSpawnArgs and buildResumeArgs, so they can't drift.
+test('headroomOwnsModel: installed + enabled + 1M on + no endpoint -> true', () => {
+  assert.strictEqual(headroomOwnsModel({
+    headroomInstalled: true, useHeadroom: true, useHeadroom1m: true, hasEndpoint: false
+  }), true);
+});
+
+test('headroomOwnsModel: not installed -> false', () => {
+  assert.strictEqual(headroomOwnsModel({
+    headroomInstalled: false, useHeadroom: true, useHeadroom1m: true, hasEndpoint: false
+  }), false);
+});
+
+test('headroomOwnsModel: Headroom toggle off -> false', () => {
+  assert.strictEqual(headroomOwnsModel({
+    headroomInstalled: true, useHeadroom: false, useHeadroom1m: true, hasEndpoint: false
+  }), false);
+});
+
+test('headroomOwnsModel: an endpoint preset owns the base URL instead -> false', () => {
+  assert.strictEqual(headroomOwnsModel({
+    headroomInstalled: true, useHeadroom: true, useHeadroom1m: true, hasEndpoint: true
+  }), false);
+});
+
+test('headroomOwnsModel: 1M explicitly disabled -> false (Headroom binds but not the model)', () => {
+  assert.strictEqual(headroomOwnsModel({
+    headroomInstalled: true, useHeadroom: true, useHeadroom1m: false, hasEndpoint: false
+  }), false);
+});
+
+test('headroomOwnsModel: useHeadroom1m undefined defaults to on (matches buildHeadroomEnv convention)', () => {
+  assert.strictEqual(headroomOwnsModel({
+    headroomInstalled: true, useHeadroom: true, hasEndpoint: false
+  }), true);
+});
+
+test('headroomOwnsModel: no input -> false (safe)', () => {
+  assert.strictEqual(headroomOwnsModel(), false);
+  assert.strictEqual(headroomOwnsModel({}), false);
 });
