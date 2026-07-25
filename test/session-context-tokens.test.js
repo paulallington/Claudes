@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const { lastAssistantContextTokens } = require('../lib/session-context-tokens');
+const { lastAssistantContextTokens, modelContextLimit } = require('../lib/session-context-tokens');
 
 function tmpFile(lines) {
   const p = path.join(os.tmpdir(), 'ctxtok-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.jsonl');
@@ -77,4 +77,26 @@ test('omitting sinceMs preserves prior behavior (no time filter)', () => {
   ]);
   assert.strictEqual(lastAssistantContextTokens(p), 50);
   fs.unlinkSync(p);
+});
+
+test('modelContextLimit is 1M for natively-1M models (opus 5)', () => {
+  assert.strictEqual(modelContextLimit('claude-opus-5'), 1000000);
+});
+
+test('modelContextLimit is 200000 for haiku 4.5', () => {
+  assert.strictEqual(modelContextLimit('claude-haiku-4-5'), 200000);
+});
+
+test('modelContextLimit is 200000 for opus 4.5 (pinned, not 1M)', () => {
+  assert.strictEqual(modelContextLimit('claude-opus-4-5'), 200000);
+});
+
+test('modelContextLimit [1m] suffix wins regardless of family', () => {
+  assert.strictEqual(modelContextLimit('claude-opus-4-5[1m]'), 1000000);
+});
+
+test('modelContextLimit returns the safe default for null/undefined/unknown', () => {
+  assert.strictEqual(modelContextLimit(null), 200000);
+  assert.strictEqual(modelContextLimit(undefined), 200000);
+  assert.strictEqual(modelContextLimit('gpt-4'), 200000);
 });
