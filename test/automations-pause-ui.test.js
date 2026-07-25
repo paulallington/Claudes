@@ -51,3 +51,13 @@ test('resolveAutomationCardStatus: error outranks a global pause on an enabled a
     dimmed: true,
   });
 });
+
+test('resolveAutomationCardStatus: a globally paused, enabled, otherwise-idle automation shows paused and dimmed', () => {
+  const automation = { enabled: true, agents: [{}] };
+  assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: false, automation }), {
+    statusClass: 'automation-paused',
+    badgeClass: 'badge-paused',
+    badgeText: 'paused',
+    dimmed: true,
+  });
+});
