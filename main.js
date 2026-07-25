@@ -4001,13 +4001,14 @@ ipcMain.handle('usage:getAll', async () => {
 });
 
 const { sessionCost: calcSessionCost } = require('./lib/cost-calc');
+const ClaudeModels = require('./lib/claude-models');
 
 // Roll up per-session costs into totals by model, project, and day.
 // Uses the digest cached by usage:getAll (call usage:getAll first; otherwise
 // returns zeros). Costs are computed from each session's single `model` plus
 // its aggregate token counts — see plan note about multi-model sessions.
 function rollupCosts(digests, sinceMs) {
-  const byModel = { opus: 0, sonnet: 0, haiku: 0, unknown: 0 };
+  const byModel = { fable: 0, opus: 0, sonnet: 0, haiku: 0, unknown: 0 };
   const byProject = {};
   const byDay = {};
   // Per-bucket breakdown so the user can see *where* the cost is coming from
@@ -4032,10 +4033,10 @@ function rollupCosts(digests, sinceMs) {
     byBucket.cacheRead     += calcSessionCost({ model: d.model || '', cacheRead: cr });
     byBucket.output        += calcSessionCost({ model: d.model || '', output: out });
     total += c;
-    const m = String(d.model || '').toLowerCase();
-    if (m.indexOf('opus') !== -1) byModel.opus += c;
-    else if (m.indexOf('sonnet') !== -1) byModel.sonnet += c;
-    else if (m.indexOf('haiku') !== -1) byModel.haiku += c;
+    // Reuse the catalogue's family classifier (checked fable-first) rather
+    // than a fourth copy of the substring ladder.
+    const family = ClaudeModels.familyOf(d.model || '');
+    if (family && byModel[family] !== undefined) byModel[family] += c;
     else byModel.unknown += c;
     if (d.projectKey) byProject[d.projectKey] = (byProject[d.projectKey] || 0) + c;
     if (d.lastTimestamp) {

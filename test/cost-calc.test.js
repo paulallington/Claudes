@@ -1,18 +1,41 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { sessionCost, MODEL_PRICES_PER_MTOK } = require('../lib/cost-calc');
+const { sessionCost, classify } = require('../lib/cost-calc');
 
-test('opus pricing: 100k input + 10k output', () => {
-  // Opus 4.x prices: $15 input, $75 output, $1.50 cache_read, $18.75 cache_creation per MTok
+test('opus 5 pricing: 100k input + 10k output', () => {
+  // Opus 5 prices: $5 input, $25 output per MTok (not the legacy Opus-3-era $15/$75)
   const c = sessionCost({
-    model: 'claude-opus-4-7',
+    model: 'claude-opus-5',
     input: 100000,
     cacheCreation: 0,
     cacheRead: 0,
     output: 10000
   });
-  // 100k input @ $15/MTok = $1.50; 10k output @ $75/MTok = $0.75 → $2.25
+  // 100k input @ $5/MTok = $0.50; 10k output @ $25/MTok = $0.25 → $0.75
+  assert.equal(c.toFixed(2), '0.75');
+});
+
+test('opus 4.1 pricing stays at the legacy $15/$75 rate (pinned, older model)', () => {
+  const c = sessionCost({
+    model: 'claude-opus-4-1',
+    input: 100000,
+    cacheCreation: 0,
+    cacheRead: 0,
+    output: 10000
+  });
   assert.equal(c.toFixed(2), '2.25');
+});
+
+test('fable classifies as its own family and costs a non-zero amount', () => {
+  assert.equal(classify('claude-fable-5'), 'fable');
+  const c = sessionCost({
+    model: 'claude-fable-5',
+    input: 100000,
+    cacheCreation: 0,
+    cacheRead: 0,
+    output: 0
+  });
+  assert.ok(c > 0);
 });
 
 test('sonnet pricing: cache reads cost less than fresh input', () => {
@@ -42,10 +65,4 @@ test('haiku pricing on unknown variant falls back to haiku rate', () => {
 test('unknown model returns 0', () => {
   const c = sessionCost({ model: 'gpt-4', input: 1000, cacheCreation: 0, cacheRead: 0, output: 1000 });
   assert.equal(c, 0);
-});
-
-test('MODEL_PRICES_PER_MTOK is exported', () => {
-  assert.ok(MODEL_PRICES_PER_MTOK.opus);
-  assert.ok(MODEL_PRICES_PER_MTOK.sonnet);
-  assert.ok(MODEL_PRICES_PER_MTOK.haiku);
 });
