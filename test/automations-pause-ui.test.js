@@ -61,3 +61,23 @@ test('resolveAutomationCardStatus: a globally paused, enabled, otherwise-idle au
     dimmed: true,
   });
 });
+
+test('resolveAutomationCardStatus: idle and not dimmed when the scheduler is not paused', () => {
+  const automation = { enabled: true, agents: [{}] };
+  assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: true, automation }), {
+    statusClass: 'automation-idle',
+    badgeClass: 'badge-idle',
+    badgeText: 'idle',
+    dimmed: false,
+  });
+});
+
+test('resolveAutomationCardStatus: a disabled automation is never dimmed even when globally paused', () => {
+  const automation = { enabled: false, agents: [{}] };
+  assert.deepEqual(resolveAutomationCardStatus({ globalEnabled: false, automation }), {
+    statusClass: 'automation-disabled',
+    badgeClass: 'badge-disabled',
+    badgeText: 'disabled',
+    dimmed: false,
+  });
+});
