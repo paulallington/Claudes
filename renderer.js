@@ -7051,13 +7051,21 @@ async function handoffColumnToCodex(id) {
     projectKey: col.projectKey, cwd: cwd, sessionId: col.sessionId
   });
   if (!read || !read.ok) {
-    showToast('Hand off to Codex failed: transcript ' + ((read && read.error) || 'unreadable'), { kind: 'error' });
+    // 'no_transcript' is the COMMON case, not an error worth alarming about:
+    // a column gets its session id at spawn, but Claude Code writes nothing to
+    // ~/.claude/projects until a turn completes. Say what to do about it rather
+    // than leaking the error code.
+    if (!read || read.error === 'no_transcript') {
+      showToast('Nothing to hand off yet — this column has not completed a turn, so Claude has not written its conversation to disk. Send a message first, then hand off.', { kind: 'warn' });
+    } else {
+      showToast('Hand off to Codex failed — could not read the transcript (' + read.error + ')', { kind: 'error' });
+    }
     return;
   }
 
   var turns = window.CodexHandoff.extractTurns(read.content);
   if (!turns.length) {
-    showToast('Hand off to Codex: nothing recoverable yet — the transcript may not be flushed to disk', { kind: 'warn' });
+    showToast('Nothing to hand off yet — the transcript exists but has no conversation in it. Send a message in this column first.', { kind: 'warn' });
     return;
   }
   var activity = window.CodexHandoff.extractActivity(read.content);
