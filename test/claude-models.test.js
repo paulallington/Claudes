@@ -85,11 +85,15 @@ test('unknown/null/undefined ids return safe defaults without throwing', () => {
   assert.strictEqual(supportsOneM(null), false);
 });
 
-test('family fallback: an unpinned opus id gets legacy prices+context', () => {
-  const prices = pricesFor('claude-opus-4-0-unpinned');
-  assert.strictEqual(prices.input, 15);
-  assert.strictEqual(prices.output, 75);
-  assert.strictEqual(contextWindowFor('claude-opus-4-0-unpinned'), 200000);
+test('family fallback: an unpinned opus id tracks the current generation', () => {
+  // An unpinned id is almost always NEWER than this catalogue (every older
+  // model is pinned), so guessing legacy rates overstated cost 3x.
+  const prices = pricesFor('claude-opus-9-9-unpinned');
+  assert.strictEqual(prices.input, 5);
+  assert.strictEqual(prices.output, 25);
+  // Context stays conservative on purpose: an over-large window means the
+  // meter never warns, which is worse than warning early.
+  assert.strictEqual(contextWindowFor('claude-opus-9-9-unpinned'), 200000);
 });
 
 test('derived cache prices are correct for opus-5 (cacheRead 0.5, cacheCreation 6.25)', () => {

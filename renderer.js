@@ -11131,6 +11131,12 @@ function spawnOpts(extra) {
     }
   }
   if (currentEndpointEnv) o.env = currentEndpointEnv;
+  // Every spawn path must carry the dropdown pick, not just the Spawn button:
+  // buildSpawnArgs deliberately omits --model when Headroom owns the binding,
+  // so a caller that passes no opts.model silently falls back to the 1M default
+  // and the column runs a model the user did not choose. Callers that set their
+  // own `model` in `extra` win, since the spread above lands first.
+  if (!o.model && optModel && optModel.value) o.model = optModel.value;
   return o;
 }
 
@@ -14022,7 +14028,11 @@ function startContextMeterPoll(colId) {
               (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL)
           };
           var hrEnv = window.HeadroomEnv.buildHeadroomEnv(hrInput);
-          if (hrEnv) {
+          // Only pin the denominator when Headroom actually pinned a model
+          // (ANTHROPIC_MODEL is set only when the 1M binding applies). Assigning
+          // unconditionally would shadow the user's own Settings context pref
+          // on every Headroom column, including ones with 1M turned off.
+          if (hrEnv && hrEnv.ANTHROPIC_MODEL) {
             col.effectiveLimit = window.HeadroomEnv.headroomModelWindow(hrInput);
           }
         } catch (e) { /* fall through to pref/heuristic */ }
@@ -14485,6 +14495,12 @@ function renderUsageSummary(data) {
 // Cache reads skip most model computation — estimated at ~10% of input energy.
 // PUE (Power Usage Effectiveness) of 1.1 included to account for cooling/networking overhead.
 var MODEL_ENERGY_PROFILES = {
+  // NOTE: these ratios were derived when Opus listed at $15/$75. Opus is now
+  // $5/$25, so the whole table is stale as a compute proxy and wants
+  // re-deriving — tracked separately, deliberately not re-guessed here. Fable
+  // is placed at 2x Opus, which is its price ratio on the same (stale) basis,
+  // so the table stays internally consistent rather than mixing methodologies.
+  fable:   { input: 120, output: 600, cache: 12  },
   opus:    { input: 60,  output: 300, cache: 6   },
   sonnet:  { input: 12,  output: 60,  cache: 1.2 },
   haiku:   { input: 4,   output: 20,  cache: 0.4 },
@@ -14493,7 +14509,15 @@ var MODEL_ENERGY_PROFILES = {
 
 function classifyModel(modelStr) {
   if (!modelStr) return 'unknown';
+  // Delegate to the catalogue so this can't drift from main.js's cost rollup
+  // (which already classifies fable-first via the same helper). Every key it
+  // can return must exist in MODEL_ENERGY_PROFILES and modelNames above, or
+  // renderEnvironmentalImpact throws on the profile lookup.
+  if (window.ClaudeModels) {
+    return window.ClaudeModels.familyOf(modelStr) || 'unknown';
+  }
   var m = modelStr.toLowerCase();
+  if (m.indexOf('fable') !== -1) return 'fable';
   if (m.indexOf('opus') !== -1) return 'opus';
   if (m.indexOf('sonnet') !== -1) return 'sonnet';
   if (m.indexOf('haiku') !== -1) return 'haiku';
@@ -14709,7 +14733,7 @@ function renderEnvironmentalImpact(modelTokens, periodLabel) {
 
   var energyWh = 0;
   var modelBreakdown = [];
-  var modelNames = ['opus', 'sonnet', 'haiku', 'unknown'];
+  var modelNames = ['fable', 'opus', 'sonnet', 'haiku', 'unknown'];
   for (var mi = 0; mi < modelNames.length; mi++) {
     var name = modelNames[mi];
     var tokens = modelTokens[name];
