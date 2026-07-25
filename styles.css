@@ -7046,6 +7046,21 @@ body.mode-popout #btn-add-project {
 .automations-global-paused-banner-resume:hover {
   background: rgba(255, 214, 10, 0.25);
 }
+/* --color-yellow flips to a dark olive (#9a6700) in light theme (see
+   [data-theme="light"] block above) so the fixed bright-yellow wash used
+   here would leave dark-olive text on bright yellow — barely legible.
+   Retint the wash to match, same pattern as .diff-line-add/-del below. */
+[data-theme="light"] .automations-global-paused-banner {
+  background: rgba(154, 103, 0, 0.1);
+  border-bottom-color: rgba(154, 103, 0, 0.3);
+}
+[data-theme="light"] .automations-global-paused-banner-resume {
+  background: rgba(154, 103, 0, 0.15);
+  border-color: rgba(154, 103, 0, 0.4);
+}
+[data-theme="light"] .automations-global-paused-banner-resume:hover {
+  background: rgba(154, 103, 0, 0.25);
+}
 
 /* === Run Window Modal Section === */
 .automation-runwindow-section {
