@@ -48,6 +48,8 @@ const { parseCodexRateLimits, pickLatestRolloutPath } = require('./lib/codex-lim
 const { parseChecksumFile, checksumsMatch } = require('./lib/update-checksum');
 const { resolveProfile, profileClaudeRoot, PRIMARY_ID } = require('./lib/profile-resolve');
 const { extractSeedClaudeJson } = require('./lib/profile-seed');
+const CodexWatchJobs = require('./lib/codex-watch-jobs');
+const CodexWatchLog = require('./lib/codex-watch-log');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -7513,6 +7515,69 @@ function hasCodex() {
 }
 
 ipcMain.handle('config:hasCodex', () => hasCodex());
+
+// --- Codex watcher -------------------------------------------------------
+//
+// The codex plugin resolves its state root from CLAUDE_PLUGIN_DATA, which
+// Claude Code derives from the session's config dir. A column running under a
+// secondary subscription profile therefore writes its job logs under that
+// profile's directory, NOT ~/.claude. Resolve per column, never hardcode.
+
+const CODEX_PLUGIN_DATA_SUBPATH = path.join('plugins', 'data', 'codex-openai-codex', 'state');
+
+// Reuse claudeRootFor() rather than reading profile.env.CLAUDE_CONFIG_DIR
+// directly: it already coalesces a persisted column's `profileId: null` to
+// PRIMARY_ID, which means "Primary, explicitly" for a column and must NOT fall
+// through the cascade to a non-Primary default. The column's Codex logs live
+// wherever the column actually spawned, so this must match spawn resolution.
+function codexWatchStateRoot(sel) {
+  return path.join(claudeRootFor(sel && sel.columnProfileId), CODEX_PLUGIN_DATA_SUBPATH);
+}
+
+// Enumerate <root>/*/state.json. A torn read is expected - the companion does
+// not write these atomically - so a bad file is skipped for this tick rather
+// than failing the whole scan.
+function codexWatchScan(root) {
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch { return []; }
+
+  const scans = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const raw = fs.readFileSync(path.join(root, entry.name, 'state.json'), 'utf8');
+      const parsed = JSON.parse(raw);
+      scans.push({ workspaceKey: entry.name, jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [] });
+    } catch { /* missing or torn state.json — skip this dir this tick */ }
+  }
+  return scans;
+}
+
+// Resolve a log path from renderer-supplied ids. workspaceKey is accepted ONLY
+// if it exactly matches a directory main itself enumerated, so traversal is
+// structurally impossible rather than filtered.
+function codexWatchResolveLogPath(sel, workspaceKey, jobId) {
+  if (typeof workspaceKey !== 'string' || typeof jobId !== 'string') return null;
+  if (!/^[A-Za-z0-9._-]+$/.test(jobId)) return null;
+
+  const root = codexWatchStateRoot(sel);
+  const known = codexWatchScan(root).some((s) => s.workspaceKey === workspaceKey);
+  if (!known) return null;
+
+  return path.join(root, workspaceKey, 'jobs', jobId + '.log');
+}
+
+ipcMain.handle('codexwatch:listJobs', (event, sel) => {
+  const opts = sel || {};
+  if (!opts.sessionId) return { ok: true, jobs: [] };
+  try {
+    const scans = codexWatchScan(codexWatchStateRoot(opts));
+    return { ok: true, jobs: CodexWatchJobs.selectSessionJobs(scans, opts.sessionId, Date.now()) };
+  } catch (err) {
+    return { ok: false, error: err && err.message };
+  }
+});
 
 function parseAgentResult(output) {
   const result = { summary: '', attentionItems: [] };
