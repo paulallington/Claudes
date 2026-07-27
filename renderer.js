@@ -1702,9 +1702,18 @@ function restoreLayout(projectPath, layout) {
   state.rows.forEach(function (r) { r.columnIds.forEach(function (cid) { existingIds.push(cid); }); });
   existingIds.forEach(function (cid) { try { removeColumn(cid); } catch (e) { /* */ } });
   // Spawn rows + columns. addColumn(args, row, opts) — with row=null it goes
-  // into the current row; with addRow() we create a new one.
+  // into the current row; with addRowToProject(state) we create a new one.
+  // Deliberately not addRow(): that helper is now async (it may await a
+  // worktree resolution) and also spawns its own default column as a side
+  // effect, neither of which this restore path wants — it needs the row
+  // synchronously so the forEach below can target it.
   layout.rows.forEach(function (rowSpec, rIdx) {
-    var row = rIdx === 0 ? null : addRow();
+    // Row must be created in the SAME state addColumn resolves via
+    // getActiveState() — that's keyed on the project's activeWorkspaceId,
+    // while `state` above is Primary-keyed. On a sub-workspace restore the
+    // two would otherwise disagree, appending rows to Primary's hidden
+    // container while addColumn registers columns into the workspace state.
+    var row = rIdx === 0 ? null : addRowToProject(getActiveState() || state);
     rowSpec.columns.forEach(function (colSpec) {
       var opts = {
         title: colSpec.title || null,
@@ -5661,9 +5670,9 @@ function addRow() {
   if (!activeProjectKey) return;
   var state = getActiveState();
   if (!state) return;
-
-  var row = addRowToProject(state);
-  addColumn(null, row, spawnOpts());
+  spawnFromOptions(function () { return addRowToProject(state); }).catch(function (e) {
+    console.error('addRow: spawn failed', e);
+  });
 }
 
 // ============================================================
@@ -11746,6 +11755,37 @@ function clawdForceRefresh() {
 // Init
 // ============================================================
 
+// Shared by the Spawn button and Add Row: both must apply the dropdown's
+// options (permission mode, --bare, --model, worktree, ...) via
+// buildSpawnArgs(), and must go through the spawnOpts() *helper* (below) —
+// not a bare object literal — since that's what layers on the endpoint env,
+// the profile env and profileId. A local named `spawnOpts` would shadow the
+// helper and silently drop all of that.
+// `makeRow` is a lazy row-creation callback rather than an already-created
+// row so that an aborted spawn (project switched mid worktree-resolve)
+// doesn't leave a stray empty row behind.
+async function spawnFromOptions(makeRow) {
+  var projectAtClick = activeProjectKey;
+  var raw = optWorktree.value.trim();
+  var resolved = { kind: 'none' };
+  if (raw && projectAtClick) {
+    resolved = await window.electronAPI.resolveWorktree(projectAtClick, raw);
+  }
+  if (activeProjectKey !== projectAtClick) return;
+  var extra = {};
+  if (resolved.kind === 'cwd') {
+    extra.cwd = resolved.path;
+    extra.cwdSource = 'manual';
+  }
+  // Threaded through to maybeBindHeadroom (via addColumn's opts.model) so a
+  // Headroom-bound spawn pins ANTHROPIC_MODEL to the dropdown pick even
+  // though buildSpawnArgs skips --model for that case (see below).
+  if (optModel.value) extra.model = optModel.value;
+  var args = buildSpawnArgs(resolved);
+  var targetRow = makeRow ? makeRow() : null;
+  addColumn(args.length > 0 ? args : null, targetRow, spawnOpts(extra));
+}
+
 btnAdd.addEventListener('click', async function () {
   if (optHeadless.checked) {
     // Consume the transient flag immediately — don't persist it.
@@ -11757,24 +11797,7 @@ btnAdd.addEventListener('click', async function () {
   if (btnAdd.disabled) return;
   btnAdd.disabled = true;
   try {
-    var projectAtClick = activeProjectKey;
-    var raw = optWorktree.value.trim();
-    var resolved = { kind: 'none' };
-    if (raw && projectAtClick) {
-      resolved = await window.electronAPI.resolveWorktree(projectAtClick, raw);
-    }
-    if (activeProjectKey !== projectAtClick) return;
-    var spawnOpts = {};
-    if (resolved.kind === 'cwd') {
-      spawnOpts.cwd = resolved.path;
-      spawnOpts.cwdSource = 'manual';
-    }
-    // Threaded through to maybeBindHeadroom (via addColumn's opts.model) so a
-    // Headroom-bound spawn pins ANTHROPIC_MODEL to the dropdown pick even
-    // though buildSpawnArgs skips --model for that case (see below).
-    if (optModel.value) spawnOpts.model = optModel.value;
-    var args = buildSpawnArgs(resolved);
-    addColumn(args.length > 0 ? args : null, null, spawnOpts);
+    await spawnFromOptions(null);
   } finally {
     btnAdd.disabled = false;
   }
