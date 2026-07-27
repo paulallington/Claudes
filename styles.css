@@ -6775,6 +6775,107 @@ textarea.settings-input { resize: vertical; font-family: inherit; }
   display: block;
 }
 
+/* --- Subscriptions panel (global settings) --- */
+
+.profiles-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 10px 0;
+}
+
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-deep);
+}
+
+.profile-row-chip {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border-dim);
+  border-radius: 50%;
+  cursor: pointer;
+  background: none;
+  flex: 0 0 auto;
+}
+.profile-row-chip::-webkit-color-swatch-wrapper { padding: 0; border-radius: 50%; }
+.profile-row-chip::-webkit-color-swatch { border: none; border-radius: 50%; }
+
+.profile-row-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-row-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 1px 5px;
+  flex: 0 0 auto;
+}
+
+.profile-row-signedin {
+  font-size: 11px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.profile-row-signedin-yes { color: var(--accent-success, #4ade80); }
+.profile-row-signedin-no { color: var(--text-dim); }
+
+.profile-row-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.profile-row-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.profile-row-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.profile-row-btn-danger:hover {
+  border-color: #f87171;
+  color: #f87171;
+}
+
+.profiles-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.profiles-add-row .settings-input {
+  flex: 1;
+}
+
+.profiles-add-status.error {
+  color: #f87171;
+  opacity: 1;
+}
+
 .project-context-menu {
   position: fixed;
   background: var(--bg-panel);

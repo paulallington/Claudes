@@ -141,6 +141,11 @@ var endpointModelsCache = {};
 var currentProfileEnv = null;    // env block from profile:getEnv, or null (Primary/no profiles configured)
 var currentProfileId = null;     // resolved profile id for the pending spawn, for the column chip + persistence
 
+// Cache of profile:list's result — the four assignment pickers and the
+// column header chip all read from here rather than re-fetching per render.
+var profilesCache = [];          // [{ id, name, colour, isPrimary, signedIn }]
+var profilesDefaultId = 'primary';
+
 // Refresh the profile a NEW column would spawn on: column picker (not built
 // yet — no picker UI exists until a later task, so this always contributes
 // null) beats workspace beats project beats the global default. Call whenever
@@ -162,6 +167,10 @@ function refreshProfileSelection() {
     return window.electronAPI.profileList ? window.electronAPI.profileList() : null;
   }).then(function (store) {
     if (!store || !window.ProfileResolve) { currentProfileId = null; return; }
+    // Keep the picker/chip cache fresh off the same fetch — cheap, and it
+    // means every surface that reads profilesCache sees this round-trip too.
+    profilesCache = store.profiles || [];
+    profilesDefaultId = store.defaultProfileId || PRIMARY_PROFILE_ID;
     // Re-run the SAME cascade main uses to resolve profile:getEnv, so the id we
     // persist on the column always matches the env it actually spawned with,
     // rather than reimplementing (and risking drifting from) that logic here.
@@ -177,6 +186,187 @@ function refreshProfileSelection() {
     currentProfileId = resolved.isPrimary ? null : resolved.id;
   }).catch(function () { currentProfileEnv = null; currentProfileId = null; });
 }
+
+// ============================================================
+// Subscriptions panel (global settings) + assignment pickers
+// ============================================================
+
+var PRIMARY_PROFILE_ID = 'primary';
+
+// One builder for all four assignment pickers so the "inherit" semantics
+// can't drift between Project settings / Workspace row / Spawn options /
+// Automation editor. `currentId` is the persisted profileId (or null/''
+// for inherit); the select's own value is always '' for inherit, never a
+// stored profile id string that happens to be empty.
+function buildProfilePicker(selectEl, currentId, inheritLabel) {
+  if (!selectEl) return Promise.resolve();
+  if (!window.electronAPI || !window.electronAPI.profileList) return Promise.resolve();
+  return window.electronAPI.profileList().then(function (store) {
+    profilesCache = (store && store.profiles) || [];
+    profilesDefaultId = (store && store.defaultProfileId) || PRIMARY_PROFILE_ID;
+    selectEl.innerHTML = '';
+    var inherit = document.createElement('option');
+    inherit.value = '';
+    inherit.textContent = inheritLabel;
+    selectEl.appendChild(inherit);
+    profilesCache.forEach(function (p) {
+      var o = document.createElement('option');
+      o.value = p.id;
+      o.textContent = p.name + (p.signedIn ? '' : ' (not signed in)');
+      selectEl.appendChild(o);
+    });
+    selectEl.value = currentId || '';
+  });
+}
+
+function renderProfilesPanel() {
+  var listEl = document.getElementById('profiles-list');
+  if (!listEl || !window.electronAPI || !window.electronAPI.profileList) return Promise.resolve();
+  return window.electronAPI.profileList().then(function (store) {
+    profilesCache = (store && store.profiles) || [];
+    profilesDefaultId = (store && store.defaultProfileId) || PRIMARY_PROFILE_ID;
+    while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+    profilesCache.forEach(function (p) {
+      listEl.appendChild(buildProfileRow(p));
+    });
+  });
+}
+
+function buildProfileRow(p) {
+  var isDefault = p.id === profilesDefaultId;
+  var row = document.createElement('div');
+  row.className = 'profile-row';
+  row.dataset.id = p.id;
+
+  // The colour chip IS the recolour control — a native colour picker behind
+  // a small swatch, rather than a separate button + dialog.
+  var chip = document.createElement('input');
+  chip.type = 'color';
+  chip.className = 'profile-row-chip';
+  chip.value = p.colour || '#5b8def';
+  chip.title = 'Recolour "' + p.name + '"';
+  chip.addEventListener('change', function () {
+    window.electronAPI.profileUpdate({ id: p.id, colour: chip.value });
+  });
+  row.appendChild(chip);
+
+  var name = document.createElement('span');
+  name.className = 'profile-row-name';
+  name.textContent = p.name;
+  row.appendChild(name);
+
+  if (isDefault) {
+    var badge = document.createElement('span');
+    badge.className = 'profile-row-badge';
+    badge.textContent = 'Default';
+    row.appendChild(badge);
+  }
+
+  var signedIn = document.createElement('span');
+  signedIn.className = 'profile-row-signedin' + (p.signedIn ? ' profile-row-signedin-yes' : ' profile-row-signedin-no');
+  signedIn.textContent = p.signedIn ? 'Signed in' : 'Not signed in';
+  row.appendChild(signedIn);
+
+  var actions = document.createElement('div');
+  actions.className = 'profile-row-actions';
+
+  var renameBtn = document.createElement('button');
+  renameBtn.className = 'profile-row-btn';
+  renameBtn.textContent = 'Rename';
+  renameBtn.addEventListener('click', function () {
+    promptForValue('Rename "' + p.name + '" to:').then(function (val) {
+      if (val == null) return;
+      val = val.trim();
+      if (!val) return;
+      window.electronAPI.profileUpdate({ id: p.id, name: val });
+    });
+  });
+  actions.appendChild(renameBtn);
+
+  if (!isDefault) {
+    var defaultBtn = document.createElement('button');
+    defaultBtn.className = 'profile-row-btn';
+    defaultBtn.textContent = 'Set default';
+    defaultBtn.addEventListener('click', function () {
+      window.electronAPI.profileSetDefault(p.id);
+    });
+    actions.appendChild(defaultBtn);
+  }
+
+  if (!p.isPrimary) {
+    var reseedBtn = document.createElement('button');
+    reseedBtn.className = 'profile-row-btn';
+    reseedBtn.textContent = 'Re-seed from Primary';
+    reseedBtn.title = 'Re-copy hooks, permissions and global CLAUDE.md from Primary, overwriting local edits.';
+    reseedBtn.addEventListener('click', function () {
+      confirmDialog('Re-seed "' + p.name + '" from Primary? This overwrites its hooks, permissions and global CLAUDE.md with Primary\'s current copies.').then(function (ok) {
+        if (!ok) return;
+        window.electronAPI.profileReseed(p.id).then(function (r) {
+          if (!r || !r.ok) showToast('Re-seed failed: ' + ((r && r.error) || 'unknown'), { kind: 'error' });
+          else showToast('Re-seeded "' + p.name + '" from Primary.', { kind: 'success' });
+        });
+      });
+    });
+    actions.appendChild(reseedBtn);
+
+    // Primary is never deletable — the UI must not offer it.
+    var deleteBtn = document.createElement('button');
+    deleteBtn.className = 'profile-row-btn profile-row-btn-danger';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', function () {
+      confirmDialog('Delete "' + p.name + '"? Its config directory is removed.', { dangerous: true, okLabel: 'Delete' }).then(function (ok) {
+        if (!ok) return;
+        window.electronAPI.profileDelete(p.id).then(function (r) {
+          if (!r || !r.ok) { showToast('Delete failed: ' + ((r && r.error) || 'unknown'), { kind: 'error' }); return; }
+          if (r.reassigned && r.reassigned.length) {
+            showToast('"' + p.name + '" deleted. Fell back to Primary: ' + r.reassigned.join(', '), { duration: 8000 });
+          } else {
+            showToast('"' + p.name + '" deleted.');
+          }
+        });
+      });
+    });
+    actions.appendChild(deleteBtn);
+  }
+
+  row.appendChild(actions);
+  return row;
+}
+
+if (window.electronAPI && window.electronAPI.onProfilesUpdated) {
+  window.electronAPI.onProfilesUpdated(renderProfilesPanel);
+}
+
+(function initProfilesAddRow() {
+  var nameInput = document.getElementById('profiles-add-name');
+  var addBtn = document.getElementById('profiles-add-btn');
+  var statusEl = document.getElementById('profiles-add-status');
+  if (!nameInput || !addBtn) return;
+
+  function doCreate() {
+    var name = nameInput.value.trim();
+    if (!name) return;
+    addBtn.disabled = true;
+    window.electronAPI.profileCreate({ name: name }).then(function (r) {
+      addBtn.disabled = false;
+      if (!r || !r.ok) {
+        if (statusEl) { statusEl.textContent = (r && r.error) || 'Could not create profile.'; statusEl.classList.add('error'); }
+        return;
+      }
+      nameInput.value = '';
+      if (statusEl) statusEl.classList.remove('error');
+      // Nothing else tells the user what to do next — a freshly-created
+      // profile has no credentials yet and just looks broken otherwise.
+      alertDialog('Profile created. Spawn a column on this subscription and run /login to sign in. Your hooks, permissions and global CLAUDE.md were copied from Primary.');
+      renderProfilesPanel();
+    }).catch(function () { addBtn.disabled = false; });
+  }
+
+  addBtn.addEventListener('click', doCreate);
+  nameInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); doCreate(); }
+  });
+})();
 
 
 // Each window has its own counter for new column/pty ids. Give popouts a high
@@ -1628,6 +1818,43 @@ function confirmDialog(message, opts) {
       if (!overlay.parentNode) { document.removeEventListener('keydown', onKey); return; }
       if (e.key === 'Escape') { e.preventDefault(); done(false); document.removeEventListener('keydown', onKey); }
       else if (e.key === 'Enter') { e.preventDefault(); done(true); document.removeEventListener('keydown', onKey); }
+    });
+  });
+}
+
+// OK-only notice, same non-blocking pattern as confirmDialog/promptForValue.
+// window.alert() is NOT safe to use here — in this sandboxed Electron
+// renderer it blocks the whole app (all columns, all windows), not just the
+// current dialog, until dismissed.
+function alertDialog(message) {
+  return new Promise(function (resolve) {
+    var overlay = document.createElement('div');
+    overlay.className = 'snippet-prompt-overlay';
+    var dialog = document.createElement('div');
+    dialog.className = 'snippet-prompt-dialog';
+    var label = document.createElement('div');
+    label.className = 'snippet-prompt-label';
+    label.textContent = message;
+    var actions = document.createElement('div');
+    actions.className = 'snippet-prompt-actions';
+    var ok = document.createElement('button');
+    ok.className = 'snippet-prompt-ok';
+    ok.textContent = 'Got it';
+    actions.appendChild(ok);
+    dialog.appendChild(label);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    setTimeout(function () { ok.focus(); }, 0);
+    function done() {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      resolve();
+    }
+    ok.addEventListener('click', done);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) done(); });
+    document.addEventListener('keydown', function onKey(e) {
+      if (!overlay.parentNode) { document.removeEventListener('keydown', onKey); return; }
+      if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); done(); document.removeEventListener('keydown', onKey); }
     });
   });
 }
@@ -12795,6 +13022,7 @@ settingsModal.querySelectorAll('.settings-tab').forEach(function (tab) {
     settingsModal.querySelectorAll('.settings-pane').forEach(function (p) {
       p.classList.toggle('active', p.getAttribute('data-settings-pane') === key);
     });
+    if (key === 'subscriptions') renderProfilesPanel();
   });
 });
 
