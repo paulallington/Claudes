@@ -815,7 +815,26 @@ function profileDirToRemove(p) {
   return target;
 }
 
+// profile:list is polled on every loadPlanLimits tick, project switch, and
+// picker render — the macOS branch below forks a synchronous /usr/bin/security
+// child on EVERY call, blocking the main process. Cache the signedIn probe
+// behind a short TTL (consistent with planUsageCache's pattern) and invalidate
+// it explicitly whenever a profile's credentials could plausibly have changed.
+const PROFILE_CREDS_CACHE_TTL_MS = 30 * 1000;
+const profileCredsCache = new Map(); // id -> { signedIn, fetchedAt }
+function invalidateProfileCredsCache(id) {
+  if (id) profileCredsCache.delete(id);
+  else profileCredsCache.clear();
+}
 function profileHasCredentials(p) {
+  const cached = profileCredsCache.get(p.id);
+  const now = Date.now();
+  if (cached && (now - cached.fetchedAt) < PROFILE_CREDS_CACHE_TTL_MS) return cached.signedIn;
+  const signedIn = probeProfileCredentials(p);
+  profileCredsCache.set(p.id, { signedIn, fetchedAt: now });
+  return signedIn;
+}
+function probeProfileCredentials(p) {
   const root = profileClaudeRoot(p, os.homedir());
   try {
     if (fs.existsSync(path.join(root, '.credentials.json'))) return true;
@@ -1937,13 +1956,14 @@ ipcMain.handle('profile:create', (event, input) => {
     colour: String((input && input.colour) || '#5b8def')
   });
   writeProfiles(store);
+  invalidateProfileCredsCache(id);
   return { ok: true, id, configDir };
 });
 
 ipcMain.handle('profile:reseed', (event, id) => {
   const p = readProfiles().profiles.find((x) => x && x.id === id);
   if (!p || !p.configDir) return { ok: false, error: 'Cannot re-seed Primary.' };
-  try { seedProfileDir(p.configDir); return { ok: true }; }
+  try { seedProfileDir(p.configDir); invalidateProfileCredsCache(id); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
 });
 
@@ -1991,6 +2011,7 @@ ipcMain.handle('profile:delete', (event, id) => {
   store.profiles = store.profiles.filter((x) => x.id !== id);
   if (store.defaultProfileId === id) store.defaultProfileId = PRIMARY_ID;
   writeProfiles(store);
+  invalidateProfileCredsCache(id);
   return { ok: true, reassigned };
 });
 
@@ -7807,11 +7828,18 @@ function runHeadless(projectPath, prompt) {
   }
 
   const endpointEnv = getProjectEndpointEnvByPath(projectPath);
+  // Headless runs must inherit the project's assigned profile the same way
+  // interactive columns do — otherwise a headless run silently bills Primary's
+  // subscription (and its background session gets keyed to PRIMARY_ID for
+  // voice catch-up, see rememberBackgroundSession) while the project is
+  // actually assigned to a secondary.
+  const profile = resolveProfileFor({ columnProfileId: getProjectProfileIdByPath(projectPath) });
   const spawned = spawnHeadlessClaude(prompt, projectPath, {
     skipPermissions: !!spawnOptions.skipPermissions,
     bare: !!spawnOptions.bare,
     model: endpointEnv ? null : (spawnOptions.model || null),
-    env: endpointEnv,
+    env: Object.assign({}, endpointEnv, profile.env),
+    profileId: profile.id,
     onText: (text) => {
       try { outputStream.write(text); } catch { /* ignore */ }
       if (mainWindow) mainWindow.webContents.send('headless:output', { projectPath, runId, chunk: text });

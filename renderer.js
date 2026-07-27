@@ -1125,7 +1125,7 @@ function connectWS() {
           if (col3.env) respawnMsg.env = col3.env;
           // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
           // Re-derived from the live global flag; never persisted on the column.
-          maybeBindHeadroom(respawnMsg, { hasEndpoint: !!(col3.endpointId || col3.env), isClaude: !col3.cmd, hasMcp: !!(col3 && col3.hasMcp), oneMModel: col3.model });
+          maybeBindHeadroom(respawnMsg, { hasEndpoint: !!(col3.endpointId || (col3.env && col3.env.ANTHROPIC_BASE_URL)), isClaude: !col3.cmd, hasMcp: !!(col3 && col3.hasMcp), oneMModel: col3.model });
           col3.terminal.clear();
           gatedWsSend(respawnMsg);
           setColumnActivity(msg.id, 'working');
@@ -2433,6 +2433,7 @@ function prepareAndPopOut(projectPath) {
         sessionId: col.sessionId || null,
         title: col.customTitle || null,
         model: col.model || null,
+        profileId: col.profileId || null,
         isDiff: !!col.isDiff
       });
     });
@@ -2471,6 +2472,7 @@ window.collectPopoutTransferForClose = function () {
       sessionId: col.sessionId || null,
       title: col.customTitle || null,
       model: col.model || null,
+      profileId: col.profileId || null,
       isDiff: !!col.isDiff
     });
   });
@@ -2502,6 +2504,7 @@ function applyTransferredColumns(projIdx, transfer) {
       cwd: entry.cwd,
       cwdSource: entry.cwdSource || null,
       model: entry.model || null,
+      profileId: entry.profileId || null,
       isDiff: entry.isDiff,
       workspaceId: null // popouts are Primary-only
     });
@@ -3926,7 +3929,7 @@ function reconcileModelArgForRespawn(args, col, isLocal) {
     headroomInstalled: headroomInstalled,
     useHeadroom: config && config.useHeadroom,
     useHeadroom1m: config && config.useHeadroom1m,
-    hasEndpoint: !!(col.endpointId || col.env)
+    hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL))
   });
   return window.HeadroomEnv
     ? window.HeadroomEnv.reconcileModelArgForRespawn(args, col.model, headroomOwnsModel, isLocal)
@@ -4716,7 +4719,7 @@ function createExitOverlay(id, exitCode, col) {
     if (col.env) sendMsg.env = col.env;
     // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
     // Re-derived from the live global flag; passthrough for endpoint/arbitrary cmd.
-    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp), oneMModel: col.model });
+    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp), oneMModel: col.model });
     gatedWsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
@@ -5150,7 +5153,7 @@ function addColumn(args, targetRow, opts) {
   // transfer / saved-layout never see an orphan --session-id flag.
   var __origArgs = claudeArgs;
   var __plan = window.SpawnSession.planFreshSessionId(
-    { args: claudeArgs, cmd: cmd, hasEndpoint: !!(opts.endpointId || opts.env) },
+    { args: claudeArgs, cmd: cmd, hasEndpoint: !!(opts.endpointId || (opts.env && opts.env.ANTHROPIC_BASE_URL)) },
     window.SpawnSession.randomUuidV4);
   claudeArgs = __plan.args;
 
@@ -5210,7 +5213,7 @@ function addColumn(args, targetRow, opts) {
     // Persist so respawn/reattach paths keep MCP inlined (Headroom tool-search off) without re-resolving.
     var __col = allColumns.get(id);
     if (__col) __col.hasMcp = __hasMcp;
-    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd, hasMcp: __hasMcp, oneMModel: opts.model });
+    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || (opts.env && opts.env.ANTHROPIC_BASE_URL)), isClaude: !cmd, hasMcp: __hasMcp, oneMModel: opts.model });
     if (mcpRes) sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
 
     vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
@@ -6836,7 +6839,7 @@ async function restartColumn(id) {
   }
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
   // Passthrough for arbitrary-cmd/endpoint columns; hasMcp from the fresh resolve.
-  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: __rHasMcp, oneMModel: col.model });
+  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: __rHasMcp, oneMModel: col.model });
   gatedWsSend(sendMsg);
   // Re-evaluate stale-hook health from a clean slate for the new session: if
   // hooks now reach the column it will never re-flag; if they still don't, the
@@ -7548,7 +7551,7 @@ async function handoffColumnToCodex(id) {
   var cwd = col.cwd || col.projectKey;
 
   var read = await window.electronAPI.readColumnTranscript({
-    projectKey: col.projectKey, cwd: cwd, sessionId: col.sessionId
+    projectKey: col.projectKey, cwd: cwd, sessionId: col.sessionId, profileId: col.profileId || null
   });
   if (!read || !read.ok) {
     // 'no_transcript' is the COMMON case, not an error worth alarming about:
@@ -11074,7 +11077,7 @@ async function streamSpeakColumn(col, readingMode, baselineUuid, colId) {
   if (!voiceSettings || !voiceSettings.voiceId) return;
   var sres = await window.electronAPI.extractColumnSentences({
     transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId,
-    baselineUuid: baselineUuid || '', readingMode: readingMode, maxChars: voiceSettings.maxChars
+    baselineUuid: baselineUuid || '', readingMode: readingMode, maxChars: voiceSettings.maxChars, profileId: col.profileId || null
   });
   vlog('extractSentences', { ok: sres && sres.ok, n: sres && sres.sentences && sres.sentences.length, error: sres && sres.error, uuid: sres && sres.uuid, diag: sres && sres.diag });
   if (!sres || !sres.ok || !sres.sentences || !sres.sentences.length) return;
@@ -11163,7 +11166,7 @@ async function playColumnReply(colId, readingMode) {
           // Advance the transcript baseline too, so a later auto Stop that falls
           // back to the transcript path doesn't re-speak this just-played reply.
           if (window.electronAPI.peekColumn) {
-            window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId })
+            window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId, profileId: col.profileId || null })
               .then(function (r) { if (r && r.ok && r.uuid) col.lastSpokenUuid = r.uuid; }).catch(function () {});
           }
         }
@@ -11179,7 +11182,8 @@ async function playColumnReply(colId, readingMode) {
   try {
     var result = await window.electronAPI.synthesizeVoiceColumn({
       projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId, transcriptPath: col.voiceTranscriptPath || '',
-      readingMode: readingMode, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, maxChars: voiceSettings.maxChars
+      readingMode: readingMode, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, maxChars: voiceSettings.maxChars,
+      profileId: col.profileId || null
     });
     vlog('manual synth', { ok: result && result.ok, error: result && result.error, status: result && result.status, hasB64: !!(result && result.base64), diag: result && result.diag });
     if (result && result.ok) { col.voiceUnspoken = false; playVoiceAudio(result, undefined, undefined, srcKey, colId); refreshVoiceButtonStates(); if (result.uuid) col.lastSpokenUuid = result.uuid; }
@@ -11467,7 +11471,7 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
     // Stop can poll for the FRESH reply (uuid !== baseline) instead of racing the
     // transcript flush and speaking the previous turn.
     if (evtName === 'UserPromptSubmit' && sidMatchesColumn && window.electronAPI.peekColumn) {
-      window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId })
+      window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId, profileId: col.profileId || null })
         .then(function (r) { if (r && r.ok) col.voicePreTurnUuid = r.uuid; }).catch(function () {});
     }
     vlog('hook decision', { evt: evtName, colId: colId, enabled: !!(voiceSettings && voiceSettings.enabled), mode: voiceSettings && voiceSettings.mode, voiceId: voiceSettings && voiceSettings.voiceId, focusedColumnId: state && state.focusedColumnId, winFocused: voiceWindowFocused, isActive: isActive, muted: isProjectVoiceMuted(col.projectKey), eligible: eligible, autoBusy: voiceAutoBusy, sidMatchesColumn: sidMatchesColumn, colSid: col && col.sessionId, evtSid: sid, unspoken: col && col.voiceUnspoken, bg: !!(event && event.__claudesBackground), attention: voiceAttentionColumnId, lastFocused: lastFocusedColumnId });
@@ -14865,7 +14869,7 @@ function startContextMeterPoll(colId) {
         try {
           var hrInput = {
             enabled: !!(headroomInstalled && config && config.useHeadroom),
-            hasEndpoint: !!(col.endpointId || col.env),
+            hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)),
             isClaude: !col.cmd,
             oneM: !!(config && config.useHeadroom1m !== false),
             oneMModel: col.model || (config && config.headroom1mModel) ||
