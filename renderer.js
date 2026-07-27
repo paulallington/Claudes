@@ -5661,9 +5661,7 @@ function addRow() {
   if (!activeProjectKey) return;
   var state = getActiveState();
   if (!state) return;
-
-  var row = addRowToProject(state);
-  addColumn(null, row, spawnOpts());
+  spawnFromOptions(function () { return addRowToProject(state); });
 }
 
 // ============================================================
@@ -11746,6 +11744,37 @@ function clawdForceRefresh() {
 // Init
 // ============================================================
 
+// Shared by the Spawn button and Add Row: both must apply the dropdown's
+// options (permission mode, --bare, --model, worktree, ...) via
+// buildSpawnArgs(), and must go through the spawnOpts() *helper* (below) —
+// not a bare object literal — since that's what layers on the endpoint env,
+// the profile env and profileId. A local named `spawnOpts` would shadow the
+// helper and silently drop all of that.
+// `makeRow` is a lazy row-creation callback rather than an already-created
+// row so that an aborted spawn (project switched mid worktree-resolve)
+// doesn't leave a stray empty row behind.
+async function spawnFromOptions(makeRow) {
+  var projectAtClick = activeProjectKey;
+  var raw = optWorktree.value.trim();
+  var resolved = { kind: 'none' };
+  if (raw && projectAtClick) {
+    resolved = await window.electronAPI.resolveWorktree(projectAtClick, raw);
+  }
+  if (activeProjectKey !== projectAtClick) return;
+  var extra = {};
+  if (resolved.kind === 'cwd') {
+    extra.cwd = resolved.path;
+    extra.cwdSource = 'manual';
+  }
+  // Threaded through to maybeBindHeadroom (via addColumn's opts.model) so a
+  // Headroom-bound spawn pins ANTHROPIC_MODEL to the dropdown pick even
+  // though buildSpawnArgs skips --model for that case (see below).
+  if (optModel.value) extra.model = optModel.value;
+  var args = buildSpawnArgs(resolved);
+  var targetRow = makeRow ? makeRow() : null;
+  addColumn(args.length > 0 ? args : null, targetRow, spawnOpts(extra));
+}
+
 btnAdd.addEventListener('click', async function () {
   if (optHeadless.checked) {
     // Consume the transient flag immediately — don't persist it.
@@ -11757,24 +11786,7 @@ btnAdd.addEventListener('click', async function () {
   if (btnAdd.disabled) return;
   btnAdd.disabled = true;
   try {
-    var projectAtClick = activeProjectKey;
-    var raw = optWorktree.value.trim();
-    var resolved = { kind: 'none' };
-    if (raw && projectAtClick) {
-      resolved = await window.electronAPI.resolveWorktree(projectAtClick, raw);
-    }
-    if (activeProjectKey !== projectAtClick) return;
-    var spawnOpts = {};
-    if (resolved.kind === 'cwd') {
-      spawnOpts.cwd = resolved.path;
-      spawnOpts.cwdSource = 'manual';
-    }
-    // Threaded through to maybeBindHeadroom (via addColumn's opts.model) so a
-    // Headroom-bound spawn pins ANTHROPIC_MODEL to the dropdown pick even
-    // though buildSpawnArgs skips --model for that case (see below).
-    if (optModel.value) spawnOpts.model = optModel.value;
-    var args = buildSpawnArgs(resolved);
-    addColumn(args.length > 0 ? args : null, null, spawnOpts);
+    await spawnFromOptions(null);
   } finally {
     btnAdd.disabled = false;
   }
