@@ -1549,6 +1549,88 @@ function debouncePopoutBounds(projectKey, win) {
   };
 }
 
+// Registry of open codex watcher windows keyed by columnId.
+const codexWatchOpenWindows = new Map();
+
+function createCodexWatchWindow(opts) {
+  const columnId = opts && opts.columnId;
+  if (codexWatchOpenWindows.has(columnId)) {
+    const existing = codexWatchOpenWindows.get(columnId);
+    if (!existing.isDestroyed()) {
+      existing.show();
+      existing.focus();
+      return existing;
+    }
+    codexWatchOpenWindows.delete(columnId);
+  }
+
+  const config = readConfig();
+  const bounds = config.codexWatchBounds || {};
+  const index = codexWatchOpenWindows.size;
+  const cascade = index * 24;
+
+  const win = new BrowserWindow({
+    width: bounds.width || 900,
+    height: bounds.height || 700,
+    x: typeof bounds.x === 'number' ? bounds.x + cascade : undefined,
+    y: typeof bounds.y === 'number' ? bounds.y + cascade : undefined,
+    minWidth: 400,
+    minHeight: 300,
+    title: 'Codex – ' + (opts.title || 'Watcher'),
+    icon: path.join(__dirname, process.platform === 'win32' ? 'icon-tray.ico' : 'icon.png'),
+    backgroundColor: '#1a1a2e',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+      webviewTag: false
+    }
+  });
+
+  lockdownWebContents(win.webContents);
+  win.loadFile('codex-watch.html', {
+    query: { sessionId: opts.sessionId, title: opts.title || '' }
+  });
+
+  const saveBoundsDebounced = debounceCodexWatchBounds(win);
+  win.on('move', saveBoundsDebounced);
+  win.on('resize', saveBoundsDebounced);
+
+  codexWatchRegisterWindow(win, { sessionId: opts.sessionId, columnProfileId: opts.columnProfileId });
+
+  win.on('closed', () => {
+    codexWatchOpenWindows.delete(columnId);
+    codexWatchUnregisterWindow(win);
+  });
+
+  codexWatchOpenWindows.set(columnId, win);
+  return win;
+}
+
+// Debounce so drag events don't flood writeConfig. Bounds are shared across
+// all watcher windows (a single top-level codexWatchBounds key), same
+// debounce constant as popoutBounds.
+function debounceCodexWatchBounds(win) {
+  let timer = null;
+  return function () {
+    if (win.isDestroyed()) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (win.isDestroyed()) return;
+      const b = win.getBounds();
+      const cfg = readConfig();
+      cfg.codexWatchBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+      scheduleWriteConfig(cfg);
+      // Intentionally no broadcastConfigUpdated here — same reasoning as
+      // debouncePopoutBounds: this is internal bookkeeping, not something the
+      // renderer needs to react to.
+    }, POPOUT_BOUNDS_DEBOUNCE_MS);
+  };
+}
+
 function broadcastConfigUpdated(config) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('config:updated', config);
@@ -7585,6 +7667,15 @@ function codexWatchResolveLogPath(sel, workspaceKey, jobId) {
 
   return CodexWatchTail.logPathFor(path, root, workspaceKey, jobId);
 }
+
+ipcMain.handle('codexwatch:open', (event, opts) => {
+  try {
+    createCodexWatchWindow(opts || {});
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
 
 ipcMain.handle('codexwatch:listJobs', (event, sel) => {
   const opts = sel || {};
