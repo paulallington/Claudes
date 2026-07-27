@@ -75,3 +75,20 @@ test('profileClaudeRoot returns ~/.claude for Primary and the config dir otherwi
 test('PRIMARY_ID is stable', () => {
   assert.strictEqual(PRIMARY_ID, 'primary');
 });
+
+test('loads in a sandboxed renderer context with no require available', () => {
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const src = fs.readFileSync(require.resolve('../lib/profile-resolve.js'), 'utf8');
+  // Mirror the renderer: a window, and NO require / NO module. If the module
+  // touches require at top level this throws and window.ProfileResolve is
+  // never assigned — which is exactly the production bug this pins.
+  const sandbox = { window: {} };
+  vm.createContext(sandbox);
+  vm.runInContext(src, sandbox);
+  assert.ok(sandbox.window.ProfileResolve, 'window.ProfileResolve must be defined');
+  assert.strictEqual(
+    sandbox.window.ProfileResolve.resolveProfile({ profiles: [], defaultProfileId: 'primary' }).id,
+    'primary'
+  );
+});
