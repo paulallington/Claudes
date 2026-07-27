@@ -739,6 +739,41 @@ function claudeRootFor(profileId) {
   return profileClaudeRoot(resolveProfileFor({ columnProfileId: profileId }), os.homedir());
 }
 
+// Primary (~/.claude) is authoritative for app-managed config. After a
+// successful write there, copy the file into every secondary profile so a hook
+// or permission the user just enabled is live on every subscription. Profiles
+// are clones that differ only in credentials and transcripts.
+//
+// A failure here MUST surface. Silently diverging profiles is precisely the
+// "why isn't my hook running on that column" bug this design exists to avoid.
+function mirrorToProfiles(relPath) {
+  const src = path.join(os.homedir(), '.claude', relPath);
+  const failed = [];
+  if (!fs.existsSync(src)) return { ok: true, failed };
+  for (const p of readProfiles().profiles) {
+    if (!p.configDir) continue;   // Primary is the source
+    try {
+      const dest = path.join(p.configDir, relPath);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+    } catch (e) {
+      console.warn('[profiles] mirror failed', p.name, relPath, e.message);
+      failed.push(p.name);
+    }
+  }
+  return { ok: failed.length === 0, failed };
+}
+
+// Broadcast a mirror failure to every window so the renderer can toast it.
+// A silent divergence between profiles is the exact bug mirrorToProfiles
+// exists to prevent, so a failed copy must never fail quietly.
+function notifyMirrorFailed(file, failedProfiles) {
+  BrowserWindow.getAllWindows().forEach((w) => {
+    try { w.webContents.send('profiles:mirrorFailed', { file, profiles: failedProfiles }); }
+    catch { /* ignore */ }
+  });
+}
+
 // The stored configDir is app-written, but a hand-edited profiles.json must
 // not be able to aim this recursive, forced delete at an arbitrary directory. A
 // textual startsWith() is not enough: "<PROFILES_DIR>\..\..\x" satisfies it and
@@ -2548,6 +2583,13 @@ ipcMain.handle('claudemd:save', (event, projectPath, content) => {
       return { success: false, error: 'content exceeds write size cap (5MB)' };
     }
     fs.writeFileSync(filePath, content, 'utf8');
+    // Only the GLOBAL CLAUDE.md is app-managed across profiles — a per-project
+    // CLAUDE.md lives under the project directory, not under ~/.claude, and
+    // has nothing to do with which subscription a column runs on.
+    if (projectPath === GLOBAL_CLAUDEMD_SENTINEL) {
+      const mirror = mirrorToProfiles('CLAUDE.md');
+      if (!mirror.ok) notifyMirrorFailed('CLAUDE.md', mirror.failed);
+    }
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
@@ -4199,43 +4241,54 @@ ipcMain.handle('notify:show', (_event, opts) => {
 });
 
 ipcMain.handle('usage:getAll', async () => {
-  const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
+  // Union across every profile, not just Primary — each has its own
+  // ~/.claude(s)/…/projects dir. Every result is tagged with its profile so a
+  // future per-profile breakdown can group on it.
+  const roots = readProfiles().profiles.map((p) => ({
+    profileId: p.id,
+    profileName: p.name,
+    dir: path.join(profileClaudeRoot(p, os.homedir()), 'projects')
+  }));
   const results = [];
   const cache = readUsageCache();
   const nextCache = {};
 
-  let projectDirs;
-  try {
-    projectDirs = await fs.promises.readdir(claudeProjectsDir);
-  } catch {
-    return results;
-  }
-
-  // Enumerate all jsonl files up front so we can parse in parallel.
+  // Enumerate all jsonl files up front, across all profiles, so we can parse
+  // in parallel.
   const jobs = [];
-  for (const dir of projectDirs) {
-    const projectDir = path.join(claudeProjectsDir, dir);
-    let dirStat;
-    try { dirStat = await fs.promises.stat(projectDir); } catch { continue; }
-    if (!dirStat.isDirectory()) continue;
+  for (const root of roots) {
+    let projectDirs;
+    try { projectDirs = await fs.promises.readdir(root.dir); } catch { continue; }
 
-    let entries;
-    try { entries = await fs.promises.readdir(projectDir); } catch { continue; }
+    for (const dir of projectDirs) {
+      const projectDir = path.join(root.dir, dir);
+      let dirStat;
+      try { dirStat = await fs.promises.stat(projectDir); } catch { continue; }
+      if (!dirStat.isDirectory()) continue;
 
-    for (const file of entries) {
-      if (!file.endsWith('.jsonl')) continue;
-      const filePath = path.join(projectDir, file);
-      let fileStat;
-      try { fileStat = await fs.promises.stat(filePath); } catch { continue; }
-      const sessionId = file.replace('.jsonl', '');
-      jobs.push({
-        cacheKey: dir + '/' + sessionId,
-        projectKey: dir,
-        sessionId,
-        filePath,
-        size: fileStat.size,
-        mtimeMs: fileStat.mtimeMs
-      });
+      let entries;
+      try { entries = await fs.promises.readdir(projectDir); } catch { continue; }
+
+      for (const file of entries) {
+        if (!file.endsWith('.jsonl')) continue;
+        const filePath = path.join(projectDir, file);
+        let fileStat;
+        try { fileStat = await fs.promises.stat(filePath); } catch { continue; }
+        const sessionId = file.replace('.jsonl', '');
+        jobs.push({
+          // Two profiles can hold a session file with the same name for the
+          // same project key — the profile id MUST be in the cache key, or a
+          // shared key would serve one profile's digest for the other's file.
+          cacheKey: root.profileId + '/' + dir + '/' + sessionId,
+          profileId: root.profileId,
+          profileName: root.profileName,
+          projectKey: dir,
+          sessionId,
+          filePath,
+          size: fileStat.size,
+          mtimeMs: fileStat.mtimeMs
+        });
+      }
     }
   }
 
@@ -4256,6 +4309,8 @@ ipcMain.handle('usage:getAll', async () => {
     if (!digest) continue;
     nextCache[job.cacheKey] = digest;
     results.push({
+      profileId: job.profileId,
+      profileName: job.profileName,
       projectKey: job.projectKey,
       sessionId: job.sessionId,
       model: digest.model,
@@ -4426,45 +4481,56 @@ ipcMain.handle('sessions:search', async (_event, query, limit, projectPath) => {
   return hits;
 });
 
-// Prompt-history search across ~/.claude/history.jsonl. Returns hits in
-// reverse-chronological order (most recent first). Distinct from sessions:search
-// — that one searches assistant transcripts; this one searches user prompts.
+// Prompt-history search, unioned across every profile's history.jsonl and
+// sorted by timestamp (most recent first). Distinct from sessions:search —
+// that one searches assistant transcripts; this one searches user prompts.
 ipcMain.handle('history:search', async (_event, query, limit, projectPath) => {
   if (!query || typeof query !== 'string' || query.length < 2) return [];
   const max = Math.max(1, Math.min(200, limit || 100));
-  const file = path.join(os.homedir(), '.claude', 'history.jsonl');
-  let content;
-  try { content = await fs.promises.readFile(file, 'utf8'); } catch { return []; }
   const needle = query.toLowerCase();
   // history.jsonl stores `entry.project` as the raw filesystem path. Compare
   // raw-to-raw to keep the path-shape contract identical to what the entry
   // already uses, avoiding any double-encoding mismatch.
   const scopedProject = (projectPath && typeof projectPath === 'string') ? projectPath : null;
-  const lines = content.split('\n');
+
+  const roots = readProfiles().profiles.map((p) => ({
+    profileId: p.id,
+    profileName: p.name,
+    file: path.join(profileClaudeRoot(p, os.homedir()), 'history.jsonl')
+  }));
+
   const hits = [];
-  for (let i = lines.length - 1; i >= 0 && hits.length < max; i--) {
-    const line = lines[i];
-    if (!line || line[0] !== '{') continue;
-    if (line.toLowerCase().indexOf(needle) === -1) continue;
-    let entry;
-    try { entry = JSON.parse(line); } catch { continue; }
-    if (scopedProject && (entry.project || '') !== scopedProject) continue;
-    const text = entry.display || '';
-    if (!text) continue;
-    if (text.toLowerCase().indexOf(needle) === -1) continue;
-    // Trim to ~200 chars around the needle
-    const matchIdx = text.toLowerCase().indexOf(needle);
-    const start = Math.max(0, matchIdx - 80);
-    const end = Math.min(text.length, matchIdx + 120);
-    const snippet = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
-    hits.push({
-      text,
-      snippet,
-      project: entry.project || '',
-      ts: entry.timestamp || null
-    });
+  for (const root of roots) {
+    let content;
+    try { content = await fs.promises.readFile(root.file, 'utf8'); } catch { continue; }
+    const lines = content.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      if (!line || line[0] !== '{') continue;
+      if (line.toLowerCase().indexOf(needle) === -1) continue;
+      let entry;
+      try { entry = JSON.parse(line); } catch { continue; }
+      if (scopedProject && (entry.project || '') !== scopedProject) continue;
+      const text = entry.display || '';
+      if (!text) continue;
+      if (text.toLowerCase().indexOf(needle) === -1) continue;
+      // Trim to ~200 chars around the needle
+      const matchIdx = text.toLowerCase().indexOf(needle);
+      const start = Math.max(0, matchIdx - 80);
+      const end = Math.min(text.length, matchIdx + 120);
+      const snippet = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+      hits.push({
+        text,
+        snippet,
+        project: entry.project || '',
+        ts: entry.timestamp || null,
+        profileId: root.profileId,
+        profileName: root.profileName
+      });
+    }
   }
-  return hits;
+  hits.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  return hits.slice(0, max);
 });
 
 // --- Auto Updater ---
@@ -5174,6 +5240,8 @@ ipcMain.handle('hooks:configure', () => {
       added++;
     }
     writeClaudeSettings(file, data);
+    const mirror = mirrorToProfiles('settings.json');
+    if (!mirror.ok) notifyMirrorFailed('settings.json', mirror.failed);
     return { ok: true, added, migrated, removed, port: hookServerListenPort };
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
@@ -5198,6 +5266,8 @@ ipcMain.handle('hooks:disconnect', () => {
     }
     if (Object.keys(data.hooks).length === 0) delete data.hooks;
     writeClaudeSettings(file, data);
+    const mirror = mirrorToProfiles('settings.json');
+    if (!mirror.ok) notifyMirrorFailed('settings.json', mirror.failed);
     return { ok: true, removed };
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
@@ -6096,6 +6166,8 @@ ipcMain.handle('voice:setPersonality', (event, personaArg) => {
     const tmp = p + '.tmp';
     fs.writeFileSync(tmp, next, 'utf8');
     fs.renameSync(tmp, p);
+    const mirror = mirrorToProfiles('CLAUDE.md');
+    if (!mirror.ok) notifyMirrorFailed('CLAUDE.md', mirror.failed);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err) };

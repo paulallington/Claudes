@@ -12075,6 +12075,18 @@ if (window.electronAPI && window.electronAPI.onProfilesUpdated) {
   });
 }
 
+// A mirror failure means a secondary profile's copy of settings.json/CLAUDE.md
+// just fell out of sync with Primary — silent divergence is exactly the "why
+// isn't my hook running on that column" bug the mirror exists to prevent, so
+// this must be visible rather than only logged.
+if (window.electronAPI && window.electronAPI.onProfilesMirrorFailed) {
+  window.electronAPI.onProfilesMirrorFailed(function (info) {
+    var file = (info && info.file) || 'config';
+    var names = (info && info.profiles && info.profiles.length) ? info.profiles.join(', ') : 'a profile';
+    showToast('Could not sync ' + file + ' to profile(s): ' + names + '. Those columns may behave differently.', { kind: 'error', duration: 8000 });
+  });
+}
+
 // Kick off initial load. If electronAPI isn't ready yet (popout windows
 // sometimes initialize the bridge late), this is a no-op and a later
 // loadSpawnOptions call will trigger applyEndpointSelection without env.

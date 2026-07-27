@@ -239,6 +239,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   profileGetEnv: (sel) => ipcRenderer.invoke('profile:getEnv', sel),
   profileReseed: (id) => ipcRenderer.invoke('profile:reseed', id),
   onProfilesUpdated: (callback) => ipcRenderer.on('profiles:updated', () => callback()),
+  onProfilesMirrorFailed: (callback) => ipcRenderer.on('profiles:mirrorFailed', (_, info) => callback(info)),
 
   paletteRank: (items, query) => ipcRenderer.invoke('palette:rank', items, query),
 
