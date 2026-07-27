@@ -31,7 +31,22 @@ Log path:
 <state-root>/<repo-slug>-<sha256(realpath(repo-root))[0:16]>/jobs/task-<id>.log
 ```
 
-with `<state-root>` = `~/.claude/plugins/data/codex-openai-codex/state`.
+`<state-root>` is **not** a fixed path. `scripts/lib/state.mjs` resolves it from
+the `CLAUDE_PLUGIN_DATA` environment variable that Claude Code sets for the
+plugin, falling back to `<tmpdir>/codex-companion` when that is absent. In
+practice Claude Code derives it from the session's config directory, so for a
+Primary session it is:
+
+```
+~/.claude/plugins/data/codex-openai-codex/state
+```
+
+This interacts directly with **multi-subscription profiles**. A column running
+under a secondary profile has `CLAUDE_CONFIG_DIR=~/.claudes/profiles/pf_*`, so
+its Codex jobs are written under *that* profile's directory instead. Hardcoding
+the Primary path would show zero jobs for every non-Primary column — silently,
+since "no jobs" is also the legitimate no-plugin state. See §2 for how the root
+is resolved per column.
 
 The directory key is the **git repo root** of the session's cwd
 (`resolveWorkspaceRoot` → `ensureGitRepository`), not the project root.
@@ -103,9 +118,31 @@ class — there is no generic `.hidden` in `styles.css` to reuse.
 
 ## 2. Architecture and data flow
 
-The main process owns all filesystem access. A hardcoded `CODEX_STATE_ROOT`
-points at the plugin state directory, and a new `codexwatch:` IPC family is the
-only route in.
+The main process owns all filesystem access. A new `codexwatch:` IPC family is
+the only route in.
+
+### Resolving the state root (profile-aware)
+
+The state root is derived in main, never supplied by the renderer:
+
+1. Resolve the column's profile through the existing `profile:resolve` entry
+   point (`lib/profile-resolve.js`), which already runs the
+   column → workspace → project → global-default cascade.
+2. Take that profile's Claude root — `profileClaudeRoot` for a secondary,
+   `~/.claude` for Primary, which sets no env var at all.
+3. Append `plugins/data/codex-openai-codex/state`.
+
+Because the watcher is per column, this yields exactly one root per window. The
+background badge poll scans the **union of distinct roots** across open columns,
+which for a single-subscription user is one directory.
+
+A root that does not exist simply yields no jobs — the same outcome as a machine
+without the plugin, and handled by the same code path. The
+`<tmpdir>/codex-companion` fallback that the plugin uses when
+`CLAUDE_PLUGIN_DATA` is unset is deliberately **not** searched: it only occurs
+when the plugin runs outside a Claude Code session, which is not a case this
+feature covers, and probing a shared temp directory for job state is a poor
+trade against the small benefit.
 
 **The renderer never sends a path.** This matters because the plugin state root
 sits outside the app's allowed roots, so `fs:startWatch` and the file-read IPC
@@ -127,9 +164,10 @@ security boundary for a read-only convenience.
 ### Polling
 
 A **slow background poll (~3s)** drives badge and row visibility. Its first
-action each tick is an `existsSync` on the state root, bailing immediately if
-absent — so on a machine without the plugin the entire ongoing cost is one stat
-every 3 seconds. Checking existence every tick rather than caching it at startup
+action each tick is an `existsSync` per resolved root, bailing immediately on
+any that are absent — so on a single-subscription machine without the plugin the
+entire ongoing cost is one stat every 3 seconds. Checking existence every tick
+rather than caching it at startup
 means the feature self-heals when the user installs the plugin or runs their
 first job after the app launched, instead of staying dark until restart.
 
@@ -180,7 +218,8 @@ of `main.js` / `renderer.js` so it can be tested outside Electron.
 
 | Condition | Behaviour |
 |---|---|
-| State root missing (plugin not installed) | No row, no badge, no work beyond one `existsSync` per slow tick. |
+| State root missing (plugin not installed) | No row, no badge, no work beyond one `existsSync` per root per slow tick. |
+| Column runs under a secondary subscription profile | Root resolved from that profile's Claude root, so its jobs are found. A Primary-hardcoded root would show zero jobs indistinguishably from "no plugin" — this is the failure mode §2 exists to prevent. |
 | Torn / corrupt `state.json` | Catch per file, skip that directory for the tick, keep the last good list. The companion writes non-atomically, so this **will** occur. |
 | Log truncated or rotated (size < offset) | Reset offset to 0 and reload the file. |
 | Job vanishes from `state.json` (`SessionEnd` cleanup) | Keep the tab, mark it ended, retain content, stop tailing. |
@@ -204,6 +243,8 @@ the real app:
 3. Start a second concurrent job; confirm both tab correctly and independently.
 4. Let a job finish; confirm it remains readable in the list.
 5. Confirm no Codex UI appears at all on a profile with no plugin state root.
+6. If a secondary subscription profile is configured, run a job from a column
+   assigned to it and confirm the jobs are found under that profile's root.
 
 ## Out of scope
 
