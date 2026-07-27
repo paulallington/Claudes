@@ -11,8 +11,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   popoutSetTransfer: (projectKey, list) => ipcRenderer.invoke('popout:setTransfer', projectKey, list),
   popoutTakeTransfer: (projectKey) => ipcRenderer.invoke('popout:takeTransfer', projectKey),
   onConfigUpdated: (callback) => ipcRenderer.on('config:updated', (_, cfg) => callback(cfg)),
-  getRecentSessions: (projectPath) => ipcRenderer.invoke('sessions:getRecent', projectPath),
-  sessionExists: (projectPath, sessionId) => ipcRenderer.invoke('sessions:exists', projectPath, sessionId),
+  getRecentSessions: (projectPath, profileId) => ipcRenderer.invoke('sessions:getRecent', projectPath, profileId),
+  sessionExists: (projectPath, sessionId, profileId) => ipcRenderer.invoke('sessions:exists', projectPath, sessionId, profileId),
   getBackgroundSessionIds: () => ipcRenderer.invoke('sessions:getBackgroundIds'),
   onBackgroundSessionIds: (cb) => ipcRenderer.on('sessions:backgroundIds', (_e, ids) => cb(ids)),
   saveSessions: (projectPath, sessionIds) => ipcRenderer.invoke('sessions:save', projectPath, sessionIds),
@@ -20,7 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadStickyNotes: (projectPath, workspaceId) => ipcRenderer.invoke('sticky-notes:load', projectPath, workspaceId),
   saveStickyNotes: (projectPath, workspaceId, notes) => ipcRenderer.invoke('sticky-notes:save', projectPath, workspaceId, notes),
   scrubWorkspaceArtifacts: (projectPath, wsId) => ipcRenderer.invoke('workspace:scrubArtifacts', projectPath, wsId),
-  getSessionTitle: (projectPath, sessionId) => ipcRenderer.invoke('sessions:getTitle', projectPath, sessionId),
+  getSessionTitle: (projectPath, sessionId, profileId) => ipcRenderer.invoke('sessions:getTitle', projectPath, sessionId, profileId),
   readClaudeMd: (projectPath) => ipcRenderer.invoke('claudemd:read', projectPath),
   saveClaudeMd: (projectPath, content) => ipcRenderer.invoke('claudemd:save', projectPath, content),
   setExploreAgent: (projectPath, enabled) => ipcRenderer.invoke('agents:setExplore', projectPath, enabled),
@@ -48,7 +48,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gitDiffCommit: (projectPath, hash, filePath) => ipcRenderer.invoke('git:diffCommit', projectPath, hash, filePath),
   gitDiffStat: (projectPath, staged, branch) => ipcRenderer.invoke('git:diffStat', projectPath, staged, branch),
   gitDiffStatVsBase: (projectPath, branch, baseRef) => ipcRenderer.invoke('git:diffStatVsBase', projectPath, branch, baseRef),
-  gitDetectSessionWorktree: (projectPath, sessionId) => ipcRenderer.invoke('git:detectSessionWorktree', projectPath, sessionId),
+  gitDetectSessionWorktree: (projectPath, sessionId, profileId) => ipcRenderer.invoke('git:detectSessionWorktree', projectPath, sessionId, profileId),
   gitIsInsideWorkTree: (cwd) => ipcRenderer.invoke('git:isInsideWorkTree', cwd),
   resolveWorktree: (projectPath, value) => ipcRenderer.invoke('paths:resolveWorktree', projectPath, value),
   pathExists: (p) => ipcRenderer.invoke('paths:exists', p),
@@ -72,7 +72,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPlanLimits: (force) => ipcRenderer.invoke('usage:getPlanLimits', force),
   getCodexLimits: (force) => ipcRenderer.invoke('usage:getCodexLimits', force),
   detectThresholdCrossings: (prev, next) => ipcRenderer.invoke('usage:detectThresholdCrossings', prev, next),
-  getSessionContextTokens: (projectKey, sessionId, sinceMs) => ipcRenderer.invoke('session:contextTokens', projectKey, sessionId, sinceMs),
+  getSessionContextTokens: (projectKey, sessionId, sinceMs, profileId) => ipcRenderer.invoke('session:contextTokens', projectKey, sessionId, sinceMs, profileId),
   getModelContextLimit: (model) => ipcRenderer.invoke('session:modelContextLimit', model),
   showSystemNotification: (opts) => ipcRenderer.invoke('notify:show', opts),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
@@ -257,7 +257,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onUpdateNone: (callback) => ipcRenderer.on('update:none', (_, info) => callback(info)),
 
   // Clawd widget — per-column JSONL tail driving the animation
-  clawdStartTail: (columnId, projectPath, sessionId) => ipcRenderer.invoke('clawd:startTail', { columnId, projectPath, sessionId }),
+  clawdStartTail: (columnId, projectPath, sessionId, profileId) => ipcRenderer.invoke('clawd:startTail', { columnId, projectPath, sessionId, profileId }),
   clawdStopTail: (columnId) => ipcRenderer.invoke('clawd:stopTail', { columnId }),
   onClawdEvent: (callback) => ipcRenderer.on('clawd:event', (_, data) => callback(data))
 });

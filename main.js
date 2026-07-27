@@ -2039,9 +2039,9 @@ function projectPathToClaudeKey(projectPath) {
 }
 
 // Get recent session IDs for a project by scanning Claude's data directory
-ipcMain.handle('sessions:getRecent', (event, projectPath) => {
+ipcMain.handle('sessions:getRecent', (event, projectPath, profileId) => {
   const claudeKey = projectPathToClaudeKey(projectPath);
-  const claudeProjectDir = path.join(os.homedir(), '.claude', 'projects', claudeKey);
+  const claudeProjectDir = path.join(claudeRootFor(profileId), 'projects', claudeKey);
 
   try {
     if (!fs.existsSync(claudeProjectDir)) return [];
@@ -2070,11 +2070,11 @@ ipcMain.handle('sessions:getRecent', (event, projectPath) => {
 // Does a session's transcript actually exist on disk? Used before a respawn so
 // we never `--resume` a phantom session id (Claude errors "No conversation
 // found"). Validates the id charset to keep it strictly a filename.
-ipcMain.handle('sessions:exists', (event, projectPath, sessionId) => {
+ipcMain.handle('sessions:exists', (event, projectPath, sessionId, profileId) => {
   if (!projectPath || typeof sessionId !== 'string' || !/^[A-Za-z0-9-]+$/.test(sessionId)) return false;
   try {
     const claudeKey = projectPathToClaudeKey(projectPath);
-    const f = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+    const f = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
     return fs.existsSync(f) && fs.statSync(f).size > 0;
   } catch (e) { return false; }
 });
@@ -2085,9 +2085,9 @@ ipcMain.handle('sessions:exists', (event, projectPath, sessionId) => {
 ipcMain.handle('sessions:getBackgroundIds', () => Array.from(backgroundSessionIds));
 
 // Get the title (first user message) from a Claude session JSONL file
-ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId) => {
+ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId, profileId) => {
   const claudeKey = projectPathToClaudeKey(projectPath);
-  const jsonlPath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+  const jsonlPath = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
   try {
     // Read only first 32KB — the first user message is always near the top
     const fd = fs.openSync(jsonlPath, 'r');
@@ -2121,11 +2121,11 @@ ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId) => {
 // scanning the JSONL tail for `cd <path>` commands and `"file_path":"..."`
 // entries. The Claude CLI's recorded gitBranch reflects ITS own cwd (project
 // root) — useless for sessions that do their work via Bash `cd worktree && ...`.
-ipcMain.handle('git:detectSessionWorktree', async (event, projectPath, sessionId) => {
+ipcMain.handle('git:detectSessionWorktree', async (event, projectPath, sessionId, profileId) => {
   if (!projectPath || !sessionId) return null;
   try {
     const claudeKey = projectPathToClaudeKey(projectPath);
-    const jsonlPath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+    const jsonlPath = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
     const stat = fs.statSync(jsonlPath);
     const tailSize = Math.min(stat.size, 512 * 1024);
     if (tailSize === 0) return null;
@@ -3989,13 +3989,13 @@ const { lastAssistantContextTokens, modelContextLimit, sampleAndResetReadStats }
 
 // One-shot read of the live context-token count for a session.
 // Renderer calls this every ~10s while a Claude column is live.
-ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId, sinceMs) => {
+ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId, sinceMs, profileId) => {
   if (!projectPath || !sessionId) return null;
   // projectPath is the renderer's projectKey, which is the raw filesystem path
   // (e.g. "D:\\Git Repos\\Claudes"). Claude stores sessions under the encoded
   // form (e.g. "D--Git-Repos-Claudes"), so we must encode before joining.
   const claudeKey = projectPathToClaudeKey(projectPath);
-  const filePath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+  const filePath = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
   // Perf instrumentation — count every IPC call. Actual fs.readFileSync
   // invocations and bytes read are tracked inside the lib and sampled by
   // perfSample below, so we can see cache effectiveness in the perf line.
@@ -4111,11 +4111,11 @@ function clawdPollTail(columnId) {
   _clawdEmitIfChanged(columnId, t, false);
 }
 
-function clawdStartTail(columnId, projectPath, sessionId, sender) {
+function clawdStartTail(columnId, projectPath, sessionId, sender, profileId) {
   clawdStopTail(columnId);
   if (!projectPath || !sessionId) return;
   const claudeKey = projectPathToClaudeKey(projectPath);
-  const filePath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+  const filePath = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
   let offset = 0;
   try { offset = fs.statSync(filePath).size; } catch {}
   const t = {
@@ -4140,7 +4140,7 @@ function clawdStopTail(columnId) {
 
 ipcMain.handle('clawd:startTail', (event, args) => {
   if (!args) return;
-  clawdStartTail(args.columnId, args.projectPath, args.sessionId, event.sender);
+  clawdStartTail(args.columnId, args.projectPath, args.sessionId, event.sender, args.profileId);
 });
 ipcMain.handle('clawd:stopTail', (_event, args) => {
   if (!args) return;
@@ -5856,9 +5856,8 @@ ipcMain.handle('voice:synthesizeColumn', async (event, args) => {
 // whose sanitized key differs from the project root), then fall back to the
 // project-key path. Returns null if none resolves to an existing file.
 function resolveColumnTranscriptPath(a) {
-  // TODO(profiles): thread the column's profileId through instead of Primary.
   const { resolvedPath } = resolveTranscriptPath({
-    claudeRoot: path.join(os.homedir(), '.claude'),
+    claudeRoot: claudeRootFor(a.profileId),
     transcriptPath: a.transcriptPath,
     cwd: a.cwd,
     projectKey: a.projectKey,
@@ -5875,8 +5874,7 @@ function resolveColumnTranscriptPath(a) {
 function buildVoiceDiag(a, opts) {
   const o = opts || {};
   let resolvedPath = null, triedCwdPath = null, triedProjectPath = null;
-  // TODO(profiles): thread the column's profileId through instead of Primary.
-  const claudeRoot = path.join(os.homedir(), '.claude');
+  const claudeRoot = claudeRootFor(a.profileId);
   try {
     const r = resolveTranscriptPath({
       claudeRoot,
@@ -5940,8 +5938,7 @@ ipcMain.handle('handoff:readTranscript', async (event, args) => {
   const a = args || {};
   try {
     const thePath = resolveColumnTranscriptPath(a);
-    // TODO(profiles): thread the column's profileId through instead of Primary.
-    if (!thePath || !isUnderProjectsRoot(path.join(os.homedir(), '.claude'), thePath)) {
+    if (!thePath || !isUnderProjectsRoot(claudeRootFor(a.profileId), thePath)) {
       return { ok: false, error: 'no_transcript' };
     }
     const content = await fs.promises.readFile(thePath, 'utf8');

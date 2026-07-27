@@ -136,6 +136,48 @@ var firstSpawnLoadComplete = false;  // gate for cloud-default-on-boot
 // { [endpointId]: { models: string[], fetchedAt: number, ok: boolean } }
 var endpointModelsCache = {};
 
+// Profile (multi-subscription) state, mirroring the currentEndpoint* cache
+// above for the same reason: profile:getEnv is async and spawnOpts is sync.
+var currentProfileEnv = null;    // env block from profile:getEnv, or null (Primary/no profiles configured)
+var currentProfileId = null;     // resolved profile id for the pending spawn, for the column chip + persistence
+
+// Refresh the profile a NEW column would spawn on: column picker (not built
+// yet — no picker UI exists until a later task, so this always contributes
+// null) beats workspace beats project beats the global default. Call whenever
+// the active project/workspace changes or main tells us 'profiles:updated'.
+function refreshProfileSelection() {
+  if (!window.electronAPI || !window.electronAPI.profileGetEnv) return Promise.resolve();
+  var activeProject = config && config.projects ? config.projects[config.activeProjectIndex] : null;
+  var activeWs = (activeProject && activeProject.activeWorkspaceId && Array.isArray(activeProject.workspaces))
+    ? activeProject.workspaces.find(function (w) { return w && w.id === activeProject.activeWorkspaceId; })
+    : null;
+  var sel = {
+    // No spawn-options profile picker yet — always inherit for now.
+    columnProfileId: (typeof optProfile !== 'undefined' && optProfile && optProfile.value) ? optProfile.value : null,
+    workspaceProfileId: activeWs ? activeWs.profileId : null,
+    projectProfileId: activeProject ? activeProject.profileId : null
+  };
+  return window.electronAPI.profileGetEnv(sel).then(function (env) {
+    currentProfileEnv = (env && Object.keys(env).length) ? env : null;
+    return window.electronAPI.profileList ? window.electronAPI.profileList() : null;
+  }).then(function (store) {
+    if (!store || !window.ProfileResolve) { currentProfileId = null; return; }
+    // Re-run the SAME cascade main uses to resolve profile:getEnv, so the id we
+    // persist on the column always matches the env it actually spawned with,
+    // rather than reimplementing (and risking drifting from) that logic here.
+    var resolved = window.ProfileResolve.resolveProfile({
+      profiles: store.profiles, defaultProfileId: store.defaultProfileId,
+      columnProfileId: sel.columnProfileId,
+      workspaceProfileId: sel.workspaceProfileId,
+      projectProfileId: sel.projectProfileId
+    });
+    // Persist null for Primary (isPrimary), the same "omit the default" pattern
+    // used elsewhere (cwd, endpointId) — a plain column with no profile config
+    // stays indistinguishable from one that predates this feature.
+    currentProfileId = resolved.isPrimary ? null : resolved.id;
+  }).catch(function () { currentProfileEnv = null; currentProfileId = null; });
+}
+
 
 // Each window has its own counter for new column/pty ids. Give popouts a high
 // offset so they can't collide with main when both windows spawn after a
@@ -3170,7 +3212,7 @@ function restoreSessions(projectPath, workspaceId) {
       var exists = false;
       if (e.sessionId && window.electronAPI && window.electronAPI.sessionExists) {
         try {
-          exists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(e, projectPath), e.sessionId);
+          exists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(e, projectPath), e.sessionId, e.profileId || null);
         } catch (_) { exists = false; }
       }
       if (e.sessionId && !exists) {
@@ -3277,6 +3319,7 @@ function restoreSessions(projectPath, workspaceId) {
         var cwdSource = (typeof entry === 'object' && entry && typeof entry.cwdSource === 'string' && entry.cwdSource) ? entry.cwdSource : null;
         var endpointId = (typeof entry === 'object' && entry && entry.endpointId) ? entry.endpointId : null;
         var model = (typeof entry === 'object' && entry && entry.model) ? entry.model : null;
+        var profileId = (typeof entry === 'object' && entry && entry.profileId) ? entry.profileId : null;
         // Minimised entries are not part of the grid — route them to a separate
         // list so they don't create rows/affect rowHeightRatios. They restore
         // live-but-minimised into the dock after the grid is built.
@@ -3287,6 +3330,7 @@ function restoreSessions(projectPath, workspaceId) {
           if (cwdSource) minEntry.cwdSource = cwdSource;
           if (endpointId) minEntry.endpointId = endpointId;
           if (model) minEntry.model = model;
+          if (profileId) minEntry.profileId = profileId;
           if (e && e.kind === 'codex') { minEntry.kind = 'codex'; minEntry.codexPreset = e.codexPreset; minEntry.codexModel = e.codexModel; minEntry.codexEffort = e.codexEffort; minEntry.codexTier = e.codexTier; }
           minimizedEntries.push(minEntry);
           continue;
@@ -3297,6 +3341,7 @@ function restoreSessions(projectPath, workspaceId) {
         if (cwdSource) pushedEntry.cwdSource = cwdSource;
         if (endpointId) pushedEntry.endpointId = endpointId;
         if (model) pushedEntry.model = model;
+        if (profileId) pushedEntry.profileId = profileId;
         if (e && e.kind === 'codex') { pushedEntry.kind = 'codex'; pushedEntry.codexPreset = e.codexPreset; pushedEntry.codexModel = e.codexModel; pushedEntry.codexEffort = e.codexEffort; pushedEntry.codexTier = e.codexTier; }
         entries.push(pushedEntry);
       }
@@ -3348,6 +3393,7 @@ function restoreSessions(projectPath, workspaceId) {
         // oneMModel, so a Headroom-bound column restores pinned to the model
         // it was actually running, not the config's 1M default.
         if (e.model) rowOpts.model = e.model;
+        if (e.profileId) rowOpts.profileId = e.profileId;
         if (e.cwd && e.cwdSource !== 'auto-worktree') {
           var stillExists = await window.electronAPI.pathExists(e.cwd);
           if (stillExists) {
@@ -3399,6 +3445,7 @@ function restoreSessions(projectPath, workspaceId) {
         var minRowOpts = { workspaceId: workspaceId };
         if (ment.title) minRowOpts.title = ment.title;
         if (ment.model) minRowOpts.model = ment.model;
+        if (ment.profileId) minRowOpts.profileId = ment.profileId;
         if (ment.cwd && ment.cwdSource !== 'auto-worktree') {
           var mExists = await window.electronAPI.pathExists(ment.cwd);
           if (mExists) {
@@ -4693,7 +4740,7 @@ function addColumn(args, targetRow, opts) {
   claudeArgs = __plan.args;
 
   var preSpawnSessionsPromise = (!cmd && window.electronAPI)
-    ? window.electronAPI.getRecentSessions(cwd)
+    ? window.electronAPI.getRecentSessions(cwd, opts.profileId)
     : Promise.resolve([]);
 
   requestAnimationFrame(async function () {
@@ -5048,6 +5095,11 @@ function addColumn(args, targetRow, opts) {
     ctxPollTimer: null,
     snippetBuffer: '',  // accumulates printable chars to detect "\\trigger" patterns
     endpointId: opts.endpointId || (typeof currentEndpointId !== 'undefined' ? currentEndpointId : null) || null,
+    // The Claude subscription this column runs on. Resolved (not just
+    // opts.profileId) so a restored/resumed column keeps whatever
+    // project/workspace/global cascade produced it at spawn time — see
+    // spawnOpts, which sets opts.profileId from currentProfileId.
+    profileId: opts.profileId || null,
     failedOver: false  // set true after one failover so we don't ping-pong
   };
 
@@ -5767,14 +5819,14 @@ function ensureClawdTail(columnId) {
   if (!col || !col.sessionId || !col.projectKey) return;
   if (col.clawdTailSessionId === col.sessionId) return;
   col.clawdTailSessionId = col.sessionId;
-  window.electronAPI.clawdStartTail(columnId, col.projectKey, col.sessionId);
+  window.electronAPI.clawdStartTail(columnId, col.projectKey, col.sessionId, col.profileId);
 }
 
 function fetchAndSetSessionTitle(columnId, projectPath, sessionId) {
   if (!window.electronAPI || !window.electronAPI.getSessionTitle) return;
   var col = allColumns.get(columnId);
   if (!col || col.customTitle) return; // don't override manual rename
-  window.electronAPI.getSessionTitle(projectPath, sessionId).then(function (title) {
+  window.electronAPI.getSessionTitle(projectPath, sessionId, col.profileId).then(function (title) {
     if (!title) return;
     var col2 = allColumns.get(columnId);
     if (!col2 || col2.customTitle) return;
@@ -5808,7 +5860,8 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
     return;
   }
   setTimeout(function () {
-    window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+    var preCol = allColumns.get(columnId);
+    window.electronAPI.getRecentSessions(projectPath, preCol && preCol.profileId).then(function (sessions) {
       var claimed = getClaimedSessionIds(columnId);
       console.log('[detectSession] col=' + columnId + ' attempt=' + attempt + ' projectPath=' + projectPath + ' got ' + sessions.length + ' sessions, ' + Object.keys(preExistingIds).length + ' preIds, ' + Object.keys(claimed).length + ' claimed');
       for (var i = 0; i < sessions.length; i++) {
@@ -5863,7 +5916,7 @@ function startSessionSync(columnId, projectPath) {
     var col = allColumns.get(columnId);
     if (!col) { stopSessionSync(columnId); return; }
 
-    window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+    window.electronAPI.getRecentSessions(projectPath, col.profileId).then(function (sessions) {
       var col2 = allColumns.get(columnId);
       if (!col2 || !sessions.length) return;
 
@@ -5999,6 +6052,10 @@ function persistSessions(projectKey, workspaceId) {
         // same local endpoint (LM Studio, Ollama, etc.) instead of defaulting
         // to whatever the global Spawn dropdown is currently pointing at.
         if (col2.endpointId) entry.endpointId = col2.endpointId;
+        // Persist which Claude subscription this column ran on, omitted (like
+        // cwd) when it equals the resolved default so existing sessions.json
+        // files without the key keep restoring unchanged.
+        if (col2.profileId) entry.profileId = col2.profileId;
         // Persist the model the user picked so a restore doesn't fall back to
         // the 1M default — omitted (not written null/undefined) when unset so
         // existing session files without the key keep restoring unchanged.
@@ -6040,6 +6097,7 @@ function persistSessions(projectKey, workspaceId) {
       if (mcol.cwd && mcol.cwd !== projectKey) ment.cwd = mcol.cwd;
       if (mcol.cwd && mcol.cwd !== projectKey && mcol.cwdSource) ment.cwdSource = mcol.cwdSource;
       if (mcol.endpointId) ment.endpointId = mcol.endpointId;
+      if (mcol.profileId) ment.profileId = mcol.profileId;
       if (mcol.model) ment.model = mcol.model;
       if (mcol.cmd) {
         // See the security note in the grid loop above.
@@ -6312,7 +6370,7 @@ async function restartColumn(id) {
   // Claude columns (not custom `cmd` columns), and only when we have a checker.
   if (!col.cmd && col.sessionId && window.electronAPI && window.electronAPI.sessionExists) {
     try {
-      var stillExists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey), col.sessionId);
+      var stillExists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey), col.sessionId, col.profileId || null);
       if (!stillExists) col.sessionId = null;
     } catch (e) { /* if the check fails, fall through and resume as before */ }
   }
@@ -6896,7 +6954,7 @@ function showColumnSessionPicker(colId, clientX, clientY) {
   var projectPath = col.projectKey || activeProjectKey;
   if (!projectPath) { loading.textContent = 'No project for this column.'; return; }
 
-  window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+  window.electronAPI.getRecentSessions(projectPath, col.profileId).then(function (sessions) {
     while (menu.firstChild) menu.removeChild(menu.firstChild);
     var others = (sessions || []).filter(function (s) { return s.sessionId !== col.sessionId; });
     if (others.length === 0) {
@@ -6922,7 +6980,7 @@ function showColumnSessionPicker(colId, clientX, clientY) {
       menu.appendChild(item);
       // Title fetch is best-effort — the short id + date is informative enough
       // on first paint; refine asynchronously when available.
-      window.electronAPI.getSessionTitle(projectPath, s.sessionId).then(function (title) {
+      window.electronAPI.getSessionTitle(projectPath, s.sessionId, col.profileId).then(function (title) {
         if (title) item.textContent = (title.length > 60 ? title.slice(0, 60) + '…' : title) + '  ·  ' + when.toLocaleString();
       }).catch(function () { /* keep id-based label */ });
     });
@@ -8023,7 +8081,7 @@ function autoBindColumnTarget(colId) {
   // Phase 3: try worktree detection from JSONL evidence first. When found,
   // pin col.cwd to the worktree path so the Git tab targets it directly with
   // full read+write functionality (the worktree HAS that branch checked out).
-  return window.electronAPI.gitDetectSessionWorktree(col.projectKey, col.sessionId).then(function (worktree) {
+  return window.electronAPI.gitDetectSessionWorktree(col.projectKey, col.sessionId, col.profileId).then(function (worktree) {
     if (worktree && worktree.path) {
       var newCwd = worktree.path;
       var changed = false;
@@ -11360,6 +11418,9 @@ function loadSpawnOptions() {
   // populateEndpointModelDropdown can preselect it.
   currentEndpointModel = endpointId ? (opts.endpointModel || null) : null;
   applyEndpointSelection(endpointId, /* persist */ false);
+  // Resolve which profile a NEW column on this project/workspace would spawn
+  // on (project/workspace/global cascade — no column-level picker exists yet).
+  refreshProfileSelection();
   // Headroom is a GLOBAL toggle (not part of the per-project spawnOptions object).
   // Refresh the whole Headroom UI here — parent checkbox AND the sub-toggles
   // (1M/Memory/Output shaper) — so the subs never keep a stale enabled/disabled
@@ -11378,6 +11439,12 @@ function spawnOpts(extra) {
     }
   }
   if (currentEndpointEnv) o.env = currentEndpointEnv;
+  // Profile env (CLAUDE_CONFIG_DIR) layers on top of, and never replaces, the
+  // endpoint env: they bind different things (credentials vs base URL) and a
+  // column can legitimately have both. Never touches maybeBindHeadroom, which
+  // is orthogonal (binds ANTHROPIC_BASE_URL, not credentials).
+  if (currentProfileEnv) o.env = Object.assign({}, o.env, currentProfileEnv);
+  if (!o.profileId && currentProfileId) o.profileId = currentProfileId;
   // Every Claude spawn path must carry the dropdown pick, not just the Spawn
   // button: buildSpawnArgs deliberately omits --model when Headroom owns the
   // binding, so a caller that passes no opts.model silently falls back to the
@@ -11999,6 +12066,12 @@ function loadEndpointPresets() {
 if (window.electronAPI && window.electronAPI.onEndpointsUpdated) {
   window.electronAPI.onEndpointsUpdated(function () {
     loadEndpointPresets();
+  });
+}
+
+if (window.electronAPI && window.electronAPI.onProfilesUpdated) {
+  window.electronAPI.onProfilesUpdated(function () {
+    refreshProfileSelection();
   });
 }
 
@@ -14214,7 +14287,7 @@ function startContextMeterPoll(colId) {
       console.log('[ctx-meter] electronAPI.getSessionContextTokens missing');
       return;
     }
-    window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId, col.contextSinceMs).then(function (tokens) {
+    window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId, col.contextSinceMs, col.profileId).then(function (tokens) {
       console.log('[ctx-meter ' + ts + '] col=' + colId + ' → tokens=' + tokens);
       if (tokens == null) {
         showCtxMeterPlaceholder(col, '0');
