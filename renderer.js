@@ -511,9 +511,24 @@ var lastFocusedColumnId = null;
 var voiceAttentionColumnId = null;
 
 // Live automation/headless/manager session ids (mirrored from main's
-// backgroundSessionIds). An interactive column must never adopt one of these as
-// its own sessionId — see getClaimedSessionIds. Kept fresh via IPC broadcast.
-var backgroundSessionIdsCache = new Set();
+// backgroundSessionIds), mapped id -> profileId. An interactive column must
+// never adopt one of these as its own sessionId, but only when it shares the
+// same profile — an automation's transcript lands under its own profile's
+// projects/ dir, so a background id under a different profile is no threat.
+// See getClaimedSessionIds. Kept fresh via IPC broadcast.
+var backgroundSessionIdsCache = new Map();
+
+// main sends bare ids (legacy) or {id, profileId} entries; normalise either
+// shape into the id -> profileId map this cache expects.
+function toBackgroundMap(entries) {
+  var map = new Map();
+  (entries || []).forEach(function (entry) {
+    if (!entry) return;
+    if (typeof entry === 'string') map.set(entry, null);
+    else if (entry.id) map.set(entry.id, entry.profileId || null);
+  });
+  return map;
+}
 
 var config = { projects: [], activeProjectIndex: -1 };
 // Guard against clobbering the on-disk config with this empty default before
@@ -6183,10 +6198,10 @@ if (window.electronAPI && window.electronAPI.onClawdEvent) {
 // Mirror main's live automation/headless session ids so interactive columns
 // never adopt one (see getClaimedSessionIds). Fetch once, then stay in sync.
 if (window.electronAPI && window.electronAPI.getBackgroundSessionIds) {
-  window.electronAPI.getBackgroundSessionIds().then(function (ids) { backgroundSessionIdsCache = new Set(ids || []); }).catch(function () {});
+  window.electronAPI.getBackgroundSessionIds().then(function (ids) { backgroundSessionIdsCache = toBackgroundMap(ids); }).catch(function () {});
 }
 if (window.electronAPI && window.electronAPI.onBackgroundSessionIds) {
-  window.electronAPI.onBackgroundSessionIds(function (ids) { backgroundSessionIdsCache = new Set(ids || []); });
+  window.electronAPI.onBackgroundSessionIds(function (ids) { backgroundSessionIdsCache = toBackgroundMap(ids); });
 }
 
 // Idempotent: start the tail for a column's current sessionId. If we already
@@ -6217,7 +6232,7 @@ function fetchAndSetSessionTitle(columnId, projectPath, sessionId) {
 }
 
 // Collect session IDs already claimed by other columns in the same project
-function getClaimedSessionIds(excludeColumnId) {
+function getClaimedSessionIds(excludeColumnId, profileId) {
   var claimed = {};
   allColumns.forEach(function (col, colId) {
     if (colId !== excludeColumnId && col.sessionId) {
@@ -6225,10 +6240,22 @@ function getClaimedSessionIds(excludeColumnId) {
     }
   });
   // Background/automation sessions (live `claude --print` runs) must NEVER be
-  // adopted by an interactive column — detectSession and the hook-rebind both
-  // consult this map, so marking them claimed blocks both adoption paths and
-  // keeps a column from latching onto an automation's transcript in the same dir.
-  try { backgroundSessionIdsCache.forEach(function (sid) { if (sid) claimed[sid] = true; }); } catch (e) {}
+  // adopted by an interactive column running under the SAME profile —
+  // detectSession and the hook-rebind both consult this map, so marking them
+  // claimed blocks both adoption paths and keeps a column from latching onto
+  // an automation's transcript in the same dir. A background id under a
+  // DIFFERENT profile lands under that profile's own projects/ dir and is no
+  // threat to this column's scan, so it's left unclaimed here.
+  // main always stores a concrete id, defaulting unset runs to 'primary';
+  // columns instead leave Primary as null/undefined — normalise both sides so
+  // a Primary background run compares equal to a Primary interactive column.
+  var normProfileId = (profileId && profileId !== 'primary') ? profileId : null;
+  try {
+    backgroundSessionIdsCache.forEach(function (bgProfileId, sid) {
+      var normBg = (bgProfileId && bgProfileId !== 'primary') ? bgProfileId : null;
+      if (sid && normBg === normProfileId) claimed[sid] = true;
+    });
+  } catch (e) {}
   return claimed;
 }
 
@@ -6241,7 +6268,7 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
   setTimeout(function () {
     var preCol = allColumns.get(columnId);
     window.electronAPI.getRecentSessions(projectPath, preCol && preCol.profileId).then(function (sessions) {
-      var claimed = getClaimedSessionIds(columnId);
+      var claimed = getClaimedSessionIds(columnId, preCol && preCol.profileId);
       console.log('[detectSession] col=' + columnId + ' attempt=' + attempt + ' projectPath=' + projectPath + ' got ' + sessions.length + ' sessions, ' + Object.keys(preExistingIds).length + ' preIds, ' + Object.keys(claimed).length + ' claimed');
       for (var i = 0; i < sessions.length; i++) {
         var sid = sessions[i].sessionId;
@@ -10769,7 +10796,7 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
       isUserPromptSubmit: evtName === 'UserPromptSubmit',
       eventSessionId: sid,
       colSessionId: col.sessionId,
-      claimedBySibling: !!getClaimedSessionIds(colId)[sid],
+      claimedBySibling: !!getClaimedSessionIds(colId, col && col.profileId)[sid],
     })) {
       col.sessionId = sid;
       col.sessionMtime = 0;

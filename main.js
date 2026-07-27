@@ -687,6 +687,17 @@ function getProjectEndpointEnvByPath(projectPath) {
   return buildEndpointEnv(id, modelOverride);
 }
 
+// Look up a project by its filesystem path and return its assigned profile id
+// (or null if unset), the same pattern as getProjectEndpointEnvByPath above.
+// Background spawn paths only know the project path, so this is how they feed
+// resolveProfileFor's projectProfileId without the renderer's cached state.
+function getProjectProfileIdByPath(projectPath) {
+  if (!projectPath) return null;
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  return (project && project.profileId) || null;
+}
+
 // --- Profile (multi-subscription) store ---
 //
 // Profiles live in their own file, not projects.json, for the same reason
@@ -2144,7 +2155,7 @@ ipcMain.handle('sessions:exists', (event, projectPath, sessionId, profileId) => 
 // Live automation/headless/manager session ids — interactive columns must never
 // adopt one as their own sessionId. Renderer fetches this once on startup and
 // then keeps in sync via the 'sessions:backgroundIds' broadcast.
-ipcMain.handle('sessions:getBackgroundIds', () => Array.from(backgroundSessionIds));
+ipcMain.handle('sessions:getBackgroundIds', () => Array.from(backgroundSessionIds, ([id, profileId]) => ({ id, profileId })));
 
 // Get the title (first user message) from a Claude session JSONL file
 ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId, profileId) => {
@@ -7653,7 +7664,7 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
       if (!line.trim()) continue;
       try {
         const evt = JSON.parse(line);
-        if (evt && evt.session_id) rememberBackgroundSession(evt.session_id, child);
+        if (evt && evt.session_id) rememberBackgroundSession(evt.session_id, child, opts.profileId);
         let text = '';
         if (evt.type === 'assistant' && evt.message && evt.message.content) {
           evt.message.content.forEach(block => {
@@ -7693,22 +7704,27 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
 
 const runningHeadless = new Map(); // runId -> { child, cleanup, projectPath, cancelled? }
 
-// Session-ids of invisible background runs (headless, automation agents, managers).
-// Their Stop hooks share the project cwd with interactive columns, so we tag their
-// broadcast events to keep them from arming voice catch-up on a real column.
-const backgroundSessionIds = new Set();
+// Session-ids of invisible background runs (headless, automation agents, managers),
+// mapped to the profile they ran under. Their Stop hooks share the project cwd with
+// interactive columns, so we tag their broadcast events to keep them from arming
+// voice catch-up on a real column. Keyed by id -> profileId (not a bare Set) because
+// an automation's transcript lands under ITS profile's projects/ dir — an interactive
+// column must only treat a background id as claimed when it shares that profile,
+// otherwise a same-named session under a different root could (in principle) block
+// a column on another subscription from ever detecting its own new session.
+const backgroundSessionIds = new Map();
 function broadcastBackgroundSessionIds() {
   try {
-    const ids = Array.from(backgroundSessionIds);
-    BrowserWindow.getAllWindows().forEach((w) => { try { w.webContents.send('sessions:backgroundIds', ids); } catch {} });
+    const entries = Array.from(backgroundSessionIds, ([id, profileId]) => ({ id, profileId }));
+    BrowserWindow.getAllWindows().forEach((w) => { try { w.webContents.send('sessions:backgroundIds', entries); } catch {} });
   } catch (e) {}
 }
-function rememberBackgroundSession(id, child) {
+function rememberBackgroundSession(id, child, profileId) {
   if (!id) return;
-  backgroundSessionIds.add(id);
+  backgroundSessionIds.set(id, profileId || PRIMARY_ID);
   if (child) child.__bgSessionId = id;
   if (backgroundSessionIds.size > 200) { // defensive bound; session-ids are never reused
-    const oldest = backgroundSessionIds.values().next().value;
+    const oldest = backgroundSessionIds.keys().next().value;
     backgroundSessionIds.delete(oldest);
   }
   broadcastBackgroundSessionIds();
@@ -8185,7 +8201,8 @@ function spawnInteractiveScheduled(prompt, cwd, opts) {
   return { kill: () => finish({ status: 'interrupted', output: capTail(denoiseInteractive(buffer), 8000), lastError: 'Killed' }) };
 }
 
-async function runAgent(automationId, agentId) {
+async function runAgent(automationId, agentId, opts) {
+  opts = opts || {};
   let data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
   if (!automation) return;
@@ -8384,7 +8401,14 @@ async function runAgent(automationId, agentId) {
     mcpOpts = { mcpConfig: { mcpServers: mongoServer }, mcpConfigPath, allowedTools: mongoAllowed, strictMcp: false };
   }
 
-  const agentEnv = getAgentEndpointEnv(agent, automation.projectPath);
+  // A manager rerunning one of its own agents passes its already-resolved
+  // profile id explicitly, so the worker never re-resolves independently and
+  // potentially lands on a different subscription than the manager that
+  // triggered it (see runManager's rerun_agent/rerun_all action handling).
+  const profile = opts.forcedProfileId
+    ? resolveProfileFor({ columnProfileId: opts.forcedProfileId })
+    : resolveProfileFor({ columnProfileId: automation.profileId, projectProfileId: getProjectProfileIdByPath(automation.projectPath) });
+  const agentEnv = Object.assign({}, getAgentEndpointEnv(agent, automation.projectPath), profile.env);
 
   // --- Interactive scheduled run (opt-in) ---
   if (agent.sessionMode === 'interactive') {
@@ -8397,6 +8421,7 @@ async function runAgent(automationId, agentId) {
       skipPermissions: !!agent.skipPermissions,
       model: agent.endpointModel || null,
       env: agentEnv,
+      profileId: profile.id,
       mcpConfig: mcpOpts ? mcpOpts.mcpConfig : null,
       mcpConfigPath: mcpOpts ? mcpOpts.mcpConfigPath : null,
       strictMcp: mcpOpts ? mcpOpts.strictMcp : false,
@@ -8438,6 +8463,7 @@ async function runAgent(automationId, agentId) {
     strictMcp: mcpOpts ? mcpOpts.strictMcp : false,
     extraArgs: Array.isArray(agent.extraArgs) ? agent.extraArgs : null,
     env: agentEnv,
+    profileId: profile.id,
     onRaw: (raw) => { outputChunks.push(raw); },
     onText: (text) => {
       textChunks.push(text);
@@ -8650,13 +8676,16 @@ async function runManager(automationId) {
     }
   }
 
-  const managerEndpointEnv = getProjectEndpointEnvByPath(automation.projectPath);
+  // Resolved once, up front, so every worker this manager re-triggers below can
+  // be pinned to the SAME profile via forcedProfileId — an unset worker would
+  // otherwise re-resolve independently and could land on a different
+  // subscription than the manager that's driving it, burning two at once.
+  const managerProfile = resolveProfileFor({ columnProfileId: automation.profileId, projectProfileId: getProjectProfileIdByPath(automation.projectPath) });
+  const managerEndpointEnv = Object.assign({}, getProjectEndpointEnvByPath(automation.projectPath), managerProfile.env);
   const child = spawn(getClaudePath(), args, {
     cwd: cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: managerEndpointEnv
-      ? Object.assign({}, process.env, managerEndpointEnv)
-      : Object.assign({}, process.env)
+    env: Object.assign({}, process.env, managerEndpointEnv)
   });
 
   runningManagers.set(automationId, child);
@@ -8672,7 +8701,7 @@ async function runManager(automationId) {
       if (!line.trim()) continue;
       try {
         const evt = JSON.parse(line);
-        if (evt && evt.session_id) rememberBackgroundSession(evt.session_id, child);
+        if (evt && evt.session_id) rememberBackgroundSession(evt.session_id, child, managerProfile.id);
         let text = '';
         if (evt.type === 'assistant' && evt.message && evt.message.content) {
           evt.message.content.forEach(block => { if (block.type === 'text') text += block.text; });
@@ -8729,7 +8758,7 @@ async function runManager(automationId) {
         if (action.type === 'rerun_agent' && action.agentId) {
           if (currentRetries < maxRetries) {
             managerRetryCounters.set(automationId, currentRetries + 1);
-            runAgent(automationId, action.agentId);
+            runAgent(automationId, action.agentId, { forcedProfileId: managerProfile.id });
             actionsExecuted = true;
           } else {
             // Exceeded retries — escalate
@@ -8743,7 +8772,7 @@ async function runManager(automationId) {
             const freshA = freshD.automations.find(a => a.id === automationId);
             if (freshA) {
               freshA.agents.forEach(ag => {
-                if (ag.enabled && ag.runMode === 'independent') runAgent(automationId, ag.id);
+                if (ag.enabled && ag.runMode === 'independent') runAgent(automationId, ag.id, { forcedProfileId: managerProfile.id });
               });
             }
             actionsExecuted = true;
