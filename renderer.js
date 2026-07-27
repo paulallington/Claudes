@@ -364,6 +364,20 @@ if (window.electronAPI && window.electronAPI.onProfilesUpdated) {
   var statusEl = document.getElementById('profiles-add-status');
   if (!nameInput || !addBtn) return;
 
+  // Mirrors main's profile:create darwin guard (unverified whether the
+  // macOS keychain service is scoped per CLAUDE_CONFIG_DIR) — disable here
+  // too so the user gets an explanation instead of a create call that
+  // always fails.
+  if (document.documentElement.dataset.platform === 'darwin') {
+    var macMsg = 'Multiple subscriptions are not supported on macOS yet — the Claude CLI may store all credentials in a single keychain entry.';
+    addBtn.disabled = true;
+    addBtn.title = macMsg;
+    nameInput.disabled = true;
+    nameInput.title = macMsg;
+    if (statusEl) statusEl.textContent = macMsg;
+    return;
+  }
+
   function doCreate() {
     var name = nameInput.value.trim();
     if (!name) return;

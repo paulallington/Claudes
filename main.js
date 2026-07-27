@@ -1900,6 +1900,16 @@ ipcMain.handle('profile:list', () => {
 });
 
 ipcMain.handle('profile:create', (event, input) => {
+  // Unverified whether the macOS keychain service "Claude Code-credentials"
+  // (see usage:getPlanLimits above) is scoped per CLAUDE_CONFIG_DIR — if it
+  // isn't, two accounts fight over one keychain slot. Refuse until that's
+  // proven safe rather than create a profile that can never sign in.
+  if (process.platform === 'darwin') {
+    return {
+      ok: false, error: 'unsupported-platform',
+      message: 'Multiple subscriptions are not supported on macOS yet — the Claude CLI may store all credentials in a single keychain entry. This is unverified; see docs/superpowers/specs/2026-07-27-multi-subscription-profiles-design.md.'
+    };
+  }
   const name = String((input && input.name) || '').trim();
   if (!name) return { ok: false, error: 'Name is required.' };
   const store = readProfiles();
