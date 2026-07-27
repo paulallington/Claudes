@@ -3845,40 +3845,51 @@ async function mapLimit(items, limit, fn) {
 // the bearer token from the CLI's credentials file. Cached briefly because the
 // server-side data updates on its own cadence and we don't want to hammer it.
 const PLAN_USAGE_CACHE_MS = 30_000;
-let planUsageCache = { data: null, fetchedAt: 0 };
-// Server-issued cooldown: when the endpoint returns 429 with a Retry-After,
-// honour it. Hammering during cooldown extends the limit further.
-let planUsageRetryAtMs = 0;
+// Keyed by profile id. One account being rate-limited must never blank
+// another's bars, which is exactly what a pair of module-level scalars would
+// do — so cache and cooldown are per-profile maps, not a single shared state.
+const planUsageCache = new Map();     // id -> { data, fetchedAt }
+const planUsageRetryAt = new Map();   // id -> ms timestamp
 
-ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
+ipcMain.handle('usage:getPlanLimits', async (_event, force, profileId) => {
+  const profile = resolveProfileFor({ columnProfileId: profileId });
+  const pid = profile.id;
   const now = Date.now();
-  if (!force && planUsageCache.data && (now - planUsageCache.fetchedAt) < PLAN_USAGE_CACHE_MS) {
-    return { ok: true, data: planUsageCache.data, fetchedAt: planUsageCache.fetchedAt, cached: true };
+
+  const cached = planUsageCache.get(pid);
+  if (!force && cached && cached.data && (now - cached.fetchedAt) < PLAN_USAGE_CACHE_MS) {
+    return { ok: true, data: cached.data, fetchedAt: cached.fetchedAt, cached: true, profileId: pid };
   }
 
   // Honour server cooldown regardless of `force` — the user clicking refresh
   // can't get fresh data when the API has told us to wait, and bypassing this
   // would just push the unlock further out.
-  if (planUsageRetryAtMs > now) {
-    const remainSec = Math.round((planUsageRetryAtMs - now) / 1000);
+  const retryAtMs = planUsageRetryAt.get(pid) || 0;
+  if (retryAtMs > now) {
+    const remainSec = Math.round((retryAtMs - now) / 1000);
     return {
       ok: false,
       error: 'rate-limited',
-      retryAtMs: planUsageRetryAtMs,
+      retryAtMs,
+      profileId: pid,
       message: 'Usage endpoint rate-limited — retry in ' + (remainSec >= 60 ? Math.round(remainSec / 60) + ' min' : remainSec + 's') + '.'
     };
   }
 
-  const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
+  const root = profileClaudeRoot(profile, os.homedir());
+  const credsPath = path.join(root, '.credentials.json');
   let token;
   try {
     const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
     token = creds?.claudeAiOauth?.accessToken;
   } catch {
     // macOS: Claude CLI stores credentials in the login keychain under
-    // service "Claude Code-credentials" instead of the plaintext file.
-    // Without this fallback the mini usage bar silently stays blank on Mac.
-    if (process.platform === 'darwin') {
+    // service "Claude Code-credentials" instead of the plaintext file — but
+    // that keychain entry is Primary's account. The fallback applies to
+    // PRIMARY ONLY: falling through for a secondary profile would report
+    // Primary's usage under the other profile's name, a wrong number that
+    // looks right, which is worse than a blank bar.
+    if (process.platform === 'darwin' && profile.isPrimary) {
       try {
         const raw = execFileSync('/usr/bin/security', [
           'find-generic-password',
@@ -3889,14 +3900,16 @@ ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
         const creds = JSON.parse(raw);
         token = creds?.claudeAiOauth?.accessToken;
       } catch {
-        return { ok: false, error: 'no-creds', message: 'Could not read Claude credentials from the macOS keychain — is Claude Code logged in?' };
+        return { ok: false, error: 'no-creds', profileId: pid, message: 'Could not read Claude credentials from the macOS keychain — is Claude Code logged in?' };
       }
+    } else if (process.platform === 'darwin') {
+      return { ok: false, error: 'no-creds-macos', profileId: pid, message: 'Secondary profiles are not supported on macOS yet.' };
     } else {
-      return { ok: false, error: 'no-creds', message: 'Could not read ~/.claude/.credentials.json — Claude Code not logged in?' };
+      return { ok: false, error: 'no-creds', profileId: pid, message: 'Could not read ' + credsPath + ' — Claude Code not logged in?' };
     }
   }
   if (!token) {
-    return { ok: false, error: 'no-oauth', message: 'No OAuth token found (API-key users do not have plan limits).' };
+    return { ok: false, error: 'no-oauth', profileId: pid, message: 'No OAuth token found (API-key users do not have plan limits).' };
   }
 
   try {
@@ -3907,30 +3920,32 @@ ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
       }
     });
     if (res.status === 401) {
-      return { ok: false, error: 'unauthorized', message: 'OAuth token expired. Run any Claude Code command to refresh.' };
+      return { ok: false, error: 'unauthorized', profileId: pid, message: 'OAuth token expired. Run any Claude Code command to refresh.' };
     }
     if (res.status === 429) {
       // Clamp Retry-After to [60s, 1h] so a server bug can't pin the bar
       // dead forever, and a missing/zero header still produces a real cooldown.
       const raw = parseInt(res.headers.get('retry-after') || '', 10);
       const retryAfterSec = Math.max(60, Math.min(Number.isFinite(raw) && raw > 0 ? raw : 60, 3600));
-      planUsageRetryAtMs = now + retryAfterSec * 1000;
+      const nextRetryAtMs = now + retryAfterSec * 1000;
+      planUsageRetryAt.set(pid, nextRetryAtMs);
       return {
         ok: false,
         error: 'rate-limited',
-        retryAtMs: planUsageRetryAtMs,
+        retryAtMs: nextRetryAtMs,
+        profileId: pid,
         message: 'Usage endpoint rate-limited (HTTP 429) — retry in ' + (retryAfterSec >= 60 ? Math.round(retryAfterSec / 60) + ' min' : retryAfterSec + 's') + '.'
       };
     }
     if (!res.ok) {
-      return { ok: false, error: 'http-' + res.status, message: 'Usage endpoint returned HTTP ' + res.status };
+      return { ok: false, error: 'http-' + res.status, profileId: pid, message: 'Usage endpoint returned HTTP ' + res.status };
     }
     const data = await res.json();
-    planUsageCache = { data, fetchedAt: now };
-    planUsageRetryAtMs = 0;
-    return { ok: true, data, fetchedAt: now, cached: false };
+    planUsageCache.set(pid, { data, fetchedAt: now });
+    planUsageRetryAt.set(pid, 0);
+    return { ok: true, data, fetchedAt: now, cached: false, profileId: pid };
   } catch (e) {
-    return { ok: false, error: 'fetch-failed', message: e.message };
+    return { ok: false, error: 'fetch-failed', profileId: pid, message: e.message };
   }
 });
 

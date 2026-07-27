@@ -69,7 +69,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listSnippets: () => ipcRenderer.invoke('snippets:list'),
   saveSnippet: (snippet) => ipcRenderer.invoke('snippets:save', snippet),
   deleteSnippet: (id) => ipcRenderer.invoke('snippets:delete', id),
-  getPlanLimits: (force) => ipcRenderer.invoke('usage:getPlanLimits', force),
+  getPlanLimits: (force, profileId) => ipcRenderer.invoke('usage:getPlanLimits', force, profileId),
   getCodexLimits: (force) => ipcRenderer.invoke('usage:getCodexLimits', force),
   detectThresholdCrossings: (prev, next) => ipcRenderer.invoke('usage:detectThresholdCrossings', prev, next),
   getSessionContextTokens: (projectKey, sessionId, sinceMs, profileId) => ipcRenderer.invoke('session:contextTokens', projectKey, sessionId, sinceMs, profileId),
