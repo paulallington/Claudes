@@ -46,6 +46,8 @@ const { appendWithRotation } = require('./lib/voice-debug-log');
 const { codexLookupCommand, parseWhichOutput } = require('./lib/codex-spawn');
 const { parseCodexRateLimits, pickLatestRolloutPath } = require('./lib/codex-limits');
 const { parseChecksumFile, checksumsMatch } = require('./lib/update-checksum');
+const { resolveProfile, profileClaudeRoot, PRIMARY_ID } = require('./lib/profile-resolve');
+const { extractSeedClaudeJson } = require('./lib/profile-seed');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -371,6 +373,8 @@ const AUTOMATIONS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'automations.jso
 const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-runs' : 'automation-runs-dev');
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
+const PROFILES_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'profiles.json' : 'profiles-dev.json');
+const PROFILES_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'profiles' : 'profiles-dev');
 const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
 const VOICE_DEBUG_LOG = path.join(CONFIG_DIR, app.isPackaged ? 'voice-debug.log' : 'voice-debug-dev.log');
 
@@ -681,6 +685,128 @@ function getProjectEndpointEnvByPath(projectPath) {
   if (!id) return null;
   const modelOverride = project.spawnOptions && project.spawnOptions.endpointModel;
   return buildEndpointEnv(id, modelOverride);
+}
+
+// --- Profile (multi-subscription) store ---
+//
+// Profiles live in their own file, not projects.json, for the same reason
+// endpoints do (see the ENDPOINTS_FILE note): the renderer round-trips
+// projects.json wholesale and would clobber anything written outside its view.
+const DEFAULT_PRIMARY = { id: PRIMARY_ID, name: 'Primary', configDir: null, colour: '#d97757' };
+
+function readProfiles() {
+  ensureConfigDir();
+  let data = null;
+  try { data = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8')); } catch { data = null; }
+  const list = (data && Array.isArray(data.profiles)) ? data.profiles.filter((p) => p && p.id) : [];
+  // Primary is synthetic when absent: a missing/corrupt profiles.json must
+  // still yield a working single-subscription app.
+  if (!list.find((p) => p.id === PRIMARY_ID)) list.unshift({ ...DEFAULT_PRIMARY });
+  const defaultProfileId = (data && typeof data.defaultProfileId === 'string' && list.find((p) => p.id === data.defaultProfileId))
+    ? data.defaultProfileId
+    : PRIMARY_ID;
+  return { profiles: list, defaultProfileId };
+}
+
+function writeProfiles(store) {
+  ensureConfigDir();
+  atomicWriteJson(PROFILES_FILE, {
+    defaultProfileId: store.defaultProfileId || PRIMARY_ID,
+    profiles: store.profiles || []
+  });
+  BrowserWindow.getAllWindows().forEach((w) => {
+    try { w.webContents.send('profiles:updated'); } catch { /* ignore */ }
+  });
+}
+
+// The single resolution entry point for main. Every re-rooted handler goes
+// through this, never through its own homedir join.
+function resolveProfileFor(sel) {
+  const store = readProfiles();
+  const r = resolveProfile({
+    profiles: store.profiles,
+    defaultProfileId: store.defaultProfileId,
+    columnProfileId: sel && sel.columnProfileId,
+    workspaceProfileId: sel && sel.workspaceProfileId,
+    projectProfileId: sel && sel.projectProfileId
+  });
+  if (r.warning) console.warn('[profiles]', r.warning, '- falling back to Primary');
+  return r;
+}
+
+// Root that stands in for ~/.claude for a given profile id.
+function claudeRootFor(profileId) {
+  return profileClaudeRoot(resolveProfileFor({ columnProfileId: profileId }), os.homedir());
+}
+
+function profileHasCredentials(p) {
+  const root = profileClaudeRoot(p, os.homedir());
+  try {
+    if (fs.existsSync(path.join(root, '.credentials.json'))) return true;
+  } catch { /* fall through */ }
+  // Primary on macOS keeps credentials in the login keychain, not a file.
+  if (process.platform === 'darwin' && !p.configDir) {
+    try {
+      execFileSync('/usr/bin/security', ['find-generic-password', '-s', 'Claude Code-credentials',
+        '-a', os.userInfo().username, '-w'], { encoding: 'utf8' });
+      return true;
+    } catch { return false; }
+  }
+  return false;
+}
+
+// Copy the parts of the primary setup that make a profile behave like the app
+// the user already has: settings (hooks, permissions), global memory, agents,
+// and the folder-trust map. Never credentials.
+function seedProfileDir(configDir) {
+  const primaryRoot = path.join(os.homedir(), '.claude');
+  for (const rel of ['settings.json', 'CLAUDE.md']) {
+    try {
+      const src = path.join(primaryRoot, rel);
+      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(configDir, rel));
+    } catch (e) { console.warn('[profiles] seed skipped', rel, e.message); }
+  }
+  try {
+    const agentsSrc = path.join(primaryRoot, 'agents');
+    if (fs.existsSync(agentsSrc)) fs.cpSync(agentsSrc, path.join(configDir, 'agents'), { recursive: true });
+  } catch (e) { console.warn('[profiles] seed skipped agents', e.message); }
+
+  try {
+    const primaryJson = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
+    atomicWriteJson(path.join(configDir, '.claude.json'), extractSeedClaudeJson(primaryJson));
+  } catch (e) { console.warn('[profiles] seed skipped trust map', e.message); }
+}
+
+// Strip a deleted profile's id out of projects.json (project + workspace) and
+// automations.json. Returns a list of what was reassigned so the UI can tell
+// the user. Column-level profileId in each project's sessions.json is
+// deliberately NOT rewritten here: those files live under project directories
+// that may not exist, and the unknown-id fallback in resolveProfile already
+// handles them safely.
+function clearProfileReferences(id) {
+  const reassigned = [];
+  try {
+    const cfg = readConfig();
+    let dirty = false;
+    for (const proj of (cfg.projects || [])) {
+      if (proj.profileId === id) { proj.profileId = null; dirty = true; reassigned.push('project: ' + proj.name); }
+      for (const ws of (proj.workspaces || [])) {
+        if (ws.profileId === id) { ws.profileId = null; dirty = true; reassigned.push('workspace: ' + ws.name); }
+      }
+    }
+    if (dirty) writeConfig(cfg);
+  } catch (e) { console.warn('[profiles] projects cleanup failed', e.message); }
+
+  try {
+    const data = readAutomations();
+    let dirty = false;
+    for (const a of (data.automations || [])) {
+      if (a && a.profileId === id) { a.profileId = null; dirty = true; reassigned.push('automation: ' + (a.name || a.id)); }
+    }
+    if (dirty) writeAutomations(data);
+  } catch (e) { console.warn('[profiles] automations cleanup failed', e.message); }
+
+  return reassigned;
 }
 
 // --- Loops Persistence ---
@@ -1682,6 +1808,107 @@ ipcMain.handle('endpoint:fetchModels', async (event, args) => {
     const msg = err && err.name === 'AbortError' ? 'Request timed out' : (err && err.message) || 'Fetch failed';
     return { ok: false, error: msg };
   }
+});
+
+// --- Profile (multi-subscription) IPC handlers ---
+
+ipcMain.handle('profile:list', () => {
+  const store = readProfiles();
+  return {
+    defaultProfileId: store.defaultProfileId,
+    profiles: store.profiles.map((p) => ({
+      id: p.id,
+      name: p.name || '',
+      colour: p.colour || DEFAULT_PRIMARY.colour,
+      isPrimary: !p.configDir,
+      // Sign-in status, so the Subscriptions panel can say "needs /login"
+      // without the renderer ever seeing a token.
+      signedIn: profileHasCredentials(p)
+    }))
+  };
+});
+
+ipcMain.handle('profile:create', (event, input) => {
+  const name = String((input && input.name) || '').trim();
+  if (!name) return { ok: false, error: 'Name is required.' };
+  const store = readProfiles();
+  if (store.profiles.length >= 8) return { ok: false, error: 'Profile limit reached (8).' };
+
+  const id = 'pf_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  // The app allocates the directory. A user-supplied path is never accepted —
+  // that is what keeps assertInsideAllowedRoots correct without a new root.
+  const configDir = path.join(PROFILES_DIR, id);
+  try {
+    fs.mkdirSync(configDir, { recursive: true });
+    seedProfileDir(configDir);
+  } catch (e) {
+    return { ok: false, error: 'Could not create profile directory: ' + e.message };
+  }
+
+  store.profiles.push({
+    id, name,
+    configDir,
+    colour: String((input && input.colour) || '#5b8def')
+  });
+  writeProfiles(store);
+  return { ok: true, id, configDir };
+});
+
+ipcMain.handle('profile:reseed', (event, id) => {
+  const p = readProfiles().profiles.find((x) => x && x.id === id);
+  if (!p || !p.configDir) return { ok: false, error: 'Cannot re-seed Primary.' };
+  try { seedProfileDir(p.configDir); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('profile:update', (event, input) => {
+  const id = input && input.id;
+  const store = readProfiles();
+  const p = store.profiles.find((x) => x && x.id === id);
+  if (!p) return { ok: false, error: 'No such profile.' };
+  if (input.name != null) p.name = String(input.name).trim() || p.name;
+  if (input.colour != null) p.colour = String(input.colour);
+  // configDir is app-owned and never accepted from the renderer.
+  writeProfiles(store);
+  return { ok: true };
+});
+
+ipcMain.handle('profile:setDefault', (event, id) => {
+  const store = readProfiles();
+  if (!store.profiles.find((p) => p && p.id === id)) return { ok: false, error: 'No such profile.' };
+  store.defaultProfileId = id;
+  writeProfiles(store);
+  return { ok: true };
+});
+
+ipcMain.handle('profile:delete', (event, id) => {
+  if (id === PRIMARY_ID) return { ok: false, error: 'Primary cannot be deleted.' };
+  const store = readProfiles();
+  const p = store.profiles.find((x) => x && x.id === id);
+  if (!p) return { ok: false, error: 'No such profile.' };
+
+  // Clear dangling references BEFORE removing the profile so nothing ever
+  // resolves through the unknown-id path in normal operation.
+  const reassigned = clearProfileReferences(id);
+
+  try {
+    // configDir comes from profiles.json, which the app writes — but a
+    // hand-edited file must not be able to turn "delete profile" into
+    // "delete arbitrary directory". Same class of guard as the automations
+    // clone-path sanitisation.
+    if (p.configDir && p.configDir.startsWith(PROFILES_DIR + path.sep)) {
+      fs.rmSync(p.configDir, { recursive: true, force: true });
+    }
+  } catch (e) { console.warn('[profiles] could not remove dir', e.message); }
+
+  store.profiles = store.profiles.filter((x) => x.id !== id);
+  if (store.defaultProfileId === id) store.defaultProfileId = PRIMARY_ID;
+  writeProfiles(store);
+  return { ok: true, reassigned };
+});
+
+ipcMain.handle('profile:getEnv', (event, sel) => {
+  return resolveProfileFor(sel || {}).env;
 });
 
 ipcMain.handle('popout:setTransfer', (event, projectKey, transferList) => {

@@ -230,6 +230,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   endpointFetchModels: (args) => ipcRenderer.invoke('endpoint:fetchModels', args),
   onEndpointsUpdated: (callback) => ipcRenderer.on('endpoints:updated', () => callback()),
 
+  // Profiles (multi-subscription)
+  profileList: () => ipcRenderer.invoke('profile:list'),
+  profileCreate: (input) => ipcRenderer.invoke('profile:create', input),
+  profileUpdate: (input) => ipcRenderer.invoke('profile:update', input),
+  profileDelete: (id) => ipcRenderer.invoke('profile:delete', id),
+  profileSetDefault: (id) => ipcRenderer.invoke('profile:setDefault', id),
+  profileGetEnv: (sel) => ipcRenderer.invoke('profile:getEnv', sel),
+  profileReseed: (id) => ipcRenderer.invoke('profile:reseed', id),
+  onProfilesUpdated: (callback) => ipcRenderer.on('profiles:updated', () => callback()),
+
   paletteRank: (items, query) => ipcRenderer.invoke('palette:rank', items, query),
 
   // Cross-device session sync
