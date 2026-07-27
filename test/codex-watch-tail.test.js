@@ -1,0 +1,96 @@
+// test/codex-watch-tail.test.js
+const test = require('node:test');
+const assert = require('node:assert');
+const { readDelta, TAIL_BYTES } = require('../lib/codex-watch-tail');
+
+// A fake io backed by an in-memory buffer, so tests never touch a real file.
+// `maxRead` (when set) caps how many bytes a single readSync call returns,
+// regardless of the requested length — this is what simulates a short read.
+function makeIo(box) {
+  return {
+    statSync: () => ({ size: box.buf.length }),
+    openSync: () => 1,
+    readSync: (fd, buf, offset, length, position) => {
+      const available = box.buf.length - position;
+      const cap = box.maxRead != null ? box.maxRead : length;
+      const toCopy = Math.max(0, Math.min(length, available, cap));
+      box.buf.copy(buf, offset, position, position + toCopy);
+      return toCopy;
+    },
+    closeSync: () => {}
+  };
+}
+
+test('first read on a large file seeds from the last 64KB rather than replaying it all', () => {
+  const content = 'A'.repeat(TAIL_BYTES) + 'x'.repeat(1000); // well past the tail window
+  const box = { buf: Buffer.from(content, 'utf8') };
+  const io = makeIo(box);
+  const state = { offset: 0, carry: '' };
+
+  const delta = readDelta(io, '/fake.log', state);
+
+  assert.ok(delta);
+  assert.strictEqual(delta.chunk.length, TAIL_BYTES);
+  assert.strictEqual(delta.chunk, content.slice(content.length - TAIL_BYTES));
+  assert.strictEqual(state.offset, box.buf.length);
+});
+
+test('a plain incremental append only reads the new bytes', () => {
+  const box = { buf: Buffer.from('first\n', 'utf8') };
+  const io = makeIo(box);
+  const state = { offset: 0, carry: '' };
+
+  const first = readDelta(io, '/fake.log', state);
+  assert.strictEqual(first.chunk, 'first\n');
+  assert.strictEqual(state.offset, 6);
+
+  box.buf = Buffer.concat([box.buf, Buffer.from('second\n', 'utf8')]);
+  const second = readDelta(io, '/fake.log', state);
+  assert.strictEqual(second.chunk, 'second\n');
+  assert.strictEqual(state.offset, 13);
+});
+
+test('a short read never leaks NUL bytes and offset advances only by bytesRead', () => {
+  const box = { buf: Buffer.from('hello world', 'utf8'), maxRead: 5 };
+  const io = makeIo(box);
+  const state = { offset: 0, carry: '' };
+
+  const delta = readDelta(io, '/fake.log', state);
+
+  assert.strictEqual(delta.chunk, 'hello');
+  assert.ok(!delta.chunk.includes('\0'));
+  assert.strictEqual(state.offset, 5);
+
+  // The remaining bytes are still there for the next tick to pick up.
+  box.maxRead = null;
+  const rest = readDelta(io, '/fake.log', state);
+  assert.strictEqual(rest.chunk, ' world');
+  assert.strictEqual(state.offset, 11);
+});
+
+test('truncation (size < offset) resets offset, carry and decoder', () => {
+  const box = { buf: Buffer.from('a fairly long first version of the file', 'utf8') };
+  const io = makeIo(box);
+  const state = { offset: 0, carry: '' };
+
+  readDelta(io, '/fake.log', state);
+  assert.ok(state.offset > 0);
+  assert.ok(state.decoder); // a real decoder now exists to be reset below
+
+  box.buf = Buffer.from('short', 'utf8');
+  const delta = readDelta(io, '/fake.log', state);
+
+  assert.strictEqual(delta.chunk, 'short');
+  assert.strictEqual(state.offset, 5);
+});
+
+test('no growth since last read returns null', () => {
+  const box = { buf: Buffer.from('unchanged', 'utf8') };
+  const io = makeIo(box);
+  const state = { offset: 0, carry: '' };
+
+  readDelta(io, '/fake.log', state);
+  const again = readDelta(io, '/fake.log', state);
+
+  assert.strictEqual(again, null);
+});

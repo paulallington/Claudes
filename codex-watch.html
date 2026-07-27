@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self' blob:;">
+  <title>Codex</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body class="cw-body">
+  <div class="cw-root">
+    <aside class="cw-jobs" id="cwJobs">
+      <div class="cw-jobs-source cw-hidden" id="cwJobsSource"></div>
+      <div class="cw-jobs-list" id="cwJobsList"></div>
+    </aside>
+    <main class="cw-stream" id="cwStream">
+      <div class="cw-empty" id="cwEmpty">No Codex jobs for this column.</div>
+      <div class="cw-events cw-hidden" id="cwEvents"></div>
+      <button type="button" class="cw-jump cw-hidden" id="cwJump">Jump to latest</button>
+    </main>
+  </div>
+  <script src="./codex-watch.js"></script>
+</body>
+</html>

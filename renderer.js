@@ -2550,6 +2550,7 @@ function disposeColumnLocalOnly(id) {
   releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
+  codexWatchCounts.delete(id);
 
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (state) {
@@ -4401,6 +4402,33 @@ function createColumnHeader(id, customTitle, opts) {
   actions.className = 'col-actions';
 
   var claudeChrome = window.CodexSpawn.columnUsesClaudeChrome({ cmd: opts.cmd });
+
+  // Codex-watch job-count badge — only meaningful on Claude-chrome columns
+  // (a raw `codex` cmd column already wears the .col-codex-badge above, and a
+  // diff column has no session at all). Named distinctly from that badge
+  // (col-codex-watch-badge, not col-codex-badge) even though both are
+  // "codex"-flavoured — they mean different things and reusing the class
+  // would collide in both CSS and any future querySelector. Hidden by
+  // default; updateCodexWatchBadge (wired via colData.codexWatchBadgeEl)
+  // shows it once codexWatchCounts has a running count for this column.
+  //
+  // Deliberately NOT appended inside `title` (the .col-title span): both
+  // startInlineRename and fetchAndSetSessionTitle overwrite title.textContent
+  // wholesale, which would destroy this node on every rename/title-sync and
+  // (worse) fold the badge's digits into the persisted customTitle string.
+  // It's appended to `header` as a sibling of `title` below instead, once
+  // `title` itself is in the DOM — the `.column-header .col-codex-watch-badge`
+  // CSS selector still matches unchanged.
+  if (!opts.isDiff && claudeChrome) {
+    var codexWatchBadge = document.createElement('span');
+    codexWatchBadge.className = 'col-codex-watch-badge';
+    codexWatchBadge.title = 'Codex jobs running in this session — click to open the watcher';
+    codexWatchBadge.addEventListener('click', function (e) {
+      e.stopPropagation();
+      openCodexWatchWindow(id);
+    });
+  }
+
   if (!opts.isDiff && claudeChrome) {
     var compactBtn = document.createElement('span');
     compactBtn.className = 'col-action';
@@ -4514,6 +4542,7 @@ function createColumnHeader(id, customTitle, opts) {
   actions.appendChild(closeBtn);
 
   header.appendChild(title);
+  if (codexWatchBadge) header.appendChild(codexWatchBadge);
   header.appendChild(actions);
 
   if (!popoutMode && !opts.isDiff) {
@@ -5541,6 +5570,13 @@ function addColumn(args, targetRow, opts) {
   colData.profileChipEl = header.querySelector('.col-profile-chip');
   updateColumnProfileChip(colData);
 
+  // Wire the codex-watch header badge the same way, and (re)assess whether
+  // the job-count poll needs to be running now that this column exists — a
+  // restored/resumed column may already carry a sessionId at this point.
+  colData.codexWatchBadgeEl = header.querySelector('.col-codex-watch-badge');
+  updateCodexWatchBadge(id);
+  codexWatchMaybeStart();
+
   // Re-fit when the wrapper settles to its final flex height. The create-time
   // fit() (above) runs before the column header + endpoint banner finish
   // laying out, so FitAddon picks one row too many; the layout then settles
@@ -5617,6 +5653,7 @@ function addColumn(args, targetRow, opts) {
     persistSessions(colData.projectKey, colData.workspaceId);
     fetchAndSetSessionTitle(id, cwd, __plan.sessionId);
     ensureClawdTail(id);
+    codexWatchMaybeStart();
   }
 }
 
@@ -6323,6 +6360,7 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
             persistSessions(col.projectKey, col.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
             ensureClawdTail(columnId);
+            codexWatchMaybeStart();
             // Sync the header effort badge to the column's actual effort (set
             // at spawn via --effort and tracked as col.effort, the source of
             // truth). Backfill from the kind-appropriate default only if it
@@ -6625,6 +6663,7 @@ function removeColumn(id) {
   releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
+  codexWatchCounts.delete(id);
 
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (state) {
@@ -6817,7 +6856,11 @@ async function restartColumn(id) {
   if (!col.cmd && col.sessionId && window.electronAPI && window.electronAPI.sessionExists) {
     try {
       var stillExists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey), col.sessionId, col.profileId || null);
-      if (!stillExists) col.sessionId = null;
+      if (!stillExists) {
+        col.sessionId = null;
+        codexWatchCounts.delete(id);
+        updateCodexWatchBadge(id);
+      }
     } catch (e) { /* if the check fails, fall through and resume as before */ }
   }
 
@@ -7420,6 +7463,7 @@ function showColumnSessionPicker(colId, clientX, clientY) {
       item.addEventListener('click', function () {
         // Swap to the chosen session and restart in place.
         col.sessionId = s.sessionId;
+        codexWatchMaybeStart();
         restartColumn(colId);
         close();
       });
@@ -7434,6 +7478,96 @@ function showColumnSessionPicker(colId, clientX, clientY) {
   }).catch(function () {
     loading.textContent = 'Failed to load sessions.';
   });
+}
+
+// Codex-watch job-count poll — backs the "Watch Codex" overflow row (below)
+// and the header badge (createColumnHeader). Deliberately its own poll,
+// independent of the codex-watch popout window's own tick in main.js: that
+// one only runs once a watcher window is open, but this is what tells the
+// user a watcher is worth opening in the first place.
+//
+// codexWatchListJobs is keyed on the CLAUDE session (not the codex CLI, and
+// not any "is codex installed" probe) — the row/badge appear only once a
+// session has at least one known job. That single condition already covers
+// every "codex isn't here" case (no CLI, no companion plugin, plugin never
+// used, or no session detected yet), so there is no separate presence gate
+// to wire up, and none should be added here later.
+var codexWatchCounts = new Map(); // columnId -> { total, running }
+var CODEX_WATCH_POLL_MS = 3000;
+var codexWatchPollTimer = null;
+
+function codexWatchAnySessionColumn() {
+  var any = false;
+  allColumns.forEach(function (col) { if (col && col.sessionId && !col.isDiff) any = true; });
+  return any;
+}
+
+function codexWatchPollTick() {
+  if (!codexWatchAnySessionColumn()) {
+    if (codexWatchPollTimer) { clearInterval(codexWatchPollTimer); codexWatchPollTimer = null; }
+    return;
+  }
+  allColumns.forEach(function (col, id) {
+    if (!col || !col.sessionId || col.isDiff) return;
+    window.electronAPI.codexWatchListJobs({ sessionId: col.sessionId, columnProfileId: col.profileId || null })
+      .then(function (res) {
+        // The column can be killed (or reassigned to a different session)
+        // while this call is in flight — re-fetch it fresh rather than
+        // trusting the closed-over `col`, and drop the result entirely if
+        // it's gone.
+        var live = allColumns.get(id);
+        if (!live) return;
+        var jobs = (res && res.ok && Array.isArray(res.jobs)) ? res.jobs : [];
+        var counts = window.CodexWatchJobs.summariseCounts(jobs);
+        var prior = codexWatchCounts.get(id);
+        if (prior && prior.total === counts.total && prior.running === counts.running) return;
+        codexWatchCounts.set(id, counts);
+        updateCodexWatchBadge(id);
+      })
+      .catch(function () { /* transient IPC failure — try again next tick */ });
+  });
+}
+
+// Called from every site that assigns col.sessionId (fresh spawn, detectSession,
+// the session picker, the hook-driven /clear rebind) plus once at column
+// creation, since a restored column may already carry a sessionId. No-op if
+// already running; self-stops (above) once no column has a session.
+function codexWatchMaybeStart() {
+  if (codexWatchPollTimer) return;
+  if (!codexWatchAnySessionColumn()) return;
+  codexWatchPollTimer = setInterval(codexWatchPollTick, CODEX_WATCH_POLL_MS);
+}
+
+function updateCodexWatchBadge(id) {
+  var col = allColumns.get(id);
+  if (!col || !col.codexWatchBadgeEl) return;
+  var counts = codexWatchCounts.get(id);
+  var running = counts ? counts.running : 0;
+  col.codexWatchBadgeEl.textContent = String(running);
+  col.codexWatchBadgeEl.classList.toggle('col-codex-watch-badge-shown', running > 0);
+}
+
+// Opens (or refocuses) the read-only Codex job-log watcher window for a
+// column. Reachable both from the header badge and the overflow row.
+async function openCodexWatchWindow(id) {
+  var col = allColumns.get(id);
+  if (!col) return;
+  var title = col.customTitle || ((col.cmd === 'codex' ? 'Codex #' : 'Claude #') + id);
+  var res;
+  try {
+    res = await window.electronAPI.codexWatchOpen({
+      columnId: id,
+      sessionId: col.sessionId,
+      title: title,
+      columnProfileId: col.profileId || null
+    });
+  } catch (e) {
+    showToast('Watch Codex failed to open' + (e && e.message ? (': ' + e.message) : ''), { kind: 'error' });
+    return;
+  }
+  if (!res || !res.ok) {
+    showToast('Watch Codex failed to open' + (res && res.error ? (': ' + res.error) : ''), { kind: 'error' });
+  }
 }
 
 // Column header overflow (⋯) menu — collapses the rarely-used per-column
@@ -7507,6 +7641,17 @@ function showColumnOverflowMenu(id, x, y) {
     if (codexPresent) {
       addRow('⇥', 'Hand off to Codex', function () {
         handoffColumnToCodex(id);
+      });
+    }
+
+    // Only ever shown when this session has at least one known job — never
+    // rendered disabled. See the codex-watch poll comment above for why that
+    // single condition, and not a codex-CLI/plugin presence probe, is the
+    // right gate.
+    var codexJobs = codexWatchCounts.get(id);
+    if (codexJobs && codexJobs.total > 0) {
+      addRow('◉', 'Watch Codex (' + codexJobs.total + ')', function () {
+        openCodexWatchWindow(id);
       });
     }
   }
@@ -10851,6 +10996,7 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
       persistSessions(col.projectKey, col.workspaceId);
       ensureClawdTail(colId);
       fetchAndSetSessionTitle(colId, col.projectKey, sid);
+      codexWatchMaybeStart();
     }
     var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
     if (sidMatchesColumn && sid && !clawdHookSeenBySession[sid]) {

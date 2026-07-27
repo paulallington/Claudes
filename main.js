@@ -48,6 +48,9 @@ const { parseCodexRateLimits, pickLatestRolloutPath } = require('./lib/codex-lim
 const { parseChecksumFile, checksumsMatch } = require('./lib/update-checksum');
 const { resolveProfile, profileClaudeRoot, PRIMARY_ID } = require('./lib/profile-resolve');
 const { extractSeedClaudeJson } = require('./lib/profile-seed');
+const CodexWatchJobs = require('./lib/codex-watch-jobs');
+const CodexWatchLog = require('./lib/codex-watch-log');
+const CodexWatchTail = require('./lib/codex-watch-tail');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -1542,6 +1545,100 @@ function debouncePopoutBounds(projectKey, win) {
       // internal to the popout. Broadcasting would race with pending renderer
       // edits (like project removal) and overwrite them with readConfig()'s
       // pre-debounce disk state.
+    }, POPOUT_BOUNDS_DEBOUNCE_MS);
+  };
+}
+
+// Registry of open codex watcher windows keyed by columnId.
+const codexWatchOpenWindows = new Map();
+
+function createCodexWatchWindow(opts) {
+  const columnId = opts && opts.columnId;
+  if (codexWatchOpenWindows.has(columnId)) {
+    const existing = codexWatchOpenWindows.get(columnId);
+    if (!existing.isDestroyed()) {
+      const entry = codexWatchWindows.get(existing);
+      const sameSession = entry && entry.sel && entry.sel.sessionId === opts.sessionId;
+      if (sameSession) {
+        existing.show();
+        existing.focus();
+        return existing;
+      }
+      // restartColumn keeps the columnId but can null-and-reacquire
+      // sessionId, so a registered window can be stale for the session it
+      // now needs to show. Patching `sel` alone would leave the page's own
+      // state.selection pointed at the dead job, so recreate outright.
+      existing.destroy();
+      codexWatchOpenWindows.delete(columnId);
+      codexWatchWindows.delete(existing);
+    } else {
+      codexWatchOpenWindows.delete(columnId);
+    }
+  }
+
+  const config = readConfig();
+  const bounds = config.codexWatchBounds || {};
+  const index = codexWatchOpenWindows.size;
+  const cascade = index * 24;
+
+  const win = new BrowserWindow({
+    width: bounds.width || 900,
+    height: bounds.height || 700,
+    x: typeof bounds.x === 'number' ? bounds.x + cascade : undefined,
+    y: typeof bounds.y === 'number' ? bounds.y + cascade : undefined,
+    minWidth: 400,
+    minHeight: 300,
+    title: 'Codex · ' + (opts.title || 'Watcher'),
+    icon: path.join(__dirname, process.platform === 'win32' ? 'icon-tray.ico' : 'icon.png'),
+    backgroundColor: '#1a1a2e',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+      webviewTag: false
+    }
+  });
+
+  lockdownWebContents(win.webContents);
+  win.loadFile('codex-watch.html', {
+    query: { sessionId: opts.sessionId, title: opts.title || '' }
+  });
+
+  const saveBoundsDebounced = debounceCodexWatchBounds(win);
+  win.on('move', saveBoundsDebounced);
+  win.on('resize', saveBoundsDebounced);
+
+  codexWatchRegisterWindow(win, { sessionId: opts.sessionId, columnProfileId: opts.columnProfileId });
+
+  win.on('closed', () => {
+    codexWatchOpenWindows.delete(columnId);
+    codexWatchUnregisterWindow(win);
+  });
+
+  codexWatchOpenWindows.set(columnId, win);
+  return win;
+}
+
+// Debounce so drag events don't flood writeConfig. Bounds are shared across
+// all watcher windows (a single top-level codexWatchBounds key), same
+// debounce constant as popoutBounds.
+function debounceCodexWatchBounds(win) {
+  let timer = null;
+  return function () {
+    if (win.isDestroyed()) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (win.isDestroyed()) return;
+      const b = win.getBounds();
+      const cfg = readConfig();
+      cfg.codexWatchBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+      scheduleWriteConfig(cfg);
+      // Intentionally no broadcastConfigUpdated here — same reasoning as
+      // debouncePopoutBounds: this is internal bookkeeping, not something the
+      // renderer needs to react to.
     }, POPOUT_BOUNDS_DEBOUNCE_MS);
   };
 }
@@ -7513,6 +7610,235 @@ function hasCodex() {
 }
 
 ipcMain.handle('config:hasCodex', () => hasCodex());
+
+// --- Codex watcher -------------------------------------------------------
+//
+// The codex plugin resolves its state root from CLAUDE_PLUGIN_DATA, which
+// Claude Code derives from the session's config dir. A column running under a
+// secondary subscription profile therefore writes its job logs under that
+// profile's directory, NOT ~/.claude. Resolve per column, never hardcode.
+
+const CODEX_PLUGIN_DATA_SUBPATH = path.join('plugins', 'data', 'codex-openai-codex', 'state');
+
+// Reuse claudeRootFor() rather than reading profile.env.CLAUDE_CONFIG_DIR
+// directly: it already coalesces a persisted column's `profileId: null` to
+// PRIMARY_ID, which means "Primary, explicitly" for a column and must NOT fall
+// through the cascade to a non-Primary default. The column's Codex logs live
+// wherever the column actually spawned, so this must match spawn resolution.
+function codexWatchStateRoot(sel) {
+  return path.join(claudeRootFor(sel && sel.columnProfileId), CODEX_PLUGIN_DATA_SUBPATH);
+}
+
+// Scan failures (EACCES, a state.json that never stops being malformed) are
+// otherwise indistinguishable from "no jobs yet" — codexWatchTick calls this
+// every tick, so log each faulting path once rather than spamming the log.
+// A missing file/dir (ENOENT) is the normal "not used yet" case and is not
+// logged at all.
+const codexWatchLoggedFailures = new Set();
+function codexWatchLogScanFault(key, err) {
+  if (err && err.code === 'ENOENT') return;
+  if (codexWatchLoggedFailures.has(key)) return;
+  codexWatchLoggedFailures.add(key);
+  console.error('[codex-watch] scan fault for ' + key + ':', String((err && err.message) || err));
+}
+
+// Enumerate <root>/*/state.json. A torn read is expected - the companion does
+// not write these atomically - so a bad file is skipped for this tick rather
+// than failing the whole scan.
+//
+// Memoized behind a short TTL, keyed by root: with N columns each poll tick
+// (and each openStream/resolve call) independently triggers a synchronous
+// readdirSync + readFileSync/JSON.parse per state.json, on the process
+// driving every window. Windows sharing a profile (the common case) then
+// collapse onto one scan per TTL window instead of one each.
+const CODEX_WATCH_SCAN_TTL_MS = 500;
+const codexWatchScanCache = new Map(); // root -> { at, scans }
+
+function codexWatchScanUncached(root) {
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch (err) { codexWatchLogScanFault(root, err); return []; }
+
+  const scans = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const statePath = path.join(root, entry.name, 'state.json');
+    try {
+      const raw = fs.readFileSync(statePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      scans.push({ workspaceKey: entry.name, jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [] });
+    } catch (err) { codexWatchLogScanFault(statePath, err); }
+  }
+  return scans;
+}
+
+function codexWatchScan(root) {
+  const cached = codexWatchScanCache.get(root);
+  const now = Date.now();
+  if (cached && (now - cached.at) < CODEX_WATCH_SCAN_TTL_MS) return cached.scans;
+
+  const scans = codexWatchScanUncached(root);
+  codexWatchScanCache.set(root, { at: now, scans });
+  return scans;
+}
+
+// Resolve a log path from renderer-supplied ids. workspaceKey is accepted ONLY
+// if it exactly matches a directory main itself enumerated, so traversal is
+// structurally impossible rather than filtered. '.'/'..' are rejected
+// explicitly even though the character class already excludes path
+// separators — defence in depth against a jobId of exactly '.' or '..'.
+function codexWatchResolveLogPath(sel, workspaceKey, jobId) {
+  if (typeof workspaceKey !== 'string' || typeof jobId !== 'string') return null;
+  if (!/^[A-Za-z0-9._-]+$/.test(jobId)) return null;
+  if (jobId === '.' || jobId === '..') return null;
+
+  const root = codexWatchStateRoot(sel);
+  const known = codexWatchScan(root).some((s) => s.workspaceKey === workspaceKey);
+  if (!known) return null;
+
+  return CodexWatchTail.logPathFor(path, root, workspaceKey, jobId);
+}
+
+ipcMain.handle('codexwatch:open', (event, opts) => {
+  try {
+    createCodexWatchWindow(opts || {});
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('codexwatch:listJobs', (event, sel) => {
+  // A registered watcher window's own sel (columnProfileId + sessionId) is
+  // authoritative — trusting the renderer's copy would resolve the wrong
+  // profile's state root for a fraction of a second on load (the page has no
+  // way to know its own columnProfileId until main tells it), so ignore
+  // whatever the caller sent whenever we already know better.
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const entry = win && codexWatchWindows.get(win);
+  const opts = (entry && entry.sel) || sel || {};
+  if (!opts.sessionId) return { ok: true, jobs: [] };
+  try {
+    const scans = codexWatchScan(codexWatchStateRoot(opts));
+    return { ok: true, jobs: CodexWatchJobs.selectSessionJobs(scans, opts.sessionId, Date.now()) };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+const CODEX_WATCH_FAST_MS = 1000;
+const CODEX_WATCH_SLOW_MS = 3000;
+
+// win -> { sel, streams: Map<streamKey, { workspaceKey, jobId, offset, carry }> }
+const codexWatchWindows = new Map();
+let codexWatchTimer = null;
+
+// '::' is a safe separator: the plugin's dir slug and job ids are both
+// [A-Za-z0-9._-], so neither can contain a colon and the key is unambiguous.
+function streamKey(workspaceKey, jobId) { return workspaceKey + '::' + jobId; }
+
+// The io the pure tail module reaches the filesystem through — real fs here,
+// a fake in lib/codex-watch-tail's own tests.
+const codexWatchTailIo = { statSync: fs.statSync, openSync: fs.openSync, readSync: fs.readSync, closeSync: fs.closeSync };
+
+function codexWatchReadDelta(logPath, state) {
+  const delta = CodexWatchTail.readDelta(codexWatchTailIo, logPath, state);
+  if (!delta) return null;
+
+  const parsed = CodexWatchLog.parseLogChunk(state.carry, delta.chunk);
+  state.carry = parsed.carry;
+  return { events: parsed.events, preview: CodexWatchLog.previewEvent(state.carry) };
+}
+
+function codexWatchTick() {
+  try {
+    for (const [win, entry] of codexWatchWindows) {
+      if (win.isDestroyed()) { codexWatchWindows.delete(win); continue; }
+
+      // A window/webContents can be torn down at any point during this
+      // iteration (between the isDestroyed() check above and a send below) —
+      // any throw here must not escape the loop, or a later window's streams
+      // go unpolled and (more importantly) codexWatchSchedule() below never
+      // runs, permanently killing the poll for every remaining window too.
+      try {
+        let scans = [];
+        try {
+          scans = codexWatchScan(codexWatchStateRoot(entry.sel));
+          const jobs = CodexWatchJobs.selectSessionJobs(scans, entry.sel.sessionId, Date.now());
+          win.webContents.send('codexwatch:jobs', { sessionId: entry.sel.sessionId, jobs });
+        } catch { /* transient scan failure — codexWatchScan already logs faults once; try again next tick */ }
+
+        // Reuse this tick's scan to validate each open stream's workspaceKey
+        // rather than calling codexWatchResolveLogPath (which re-scans the
+        // directory) once per stream per tick.
+        const knownWorkspaceKeys = new Set(scans.map((s) => s.workspaceKey));
+        const root = codexWatchStateRoot(entry.sel);
+
+        for (const state of entry.streams.values()) {
+          if (!knownWorkspaceKeys.has(state.workspaceKey)) continue;
+          const logPath = CodexWatchTail.logPathFor(path, root, state.workspaceKey, state.jobId);
+          let delta = null;
+          try { delta = codexWatchReadDelta(logPath, state); }
+          catch { continue; }
+          if (!delta) continue;
+          win.webContents.send('codexwatch:delta', {
+            workspaceKey: state.workspaceKey,
+            jobId: state.jobId,
+            events: delta.events,
+            preview: delta.preview
+          });
+        }
+      } catch { /* window destroyed mid-tick — skip it this tick, isDestroyed() cleans it up next time */ }
+    }
+  } finally {
+    codexWatchSchedule();
+  }
+}
+
+function codexWatchSchedule() {
+  if (codexWatchTimer) { clearTimeout(codexWatchTimer); codexWatchTimer = null; }
+  if (!codexWatchWindows.size) return;
+  let anyStream = false;
+  for (const entry of codexWatchWindows.values()) if (entry.streams.size) anyStream = true;
+  codexWatchTimer = setTimeout(codexWatchTick, anyStream ? CODEX_WATCH_FAST_MS : CODEX_WATCH_SLOW_MS);
+}
+
+function codexWatchRegisterWindow(win, sel) {
+  codexWatchWindows.set(win, { sel: sel, streams: new Map() });
+  codexWatchSchedule();
+}
+
+function codexWatchUnregisterWindow(win) {
+  codexWatchWindows.delete(win);
+  codexWatchSchedule();
+}
+
+ipcMain.handle('codexwatch:openStream', (event, opts) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const entry = win && codexWatchWindows.get(win);
+  if (!entry) return { ok: false, error: 'not a watcher window' };
+
+  const logPath = codexWatchResolveLogPath(entry.sel, opts && opts.workspaceKey, opts && opts.jobId);
+  if (!logPath) return { ok: false, error: 'unknown job' };
+
+  const state = { workspaceKey: opts.workspaceKey, jobId: opts.jobId, offset: 0, carry: '' };
+  entry.streams.set(streamKey(opts.workspaceKey, opts.jobId), state);
+  codexWatchSchedule();
+
+  let delta = null;
+  try { delta = codexWatchReadDelta(logPath, state); }
+  catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
+
+  return { ok: true, events: (delta && delta.events) || [], preview: (delta && delta.preview) || null };
+});
+
+ipcMain.handle('codexwatch:closeStream', (event, opts) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const entry = win && codexWatchWindows.get(win);
+  if (entry && opts) entry.streams.delete(streamKey(opts.workspaceKey, opts.jobId));
+  codexWatchSchedule();
+  return { ok: true };
+});
 
 function parseAgentResult(output) {
   const result = { summary: '', attentionItems: [] };

@@ -1577,6 +1577,31 @@ html[data-platform="darwin"] #toolbar {
   vertical-align: middle;
 }
 
+/* Codex-watch running-job count badge (see updateCodexWatchBadge in
+   renderer.js). Distinct from .col-codex-badge above — that one marks a
+   column as running the Codex CLI, this one shows Codex jobs the Codex
+   Claude Code plugin is running inside a Claude session — so it's hidden by
+   default (no `-shown` modifier) rather than reusing that class, and only
+   toggled visible once there's a running count to report. */
+.column-header .col-codex-watch-badge {
+  display: none;
+  margin-left: 6px;
+  margin-right: auto;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  border-radius: 3px;
+  background: rgba(120, 255, 170, 0.18);
+  color: #a9ffcf;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.column-header .col-codex-watch-badge.col-codex-watch-badge-shown {
+  display: inline-block;
+}
+
 /* Subscription chip — only visible when col.profileId names a non-Primary
    profile (see updateColumnProfileChip); empty/no-background otherwise, so a
    single-subscription user sees nothing here at all. */
@@ -8746,4 +8771,207 @@ body.light-theme .clawd-debug-log .ts { color: #8a8aa0; }
   font-variant-numeric: tabular-nums;
   min-width: 32px;
   text-align: center;
+}
+
+/* === Codex Watch — read-only Codex job-log viewer window === */
+/* A calm, dense log viewer that sits beside a terminal column, not a
+   dashboard: a narrow job list down the side, a scrolling event stream. */
+
+.cw-body {
+  margin: 0;
+  background: var(--bg-main);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.cw-root {
+  display: flex;
+  height: 100vh;
+  background: var(--bg-main);
+}
+
+.cw-jobs {
+  flex: 0 0 220px;
+  overflow: hidden;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-primary);
+  display: flex;
+  flex-direction: column;
+}
+
+.cw-jobs-source {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.cw-jobs-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cw-job {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.cw-job:hover {
+  background: var(--hover-medium);
+}
+
+.cw-job-selected {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--text-bright);
+}
+
+.cw-job-ended {
+  opacity: 0.65;
+}
+
+.cw-job-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+.cw-job-dot-active {
+  background: var(--color-green);
+}
+
+.cw-job-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cw-job-elapsed {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.cw-stream {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--bg-main);
+  padding: 10px 14px;
+}
+
+.cw-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 12px 4px;
+}
+
+.cw-events {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cw-event {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cw-event-main {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.cw-event-prefix {
+  color: var(--text-dim);
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.cw-event-mono {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  color: var(--text-body);
+  white-space: pre-wrap;
+}
+
+.cw-event-prose {
+  color: var(--text-primary);
+  white-space: pre-wrap;
+}
+
+.cw-event-status-text {
+  color: var(--text-dim);
+}
+
+.cw-event-ok .cw-event-mono {
+  color: var(--color-green);
+}
+
+.cw-event-fail .cw-event-mono {
+  color: var(--accent);
+}
+
+.cw-event-preview {
+  opacity: 0.75;
+}
+
+.cw-event-truncated {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  cursor: help;
+}
+
+.cw-jump {
+  position: sticky;
+  bottom: 10px;
+  left: 100%;
+  display: block;
+  background: var(--bg-button);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--text-bright);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 6px 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+.cw-jump:hover {
+  background: var(--hover-strong);
+}
+
+/* Scoped hidden state — NOT a global .hidden. */
+.cw-hidden {
+  display: none;
 }
