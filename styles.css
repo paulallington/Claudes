@@ -1195,7 +1195,8 @@ html[data-platform="darwin"] #toolbar {
 .spawn-effort-row select,
 .spawn-model-row select,
 .spawn-perm-row select,
-.spawn-endpoint-row select {
+.spawn-endpoint-row select,
+.spawn-profile-row select {
   background: var(--bg-button);
   color: var(--text-primary);
   border: 1px solid var(--border-dim);
@@ -1207,7 +1208,8 @@ html[data-platform="darwin"] #toolbar {
 }
 
 .spawn-endpoint-model-row.hidden,
-.spawn-model-row.hidden {
+.spawn-model-row.hidden,
+.spawn-profile-row.hidden {
   display: none;
 }
 
@@ -1573,6 +1575,25 @@ html[data-platform="darwin"] #toolbar {
   background: rgba(120, 170, 255, 0.18);
   color: #a9c7ff;
   vertical-align: middle;
+}
+
+/* Subscription chip — only visible when col.profileId names a non-Primary
+   profile (see updateColumnProfileChip); empty/no-background otherwise, so a
+   single-subscription user sees nothing here at all. */
+.column-header .col-profile-chip {
+  display: none;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  border-radius: 3px;
+  color: #1a1a2e;
+  vertical-align: middle;
+}
+
+.column-header .col-profile-chip.column-profile-chip-shown {
+  display: inline-block;
 }
 
 .column-header .col-title.editing,
@@ -4879,6 +4900,18 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 .plan-limits-mini.stale { opacity: 0.55; }
 .plan-limits-mini.stale:hover { opacity: 1; }
 
+/* One group per subscription, stacked inside #plan-limits-mini. With a single
+   profile there is exactly one group and no visible separation from before. */
+.plan-limits-mini-group { margin-bottom: 6px; }
+.plan-limits-mini-group:last-child { margin-bottom: 0; }
+.plan-limits-mini-chip {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  margin-right: 5px; vertical-align: middle;
+}
+.plan-limits-mini-signin {
+  font-size: 11px; opacity: .65; padding: 2px 0; cursor: pointer;
+}
+
 .plan-limits-mini-row {
   display: grid;
   grid-template-columns: 48px 1fr 32px;
@@ -6763,6 +6796,107 @@ textarea.settings-input { resize: vertical; font-family: inherit; }
   display: block;
 }
 
+/* --- Subscriptions panel (global settings) --- */
+
+.profiles-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 10px 0;
+}
+
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-deep);
+}
+
+.profile-row-chip {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border-dim);
+  border-radius: 50%;
+  cursor: pointer;
+  background: none;
+  flex: 0 0 auto;
+}
+.profile-row-chip::-webkit-color-swatch-wrapper { padding: 0; border-radius: 50%; }
+.profile-row-chip::-webkit-color-swatch { border: none; border-radius: 50%; }
+
+.profile-row-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-row-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 1px 5px;
+  flex: 0 0 auto;
+}
+
+.profile-row-signedin {
+  font-size: 11px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.profile-row-signedin-yes { color: var(--accent-success, #4ade80); }
+.profile-row-signedin-no { color: var(--text-dim); }
+
+.profile-row-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.profile-row-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.profile-row-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.profile-row-btn-danger:hover {
+  border-color: #f87171;
+  color: #f87171;
+}
+
+.profiles-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.profiles-add-row .settings-input {
+  flex: 1;
+}
+
+.profiles-add-status.error {
+  color: #f87171;
+  opacity: 1;
+}
+
 .project-context-menu {
   position: fixed;
   background: var(--bg-panel);
@@ -7857,6 +7991,10 @@ body.mode-popout #btn-add-project {
 .snippet-prompt-cancel:hover { border-color: #4f8cff; }
 
 /* === Shortcuts Reference Modal === */
+.profile-assign-dialog { width: 360px; }
+.profile-assign-body { padding: 16px; }
+.profile-assign-body select { width: 100%; }
+
 .shortcuts-dialog { width: 760px; max-height: 85vh; }
 .shortcuts-dialog .modal-body {
   flex-direction: column;

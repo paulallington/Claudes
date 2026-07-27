@@ -11,8 +11,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   popoutSetTransfer: (projectKey, list) => ipcRenderer.invoke('popout:setTransfer', projectKey, list),
   popoutTakeTransfer: (projectKey) => ipcRenderer.invoke('popout:takeTransfer', projectKey),
   onConfigUpdated: (callback) => ipcRenderer.on('config:updated', (_, cfg) => callback(cfg)),
-  getRecentSessions: (projectPath) => ipcRenderer.invoke('sessions:getRecent', projectPath),
-  sessionExists: (projectPath, sessionId) => ipcRenderer.invoke('sessions:exists', projectPath, sessionId),
+  getRecentSessions: (projectPath, profileId) => ipcRenderer.invoke('sessions:getRecent', projectPath, profileId),
+  sessionExists: (projectPath, sessionId, profileId) => ipcRenderer.invoke('sessions:exists', projectPath, sessionId, profileId),
   getBackgroundSessionIds: () => ipcRenderer.invoke('sessions:getBackgroundIds'),
   onBackgroundSessionIds: (cb) => ipcRenderer.on('sessions:backgroundIds', (_e, ids) => cb(ids)),
   saveSessions: (projectPath, sessionIds) => ipcRenderer.invoke('sessions:save', projectPath, sessionIds),
@@ -20,7 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadStickyNotes: (projectPath, workspaceId) => ipcRenderer.invoke('sticky-notes:load', projectPath, workspaceId),
   saveStickyNotes: (projectPath, workspaceId, notes) => ipcRenderer.invoke('sticky-notes:save', projectPath, workspaceId, notes),
   scrubWorkspaceArtifacts: (projectPath, wsId) => ipcRenderer.invoke('workspace:scrubArtifacts', projectPath, wsId),
-  getSessionTitle: (projectPath, sessionId) => ipcRenderer.invoke('sessions:getTitle', projectPath, sessionId),
+  getSessionTitle: (projectPath, sessionId, profileId) => ipcRenderer.invoke('sessions:getTitle', projectPath, sessionId, profileId),
   readClaudeMd: (projectPath) => ipcRenderer.invoke('claudemd:read', projectPath),
   saveClaudeMd: (projectPath, content) => ipcRenderer.invoke('claudemd:save', projectPath, content),
   setExploreAgent: (projectPath, enabled) => ipcRenderer.invoke('agents:setExplore', projectPath, enabled),
@@ -48,7 +48,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gitDiffCommit: (projectPath, hash, filePath) => ipcRenderer.invoke('git:diffCommit', projectPath, hash, filePath),
   gitDiffStat: (projectPath, staged, branch) => ipcRenderer.invoke('git:diffStat', projectPath, staged, branch),
   gitDiffStatVsBase: (projectPath, branch, baseRef) => ipcRenderer.invoke('git:diffStatVsBase', projectPath, branch, baseRef),
-  gitDetectSessionWorktree: (projectPath, sessionId) => ipcRenderer.invoke('git:detectSessionWorktree', projectPath, sessionId),
+  gitDetectSessionWorktree: (projectPath, sessionId, profileId) => ipcRenderer.invoke('git:detectSessionWorktree', projectPath, sessionId, profileId),
   gitIsInsideWorkTree: (cwd) => ipcRenderer.invoke('git:isInsideWorkTree', cwd),
   resolveWorktree: (projectPath, value) => ipcRenderer.invoke('paths:resolveWorktree', projectPath, value),
   pathExists: (p) => ipcRenderer.invoke('paths:exists', p),
@@ -69,10 +69,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listSnippets: () => ipcRenderer.invoke('snippets:list'),
   saveSnippet: (snippet) => ipcRenderer.invoke('snippets:save', snippet),
   deleteSnippet: (id) => ipcRenderer.invoke('snippets:delete', id),
-  getPlanLimits: (force) => ipcRenderer.invoke('usage:getPlanLimits', force),
+  getPlanLimits: (force, profileId) => ipcRenderer.invoke('usage:getPlanLimits', force, profileId),
   getCodexLimits: (force) => ipcRenderer.invoke('usage:getCodexLimits', force),
   detectThresholdCrossings: (prev, next) => ipcRenderer.invoke('usage:detectThresholdCrossings', prev, next),
-  getSessionContextTokens: (projectKey, sessionId, sinceMs) => ipcRenderer.invoke('session:contextTokens', projectKey, sessionId, sinceMs),
+  getSessionContextTokens: (projectKey, sessionId, sinceMs, profileId) => ipcRenderer.invoke('session:contextTokens', projectKey, sessionId, sinceMs, profileId),
   getModelContextLimit: (model) => ipcRenderer.invoke('session:modelContextLimit', model),
   showSystemNotification: (opts) => ipcRenderer.invoke('notify:show', opts),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
@@ -179,6 +179,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   toggleAgent: (automationId, agentId) => ipcRenderer.invoke('automations:toggleAgent', automationId, agentId),
   setAllAutomationsEnabled: (projectPath, enabled) => ipcRenderer.invoke('automations:setAllEnabled', projectPath, enabled),
   toggleAutomationsGlobal: () => ipcRenderer.invoke('automations:toggleGlobal'),
+  pauseAutomationsForProfile: (profileId) => ipcRenderer.invoke('automations:pauseForProfile', profileId),
   runAgentNow: (automationId, agentId) => ipcRenderer.invoke('automations:runAgentNow', automationId, agentId),
   runAutomationNow: (automationId) => ipcRenderer.invoke('automations:runAutomationNow', automationId),
   getAgentHistory: (automationId, agentId, count) => ipcRenderer.invoke('automations:getAgentHistory', automationId, agentId, count),
@@ -230,6 +231,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   endpointFetchModels: (args) => ipcRenderer.invoke('endpoint:fetchModels', args),
   onEndpointsUpdated: (callback) => ipcRenderer.on('endpoints:updated', () => callback()),
 
+  // Profiles (multi-subscription)
+  profileList: () => ipcRenderer.invoke('profile:list'),
+  profileCreate: (input) => ipcRenderer.invoke('profile:create', input),
+  profileUpdate: (input) => ipcRenderer.invoke('profile:update', input),
+  profileDelete: (id) => ipcRenderer.invoke('profile:delete', id),
+  profileSetDefault: (id) => ipcRenderer.invoke('profile:setDefault', id),
+  profileResolve: (sel) => ipcRenderer.invoke('profile:resolve', sel),
+  profileReseed: (id) => ipcRenderer.invoke('profile:reseed', id),
+  onProfilesUpdated: (callback) => ipcRenderer.on('profiles:updated', () => callback()),
+  onProfilesMirrorFailed: (callback) => ipcRenderer.on('profiles:mirrorFailed', (_, info) => callback(info)),
+
   paletteRank: (items, query) => ipcRenderer.invoke('palette:rank', items, query),
 
   // Cross-device session sync
@@ -247,7 +259,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onUpdateNone: (callback) => ipcRenderer.on('update:none', (_, info) => callback(info)),
 
   // Clawd widget — per-column JSONL tail driving the animation
-  clawdStartTail: (columnId, projectPath, sessionId) => ipcRenderer.invoke('clawd:startTail', { columnId, projectPath, sessionId }),
+  clawdStartTail: (columnId, projectPath, sessionId, profileId) => ipcRenderer.invoke('clawd:startTail', { columnId, projectPath, sessionId, profileId }),
   clawdStopTail: (columnId) => ipcRenderer.invoke('clawd:stopTail', { columnId }),
   onClawdEvent: (callback) => ipcRenderer.on('clawd:event', (_, data) => callback(data))
 });

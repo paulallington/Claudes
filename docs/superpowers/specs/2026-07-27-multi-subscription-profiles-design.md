@@ -36,11 +36,56 @@ Three conclusions:
 3. The transcript path key scheme is **identical**, only re-rooted. So the
    transcript helpers need a root argument and nothing more.
 
-**Unverified on macOS.** Claude CLI stores credentials in the login keychain
-under service `Claude Code-credentials` (`main.js:3628`). Whether that service
-name is scoped per config dir is unknown. Implementation must verify this
-before shipping; if it is not scoped, secondary profiles are disabled on macOS
-with a clear message rather than half-working.
+**Still unverified on macOS — guarded, not tested.** No Mac with a second
+Anthropic account was available during implementation, so the keychain
+question below was never actually run; what shipped is the safe assumption,
+not a finding.
+
+Claude CLI stores credentials in the login keychain under service
+`Claude Code-credentials` (`main.js`, `usage:getPlanLimits`). Whether that
+service name is scoped per `CLAUDE_CONFIG_DIR` is unknown. Until someone runs
+the experiment on a Mac with two accounts, the app assumes the worst case and:
+
+- `profile:create` refuses unconditionally on `darwin` with an explanation,
+  so no secondary profile can be created there at all.
+- The Subscriptions panel disables "Add subscription" on `darwin` (detected
+  via `document.documentElement.dataset.platform`, set by
+  `platform-detect.js`) with the same message as a tooltip.
+- `usage:getPlanLimits`'s existing `no-creds-macos` branch is preserved
+  unchanged: a **secondary** profile with no `.credentials.json` on darwin
+  returns an error rather than falling through to the keychain (which would
+  read Primary's token and report it under the wrong profile's name — a wrong
+  number that looks right).
+- A `profiles.json` copied from Windows to a Mac still lists and allows
+  assigning existing secondary profiles there (list/update/delete/setDefault
+  are platform-agnostic); only *creation* of new ones is blocked.
+
+**Outstanding experiment, still to be run on a Mac with two Anthropic
+accounts:**
+
+```
+CLAUDE_CONFIG_DIR=<tmp1> claude  → /login account A
+CLAUDE_CONFIG_DIR=<tmp2> claude  → /login account B
+security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w
+```
+
+Three possible findings, and what each implies for lifting the guard:
+
+1. **The keychain entry is scoped per config dir** (e.g. account name/label
+   includes the dir, or macOS Keychain Access shows two separate
+   "Claude Code-credentials" items) — the guard can be lifted outright;
+   `usage:getPlanLimits` would need a per-profile keychain read instead of
+   the current Primary-only fallback.
+2. **One shared entry, last login wins** — logging into account B silently
+   invalidates account A's session. Secondary profiles would file-collide
+   with Primary's keychain slot; the guard should stay, and the fix (if any)
+   would need a distinct keychain service name per profile, not a bigger
+   guard.
+3. **The CLI errors or refuses a second concurrent login** — closer to the
+   Linux/Windows file-based behaviour by accident; worth re-testing whether
+   `.credentials.json` also appears under `$CLAUDE_CONFIG_DIR` on macOS (some
+   CLI versions write both), in which case the guard could be relaxed to
+   "keychain unScoped" only.
 
 ## Data model
 

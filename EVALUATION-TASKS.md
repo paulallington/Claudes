@@ -180,3 +180,32 @@ _Residual security exposure across all parked items is defense-in-depth — it r
 - [ ] **Interruption detection wrongly gated on prior input.** Outer condition includes
   `col.hasUserInput`, so the resumed-session-before-keystroke correction the comment promises never
   runs. `renderer.js:646`. **Fix:** move interruption detection outside the `hasUserInput` gate.
+
+---
+
+# Multi-subscription profiles (2026-07-27) — findings from implementation
+
+- [ ] **macOS secondary profiles are guarded, not verified.** `profile:create` refuses on `darwin`
+  and the Subscriptions panel disables "Add subscription" there, on the assumption (unproven) that
+  the CLI's macOS keychain service `Claude Code-credentials` is not scoped per `CLAUDE_CONFIG_DIR`.
+  The experiment (two accounts, two `CLAUDE_CONFIG_DIR`s, inspect the keychain entry) still needs
+  running on a Mac. See `docs/superpowers/specs/2026-07-27-multi-subscription-profiles-design.md`
+  for the three possible outcomes and what each implies. *(this task)*
+- [ ] **Usage modal has no per-profile breakdown.** The sidebar mini usage bar polls and shows every
+  profile's usage, but the full Usage modal's detailed breakdown is still Primary-only. Deliberate
+  scope cut for this feature, tracked here as a real follow-up rather than silently dropped.
+- [ ] **`lib/voice-background.js:19` and `lib/stale-hooks.js:21` throw in the sandboxed renderer.**
+  Both do an unconditional `module.exports = {...}` before their `if (typeof window !== 'undefined')`
+  block; in the renderer's sandbox (no `require`/`module`) the `module.exports` line throws first, so
+  the `window.*` export is never reached and the whole module silently fails to load. Same bug class
+  fixed for `lib/profile-resolve.js` in commit `74d3e26` (guard `module.exports` behind
+  `typeof module !== 'undefined' && module.exports`, mirroring the existing `typeof window` guard).
+  The `node:vm`-sandboxed regression test in `test/profile-resolve.test.js` (loads the file with no
+  `module`/`require` in scope and asserts `window.*` is still populated) is the template for a test
+  on these two.
+- [ ] **`window.alert()` hangs the whole Electron process tree in this renderer.** A blocking
+  `alert()`/`confirm()` freezes not just the window but every column's pty I/O behind it, because
+  they share the renderer's event loop. A non-blocking `alertDialog()` (and `confirmDialog()`) now
+  exists in `renderer.js` for exactly this reason — used by the new Subscriptions panel and profile
+  delete flow — but roughly 9 other `alert()` call sites elsewhere in `renderer.js` still use the
+  blocking form and remain to be migrated.

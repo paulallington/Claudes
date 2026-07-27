@@ -369,6 +369,12 @@
                   <option value="">Anthropic (cloud)</option>
                 </select>
               </div>
+              <div class="spawn-option spawn-profile-row hidden" id="opt-profile-row">
+                <label for="opt-profile">Subscription:</label>
+                <select id="opt-profile">
+                  <option value="">Inherit</option>
+                </select>
+              </div>
               <div class="spawn-option spawn-model-row" id="opt-model-row">
                 <label for="opt-model">Model:</label>
                 <select id="opt-model">
@@ -485,6 +491,7 @@
       <div class="modal-body settings-body">
         <div class="settings-tabs" role="tablist">
           <button class="settings-tab active" data-settings-tab="general" role="tab">General</button>
+          <button class="settings-tab" data-settings-tab="subscriptions" role="tab">Subscriptions</button>
           <button class="settings-tab" data-settings-tab="notifications" role="tab">Notifications</button>
           <button class="settings-tab" data-settings-tab="automations" role="tab">Automations</button>
           <button class="settings-tab" data-settings-tab="sync" role="tab">Sync</button>
@@ -508,6 +515,17 @@
               </select>
               <span class="settings-hint">Used as the initial denominator for column context meters. "Auto" starts at 200k and promotes to 1M when usage exceeds 200k.</span>
             </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="subscriptions">
+            <div class="settings-field">
+              <span class="settings-hint">Assign different Claude Code subscriptions to projects, workspaces, columns and automations. Each is a separate Anthropic account, kept in its own config directory. "Primary" is your existing <code>~/.claude</code> account and can't be deleted.</span>
+            </div>
+            <div id="profiles-list" class="profiles-list"></div>
+            <div class="profiles-add-row">
+              <input type="text" id="profiles-add-name" class="settings-input" placeholder="Subscription name (e.g. Work)" spellcheck="false">
+              <button id="profiles-add-btn" class="settings-browse-btn">+ Add subscription</button>
+            </div>
+            <div id="profiles-add-status" class="settings-hint profiles-add-status"></div>
           </div>
           <div class="settings-pane" data-settings-pane="notifications">
             <label class="settings-toggle">
@@ -845,6 +863,19 @@
     </div>
   </div>
 
+  <!-- Subscription assignment picker — shared by Project settings and the Workspace row context menus -->
+  <div id="profile-assign-modal" class="modal-overlay hidden">
+    <div class="modal-dialog profile-assign-dialog">
+      <div class="modal-header">
+        <span class="modal-title" id="profile-assign-title">Subscription</span>
+        <span id="profile-assign-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body profile-assign-body">
+        <select id="profile-assign-select" class="settings-input"></select>
+      </div>
+    </div>
+  </div>
+
   <!-- Update notification -->
   <div id="update-bar" class="update-bar hidden">
     <span id="update-message"></span>
@@ -1089,6 +1120,12 @@
           <div id="automation-name-group" class="automation-form-group" style="display:none;">
             <label for="automation-name">Automation Name</label>
             <input type="text" id="automation-name" class="automation-input" placeholder="e.g. TaskBoard Pipeline" spellcheck="false">
+          </div>
+
+          <!-- Subscription (which Claude account this automation runs on) -->
+          <div class="automation-form-group">
+            <label for="automation-profile">Subscription</label>
+            <select id="automation-profile" class="automation-input"></select>
           </div>
 
           <!-- Run window (optional) -->
