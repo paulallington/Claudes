@@ -746,8 +746,13 @@ function resolveProfileFor(sel) {
 }
 
 // Root that stands in for ~/.claude for a given profile id.
+// NOTE: profileId is overloaded elsewhere - undefined/null means "inherit the
+// cascade" (falls through to defaultProfileId) in resolveProfileFor's normal
+// callers, but a persisted column's profileId: null means "Primary,
+// explicitly". Coalesce to PRIMARY_ID here so a non-Primary default profile
+// can't get substituted in for columns that are actually on Primary.
 function claudeRootFor(profileId) {
-  return profileClaudeRoot(resolveProfileFor({ columnProfileId: profileId }), os.homedir());
+  return profileClaudeRoot(resolveProfileFor({ columnProfileId: profileId || PRIMARY_ID }), os.homedir());
 }
 
 // Primary (~/.claude) is authoritative for app-managed config. After a
@@ -6309,7 +6314,8 @@ ipcMain.handle('automations:create', (event, config) => {
     agents: agents,
     enabled: true,
     createdAt: new Date().toISOString(),
-    runWindow: config.runWindow || null
+    runWindow: config.runWindow || null,
+    profileId: config.profileId || null
   };
 
   data.automations.push(automation);
@@ -6357,7 +6363,7 @@ ipcMain.handle('automations:update', (event, automationId, updates) => {
   const data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
   if (!automation) return null;
-  const safeFields = ['name', 'enabled', 'runWindow'];
+  const safeFields = ['name', 'enabled', 'runWindow', 'profileId'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) automation[field] = updates[field];
   });

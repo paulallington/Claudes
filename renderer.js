@@ -3581,6 +3581,19 @@ function restoreSessions(projectPath, workspaceId) {
       } else {
         resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
       }
+      // Re-resolve the profile's env (CLAUDE_CONFIG_DIR) for this entry and layer
+      // it on top of — never in place of — the endpoint env above, mirroring
+      // spawnOpts' layering. Without this, a restored column on a secondary
+      // profile spawns with no CLAUDE_CONFIG_DIR at all: it runs on Primary's
+      // credentials while col.profileId still claims the secondary.
+      if (e.profileId && window.electronAPI && window.electronAPI.profileResolve) {
+        var profEnv = null;
+        try {
+          var profResolved = await window.electronAPI.profileResolve({ columnProfileId: e.profileId });
+          profEnv = (profResolved && profResolved.env && Object.keys(profResolved.env).length) ? profResolved.env : null;
+        } catch (_) { profEnv = null; }
+        if (profEnv) resumeRowOpts = Object.assign({}, resumeRowOpts, { env: Object.assign({}, resumeRowOpts.env, profEnv) });
+      }
       // `spawnArgs` above is built ONCE from the current global spawn dropdown,
       // not from this entry's own saved model — reconcile against e.model the
       // same way every respawn does, or a Headroom-OFF restore silently carries
