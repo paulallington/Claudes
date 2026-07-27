@@ -236,7 +236,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   profileUpdate: (input) => ipcRenderer.invoke('profile:update', input),
   profileDelete: (id) => ipcRenderer.invoke('profile:delete', id),
   profileSetDefault: (id) => ipcRenderer.invoke('profile:setDefault', id),
-  profileGetEnv: (sel) => ipcRenderer.invoke('profile:getEnv', sel),
+  profileResolve: (sel) => ipcRenderer.invoke('profile:resolve', sel),
   profileReseed: (id) => ipcRenderer.invoke('profile:reseed', id),
   onProfilesUpdated: (callback) => ipcRenderer.on('profiles:updated', () => callback()),
   onProfilesMirrorFailed: (callback) => ipcRenderer.on('profiles:mirrorFailed', (_, info) => callback(info)),

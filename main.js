@@ -1968,8 +1968,9 @@ ipcMain.handle('profile:delete', (event, id) => {
   return { ok: true, reassigned };
 });
 
-ipcMain.handle('profile:getEnv', (event, sel) => {
-  return resolveProfileFor(sel || {}).env;
+ipcMain.handle('profile:resolve', (event, sel) => {
+  const r = resolveProfileFor(sel || {});
+  return { id: r.id, name: r.name, colour: r.colour, isPrimary: r.isPrimary, env: r.env };
 });
 
 ipcMain.handle('popout:setTransfer', (event, projectKey, transferList) => {

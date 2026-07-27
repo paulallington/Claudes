@@ -139,8 +139,8 @@ var firstSpawnLoadComplete = false;  // gate for cloud-default-on-boot
 var endpointModelsCache = {};
 
 // Profile (multi-subscription) state, mirroring the currentEndpoint* cache
-// above for the same reason: profile:getEnv is async and spawnOpts is sync.
-var currentProfileEnv = null;    // env block from profile:getEnv, or null (Primary/no profiles configured)
+// above for the same reason: profile:resolve is async and spawnOpts is sync.
+var currentProfileEnv = null;    // env block from profile:resolve, or null (Primary/no profiles configured)
 var currentProfileId = null;     // resolved profile id for the pending spawn, for the column chip + persistence
 
 // Cache of profile:list's result — the four assignment pickers and the
@@ -153,39 +153,33 @@ var profilesDefaultId = 'primary';
 // null) beats workspace beats project beats the global default. Call whenever
 // the active project/workspace changes or main tells us 'profiles:updated'.
 function refreshProfileSelection() {
-  if (!window.electronAPI || !window.electronAPI.profileGetEnv) return Promise.resolve();
+  if (!window.electronAPI || !window.electronAPI.profileResolve) return Promise.resolve();
   var activeProject = config && config.projects ? config.projects[config.activeProjectIndex] : null;
   var activeWs = (activeProject && activeProject.activeWorkspaceId && Array.isArray(activeProject.workspaces))
     ? activeProject.workspaces.find(function (w) { return w && w.id === activeProject.activeWorkspaceId; })
     : null;
   var sel = {
-    // No spawn-options profile picker yet — always inherit for now.
     columnProfileId: (typeof optProfile !== 'undefined' && optProfile && optProfile.value) ? optProfile.value : null,
     workspaceProfileId: activeWs ? activeWs.profileId : null,
     projectProfileId: activeProject ? activeProject.profileId : null
   };
-  return window.electronAPI.profileGetEnv(sel).then(function (env) {
-    currentProfileEnv = (env && Object.keys(env).length) ? env : null;
+  // main is the single resolver — it's the only place that ever sees a
+  // profile's configDir, so re-running the cascade here would risk a second
+  // copy of the logic drifting from main's. currentProfileId comes straight
+  // off the same round trip that produced currentProfileEnv.
+  return window.electronAPI.profileResolve(sel).then(function (r) {
+    currentProfileEnv = (r && r.env && Object.keys(r.env).length) ? r.env : null;
+    // Persist null for Primary (isPrimary), the same "omit the default" pattern
+    // used elsewhere (cwd, endpointId) — a plain column with no profile config
+    // stays indistinguishable from one that predates this feature.
+    currentProfileId = (r && !r.isPrimary) ? r.id : null;
     return window.electronAPI.profileList ? window.electronAPI.profileList() : null;
   }).then(function (store) {
-    if (!store || !window.ProfileResolve) { currentProfileId = null; return; }
+    if (!store) return;
     // Keep the picker/chip cache fresh off the same fetch — cheap, and it
     // means every surface that reads profilesCache sees this round-trip too.
     profilesCache = store.profiles || [];
     profilesDefaultId = store.defaultProfileId || PRIMARY_PROFILE_ID;
-    // Re-run the SAME cascade main uses to resolve profile:getEnv, so the id we
-    // persist on the column always matches the env it actually spawned with,
-    // rather than reimplementing (and risking drifting from) that logic here.
-    var resolved = window.ProfileResolve.resolveProfile({
-      profiles: store.profiles, defaultProfileId: store.defaultProfileId,
-      columnProfileId: sel.columnProfileId,
-      workspaceProfileId: sel.workspaceProfileId,
-      projectProfileId: sel.projectProfileId
-    });
-    // Persist null for Primary (isPrimary), the same "omit the default" pattern
-    // used elsewhere (cwd, endpointId) — a plain column with no profile config
-    // stays indistinguishable from one that predates this feature.
-    currentProfileId = resolved.isPrimary ? null : resolved.id;
   }).catch(function () { currentProfileEnv = null; currentProfileId = null; });
 }
 
@@ -14369,7 +14363,7 @@ function renderPlanLimits(result) {
 // persistent sidebar mini-bar). Refreshed by loadPlanLimits(). The modal still
 // reflects Primary only (see loadPlanLimits) — lastPlanLimitsEntries carries
 // every profile's result for the sidebar bar, which renders one group each.
-var PLAN_LIMITS_PRIMARY_ID = (window.ProfileResolve && window.ProfileResolve.PRIMARY_ID) || 'primary';
+var PLAN_LIMITS_PRIMARY_ID = 'primary';
 var lastPlanLimitsResult = null;      // Primary's result — feeds the modal, unchanged shape
 var lastPlanLimitsEntries = null;     // [{ profile, result }, ...] — feeds the sidebar bar
 var prevByProfile = Object.create(null);  // profile id -> last successful data, for crossing detection
