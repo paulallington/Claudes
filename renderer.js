@@ -1702,9 +1702,13 @@ function restoreLayout(projectPath, layout) {
   state.rows.forEach(function (r) { r.columnIds.forEach(function (cid) { existingIds.push(cid); }); });
   existingIds.forEach(function (cid) { try { removeColumn(cid); } catch (e) { /* */ } });
   // Spawn rows + columns. addColumn(args, row, opts) — with row=null it goes
-  // into the current row; with addRow() we create a new one.
+  // into the current row; with addRowToProject(state) we create a new one.
+  // Deliberately not addRow(): that helper is now async (it may await a
+  // worktree resolution) and also spawns its own default column as a side
+  // effect, neither of which this restore path wants — it needs the row
+  // synchronously so the forEach below can target it.
   layout.rows.forEach(function (rowSpec, rIdx) {
-    var row = rIdx === 0 ? null : addRow();
+    var row = rIdx === 0 ? null : addRowToProject(state);
     rowSpec.columns.forEach(function (colSpec) {
       var opts = {
         title: colSpec.title || null,
