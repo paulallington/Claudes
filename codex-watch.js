@@ -84,7 +84,7 @@
   }
 
   function renderJobList() {
-    var container = document.getElementById('cwJobs');
+    var container = document.getElementById('cwJobsList');
     container.textContent = '';
     jobsForDisplay().forEach(function (job) {
       container.appendChild(buildJobRow(job));
@@ -292,6 +292,13 @@
     state.sessionId = params.get('sessionId') || '';
     state.title = params.get('title') || '';
     document.title = 'Codex · ' + state.title;
+
+    var sourceEl = document.getElementById('cwJobsSource');
+    if (state.title) {
+      sourceEl.textContent = state.title;
+      sourceEl.title = state.title;
+      sourceEl.classList.remove('cw-hidden');
+    }
 
     document.getElementById('cwJump').addEventListener('click', function () {
       var stream = document.getElementById('cwStream');
