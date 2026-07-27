@@ -1577,6 +1577,30 @@ html[data-platform="darwin"] #toolbar {
   vertical-align: middle;
 }
 
+/* Codex-watch running-job count badge (see updateCodexWatchBadge in
+   renderer.js). Distinct from .col-codex-badge above — that one marks a
+   column as running the Codex CLI, this one shows Codex jobs the Codex
+   Claude Code plugin is running inside a Claude session — so it's hidden by
+   default (no `-shown` modifier) rather than reusing that class, and only
+   toggled visible once there's a running count to report. */
+.column-header .col-codex-watch-badge {
+  display: none;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  border-radius: 3px;
+  background: rgba(120, 255, 170, 0.18);
+  color: #a9ffcf;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.column-header .col-codex-watch-badge.col-codex-watch-badge-shown {
+  display: inline-block;
+}
+
 /* Subscription chip — only visible when col.profileId names a non-Primary
    profile (see updateColumnProfileChip); empty/no-background otherwise, so a
    single-subscription user sees nothing here at all. */
