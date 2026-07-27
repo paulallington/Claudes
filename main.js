@@ -50,6 +50,7 @@ const { resolveProfile, profileClaudeRoot, PRIMARY_ID } = require('./lib/profile
 const { extractSeedClaudeJson } = require('./lib/profile-seed');
 const CodexWatchJobs = require('./lib/codex-watch-jobs');
 const CodexWatchLog = require('./lib/codex-watch-log');
+const CodexWatchTail = require('./lib/codex-watch-tail');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -7582,7 +7583,7 @@ function codexWatchResolveLogPath(sel, workspaceKey, jobId) {
   const known = codexWatchScan(root).some((s) => s.workspaceKey === workspaceKey);
   if (!known) return null;
 
-  return path.join(root, workspaceKey, 'jobs', jobId + '.log');
+  return CodexWatchTail.logPathFor(path, root, workspaceKey, jobId);
 }
 
 ipcMain.handle('codexwatch:listJobs', (event, sel) => {
@@ -7596,7 +7597,6 @@ ipcMain.handle('codexwatch:listJobs', (event, sel) => {
   }
 });
 
-const CODEX_WATCH_TAIL_BYTES = 64 * 1024;
 const CODEX_WATCH_FAST_MS = 1000;
 const CODEX_WATCH_SLOW_MS = 3000;
 
@@ -7608,69 +7608,62 @@ let codexWatchTimer = null;
 // [A-Za-z0-9._-], so neither can contain a colon and the key is unambiguous.
 function streamKey(workspaceKey, jobId) { return workspaceKey + '::' + jobId; }
 
+// The io the pure tail module reaches the filesystem through — real fs here,
+// a fake in lib/codex-watch-tail's own tests.
+const codexWatchTailIo = { statSync: fs.statSync, openSync: fs.openSync, readSync: fs.readSync, closeSync: fs.closeSync };
+
 function codexWatchReadDelta(logPath, state) {
-  let stat;
-  try { stat = fs.statSync(logPath); }
-  catch { return null; }
+  const delta = CodexWatchTail.readDelta(codexWatchTailIo, logPath, state);
+  if (!delta) return null;
 
-  // Truncated or rotated: start over rather than reading from a stale offset.
-  if (stat.size < state.offset) { state.offset = 0; state.carry = ''; }
-  if (stat.size === state.offset) return null;
-
-  const start = state.offset === 0 && stat.size > CODEX_WATCH_TAIL_BYTES
-    ? stat.size - CODEX_WATCH_TAIL_BYTES
-    : state.offset;
-
-  let chunk = '';
-  const fd = fs.openSync(logPath, 'r');
-  try {
-    const buf = Buffer.alloc(stat.size - start);
-    fs.readSync(fd, buf, 0, buf.length, start);
-    chunk = buf.toString('utf8');
-  } finally {
-    fs.closeSync(fd);
-  }
-  state.offset = stat.size;
-
-  const parsed = CodexWatchLog.parseLogChunk(state.carry, chunk);
+  const parsed = CodexWatchLog.parseLogChunk(state.carry, delta.chunk);
   state.carry = parsed.carry;
   return { events: parsed.events, preview: CodexWatchLog.previewEvent(state.carry) };
 }
 
 function codexWatchTick() {
-  for (const [win, entry] of codexWatchWindows) {
-    if (win.isDestroyed()) { codexWatchWindows.delete(win); continue; }
+  try {
+    for (const [win, entry] of codexWatchWindows) {
+      if (win.isDestroyed()) { codexWatchWindows.delete(win); continue; }
 
-    let scans = [];
-    try {
-      scans = codexWatchScan(codexWatchStateRoot(entry.sel));
-      const jobs = CodexWatchJobs.selectSessionJobs(scans, entry.sel.sessionId, Date.now());
-      win.webContents.send('codexwatch:jobs', { sessionId: entry.sel.sessionId, jobs });
-    } catch { /* transient scan failure — codexWatchScan already logs faults once; try again next tick */ }
+      // A window/webContents can be torn down at any point during this
+      // iteration (between the isDestroyed() check above and a send below) —
+      // any throw here must not escape the loop, or a later window's streams
+      // go unpolled and (more importantly) codexWatchSchedule() below never
+      // runs, permanently killing the poll for every remaining window too.
+      try {
+        let scans = [];
+        try {
+          scans = codexWatchScan(codexWatchStateRoot(entry.sel));
+          const jobs = CodexWatchJobs.selectSessionJobs(scans, entry.sel.sessionId, Date.now());
+          win.webContents.send('codexwatch:jobs', { sessionId: entry.sel.sessionId, jobs });
+        } catch { /* transient scan failure — codexWatchScan already logs faults once; try again next tick */ }
 
-    // Reuse this tick's scan to validate each open stream's workspaceKey
-    // rather than calling codexWatchResolveLogPath (which re-scans the
-    // directory) once per stream per tick.
-    const knownWorkspaceKeys = new Set(scans.map((s) => s.workspaceKey));
-    const root = codexWatchStateRoot(entry.sel);
+        // Reuse this tick's scan to validate each open stream's workspaceKey
+        // rather than calling codexWatchResolveLogPath (which re-scans the
+        // directory) once per stream per tick.
+        const knownWorkspaceKeys = new Set(scans.map((s) => s.workspaceKey));
+        const root = codexWatchStateRoot(entry.sel);
 
-    for (const state of entry.streams.values()) {
-      if (!knownWorkspaceKeys.has(state.workspaceKey)) continue;
-      const logPath = path.join(root, state.workspaceKey, 'jobs', state.jobId + '.log');
-      let delta = null;
-      try { delta = codexWatchReadDelta(logPath, state); }
-      catch { continue; }
-      if (!delta) continue;
-      win.webContents.send('codexwatch:delta', {
-        workspaceKey: state.workspaceKey,
-        jobId: state.jobId,
-        events: delta.events,
-        preview: delta.preview
-      });
+        for (const state of entry.streams.values()) {
+          if (!knownWorkspaceKeys.has(state.workspaceKey)) continue;
+          const logPath = CodexWatchTail.logPathFor(path, root, state.workspaceKey, state.jobId);
+          let delta = null;
+          try { delta = codexWatchReadDelta(logPath, state); }
+          catch { continue; }
+          if (!delta) continue;
+          win.webContents.send('codexwatch:delta', {
+            workspaceKey: state.workspaceKey,
+            jobId: state.jobId,
+            events: delta.events,
+            preview: delta.preview
+          });
+        }
+      } catch { /* window destroyed mid-tick — skip it this tick, isDestroyed() cleans it up next time */ }
     }
+  } finally {
+    codexWatchSchedule();
   }
-
-  codexWatchSchedule();
 }
 
 function codexWatchSchedule() {
