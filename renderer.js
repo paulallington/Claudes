@@ -342,6 +342,7 @@ function buildProfileRow(p) {
           if (!ok) return;
           window.electronAPI.profileDelete(p.id).then(function (r) {
             if (!r || !r.ok) { showToast('Delete failed: ' + ((r && r.error) || 'unknown'), { kind: 'error' }); return; }
+            if (typeof clearProfileUsageState === 'function') clearProfileUsageState(p.id);
             showToast('"' + p.name + '" deleted.');
           });
         });
@@ -429,6 +430,10 @@ function openProfileAssignPicker(opts) {
     // '' means inherit — persist null, never the empty string (Task 1's
     // cascade in lib/profile-resolve.js only treats null/undefined as "inherit").
     opts.onChange(profileAssignSelect.value || null);
+    // A selection is a completed pick, not a live-editing control — close so
+    // the user isn't left to dismiss it manually, and so onChange can't fire
+    // again for the same open (a stray second change event on the same select).
+    profileAssignModal.classList.add('hidden');
   };
 }
 
@@ -4190,6 +4195,11 @@ function showGroupContextMenu(event, groupKey) {
   }, 0);
 }
 
+// Reuses #project-context-menu (the project-level context menu's element) —
+// they are never open at once, but this rebuilds its children AND overwrites
+// menu.onclick wholesale every call, so whichever of this / the project menu
+// last opened wins the handler. Don't add per-menu-type state to `menu`
+// without accounting for that shared-element coupling.
 function showWorkspaceContextMenu(event, project, projectIndex, ws) {
   var menu = document.getElementById('project-context-menu');
   if (!menu) {
@@ -14459,9 +14469,22 @@ function persistLastGoodPlanLimits(profileId, data, fetchedAt) {
   } catch { /* quota / privacy mode — ignore */ }
 }
 
-// Renders one profile's usage group into the wrapper #plan-limits-mini.
-// Called once per profile by renderPlanLimitsMiniAll, which owns the
-// wrapper's hidden/stale classes and the per-group caption/sign-in state.
+// Called after a profile is deleted so its usage-tracking state doesn't
+// outlive the profile: the persisted localStorage snapshot, and the
+// in-memory stickiness/crossing-detection maps keyed by profile id.
+function clearProfileUsageState(profileId) {
+  if (!profileId) return;
+  try {
+    if (window.localStorage) window.localStorage.removeItem(PLAN_LIMITS_LASTGOOD_KEY + '.' + profileId);
+  } catch { /* quota / privacy mode — ignore */ }
+  delete lastGoodByProfile[profileId];
+  delete lastGoodAtByProfile[profileId];
+  delete prevByProfile[profileId];
+}
+
+// Renders the wrapper #plan-limits-mini: one usage group per profile entry,
+// plus the wrapper's own hidden/stale classes and each group's caption/
+// sign-in state.
 function renderPlanLimitsMiniAll(entries) {
   var el = document.getElementById('plan-limits-mini');
   if (!el) return;
@@ -14773,7 +14796,7 @@ function handleThresholdCrossings(crossings, profile) {
     if (c.threshold === 90 && !enabled90) continue;
     showThresholdNotification(c, profile);
     if (c.threshold === 90 && c.window === 'seven_day' && (!notifSettings || notifSettings.limitsPause !== false)) {
-      promptPauseAutomations(c);
+      promptPauseAutomations(c, profile);
     }
   }
 }
@@ -14962,21 +14985,24 @@ function updateColumnDeltaFromTokens(col, tokens) {
 // Per-column delta is now driven by updateColumnDeltaFromTokens via the ctx poll.
 function updateColumnDeltaPills(_data, _profileId) { /* no-op */ }
 
-function promptPauseAutomations(c) {
-  if (!window.electronAPI || !window.electronAPI.getAutomationSettings || !window.electronAPI.toggleAutomationsGlobal) return;
+function promptPauseAutomations(c, profile) {
+  if (!window.electronAPI || !window.electronAPI.pauseAutomationsForProfile) return;
+  var profileId = (profile && profile.id) || PLAN_LIMITS_PRIMARY_ID;
+  // Only offer to pause automations on the SUBSCRIPTION that actually crossed
+  // the threshold — pausing every automation across every profile over one
+  // subscription's limit would needlessly stop work on subscriptions that
+  // still have headroom.
+  var subject = (profile && profile.id !== PLAN_LIMITS_PRIMARY_ID && profile.name)
+    ? 'your automations on ' + profile.name
+    : 'your automations on Primary';
   // Non-blocking inline confirm (replaces the renderer-blocking window.confirm).
   confirmDialog(
     'You\'ve crossed 90% of your weekly limit (' + Math.round(c.value) + '%).\n\n' +
-    'Pause all your automations? This stops every scheduled run across all projects until you resume it — use the Pause scheduler / Resume scheduler control in the Automations flyout (toolbar), or the banner in the Automations panel.',
-    { okLabel: 'Pause all', cancelLabel: 'Not now' }
+    'Pause ' + subject + '? This stops every scheduled run on that subscription until you re-enable it individually.',
+    { okLabel: 'Pause', cancelLabel: 'Not now' }
   ).then(function (ok) {
     if (!ok) return;
-    // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
-    window.electronAPI.getAutomationSettings().then(function (settings) {
-      if (settings && settings.globalEnabled) {
-        return window.electronAPI.toggleAutomationsGlobal();
-      }
-    }).then(function () {
+    window.electronAPI.pauseAutomationsForProfile(profileId).then(function () {
       refreshGlobalPausedBanner();
       refreshAutomations();
       refreshAutomationsFlyout();

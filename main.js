@@ -705,8 +705,20 @@ function getProjectProfileIdByPath(projectPath) {
 // projects.json wholesale and would clobber anything written outside its view.
 const DEFAULT_PRIMARY = { id: PRIMARY_ID, name: 'Primary', configDir: null, colour: '#d97757' };
 
+// readProfiles is on the hot path of every re-rooted IPC call (session:contextTokens
+// on every live column, the 15-attempt detectSession loop, …) and used to do a fresh
+// ensureConfigDir + readFileSync + JSON.parse on every single call. Cache the parsed
+// store behind an mtime check so a burst of calls between actual writes costs one
+// stat, not one full read+parse; writeProfiles also clears it directly so a write
+// from THIS process is picked up immediately without waiting on mtime resolution
+// (some filesystems only have 1-2s mtime granularity).
+let profilesCache = null; // { mtimeMs, store }
 function readProfiles() {
   ensureConfigDir();
+  let stat = null;
+  try { stat = fs.statSync(PROFILES_FILE); } catch { stat = null; }
+  if (profilesCache && stat && stat.mtimeMs === profilesCache.mtimeMs) return profilesCache.store;
+
   let data = null;
   try { data = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8')); } catch { data = null; }
   const list = (data && Array.isArray(data.profiles)) ? data.profiles.filter((p) => p && p.id) : [];
@@ -716,7 +728,9 @@ function readProfiles() {
   const defaultProfileId = (data && typeof data.defaultProfileId === 'string' && list.find((p) => p.id === data.defaultProfileId))
     ? data.defaultProfileId
     : PRIMARY_ID;
-  return { profiles: list, defaultProfileId };
+  const store = { profiles: list, defaultProfileId };
+  profilesCache = { mtimeMs: stat ? stat.mtimeMs : null, store };
+  return store;
 }
 
 function writeProfiles(store) {
@@ -725,6 +739,7 @@ function writeProfiles(store) {
     defaultProfileId: store.defaultProfileId || PRIMARY_ID,
     profiles: store.profiles || []
   });
+  profilesCache = null;
   BrowserWindow.getAllWindows().forEach((w) => {
     try { w.webContents.send('profiles:updated'); } catch { /* ignore */ }
   });
@@ -4552,7 +4567,15 @@ ipcMain.handle('history:search', async (_event, query, limit, projectPath) => {
     let content;
     try { content = await fs.promises.readFile(root.file, 'utf8'); } catch { continue; }
     const lines = content.split('\n');
-    for (let i = lines.length - 1; i >= 0; i--) {
+    // Lines are newest-last on disk, so iterating in reverse yields this file's
+    // entries newest-first; once we've collected `max` hits from THIS file,
+    // every remaining line in it is strictly older than what we already have,
+    // so it's safe to stop early rather than scanning the rest of a keystroke
+    // search across every line of every profile's history. Each file's list is
+    // still capped independently, and the final sort+slice below picks the
+    // true top `max` across all profiles.
+    let fileHits = 0;
+    for (let i = lines.length - 1; i >= 0 && fileHits < max; i--) {
       const line = lines[i];
       if (!line || line[0] !== '{') continue;
       if (line.toLowerCase().indexOf(needle) === -1) continue;
@@ -4575,9 +4598,14 @@ ipcMain.handle('history:search', async (_event, query, limit, projectPath) => {
         profileId: root.profileId,
         profileName: root.profileName
       });
+      fileHits++;
     }
   }
-  hits.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  // ts is a numeric epoch-ms in every history.jsonl observed, but parse
+  // defensively (Number falls through to Date.parse) in case an older/foreign
+  // entry ever carries an ISO string instead.
+  const tsNum = (v) => Number(v) || Date.parse(v) || 0;
+  hits.sort((a, b) => tsNum(b.ts) - tsNum(a.ts));
   return hits.slice(0, max);
 });
 
@@ -6570,6 +6598,31 @@ ipcMain.handle('automations:toggleGlobal', () => {
   return data.globalEnabled;
 });
 
+// Pause only the automations effectively running on ONE subscription (the
+// crossing profile from the 90% weekly-limit prompt) rather than every
+// automation across every subscription. Resolves each automation's effective
+// profile the same way runAutomationAgent does (automation.profileId ->
+// project's assigned profile -> global default) so an automation that
+// inherits the profile is paused too, not just one with it set explicitly.
+ipcMain.handle('automations:pauseForProfile', (event, profileId) => {
+  const data = readAutomations();
+  const targetId = profileId || PRIMARY_ID;
+  let pausedCount = 0;
+  data.automations.forEach((automation) => {
+    if (!automation.enabled) return;
+    const resolved = resolveProfileFor({
+      columnProfileId: automation.profileId,
+      projectProfileId: getProjectProfileIdByPath(automation.projectPath)
+    });
+    if (resolved.id === targetId) {
+      automation.enabled = false;
+      pausedCount++;
+    }
+  });
+  if (pausedCount) writeAutomations(data);
+  return { ok: true, pausedCount };
+});
+
 ipcMain.handle('automations:getAgentHistory', (event, automationId, agentId, count) => {
   return getAgentHistory(automationId, agentId, count);
 });
@@ -8069,6 +8122,12 @@ let interactiveRunActive = false;
 function spawnInteractiveScheduled(prompt, cwd, opts) {
   opts = opts || {};
   const ptyId = 'sched_' + crypto.randomBytes(8).toString('hex');
+  // Unlike spawnHeadlessClaude (which only learns session_id from stdout),
+  // an interactive-scheduled run's sessionId is chosen by the caller up
+  // front — register it against its profile right away so voice catch-up
+  // (sessions:getBackgroundIds) resolves this background run's transcript
+  // under the right subscription's root, not Primary's.
+  if (opts.sessionId) rememberBackgroundSession(opts.sessionId, opts, opts.profileId);
   const args = buildInteractiveArgs({
     sessionId: opts.sessionId,
     skipPermissions: opts.skipPermissions,
@@ -8115,6 +8174,7 @@ function spawnInteractiveScheduled(prompt, cwd, opts) {
     if (watchdog) { clearTimeout(watchdog); watchdog = null; }
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     if (injectTimer) { clearInterval(injectTimer); injectTimer = null; }
+    forgetBackgroundSession(opts);
     try {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'kill', id: ptyId }));
     } catch { /* ignore */ }

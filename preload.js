@@ -179,6 +179,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   toggleAgent: (automationId, agentId) => ipcRenderer.invoke('automations:toggleAgent', automationId, agentId),
   setAllAutomationsEnabled: (projectPath, enabled) => ipcRenderer.invoke('automations:setAllEnabled', projectPath, enabled),
   toggleAutomationsGlobal: () => ipcRenderer.invoke('automations:toggleGlobal'),
+  pauseAutomationsForProfile: (profileId) => ipcRenderer.invoke('automations:pauseForProfile', profileId),
   runAgentNow: (automationId, agentId) => ipcRenderer.invoke('automations:runAgentNow', automationId, agentId),
   runAutomationNow: (automationId) => ipcRenderer.invoke('automations:runAutomationNow', automationId),
   getAgentHistory: (automationId, agentId, count) => ipcRenderer.invoke('automations:getAgentHistory', automationId, agentId, count),
