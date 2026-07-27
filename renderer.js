@@ -1708,7 +1708,12 @@ function restoreLayout(projectPath, layout) {
   // effect, neither of which this restore path wants — it needs the row
   // synchronously so the forEach below can target it.
   layout.rows.forEach(function (rowSpec, rIdx) {
-    var row = rIdx === 0 ? null : addRowToProject(state);
+    // Row must be created in the SAME state addColumn resolves via
+    // getActiveState() — that's keyed on the project's activeWorkspaceId,
+    // while `state` above is Primary-keyed. On a sub-workspace restore the
+    // two would otherwise disagree, appending rows to Primary's hidden
+    // container while addColumn registers columns into the workspace state.
+    var row = rIdx === 0 ? null : addRowToProject(getActiveState() || state);
     rowSpec.columns.forEach(function (colSpec) {
       var opts = {
         title: colSpec.title || null,
@@ -5665,7 +5670,9 @@ function addRow() {
   if (!activeProjectKey) return;
   var state = getActiveState();
   if (!state) return;
-  spawnFromOptions(function () { return addRowToProject(state); });
+  spawnFromOptions(function () { return addRowToProject(state); }).catch(function (e) {
+    console.error('addRow: spawn failed', e);
+  });
 }
 
 // ============================================================
