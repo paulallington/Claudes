@@ -1586,6 +1586,7 @@ html[data-platform="darwin"] #toolbar {
 .column-header .col-codex-watch-badge {
   display: none;
   margin-left: 6px;
+  margin-right: auto;
   padding: 0 5px;
   font-size: 10px;
   line-height: 15px;

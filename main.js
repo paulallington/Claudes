@@ -1557,11 +1557,23 @@ function createCodexWatchWindow(opts) {
   if (codexWatchOpenWindows.has(columnId)) {
     const existing = codexWatchOpenWindows.get(columnId);
     if (!existing.isDestroyed()) {
-      existing.show();
-      existing.focus();
-      return existing;
+      const entry = codexWatchWindows.get(existing);
+      const sameSession = entry && entry.sel && entry.sel.sessionId === opts.sessionId;
+      if (sameSession) {
+        existing.show();
+        existing.focus();
+        return existing;
+      }
+      // restartColumn keeps the columnId but can null-and-reacquire
+      // sessionId, so a registered window can be stale for the session it
+      // now needs to show. Patching `sel` alone would leave the page's own
+      // state.selection pointed at the dead job, so recreate outright.
+      existing.destroy();
+      codexWatchOpenWindows.delete(columnId);
+      codexWatchWindows.delete(existing);
+    } else {
+      codexWatchOpenWindows.delete(columnId);
     }
-    codexWatchOpenWindows.delete(columnId);
   }
 
   const config = readConfig();
@@ -1576,7 +1588,7 @@ function createCodexWatchWindow(opts) {
     y: typeof bounds.y === 'number' ? bounds.y + cascade : undefined,
     minWidth: 400,
     minHeight: 300,
-    title: 'Codex – ' + (opts.title || 'Watcher'),
+    title: 'Codex · ' + (opts.title || 'Watcher'),
     icon: path.join(__dirname, process.platform === 'win32' ? 'icon-tray.ico' : 'icon.png'),
     backgroundColor: '#1a1a2e',
     webPreferences: {
@@ -7633,7 +7645,16 @@ function codexWatchLogScanFault(key, err) {
 // Enumerate <root>/*/state.json. A torn read is expected - the companion does
 // not write these atomically - so a bad file is skipped for this tick rather
 // than failing the whole scan.
-function codexWatchScan(root) {
+//
+// Memoized behind a short TTL, keyed by root: with N columns each poll tick
+// (and each openStream/resolve call) independently triggers a synchronous
+// readdirSync + readFileSync/JSON.parse per state.json, on the process
+// driving every window. Windows sharing a profile (the common case) then
+// collapse onto one scan per TTL window instead of one each.
+const CODEX_WATCH_SCAN_TTL_MS = 500;
+const codexWatchScanCache = new Map(); // root -> { at, scans }
+
+function codexWatchScanUncached(root) {
   let entries;
   try { entries = fs.readdirSync(root, { withFileTypes: true }); }
   catch (err) { codexWatchLogScanFault(root, err); return []; }
@@ -7648,6 +7669,16 @@ function codexWatchScan(root) {
       scans.push({ workspaceKey: entry.name, jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [] });
     } catch (err) { codexWatchLogScanFault(statePath, err); }
   }
+  return scans;
+}
+
+function codexWatchScan(root) {
+  const cached = codexWatchScanCache.get(root);
+  const now = Date.now();
+  if (cached && (now - cached.at) < CODEX_WATCH_SCAN_TTL_MS) return cached.scans;
+
+  const scans = codexWatchScanUncached(root);
+  codexWatchScanCache.set(root, { at: now, scans });
   return scans;
 }
 
@@ -7678,7 +7709,14 @@ ipcMain.handle('codexwatch:open', (event, opts) => {
 });
 
 ipcMain.handle('codexwatch:listJobs', (event, sel) => {
-  const opts = sel || {};
+  // A registered watcher window's own sel (columnProfileId + sessionId) is
+  // authoritative — trusting the renderer's copy would resolve the wrong
+  // profile's state root for a fraction of a second on load (the page has no
+  // way to know its own columnProfileId until main tells it), so ignore
+  // whatever the caller sent whenever we already know better.
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const entry = win && codexWatchWindows.get(win);
+  const opts = (entry && entry.sel) || sel || {};
   if (!opts.sessionId) return { ok: true, jobs: [] };
   try {
     const scans = codexWatchScan(codexWatchStateRoot(opts));

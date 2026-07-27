@@ -160,6 +160,7 @@
     var stream = document.getElementById('cwStream');
     if (wasPinned) {
       stream.scrollTop = stream.scrollHeight;
+      hideJump();
     } else {
       showJump();
     }
@@ -246,6 +247,9 @@
       if (jobKeyOf(job) !== selectionKey()) return; // superseded by another switch
       appendEvents(res.events || []);
       renderPreview(res.preview || null);
+    }).catch(function (err) {
+      if (jobKeyOf(job) !== selectionKey()) return;
+      appendStatusRow('Failed to open stream: ' + ((err && err.message) || err));
     });
   }
 
@@ -300,7 +304,11 @@
       state.jobs = jobs;
       renderJobList();
       if (jobs.length) selectJob(jobs[0]);
-      else showEmpty();
+      else if (!state.selection) showEmpty(); // a pushed codexwatch:jobs update may have already populated the pane
+    }).catch(function (err) {
+      if (state.selection) return; // a pushed codexwatch:jobs update already populated the pane
+      showStream();
+      appendStatusRow('Failed to load jobs: ' + ((err && err.message) || err));
     });
 
     window.electronAPI.onCodexWatchJobs(function (payload) {
