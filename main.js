@@ -712,15 +712,20 @@ const DEFAULT_PRIMARY = { id: PRIMARY_ID, name: 'Primary', configDir: null, colo
 // stat, not one full read+parse; writeProfiles also clears it directly so a write
 // from THIS process is picked up immediately without waiting on mtime resolution
 // (some filesystems only have 1-2s mtime granularity).
-let profilesCache = null; // { mtimeMs, store }
+let profilesCache = null; // { mtimeMs, store } — mtimeMs is null when the file is absent (also cacheable)
 function readProfiles() {
   ensureConfigDir();
   let stat = null;
   try { stat = fs.statSync(PROFILES_FILE); } catch { stat = null; }
-  if (profilesCache && stat && stat.mtimeMs === profilesCache.mtimeMs) return profilesCache.store;
+  const statMtime = stat ? stat.mtimeMs : null;
+  if (profilesCache && statMtime === profilesCache.mtimeMs) return profilesCache.store;
 
   let data = null;
-  try { data = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8')); } catch { data = null; }
+  // Single-Primary users never call writeProfiles, so the file legitimately
+  // doesn't exist yet — that's not an error, just an empty store to cache.
+  if (stat) {
+    try { data = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8')); } catch { data = null; }
+  }
   const list = (data && Array.isArray(data.profiles)) ? data.profiles.filter((p) => p && p.id) : [];
   // Primary is synthetic when absent: a missing/corrupt profiles.json must
   // still yield a working single-subscription app.
@@ -730,7 +735,12 @@ function readProfiles() {
     : PRIMARY_ID;
   const store = { profiles: list, defaultProfileId };
   profilesCache = { mtimeMs: stat ? stat.mtimeMs : null, store };
-  return store;
+  // Callers (profile:create/update/setDefault/delete) mutate the returned
+  // object in place, then call writeProfiles to persist + invalidate the
+  // cache. Clone here so an early return between mutation and write can
+  // never leave profilesCache diverged from disk with no mtime change to
+  // ever correct it.
+  return structuredClone(store);
 }
 
 function writeProfiles(store) {
@@ -6601,7 +6611,7 @@ ipcMain.handle('automations:toggleGlobal', () => {
 // Pause only the automations effectively running on ONE subscription (the
 // crossing profile from the 90% weekly-limit prompt) rather than every
 // automation across every subscription. Resolves each automation's effective
-// profile the same way runAutomationAgent does (automation.profileId ->
+// profile the same way runAgent does (automation.profileId ->
 // project's assigned profile -> global default) so an automation that
 // inherits the profile is paused too, not just one with it set explicitly.
 ipcMain.handle('automations:pauseForProfile', (event, profileId) => {
@@ -7886,7 +7896,7 @@ function runHeadless(projectPath, prompt) {
   // subscription (and its background session gets keyed to PRIMARY_ID for
   // voice catch-up, see rememberBackgroundSession) while the project is
   // actually assigned to a secondary.
-  const profile = resolveProfileFor({ columnProfileId: getProjectProfileIdByPath(projectPath) });
+  const profile = resolveProfileFor({ projectProfileId: getProjectProfileIdByPath(projectPath) });
   const spawned = spawnHeadlessClaude(prompt, projectPath, {
     skipPermissions: !!spawnOptions.skipPermissions,
     bare: !!spawnOptions.bare,
@@ -8122,21 +8132,22 @@ let interactiveRunActive = false;
 function spawnInteractiveScheduled(prompt, cwd, opts) {
   opts = opts || {};
   const ptyId = 'sched_' + crypto.randomBytes(8).toString('hex');
-  // Unlike spawnHeadlessClaude (which only learns session_id from stdout),
-  // an interactive-scheduled run's sessionId is chosen by the caller up
-  // front — register it against its profile right away so voice catch-up
-  // (sessions:getBackgroundIds) resolves this background run's transcript
-  // under the right subscription's root, not Primary's.
-  if (opts.sessionId) rememberBackgroundSession(opts.sessionId, opts, opts.profileId);
   const args = buildInteractiveArgs({
     sessionId: opts.sessionId,
     skipPermissions: opts.skipPermissions,
     model: opts.model,
-    hasEndpoint: !!opts.env,
+    hasEndpoint: !!(opts.env && opts.env.ANTHROPIC_BASE_URL),
     mcpConfigPath: opts.mcpConfigPath,
     strictMcp: opts.strictMcp,
     extraArgs: opts.extraArgs
   });
+  // Unlike spawnHeadlessClaude (which only learns session_id from stdout),
+  // an interactive-scheduled run's sessionId is chosen by the caller up
+  // front — register it against its profile right away (after args build
+  // so a throw there can't leak an id into rememberBackgroundSession) so
+  // voice catch-up (sessions:getBackgroundIds) resolves this background
+  // run's transcript under the right subscription's root, not Primary's.
+  if (opts.sessionId) rememberBackgroundSession(opts.sessionId, opts, opts.profileId);
 
   // Write the scoped MCP config (if any) — the pty-spawned claude reads it by path.
   if (opts.mcpConfig && opts.mcpConfigPath) {

@@ -3925,10 +3925,10 @@ function buildResumeArgs(col) {
 // buildResumeForEntry, so both paths reconcile the same way instead of one
 // silently overwriting the saved pin with the current dropdown value.
 //
-// hasEndpoint intentionally uses the same `!!(col.endpointId || col.env)`
-// expression every maybeBindHeadroom call site uses — NOT the narrower
-// `isLocal` param (which also requires env.ANTHROPIC_BASE_URL) — so this
-// can never drift from what actually binds Headroom for the column.
+// hasEndpoint intentionally requires env.ANTHROPIC_BASE_URL, not just a
+// truthy col.env — a profiled column's env carries CLAUDE_CONFIG_DIR (which
+// subscription's credentials get used), not a base URL override, so it must
+// still let Headroom own the model binding the same as an unprofiled column.
 function reconcileModelArgForRespawn(args, col, isLocal) {
   var headroomOwnsModel = window.HeadroomEnv && window.HeadroomEnv.headroomOwnsModel({
     headroomInstalled: headroomInstalled,
@@ -15002,8 +15002,10 @@ function promptPauseAutomations(c, profile) {
     { okLabel: 'Pause', cancelLabel: 'Not now' }
   ).then(function (ok) {
     if (!ok) return;
-    window.electronAPI.pauseAutomationsForProfile(profileId).then(function () {
-      refreshGlobalPausedBanner();
+    var profileName = (profile && profile.id !== PLAN_LIMITS_PRIMARY_ID && profile.name) ? profile.name : 'Primary';
+    window.electronAPI.pauseAutomationsForProfile(profileId).then(function (result) {
+      var pausedCount = (result && result.pausedCount) || 0;
+      showToast('Paused ' + pausedCount + ' automation' + (pausedCount === 1 ? '' : 's') + ' on ' + profileName + '.', { kind: 'info' });
       refreshAutomations();
       refreshAutomationsFlyout();
     }).catch(function () { /* ignore — silent failure is acceptable here */ });
