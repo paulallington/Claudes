@@ -126,7 +126,7 @@ A column tracks `col.sessionId`. Getting it right was the source of "voice reads
 | Handler | Purpose |
 |---|---|
 | `voice:getSettings` / `voice:setSettings` | Read/merge the public voice settings (the API key is never returned to the renderer). |
-| `voice:getPersonality` / `voice:setPersonality` | Read/write the persona block in global `~/.claude/CLAUDE.md`. |
+| `voice:getPersonality` / `voice:setPersonality` | Read/write the persona block in global `~/.claude/CLAUDE.md`. `setPersonality`'s write is one of two places that touch the global `CLAUDE.md` (the CLAUDE.md editor's `claudemd:save` is the other) that also mirror the file into every multi-subscription profile's config dir (`mirrorToProfiles`), so a persona change is live on every subscription's columns, not just Primary's. |
 | `voice:listVoices` | List ElevenLabs voices (`/v1/voices`). |
 | `voice:synthesize` | TTS for arbitrary text (test button, Notification messages). |
 | `voice:synthesizeColumn` | Manual Play: resolve the column transcript → extract → synth. Returns a `diag` object (resolvedPath / exists / size / lengths) for debugging. |
