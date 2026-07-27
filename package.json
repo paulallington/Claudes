@@ -55,6 +55,8 @@
       "renderer.js",
       "platform-detect.js",
       "index.html",
+      "codex-watch.html",
+      "codex-watch.js",
       "styles.css",
       "pty-server.js",
       "lib/**/*",
