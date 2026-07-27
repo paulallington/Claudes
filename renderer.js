@@ -85,6 +85,8 @@ function buildModelOptionsHtml(selected) {
 if (optModel) optModel.innerHTML = buildModelOptionsHtml(optModel.value);
 var optModelRow = document.getElementById('opt-model-row');
 var optEndpoint = document.getElementById('opt-endpoint');
+var optProfile = document.getElementById('opt-profile');
+var optProfileRow = document.getElementById('opt-profile-row');
 var optEndpointModelRow = document.getElementById('opt-endpoint-model-row');
 var optEndpointModel = document.getElementById('opt-endpoint-model');
 var optEndpointModelRefresh = document.getElementById('opt-endpoint-model-refresh');
@@ -232,6 +234,31 @@ function renderProfilesPanel() {
   });
 }
 
+// Scan projects/workspaces/automations for references to a profile BEFORE
+// deleting it, so the confirm dialog can name exactly what falls back to
+// Primary — matching the strings main's clearProfileReferences produces
+// (project: <name>, workspace: <name>, automation: <name>), computed ahead
+// of time since the delete IPC only reports them after the fact.
+function previewProfileReassignments(profileId) {
+  var projects = (config && config.projects) || [];
+  var reassigned = [];
+  projects.forEach(function (proj) {
+    if (proj.profileId === profileId) reassigned.push('project: ' + proj.name);
+    (proj.workspaces || []).forEach(function (ws) {
+      if (ws.profileId === profileId) reassigned.push('workspace: ' + ws.name);
+    });
+  });
+  if (!window.electronAPI || !window.electronAPI.getAutomationsForProject) return Promise.resolve(reassigned);
+  var automationChecks = projects.map(function (proj) {
+    return window.electronAPI.getAutomationsForProject(proj.path).then(function (automations) {
+      (automations || []).forEach(function (a) {
+        if (a.profileId === profileId) reassigned.push('automation: ' + (a.name || a.id));
+      });
+    }).catch(function () { /* project may have no automations file yet */ });
+  });
+  return Promise.all(automationChecks).then(function () { return reassigned; });
+}
+
 function buildProfileRow(p) {
   var isDefault = p.id === profilesDefaultId;
   var row = document.createElement('div');
@@ -314,15 +341,15 @@ function buildProfileRow(p) {
     deleteBtn.className = 'profile-row-btn profile-row-btn-danger';
     deleteBtn.textContent = 'Delete';
     deleteBtn.addEventListener('click', function () {
-      confirmDialog('Delete "' + p.name + '"? Its config directory is removed.', { dangerous: true, okLabel: 'Delete' }).then(function (ok) {
-        if (!ok) return;
-        window.electronAPI.profileDelete(p.id).then(function (r) {
-          if (!r || !r.ok) { showToast('Delete failed: ' + ((r && r.error) || 'unknown'), { kind: 'error' }); return; }
-          if (r.reassigned && r.reassigned.length) {
-            showToast('"' + p.name + '" deleted. Fell back to Primary: ' + r.reassigned.join(', '), { duration: 8000 });
-          } else {
+      previewProfileReassignments(p.id).then(function (reassigned) {
+        var msg = 'Delete "' + p.name + '"? Its config directory is removed.' +
+          (reassigned.length ? ' These will fall back to Primary: ' + reassigned.join(', ') + '.' : '');
+        confirmDialog(msg, { dangerous: true, okLabel: 'Delete' }).then(function (ok) {
+          if (!ok) return;
+          window.electronAPI.profileDelete(p.id).then(function (r) {
+            if (!r || !r.ok) { showToast('Delete failed: ' + ((r && r.error) || 'unknown'), { kind: 'error' }); return; }
             showToast('"' + p.name + '" deleted.');
-          }
+          });
         });
       });
     });
@@ -367,6 +394,61 @@ if (window.electronAPI && window.electronAPI.onProfilesUpdated) {
     if (e.key === 'Enter') { e.preventDefault(); doCreate(); }
   });
 })();
+
+// Small shared modal for the Project-settings and Workspace-row assignment
+// pickers — the spawn-options and automation-editor pickers are inline
+// selects on their own surfaces and don't need it (see below).
+var profileAssignModal = document.getElementById('profile-assign-modal');
+var profileAssignSelect = document.getElementById('profile-assign-select');
+var profileAssignTitle = document.getElementById('profile-assign-title');
+if (profileAssignModal) {
+  document.getElementById('profile-assign-close').addEventListener('click', function () {
+    profileAssignModal.classList.add('hidden');
+  });
+  profileAssignModal.addEventListener('click', function (e) {
+    if (e.target === profileAssignModal) profileAssignModal.classList.add('hidden');
+  });
+}
+
+// opts: { title, currentId, inheritLabel, onChange(newIdOrNull) }
+function openProfileAssignPicker(opts) {
+  if (!profileAssignModal) return;
+  profileAssignTitle.textContent = opts.title;
+  buildProfilePicker(profileAssignSelect, opts.currentId, opts.inheritLabel).then(function () {
+    profileAssignModal.classList.remove('hidden');
+  });
+  profileAssignSelect.onchange = function () {
+    // '' means inherit — persist null, never the empty string (Task 1's
+    // cascade in lib/profile-resolve.js only treats null/undefined as "inherit").
+    opts.onChange(profileAssignSelect.value || null);
+  };
+}
+
+// Column header chip — shown only when a column is actually pinned to a
+// non-Primary subscription. A single-subscription user (no profiles beyond
+// Primary ever created) always has col.profileId null/'primary' here, so
+// this never shows anything for them — no visual change at all.
+function updateColumnProfileChip(col) {
+  if (!col || !col.profileChipEl) return;
+  var show = col.profileId && col.profileId !== PRIMARY_PROFILE_ID;
+  col.profileChipEl.classList.toggle('column-profile-chip-shown', !!show);
+  if (show) {
+    var p = (profilesCache || []).find(function (x) { return x.id === col.profileId; });
+    col.profileChipEl.textContent = p ? p.name : '?';
+    col.profileChipEl.style.background = p ? p.colour : '#888';
+    col.profileChipEl.title = 'Subscription: ' + (p ? p.name : col.profileId);
+  }
+}
+
+// Re-sweep every open column's chip whenever the profiles list changes (e.g.
+// a rename or recolour should update any chip currently showing that profile).
+if (window.electronAPI && window.electronAPI.onProfilesUpdated) {
+  window.electronAPI.onProfilesUpdated(function () {
+    if (typeof allColumns !== 'undefined') {
+      allColumns.forEach(function (c) { updateColumnProfileChip(c); });
+    }
+  });
+}
 
 
 // Each window has its own counter for new column/pty ids. Give popouts a high
@@ -2665,11 +2747,12 @@ function buildWorkspaceItem(project, projectIndex, ws, wsIndex) {
     setActiveWorkspace(projectIndex, ws.id, false);
   });
 
-  // Suppress the default browser context menu (would otherwise surface inside
-  // the app chrome on right-click). A minimal Rename/Delete menu can land here
-  // in a later phase.
+  // Beyond "Subscription…", a minimal Rename/Delete menu can land here in a
+  // later phase — both are already reachable (dblclick to rename, × to
+  // delete), so this stays a single-item menu for now.
   wsItem.addEventListener('contextmenu', function (e) {
     e.preventDefault();
+    showWorkspaceContextMenu(e, project, projectIndex, ws);
   });
 
   // Drag-reorder within the same project only. Cross-project drops are
@@ -2957,6 +3040,7 @@ function buildProjectItem(project, index) {
     // Explorer tree — at project level it's just a folder-open, which the
     // user can also reach via "Reveal in Explorer" and the file-tree menu.
     addMenuItem('Manage MCP servers…', 'manage-mcp');
+    addMenuItem('Subscription…', 'assign-profile');
     addMenuItem('Skills / agents / commands…', 'manage-ext');
     addMenuItem('Save current layout…', 'layout-save');
     addMenuItem('Restore layout…', 'layout-restore');
@@ -3054,6 +3138,18 @@ function buildProjectItem(project, index) {
         handleSyncForce(config.projects[projIndex].path);
       } else if (action === 'manage-mcp') {
         openMcpModal(config.projects[projIndex].path);
+      } else if (action === 'assign-profile') {
+        var proj = config.projects[projIndex];
+        openProfileAssignPicker({
+          title: 'Subscription for "' + proj.name + '"',
+          currentId: proj.profileId || null,
+          inheritLabel: 'Global default',
+          onChange: function (v) {
+            proj.profileId = v;
+            saveConfig();
+            if (projIndex === config.activeProjectIndex) refreshProfileSelection();
+          }
+        });
       } else if (action === 'manage-ext') {
         openExtensionsModal(config.projects[projIndex].path);
       } else if (action === 'layout-save') {
@@ -4055,6 +4151,54 @@ function showGroupContextMenu(event, groupKey) {
   }, 0);
 }
 
+function showWorkspaceContextMenu(event, project, projectIndex, ws) {
+  var menu = document.getElementById('project-context-menu');
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.id = 'project-context-menu';
+    menu.className = 'project-context-menu';
+    document.body.appendChild(menu);
+  }
+  while (menu.firstChild) menu.removeChild(menu.firstChild);
+
+  function addItem(label, action) {
+    var mi = document.createElement('div');
+    mi.className = 'project-context-item';
+    mi.dataset.action = action;
+    mi.textContent = label;
+    menu.appendChild(mi);
+  }
+  addItem('Subscription…', 'assign-profile');
+
+  menu.style.left = event.clientX + 'px';
+  menu.style.top = event.clientY + 'px';
+  menu.style.display = 'block';
+
+  menu.onclick = function (ev) {
+    var action = ev.target.dataset.action;
+    if (action === 'assign-profile') {
+      openProfileAssignPicker({
+        title: 'Subscription for workspace "' + ws.name + '"',
+        currentId: ws.profileId || null,
+        inheritLabel: 'Inherit from project',
+        onChange: function (v) {
+          ws.profileId = v;
+          saveConfig();
+          if (projectIndex === config.activeProjectIndex && project.activeWorkspaceId === ws.id) refreshProfileSelection();
+        }
+      });
+    }
+    menu.style.display = 'none';
+  };
+
+  setTimeout(function () {
+    document.addEventListener('click', function closeMenu() {
+      menu.style.display = 'none';
+      document.removeEventListener('click', closeMenu);
+    });
+  }, 0);
+}
+
 function toggleProjectSortMode() {
   var current = config.projectSortMode || 'manual';
   config.projectSortMode = current === 'alpha' ? 'manual' : 'alpha';
@@ -4195,6 +4339,14 @@ function createColumnHeader(id, customTitle, opts) {
       : 'This column runs the Codex CLI, not Claude';
     title.appendChild(codexBadge);
   }
+
+  // Subscription chip — hidden by default (empty text, no background), toggled
+  // on by updateColumnProfileChip once the caller wires col.profileChipEl to
+  // this element. Stays invisible for anyone who has never created a
+  // non-Primary profile.
+  var profileChip = document.createElement('span');
+  profileChip.className = 'col-profile-chip';
+  title.appendChild(profileChip);
 
   var actions = document.createElement('span');
   actions.className = 'col-actions';
@@ -5333,6 +5485,12 @@ function addColumn(args, targetRow, opts) {
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
+
+  // Wire the header's subscription chip to this column's data object and set
+  // its initial visibility — no-op (chip stays empty/hidden) for anyone who
+  // has never created a non-Primary profile.
+  colData.profileChipEl = header.querySelector('.col-profile-chip');
+  updateColumnProfileChip(colData);
 
   // Re-fit when the wrapper settles to its final flex height. The create-time
   // fit() (above) runs before the column header + endpoint banner finish
@@ -11645,8 +11803,12 @@ function loadSpawnOptions() {
   // populateEndpointModelDropdown can preselect it.
   currentEndpointModel = endpointId ? (opts.endpointModel || null) : null;
   applyEndpointSelection(endpointId, /* persist */ false);
+  // Reset the column-level override to Inherit on every project switch — it's
+  // an in-memory, per-spawn choice, not part of the persisted spawnOptions.
+  if (optProfile) optProfile.value = '';
+  loadProfilePicker();
   // Resolve which profile a NEW column on this project/workspace would spawn
-  // on (project/workspace/global cascade — no column-level picker exists yet).
+  // on (column picker beats workspace beats project beats global default).
   refreshProfileSelection();
   // Headroom is a GLOBAL toggle (not part of the per-project spawnOptions object).
   // Refresh the whole Headroom UI here — parent checkbox AND the sub-toggles
@@ -12230,6 +12392,30 @@ var endpointSelectOpen = false;
 optEndpoint.addEventListener('focus', function () { endpointSelectOpen = true; });
 optEndpoint.addEventListener('blur', function () { endpointSelectOpen = false; });
 
+// Spawn-options subscription picker — 'Inherit' (value '') beats nothing,
+// loses to an explicit choice. In-memory only: each spawn dropdown open
+// starts back at 'Inherit' (see loadProfilePicker); it's not part of the
+// persisted per-project spawnOptions object.
+if (optProfile) {
+  optProfile.addEventListener('change', function () {
+    refreshProfileSelection();
+    updateSpawnButtonLabel();
+  });
+  optProfile.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+  optProfile.addEventListener('click', function (e) { e.stopPropagation(); });
+  var profileSelectOpen = false;
+  optProfile.addEventListener('focus', function () { profileSelectOpen = true; });
+  optProfile.addEventListener('blur', function () { profileSelectOpen = false; });
+}
+
+function loadProfilePicker() {
+  if (!optProfile || !optProfileRow) return Promise.resolve();
+  return buildProfilePicker(optProfile, optProfile.value, 'Inherit').then(function () {
+    // A single-subscription user must see no new UI at all.
+    optProfileRow.classList.toggle('hidden', profilesCache.length <= 1);
+  });
+}
+
 // Per-project model override dropdown. Selecting a different model rebuilds
 // the env block and persists the choice in spawnOptions.endpointModel.
 optEndpointModel.addEventListener('change', function () {
@@ -12299,7 +12485,14 @@ if (window.electronAPI && window.electronAPI.onEndpointsUpdated) {
 if (window.electronAPI && window.electronAPI.onProfilesUpdated) {
   window.electronAPI.onProfilesUpdated(function () {
     refreshProfileSelection();
+    loadProfilePicker();
   });
+}
+
+// Initial load — popouts sometimes initialize the bridge late, same reasoning
+// as the endpointList kick-off above; a later loadSpawnOptions call covers it.
+if (window.electronAPI && window.electronAPI.profileList) {
+  loadProfilePicker();
 }
 
 // A mirror failure means a secondary profile's copy of settings.json/CLAUDE.md
@@ -16824,6 +17017,10 @@ function openAutomationModal(existingAutomation) {
   document.getElementById('automation-name-group').style.display = isMulti ? '' : 'none';
   document.getElementById('automation-name').value = existingAutomation ? existingAutomation.name : '';
 
+  // Subscription picker — same shared builder as the project/workspace/spawn
+  // pickers, so "inherit" can't drift between surfaces.
+  buildProfilePicker(document.getElementById('automation-profile'), existingAutomation ? existingAutomation.profileId : null, 'Inherit from project');
+
   renderModalAgentCards();
 
   // Discover the project's MCP servers for the per-agent allowlist checkboxes,
@@ -17671,6 +17868,11 @@ function saveAutomation() {
     };
   }
 
+  // '' means inherit from project — persist null, never '' (same convention
+  // as the other three pickers; see buildProfilePicker).
+  var automationProfileEl = document.getElementById('automation-profile');
+  var automationProfileId = automationProfileEl ? (automationProfileEl.value || null) : null;
+
   if (automationEditingId) {
     // Get current automation to find agents that were removed
     window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
@@ -17685,7 +17887,7 @@ function saveAutomation() {
 
       return Promise.all(removePromises);
     }).then(function () {
-      return window.electronAPI.updateAutomation(automationEditingId, { name: automationName, manager: managerConfig, runWindow: automationRunWindow });
+      return window.electronAPI.updateAutomation(automationEditingId, { name: automationName, manager: managerConfig, runWindow: automationRunWindow, profileId: automationProfileId });
     }).then(function () {
       var promises = agents.map(function (ag) {
         if (ag.id && ag.id.indexOf('temp_') !== 0) {
@@ -17710,7 +17912,8 @@ function saveAutomation() {
       projectPath: activeProjectKey,
       agents: agents,
       manager: managerConfig,
-      runWindow: automationRunWindow
+      runWindow: automationRunWindow,
+      profileId: automationProfileId
     };
     window.electronAPI.createAutomation(config).then(function (automation) {
       if (needsCloneSetup) {

@@ -369,6 +369,12 @@
                   <option value="">Anthropic (cloud)</option>
                 </select>
               </div>
+              <div class="spawn-option spawn-profile-row hidden" id="opt-profile-row">
+                <label for="opt-profile">Subscription:</label>
+                <select id="opt-profile">
+                  <option value="">Inherit</option>
+                </select>
+              </div>
               <div class="spawn-option spawn-model-row" id="opt-model-row">
                 <label for="opt-model">Model:</label>
                 <select id="opt-model">
@@ -857,6 +863,19 @@
     </div>
   </div>
 
+  <!-- Subscription assignment picker — shared by Project settings and the Workspace row context menus -->
+  <div id="profile-assign-modal" class="modal-overlay hidden">
+    <div class="modal-dialog profile-assign-dialog">
+      <div class="modal-header">
+        <span class="modal-title" id="profile-assign-title">Subscription</span>
+        <span id="profile-assign-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body profile-assign-body">
+        <select id="profile-assign-select" class="settings-input"></select>
+      </div>
+    </div>
+  </div>
+
   <!-- Update notification -->
   <div id="update-bar" class="update-bar hidden">
     <span id="update-message"></span>
@@ -1101,6 +1120,12 @@
           <div id="automation-name-group" class="automation-form-group" style="display:none;">
             <label for="automation-name">Automation Name</label>
             <input type="text" id="automation-name" class="automation-input" placeholder="e.g. TaskBoard Pipeline" spellcheck="false">
+          </div>
+
+          <!-- Subscription (which Claude account this automation runs on) -->
+          <div class="automation-form-group">
+            <label for="automation-profile">Subscription</label>
+            <select id="automation-profile" class="automation-input"></select>
           </div>
 
           <!-- Run window (optional) -->
