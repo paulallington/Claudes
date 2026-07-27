@@ -7534,32 +7534,49 @@ function codexWatchStateRoot(sel) {
   return path.join(claudeRootFor(sel && sel.columnProfileId), CODEX_PLUGIN_DATA_SUBPATH);
 }
 
+// Scan failures (EACCES, a state.json that never stops being malformed) are
+// otherwise indistinguishable from "no jobs yet" — codexWatchTick calls this
+// every tick, so log each faulting path once rather than spamming the log.
+// A missing file/dir (ENOENT) is the normal "not used yet" case and is not
+// logged at all.
+const codexWatchLoggedFailures = new Set();
+function codexWatchLogScanFault(key, err) {
+  if (err && err.code === 'ENOENT') return;
+  if (codexWatchLoggedFailures.has(key)) return;
+  codexWatchLoggedFailures.add(key);
+  console.error('[codex-watch] scan fault for ' + key + ':', String((err && err.message) || err));
+}
+
 // Enumerate <root>/*/state.json. A torn read is expected - the companion does
 // not write these atomically - so a bad file is skipped for this tick rather
 // than failing the whole scan.
 function codexWatchScan(root) {
   let entries;
   try { entries = fs.readdirSync(root, { withFileTypes: true }); }
-  catch { return []; }
+  catch (err) { codexWatchLogScanFault(root, err); return []; }
 
   const scans = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
+    const statePath = path.join(root, entry.name, 'state.json');
     try {
-      const raw = fs.readFileSync(path.join(root, entry.name, 'state.json'), 'utf8');
+      const raw = fs.readFileSync(statePath, 'utf8');
       const parsed = JSON.parse(raw);
       scans.push({ workspaceKey: entry.name, jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [] });
-    } catch { /* missing or torn state.json — skip this dir this tick */ }
+    } catch (err) { codexWatchLogScanFault(statePath, err); }
   }
   return scans;
 }
 
 // Resolve a log path from renderer-supplied ids. workspaceKey is accepted ONLY
 // if it exactly matches a directory main itself enumerated, so traversal is
-// structurally impossible rather than filtered.
+// structurally impossible rather than filtered. '.'/'..' are rejected
+// explicitly even though the character class already excludes path
+// separators — defence in depth against a jobId of exactly '.' or '..'.
 function codexWatchResolveLogPath(sel, workspaceKey, jobId) {
   if (typeof workspaceKey !== 'string' || typeof jobId !== 'string') return null;
   if (!/^[A-Za-z0-9._-]+$/.test(jobId)) return null;
+  if (jobId === '.' || jobId === '..') return null;
 
   const root = codexWatchStateRoot(sel);
   const known = codexWatchScan(root).some((s) => s.workspaceKey === workspaceKey);
@@ -7575,8 +7592,130 @@ ipcMain.handle('codexwatch:listJobs', (event, sel) => {
     const scans = codexWatchScan(codexWatchStateRoot(opts));
     return { ok: true, jobs: CodexWatchJobs.selectSessionJobs(scans, opts.sessionId, Date.now()) };
   } catch (err) {
-    return { ok: false, error: err && err.message };
+    return { ok: false, error: String((err && err.message) || err) };
   }
+});
+
+const CODEX_WATCH_TAIL_BYTES = 64 * 1024;
+const CODEX_WATCH_FAST_MS = 1000;
+const CODEX_WATCH_SLOW_MS = 3000;
+
+// win -> { sel, streams: Map<streamKey, { workspaceKey, jobId, offset, carry }> }
+const codexWatchWindows = new Map();
+let codexWatchTimer = null;
+
+// '::' is a safe separator: the plugin's dir slug and job ids are both
+// [A-Za-z0-9._-], so neither can contain a colon and the key is unambiguous.
+function streamKey(workspaceKey, jobId) { return workspaceKey + '::' + jobId; }
+
+function codexWatchReadDelta(logPath, state) {
+  let stat;
+  try { stat = fs.statSync(logPath); }
+  catch { return null; }
+
+  // Truncated or rotated: start over rather than reading from a stale offset.
+  if (stat.size < state.offset) { state.offset = 0; state.carry = ''; }
+  if (stat.size === state.offset) return null;
+
+  const start = state.offset === 0 && stat.size > CODEX_WATCH_TAIL_BYTES
+    ? stat.size - CODEX_WATCH_TAIL_BYTES
+    : state.offset;
+
+  let chunk = '';
+  const fd = fs.openSync(logPath, 'r');
+  try {
+    const buf = Buffer.alloc(stat.size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    chunk = buf.toString('utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+  state.offset = stat.size;
+
+  const parsed = CodexWatchLog.parseLogChunk(state.carry, chunk);
+  state.carry = parsed.carry;
+  return { events: parsed.events, preview: CodexWatchLog.previewEvent(state.carry) };
+}
+
+function codexWatchTick() {
+  for (const [win, entry] of codexWatchWindows) {
+    if (win.isDestroyed()) { codexWatchWindows.delete(win); continue; }
+
+    let scans = [];
+    try {
+      scans = codexWatchScan(codexWatchStateRoot(entry.sel));
+      const jobs = CodexWatchJobs.selectSessionJobs(scans, entry.sel.sessionId, Date.now());
+      win.webContents.send('codexwatch:jobs', { sessionId: entry.sel.sessionId, jobs });
+    } catch { /* transient scan failure — codexWatchScan already logs faults once; try again next tick */ }
+
+    // Reuse this tick's scan to validate each open stream's workspaceKey
+    // rather than calling codexWatchResolveLogPath (which re-scans the
+    // directory) once per stream per tick.
+    const knownWorkspaceKeys = new Set(scans.map((s) => s.workspaceKey));
+    const root = codexWatchStateRoot(entry.sel);
+
+    for (const state of entry.streams.values()) {
+      if (!knownWorkspaceKeys.has(state.workspaceKey)) continue;
+      const logPath = path.join(root, state.workspaceKey, 'jobs', state.jobId + '.log');
+      let delta = null;
+      try { delta = codexWatchReadDelta(logPath, state); }
+      catch { continue; }
+      if (!delta) continue;
+      win.webContents.send('codexwatch:delta', {
+        workspaceKey: state.workspaceKey,
+        jobId: state.jobId,
+        events: delta.events,
+        preview: delta.preview
+      });
+    }
+  }
+
+  codexWatchSchedule();
+}
+
+function codexWatchSchedule() {
+  if (codexWatchTimer) { clearTimeout(codexWatchTimer); codexWatchTimer = null; }
+  if (!codexWatchWindows.size) return;
+  let anyStream = false;
+  for (const entry of codexWatchWindows.values()) if (entry.streams.size) anyStream = true;
+  codexWatchTimer = setTimeout(codexWatchTick, anyStream ? CODEX_WATCH_FAST_MS : CODEX_WATCH_SLOW_MS);
+}
+
+function codexWatchRegisterWindow(win, sel) {
+  codexWatchWindows.set(win, { sel: sel, streams: new Map() });
+  codexWatchSchedule();
+}
+
+function codexWatchUnregisterWindow(win) {
+  codexWatchWindows.delete(win);
+  codexWatchSchedule();
+}
+
+ipcMain.handle('codexwatch:openStream', (event, opts) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const entry = win && codexWatchWindows.get(win);
+  if (!entry) return { ok: false, error: 'not a watcher window' };
+
+  const logPath = codexWatchResolveLogPath(entry.sel, opts && opts.workspaceKey, opts && opts.jobId);
+  if (!logPath) return { ok: false, error: 'unknown job' };
+
+  const state = { workspaceKey: opts.workspaceKey, jobId: opts.jobId, offset: 0, carry: '' };
+  entry.streams.set(streamKey(opts.workspaceKey, opts.jobId), state);
+  codexWatchSchedule();
+
+  let delta = null;
+  try { delta = codexWatchReadDelta(logPath, state); }
+  catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
+
+  return { ok: true, events: (delta && delta.events) || [], preview: (delta && delta.preview) || null };
+});
+
+ipcMain.handle('codexwatch:closeStream', (event, opts) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const entry = win && codexWatchWindows.get(win);
+  if (entry && opts) entry.streams.delete(streamKey(opts.workspaceKey, opts.jobId));
+  codexWatchSchedule();
+  return { ok: true };
 });
 
 function parseAgentResult(output) {
