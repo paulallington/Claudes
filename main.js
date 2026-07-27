@@ -5856,8 +5856,9 @@ ipcMain.handle('voice:synthesizeColumn', async (event, args) => {
 // whose sanitized key differs from the project root), then fall back to the
 // project-key path. Returns null if none resolves to an existing file.
 function resolveColumnTranscriptPath(a) {
+  // TODO(profiles): thread the column's profileId through instead of Primary.
   const { resolvedPath } = resolveTranscriptPath({
-    homeDir: os.homedir(),
+    claudeRoot: path.join(os.homedir(), '.claude'),
     transcriptPath: a.transcriptPath,
     cwd: a.cwd,
     projectKey: a.projectKey,
@@ -5874,9 +5875,11 @@ function resolveColumnTranscriptPath(a) {
 function buildVoiceDiag(a, opts) {
   const o = opts || {};
   let resolvedPath = null, triedCwdPath = null, triedProjectPath = null;
+  // TODO(profiles): thread the column's profileId through instead of Primary.
+  const claudeRoot = path.join(os.homedir(), '.claude');
   try {
     const r = resolveTranscriptPath({
-      homeDir: os.homedir(),
+      claudeRoot,
       transcriptPath: a.transcriptPath,
       cwd: a.cwd,
       projectKey: a.projectKey,
@@ -5894,7 +5897,7 @@ function buildVoiceDiag(a, opts) {
     // Defense-in-depth: only stat a path that is contained under the projects
     // root, so this diag oracle can never report on an out-of-root file even if
     // an unsanitized path ever reached here.
-    if (usedPath && isUnderProjectsRoot(os.homedir(), usedPath) && fs.existsSync(usedPath)) {
+    if (usedPath && isUnderProjectsRoot(claudeRoot, usedPath) && fs.existsSync(usedPath)) {
       resolvedExists = true;
       resolvedSize = fs.statSync(usedPath).size;
     }
@@ -5937,7 +5940,8 @@ ipcMain.handle('handoff:readTranscript', async (event, args) => {
   const a = args || {};
   try {
     const thePath = resolveColumnTranscriptPath(a);
-    if (!thePath || !isUnderProjectsRoot(os.homedir(), thePath)) {
+    // TODO(profiles): thread the column's profileId through instead of Primary.
+    if (!thePath || !isUnderProjectsRoot(path.join(os.homedir(), '.claude'), thePath)) {
       return { ok: false, error: 'no_transcript' };
     }
     const content = await fs.promises.readFile(thePath, 'utf8');
