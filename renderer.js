@@ -2550,6 +2550,7 @@ function disposeColumnLocalOnly(id) {
   releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
+  codexWatchCounts.delete(id);
 
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (state) {
@@ -4410,6 +4411,14 @@ function createColumnHeader(id, customTitle, opts) {
   // would collide in both CSS and any future querySelector. Hidden by
   // default; updateCodexWatchBadge (wired via colData.codexWatchBadgeEl)
   // shows it once codexWatchCounts has a running count for this column.
+  //
+  // Deliberately NOT appended inside `title` (the .col-title span): both
+  // startInlineRename and fetchAndSetSessionTitle overwrite title.textContent
+  // wholesale, which would destroy this node on every rename/title-sync and
+  // (worse) fold the badge's digits into the persisted customTitle string.
+  // It's appended to `header` as a sibling of `title` below instead, once
+  // `title` itself is in the DOM — the `.column-header .col-codex-watch-badge`
+  // CSS selector still matches unchanged.
   if (!opts.isDiff && claudeChrome) {
     var codexWatchBadge = document.createElement('span');
     codexWatchBadge.className = 'col-codex-watch-badge';
@@ -4418,7 +4427,6 @@ function createColumnHeader(id, customTitle, opts) {
       e.stopPropagation();
       openCodexWatchWindow(id);
     });
-    title.appendChild(codexWatchBadge);
   }
 
   if (!opts.isDiff && claudeChrome) {
@@ -4534,6 +4542,7 @@ function createColumnHeader(id, customTitle, opts) {
   actions.appendChild(closeBtn);
 
   header.appendChild(title);
+  if (codexWatchBadge) header.appendChild(codexWatchBadge);
   header.appendChild(actions);
 
   if (!popoutMode && !opts.isDiff) {
@@ -6654,6 +6663,7 @@ function removeColumn(id) {
   releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
+  codexWatchCounts.delete(id);
 
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (state) {
@@ -6846,7 +6856,11 @@ async function restartColumn(id) {
   if (!col.cmd && col.sessionId && window.electronAPI && window.electronAPI.sessionExists) {
     try {
       var stillExists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey), col.sessionId, col.profileId || null);
-      if (!stillExists) col.sessionId = null;
+      if (!stillExists) {
+        col.sessionId = null;
+        codexWatchCounts.delete(id);
+        updateCodexWatchBadge(id);
+      }
     } catch (e) { /* if the check fails, fall through and resume as before */ }
   }
 
@@ -7484,7 +7498,7 @@ var codexWatchPollTimer = null;
 
 function codexWatchAnySessionColumn() {
   var any = false;
-  allColumns.forEach(function (col) { if (col && col.sessionId) any = true; });
+  allColumns.forEach(function (col) { if (col && col.sessionId && !col.isDiff) any = true; });
   return any;
 }
 
@@ -7494,7 +7508,7 @@ function codexWatchPollTick() {
     return;
   }
   allColumns.forEach(function (col, id) {
-    if (!col || !col.sessionId) return;
+    if (!col || !col.sessionId || col.isDiff) return;
     window.electronAPI.codexWatchListJobs({ sessionId: col.sessionId, columnProfileId: col.profileId || null })
       .then(function (res) {
         // The column can be killed (or reassigned to a different session)
@@ -7539,12 +7553,18 @@ async function openCodexWatchWindow(id) {
   var col = allColumns.get(id);
   if (!col) return;
   var title = col.customTitle || ((col.cmd === 'codex' ? 'Codex #' : 'Claude #') + id);
-  var res = await window.electronAPI.codexWatchOpen({
-    columnId: id,
-    sessionId: col.sessionId,
-    title: title,
-    columnProfileId: col.profileId || null
-  });
+  var res;
+  try {
+    res = await window.electronAPI.codexWatchOpen({
+      columnId: id,
+      sessionId: col.sessionId,
+      title: title,
+      columnProfileId: col.profileId || null
+    });
+  } catch (e) {
+    showToast('Watch Codex failed to open' + (e && e.message ? (': ' + e.message) : ''), { kind: 'error' });
+    return;
+  }
   if (!res || !res.ok) {
     showToast('Watch Codex failed to open' + (res && res.error ? (': ' + res.error) : ''), { kind: 'error' });
   }
