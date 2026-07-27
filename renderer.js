@@ -13932,85 +13932,118 @@ function renderPlanLimits(result) {
   }
 }
 
-// Most recent plan-limits result (used by both the Usage modal panel and the
-// persistent sidebar mini-bar). Refreshed by loadPlanLimits().
-var lastPlanLimitsResult = null;
-var prevPlanLimitsData = null;  // last successful data, used for crossing detection
-// Stickiness: hold on to the last *successful* render so transient API failures
-// during background polls don't make the sidebar bar vanish. Persisted to
-// localStorage so a cold start during a server-issued cooldown still shows
-// data (greyed) instead of an empty sidebar.
-var lastGoodPlanLimitsData = null;
-var lastGoodPlanLimitsAtMs = 0;
+// Most recent plan-limits results (used by both the Usage modal panel and the
+// persistent sidebar mini-bar). Refreshed by loadPlanLimits(). The modal still
+// reflects Primary only (see loadPlanLimits) — lastPlanLimitsEntries carries
+// every profile's result for the sidebar bar, which renders one group each.
+var PLAN_LIMITS_PRIMARY_ID = (window.ProfileResolve && window.ProfileResolve.PRIMARY_ID) || 'primary';
+var lastPlanLimitsResult = null;      // Primary's result — feeds the modal, unchanged shape
+var lastPlanLimitsEntries = null;     // [{ profile, result }, ...] — feeds the sidebar bar
+var prevByProfile = Object.create(null);  // profile id -> last successful data, for crossing detection
+// Stickiness: hold on to each profile's last *successful* render so transient
+// API failures during background polls don't make its group vanish. Persisted
+// to localStorage (keyed per profile) so a cold start during a server-issued
+// cooldown still shows data (greyed) instead of an empty sidebar.
+var lastGoodByProfile = Object.create(null);    // profile id -> data
+var lastGoodAtByProfile = Object.create(null);  // profile id -> fetchedAt ms
 var PLAN_LIMITS_LASTGOOD_KEY = 'claudes.planLimitsLastGood';
 var PLAN_LIMITS_LASTGOOD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 (function restoreLastGoodPlanLimits() {
   try {
-    var raw = window.localStorage && window.localStorage.getItem(PLAN_LIMITS_LASTGOOD_KEY);
+    // New key is per-profile ('<key>.<id>'). Fall back to the old unprefixed
+    // key for Primary so an upgrade doesn't lose an existing snapshot.
+    var raw = window.localStorage && (
+      window.localStorage.getItem(PLAN_LIMITS_LASTGOOD_KEY + '.' + PLAN_LIMITS_PRIMARY_ID) ||
+      window.localStorage.getItem(PLAN_LIMITS_LASTGOOD_KEY)
+    );
     if (!raw) return;
     var saved = JSON.parse(raw);
     if (!saved || !saved.data || !saved.fetchedAt) return;
     if (Date.now() - saved.fetchedAt > PLAN_LIMITS_LASTGOOD_MAX_AGE_MS) return;
-    lastGoodPlanLimitsData = saved.data;
-    lastGoodPlanLimitsAtMs = saved.fetchedAt;
+    lastGoodByProfile[PLAN_LIMITS_PRIMARY_ID] = saved.data;
+    lastGoodAtByProfile[PLAN_LIMITS_PRIMARY_ID] = saved.fetchedAt;
   } catch { /* corrupt entry — ignore */ }
 })();
 
-function persistLastGoodPlanLimits(data, fetchedAt) {
+function persistLastGoodPlanLimits(profileId, data, fetchedAt) {
   try {
     if (window.localStorage) {
-      window.localStorage.setItem(PLAN_LIMITS_LASTGOOD_KEY, JSON.stringify({ data, fetchedAt }));
+      window.localStorage.setItem(PLAN_LIMITS_LASTGOOD_KEY + '.' + profileId, JSON.stringify({ data, fetchedAt }));
     }
   } catch { /* quota / privacy mode — ignore */ }
 }
 
-function renderPlanLimitsMini(result) {
+// Renders one profile's usage group into the wrapper #plan-limits-mini.
+// Called once per profile by renderPlanLimitsMiniAll, which owns the
+// wrapper's hidden/stale classes and the per-group caption/sign-in state.
+function renderPlanLimitsMiniAll(entries) {
   var el = document.getElementById('plan-limits-mini');
   if (!el) return;
-  var ok = result && result.ok && result.data;
-  if (!ok) {
-    // No live data this poll. If we have a last-good snapshot (in-memory from
-    // a prior poll, or restored from localStorage at startup), keep showing
-    // it — flagged stale when the failure was a server cooldown — instead of
-    // hiding the bar silently.
-    if (lastGoodPlanLimitsData) {
-      var stale = result && result.error === 'rate-limited';
-      renderPlanLimitsMiniFrom(el, lastGoodPlanLimitsData, stale);
-    } else {
-      el.classList.add('hidden');
+  el.innerHTML = '';
+  var list = entries || [];
+  if (!list.length) { el.classList.add('hidden'); return; }
+
+  var anyStale = false;
+  var rendered = 0;
+  list.forEach(function (e) {
+    var r = e.result;
+    var data = (r && r.ok && r.data) ? r.data : lastGoodByProfile[e.profile.id];
+    if (r && r.ok && r.data) {
+      lastGoodByProfile[e.profile.id] = r.data;
+      lastGoodAtByProfile[e.profile.id] = r.fetchedAt || Date.now();
+      persistLastGoodPlanLimits(e.profile.id, r.data, lastGoodAtByProfile[e.profile.id]);
     }
-    return;
-  }
-  var d = result.data;
-  lastGoodPlanLimitsData = d;
-  lastGoodPlanLimitsAtMs = result.fetchedAt || Date.now();
-  persistLastGoodPlanLimits(d, lastGoodPlanLimitsAtMs);
-  // Hide if the API returned nothing useful (e.g. API-key user).
-  if (!d.five_hour && !d.seven_day) {
-    el.classList.add('hidden');
-    return;
-  }
-  renderPlanLimitsMiniFrom(el, d, false);
+    var stale = !!(r && !r.ok && r.error === 'rate-limited' && data);
+    var showSignIn = !data && r && !r.ok &&
+      (r.error === 'no-creds' || r.error === 'no-creds-macos' || r.error === 'no-oauth' || r.error === 'unauthorized');
+    var hasRows = data && (data.five_hour || data.seven_day);
+    if (!hasRows && !showSignIn) return;   // nothing to show for this profile this poll
+
+    if (stale) anyStale = true;
+    rendered++;
+
+    var group = document.createElement('div');
+    group.className = 'plan-limits-mini-group';
+
+    // The brand caption is shown whenever more than one Claude group is on
+    // screen, not only when the Codex bar is stacked above — with a single
+    // profile the caption logic (and the whole bar) stays byte-identical to
+    // the pre-profiles behaviour.
+    if (list.length > 1 || codexBarVisible) {
+      var title = document.createElement('div');
+      title.className = 'plan-limits-mini-title';
+      if (list.length > 1) {
+        var chip = document.createElement('span');
+        chip.className = 'plan-limits-mini-chip';
+        chip.style.background = e.profile.colour || '#5b8def';
+        title.appendChild(chip);
+      }
+      title.appendChild(document.createTextNode(
+        list.length > 1 ? 'Claude · ' + (e.profile.name || e.profile.id) : 'Claude'
+      ));
+      group.appendChild(title);
+    }
+
+    if (hasRows) {
+      renderPlanLimitsMiniFrom(group, data);
+    } else {
+      var msg = document.createElement('div');
+      msg.className = 'plan-limits-mini-signin';
+      msg.textContent = 'Sign in';
+      group.appendChild(msg);
+    }
+    el.appendChild(group);
+  });
+
+  if (!rendered) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  el.classList.toggle('stale', anyStale);
+  if (typeof updatePlanLimitsPopover === 'function') updatePlanLimitsPopover();
 }
 
-function renderPlanLimitsMiniFrom(el, d, stale) {
-  if (!d.five_hour && !d.seven_day) {
-    el.classList.add('hidden');
-    return;
-  }
-  el.classList.remove('hidden');
-  el.classList.toggle('stale', !!stale);
-  el.innerHTML = '';
-
-  // Brand the Claude bar only when the Codex bar is stacked above it, so the two
-  // identical Session/Week bars are distinguishable. Solo, it stays uncaptioned.
-  if (codexBarVisible) {
-    var title = document.createElement('div');
-    title.className = 'plan-limits-mini-title';
-    title.textContent = 'Claude';
-    el.appendChild(title);
-  }
+function renderPlanLimitsMiniFrom(el, d) {
+  if (!d || (!d.five_hour && !d.seven_day)) return;
 
   function row(label, slot) {
     if (!slot) return null;
@@ -14041,8 +14074,6 @@ function renderPlanLimitsMiniFrom(el, d, stale) {
   var weekRow = row('Week', d.seven_day);
   if (sessionRow) el.appendChild(sessionRow);
   if (weekRow) el.appendChild(weekRow);
-  // Re-attach the hover popover after innerHTML wipe.
-  if (typeof updatePlanLimitsPopover === 'function') updatePlanLimitsPopover();
 }
 
 // --- Codex usage mini-bar ---
@@ -14059,11 +14090,11 @@ var codexBarVisible = false;
 function setCodexBarVisible(v) {
   if (codexBarVisible === v) return;
   codexBarVisible = v;
-  // The Claude bar's caption depends on this flag — re-render it from last-good
-  // so the "CLAUDE" label appears/disappears in lockstep with the Codex bar.
-  var claudeEl = document.getElementById('plan-limits-mini');
-  if (claudeEl && lastGoodPlanLimitsData) {
-    renderPlanLimitsMiniFrom(claudeEl, lastGoodPlanLimitsData, claudeEl.classList.contains('stale'));
+  // The Claude bar's caption depends on this flag — re-render every group from
+  // the cached entries so the "CLAUDE" label appears/disappears in lockstep
+  // with the Codex bar.
+  if (lastPlanLimitsEntries) {
+    renderPlanLimitsMiniAll(lastPlanLimitsEntries);
   }
 }
 
@@ -14191,41 +14222,71 @@ function loadPlanLimits(force) {
   if (!window.electronAPI || !window.electronAPI.getPlanLimits) {
     var miss = { ok: false, message: 'Plan limits API not available.' };
     lastPlanLimitsResult = miss;
+    lastPlanLimitsEntries = [{ profile: { id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }, result: miss }];
     renderPlanLimits(miss);
-    renderPlanLimitsMini(miss);
+    renderPlanLimitsMiniAll(lastPlanLimitsEntries);
     return Promise.resolve(miss);
   }
-  return window.electronAPI.getPlanLimits(!!force).then(function (r) {
+
+  var listProfiles = window.electronAPI.profileList
+    ? window.electronAPI.profileList().then(function (store) {
+        return (store && store.profiles) || [{ id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }];
+      }).catch(function () { return [{ id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }]; })
+    : Promise.resolve([{ id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }]);
+
+  return listProfiles.then(function (profiles) {
+    // Stagger so N profiles don't burst the endpoint simultaneously.
+    return Promise.all(profiles.map(function (p, i) {
+      return new Promise(function (res) { setTimeout(res, i * 250); })
+        .then(function () { return window.electronAPI.getPlanLimits(!!force, p.id); })
+        .then(function (r) { return { profile: p, result: r }; })
+        .catch(function (e) { return { profile: p, result: { ok: false, message: String(e) } }; });
+    }));
+  }).then(function (entries) {
+    lastPlanLimitsEntries = entries;
+    // The modal keeps showing Primary only, exactly as before this feature.
+    var primaryEntry = entries.filter(function (e) { return e.profile.id === PLAN_LIMITS_PRIMARY_ID; })[0] || entries[0] || null;
+    var r = primaryEntry ? primaryEntry.result : null;
     lastPlanLimitsResult = r;
+
     if (!usageModal.classList.contains('hidden')) renderPlanLimits(r);
-    renderPlanLimitsMini(r);
-    if (r && r.ok && r.data) {
-      if (prevPlanLimitsData) {
-        window.electronAPI.detectThresholdCrossings(prevPlanLimitsData, r.data).then(function (crossings) {
-          if (crossings && crossings.length) handleThresholdCrossings(crossings);
-        });
-      }
-      prevPlanLimitsData = r.data;
-      updateColumnDeltaPills(r.data);
-    }
+    renderPlanLimitsMiniAll(entries);
+    entries.forEach(handleCrossingsForProfile);
     return r;
   }).catch(function (e) {
     var err = { ok: false, message: e && e.message ? e.message : String(e) };
     lastPlanLimitsResult = err;
+    lastPlanLimitsEntries = [{ profile: { id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }, result: err }];
     if (!usageModal.classList.contains('hidden')) renderPlanLimits(err);
-    renderPlanLimitsMini(err);
+    renderPlanLimitsMiniAll(lastPlanLimitsEntries);
     return err;
   });
 }
 
-function handleThresholdCrossings(crossings) {
+// Per-profile threshold-crossing detection and notification, called once per
+// entry after each poll. Keeps one subscription's crossing from being
+// compared against another's previous snapshot.
+function handleCrossingsForProfile(entry) {
+  var r = entry.result, id = entry.profile.id;
+  if (!r || !r.ok || !r.data) return;
+  var prev = prevByProfile[id];
+  if (prev) {
+    window.electronAPI.detectThresholdCrossings(prev, r.data).then(function (crossings) {
+      if (crossings && crossings.length) handleThresholdCrossings(crossings, entry.profile);
+    });
+  }
+  prevByProfile[id] = r.data;
+  updateColumnDeltaPills(r.data, id);
+}
+
+function handleThresholdCrossings(crossings, profile) {
   for (var i = 0; i < crossings.length; i++) {
     var c = crossings[i];
     var enabled70 = !notifSettings || notifSettings.limits70 !== false;
     var enabled90 = !notifSettings || notifSettings.limits90 !== false;
     if (c.threshold === 70 && !enabled70) continue;
     if (c.threshold === 90 && !enabled90) continue;
-    showThresholdNotification(c);
+    showThresholdNotification(c, profile);
     if (c.threshold === 90 && c.window === 'seven_day' && (!notifSettings || notifSettings.limitsPause !== false)) {
       promptPauseAutomations(c);
     }
@@ -14414,7 +14475,7 @@ function updateColumnDeltaFromTokens(col, tokens) {
 
 // Kept as a no-op shim for the old global-plan-limits trigger sites.
 // Per-column delta is now driven by updateColumnDeltaFromTokens via the ctx poll.
-function updateColumnDeltaPills(_data) { /* no-op */ }
+function updateColumnDeltaPills(_data, _profileId) { /* no-op */ }
 
 function promptPauseAutomations(c) {
   if (!window.electronAPI || !window.electronAPI.getAutomationSettings || !window.electronAPI.toggleAutomationsGlobal) return;
@@ -14438,7 +14499,7 @@ function promptPauseAutomations(c) {
   });
 }
 
-function showThresholdNotification(c) {
+function showThresholdNotification(c, profile) {
   var label = ({
     five_hour: 'Current session',
     seven_day: 'Weekly (all models)',
@@ -14446,7 +14507,10 @@ function showThresholdNotification(c) {
     seven_day_opus: 'Weekly (Opus)',
     seven_day_omelette: 'Weekly (Claude Design)'
   })[c.window] || c.window;
-  var msg = label + ' just crossed ' + c.threshold + '% (' + Math.round(c.value) + '% used).';
+  // Prefix with the subscription name once more than one profile is in play,
+  // so "your usage limit" notifications don't read as ambiguous.
+  var prefix = (profile && profile.id !== PLAN_LIMITS_PRIMARY_ID && profile.name) ? profile.name + ': ' : '';
+  var msg = prefix + label + ' just crossed ' + c.threshold + '% (' + Math.round(c.value) + '% used).';
   if (!document.hasFocus() && window.electronAPI && window.electronAPI.flashFrame) {
     window.electronAPI.flashFrame();
   }
@@ -14530,9 +14594,13 @@ document.addEventListener('focusin', function (e) {
 // Show the restored last-good snapshot (if any) right away so the bar isn't
 // blank during the initial IPC roundtrip — especially important when the
 // endpoint is under a multi-minute server cooldown.
-if (lastGoodPlanLimitsData) {
+if (lastGoodByProfile[PLAN_LIMITS_PRIMARY_ID]) {
+  renderPlanLimitsMiniAll([{
+    profile: { id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' },
+    result: null   // no live result yet — renderPlanLimitsMiniAll falls back to lastGoodByProfile
+  }]);
   var miniEl0 = document.getElementById('plan-limits-mini');
-  if (miniEl0) renderPlanLimitsMiniFrom(miniEl0, lastGoodPlanLimitsData, true);
+  if (miniEl0) miniEl0.classList.add('stale');   // not live yet — dim until the first poll lands
 }
 
 // Initial fetch on app start. Previously gated behind document.hasFocus(),
@@ -14579,24 +14647,30 @@ function updatePlanLimitsPopover() {
     html += '</div>';
     return html;
   }
-  var d = lastGoodPlanLimitsData;
+  // One or more profiles. With a single profile (the pre-profiles case) this
+  // renders byte-identical to before: no name header, just the two slots and
+  // an optional rate-limited note.
+  var entries = lastPlanLimitsEntries || [{ profile: { id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }, result: lastPlanLimitsResult }];
+  var multi = entries.length > 1;
   var slots = '';
-  if (d) {
+  entries.forEach(function (e) {
+    var d = lastGoodByProfile[e.profile.id];
+    if (!d) return;
+    if (multi) slots += '<div class="plan-limits-popover-sub">' + (e.profile.name || e.profile.id) + '</div>';
     slots += fmtSlot('Session', d.five_hour);
     slots += fmtSlot('Week', d.seven_day);
-  }
+    // Surface why the bar might look frozen — rate-limited polls keep the
+    // last-good values on screen with a `.stale` class on the mini bar.
+    var r = e.result;
+    if (r && !r.ok && r.error === 'rate-limited') {
+      var ageMin = lastGoodAtByProfile[e.profile.id] ? Math.round((Date.now() - lastGoodAtByProfile[e.profile.id]) / 60000) : null;
+      var ageLabel = ageMin == null ? '' : (ageMin < 1 ? 'just now' : ageMin + ' min ago');
+      slots += '<div class="plan-limits-popover-sub">Rate-limited' +
+        (ageLabel ? ' — last good ' + ageLabel : '') + '</div>';
+    }
+  });
   if (!slots) slots = '<div class="plan-limits-popover-sub">Loading usage…</div>';
-  var inner = slots;
-  // Surface why the bar might look frozen — rate-limited polls keep the
-  // last-good values on screen with a `.stale` class on the mini bar.
-  var lr = lastPlanLimitsResult;
-  if (lr && !lr.ok && lr.error === 'rate-limited' && d) {
-    var ageMin = lastGoodPlanLimitsAtMs ? Math.round((Date.now() - lastGoodPlanLimitsAtMs) / 60000) : null;
-    var ageLabel = ageMin == null ? '' : (ageMin < 1 ? 'just now' : ageMin + ' min ago');
-    inner += '<div class="plan-limits-popover-sub">Rate-limited' +
-      (ageLabel ? ' — last good ' + ageLabel : '') + '</div>';
-  }
-  inner += '<div class="plan-limits-popover-hint">Click for full usage</div>';
+  var inner = slots + '<div class="plan-limits-popover-hint">Click for full usage</div>';
   pop.innerHTML = inner;
 }
 
