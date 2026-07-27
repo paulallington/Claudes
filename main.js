@@ -739,6 +739,31 @@ function claudeRootFor(profileId) {
   return profileClaudeRoot(resolveProfileFor({ columnProfileId: profileId }), os.homedir());
 }
 
+// The stored configDir is app-written, but a hand-edited profiles.json must
+// not be able to aim this recursive, forced delete at an arbitrary directory. A
+// textual startsWith() is not enough: "<PROFILES_DIR>\..\..\x" satisfies it and
+// then resolves out of the fence inside rmSync, and a junction planted at
+// <PROFILES_DIR>\pf_x would satisfy it too. Canonicalise the same way
+// assertInsideAllowedRoots does, and additionally require the directory to be
+// exactly the one the app would have allocated for this id.
+function profileDirToRemove(p) {
+  if (!p || typeof p.configDir !== 'string' || !p.configDir) return null;
+  if (!/^pf_[A-Za-z0-9_]+$/.test(String(p.id || ''))) return null;
+  const real = (q) => {
+    try { return fs.realpathSync.native ? fs.realpathSync.native(q) : fs.realpathSync(q); }
+    catch { return null; }
+  };
+  const target = real(path.resolve(p.configDir));
+  const expected = real(path.resolve(path.join(PROFILES_DIR, p.id)));
+  const root = real(path.resolve(PROFILES_DIR));
+  if (!target || !expected || !root) return null;
+  const same = process.platform === 'win32'
+    ? target.toLowerCase() === expected.toLowerCase()
+    : target === expected;
+  if (!same || !isInsideRoot(target, root)) return null;
+  return target;
+}
+
 function profileHasCredentials(p) {
   const root = profileClaudeRoot(p, os.homedir());
   try {
@@ -1891,15 +1916,16 @@ ipcMain.handle('profile:delete', (event, id) => {
   // resolves through the unknown-id path in normal operation.
   const reassigned = clearProfileReferences(id);
 
-  try {
-    // configDir comes from profiles.json, which the app writes — but a
-    // hand-edited file must not be able to turn "delete profile" into
-    // "delete arbitrary directory". Same class of guard as the automations
-    // clone-path sanitisation.
-    if (p.configDir && p.configDir.startsWith(PROFILES_DIR + path.sep)) {
-      fs.rmSync(p.configDir, { recursive: true, force: true });
-    }
-  } catch (e) { console.warn('[profiles] could not remove dir', e.message); }
+  // The profile is de-registered from profiles.json regardless of what
+  // happens below — a tampered entry must be clearable without granting it
+  // a delete.
+  const dir = profileDirToRemove(p);
+  if (dir) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); }
+    catch (e) { console.warn('[profiles] could not remove dir', e.message); }
+  } else {
+    console.warn('[profiles] refusing to remove configDir outside the profiles root:', p.configDir);
+  }
 
   store.profiles = store.profiles.filter((x) => x.id !== id);
   if (store.defaultProfileId === id) store.defaultProfileId = PRIMARY_ID;
