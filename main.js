@@ -1586,6 +1586,8 @@ function createCodexWatchWindow(opts) {
   const index = codexWatchOpenWindows.size;
   const cascade = index * 24;
 
+  const theme = opts.theme === 'light' || opts.theme === 'dark' ? opts.theme : codexWatchLastTheme;
+
   const win = new BrowserWindow({
     width: bounds.width || 900,
     height: bounds.height || 700,
@@ -1595,7 +1597,8 @@ function createCodexWatchWindow(opts) {
     minHeight: 300,
     title: 'Codex · ' + (opts.title || 'Watcher'),
     icon: path.join(__dirname, process.platform === 'win32' ? 'icon-tray.ico' : 'icon.png'),
-    backgroundColor: '#1a1a2e',
+    // Match the resolved theme so light-mode watchers don't flash dark before first paint.
+    backgroundColor: theme === 'light' ? '#ffffff' : '#1a1a2e',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1607,9 +1610,17 @@ function createCodexWatchWindow(opts) {
   });
 
   lockdownWebContents(win.webContents);
-  const theme = opts.theme === 'light' || opts.theme === 'dark' ? opts.theme : codexWatchLastTheme;
   win.loadFile('codex-watch.html', {
     query: { sessionId: opts.sessionId, title: opts.title || '', theme }
+  });
+
+  // A codexwatch:themeChanged broadcast arriving between loadFile and the
+  // page's DOMContentLoaded would be dropped (onCodexWatchTheme isn't
+  // registered yet), leaving the window stuck on its query-param theme until
+  // the next toggle. Re-send the current theme once the page is ready to
+  // close that race; the query param remains the first-paint value.
+  win.webContents.on('did-finish-load', () => {
+    if (!win.isDestroyed()) win.webContents.send('codexwatch:theme', codexWatchLastTheme);
   });
 
   const saveBoundsDebounced = debounceCodexWatchBounds(win);
