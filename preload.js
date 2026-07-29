@@ -121,6 +121,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   codexWatchCloseStream: (o) => ipcRenderer.invoke('codexwatch:closeStream', o),
   onCodexWatchJobs: (cb) => ipcRenderer.on('codexwatch:jobs', (_e, v) => cb(v)),
   onCodexWatchDelta: (cb) => ipcRenderer.on('codexwatch:delta', (_e, v) => cb(v)),
+  codexWatchThemeChanged: (theme) => ipcRenderer.send('codexwatch:themeChanged', theme),
+  onCodexWatchTheme: (cb) => ipcRenderer.on('codexwatch:theme', (_e, theme) => cb(theme)),
   getHeadroomStatus: () => ipcRenderer.invoke('headroom:status'),
   onHeadroomStatus: (cb) => ipcRenderer.on('headroom:status-changed', (_e, st) => cb(st)),
   getHeadroomServiceStatus: () => ipcRenderer.invoke('headroom:serviceStatus'),

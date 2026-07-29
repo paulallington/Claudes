@@ -1552,6 +1552,11 @@ function debouncePopoutBounds(projectKey, win) {
 // Registry of open codex watcher windows keyed by columnId.
 const codexWatchOpenWindows = new Map();
 
+// Last visual theme ('light' | 'dark') reported by the main renderer's
+// applyVisualTheme. Remembered so a watcher window opened without an
+// explicit opts.theme (e.g. a stale renderer) still gets the right value.
+let codexWatchLastTheme = 'dark';
+
 function createCodexWatchWindow(opts) {
   const columnId = opts && opts.columnId;
   if (codexWatchOpenWindows.has(columnId)) {
@@ -1602,8 +1607,9 @@ function createCodexWatchWindow(opts) {
   });
 
   lockdownWebContents(win.webContents);
+  const theme = opts.theme === 'light' || opts.theme === 'dark' ? opts.theme : codexWatchLastTheme;
   win.loadFile('codex-watch.html', {
-    query: { sessionId: opts.sessionId, title: opts.title || '' }
+    query: { sessionId: opts.sessionId, title: opts.title || '', theme }
   });
 
   const saveBoundsDebounced = debounceCodexWatchBounds(win);
@@ -7705,6 +7711,17 @@ ipcMain.handle('codexwatch:open', (event, opts) => {
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+// Fire-and-forget notification from the main window's applyVisualTheme so
+// any already-open watcher windows follow a live light/dark toggle instead
+// of staying stuck at whatever theme they were opened with.
+ipcMain.on('codexwatch:themeChanged', (event, theme) => {
+  if (theme !== 'light' && theme !== 'dark') return;
+  codexWatchLastTheme = theme;
+  for (const win of codexWatchWindows.keys()) {
+    if (!win.isDestroyed()) win.webContents.send('codexwatch:theme', theme);
   }
 });
 
