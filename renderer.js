@@ -7568,7 +7568,8 @@ async function openCodexWatchWindow(id) {
       columnId: id,
       sessionId: col.sessionId,
       title: title,
-      columnProfileId: col.profileId || null
+      columnProfileId: col.profileId || null,
+      theme: currentTheme
     });
   } catch (e) {
     showToast('Watch Codex failed to open' + (e && e.message ? (': ' + e.message) : ''), { kind: 'error' });
@@ -10815,6 +10816,11 @@ function applyVisualTheme(visual) {
       ? { color: '#e8ecf1', symbolColor: '#1f2328' }
       : { color: '#16213e', symbolColor: '#e0e0e0' };
     window.electronAPI.setTitleBarOverlay(overlayColors);
+  }
+  // Any open Codex-watch popouts don't get their own theme toggle — they
+  // should just follow whatever the main window resolves to.
+  if (window.electronAPI && window.electronAPI.codexWatchThemeChanged) {
+    window.electronAPI.codexWatchThemeChanged(visual);
   }
 }
 

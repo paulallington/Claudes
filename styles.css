@@ -1602,6 +1602,15 @@ html[data-platform="darwin"] #toolbar {
   display: inline-block;
 }
 
+/* Light theme: the dark-theme mint (#a9ffcf on translucent green) is
+   near-invisible against the near-white header, so swap to a green wash
+   (background uses --color-green's rgb) with #116329, a darker green than
+   the --color-green token, for enough text contrast on the light header. */
+[data-theme="light"] .column-header .col-codex-watch-badge {
+  background: rgba(26, 127, 55, 0.12);
+  color: #116329;
+}
+
 /* Subscription chip — only visible when col.profileId names a non-Primary
    profile (see updateColumnProfileChip); empty/no-background otherwise, so a
    single-subscription user sees nothing here at all. */

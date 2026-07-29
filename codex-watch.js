@@ -287,11 +287,24 @@
 
   // --- Wiring ---------------------------------------------------------
 
+  // Mirrors applyVisualTheme in renderer.js: unrecognised/absent values fall
+  // back to dark, since this window has no theme selector of its own — it
+  // only ever follows the main window's resolved theme.
+  function applyTheme(theme) {
+    if (theme === 'light') {
+      document.documentElement.setAttribute('data-theme', 'light');
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+  }
+
   function init() {
     var params = new URLSearchParams(window.location.search);
     state.sessionId = params.get('sessionId') || '';
     state.title = params.get('title') || '';
     document.title = 'Codex · ' + state.title;
+    applyTheme(params.get('theme'));
+    window.electronAPI.onCodexWatchTheme(applyTheme);
 
     var sourceEl = document.getElementById('cwJobsSource');
     if (state.title) {
