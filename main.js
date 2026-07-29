@@ -1587,6 +1587,7 @@ function createCodexWatchWindow(opts) {
   const cascade = index * 24;
 
   const theme = opts.theme === 'light' || opts.theme === 'dark' ? opts.theme : codexWatchLastTheme;
+  codexWatchLastTheme = theme; // renderer-supplied theme is authoritative when present, so the did-finish-load re-send can't diverge from it
 
   const win = new BrowserWindow({
     width: bounds.width || 900,
