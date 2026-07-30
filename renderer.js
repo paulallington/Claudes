@@ -7448,8 +7448,11 @@ function showColumnSessionPicker(colId, clientX, clientY) {
   function outside(ev) { if (!menu.contains(ev.target)) close(); }
   setTimeout(function () { document.addEventListener('mousedown', outside, true); }, 0);
 
-  // Resolve the column's project path from activeProjectKey on the colData.
-  var projectPath = col.projectKey || activeProjectKey;
+  // The Claude CLI keys its transcript dir by the cwd the process actually ran
+  // in, so this must resolve the same way restartColumn/sessionExists and the
+  // ctx meter do — otherwise a column with a non-root cwd lists/resumes
+  // sessions from the wrong directory.
+  var projectPath = window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey || activeProjectKey);
   if (!projectPath) { loading.textContent = 'No project for this column.'; return; }
 
   window.electronAPI.getRecentSessions(projectPath, col.profileId).then(function (sessions) {
