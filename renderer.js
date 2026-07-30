@@ -7448,8 +7448,11 @@ function showColumnSessionPicker(colId, clientX, clientY) {
   function outside(ev) { if (!menu.contains(ev.target)) close(); }
   setTimeout(function () { document.addEventListener('mousedown', outside, true); }, 0);
 
-  // Resolve the column's project path from activeProjectKey on the colData.
-  var projectPath = col.projectKey || activeProjectKey;
+  // The Claude CLI keys its transcript dir by the cwd the process actually ran
+  // in, so this must resolve the same way restartColumn/sessionExists and the
+  // ctx meter do — otherwise a column with a non-root cwd lists/resumes
+  // sessions from the wrong directory.
+  var projectPath = window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey || activeProjectKey);
   if (!projectPath) { loading.textContent = 'No project for this column.'; return; }
 
   window.electronAPI.getRecentSessions(projectPath, col.profileId).then(function (sessions) {
@@ -7472,6 +7475,17 @@ function showColumnSessionPicker(colId, clientX, clientY) {
       item.addEventListener('click', function () {
         // Swap to the chosen session and restart in place.
         col.sessionId = s.sessionId;
+        // The `since` filter belongs to the session the column was previously
+        // bound to; every entry in the resumed transcript predates it, so
+        // leaving it set makes the ctx meter read 0.
+        col.contextEnabled = true;
+        col.contextSinceMs = null;
+        // Stale pointers into the previous session's transcript — mirror the
+        // reset done wherever else col.sessionId is reassigned.
+        col.voiceTranscriptPath = null;
+        col.voicePreTurnUuid = undefined;
+        col.lastSpokenUuid = undefined;
+        col.lastSpokenText = undefined;
         codexWatchMaybeStart();
         restartColumn(colId);
         close();
@@ -15016,7 +15030,8 @@ function startContextMeterPoll(colId) {
     var ts = new Date().toISOString().slice(11, 19);
     var col = allColumns.get(colId);
     if (!col || !col.ctxMeterEl) return;
-    console.log('[ctx-meter ' + ts + '] tick col=' + colId + ' sessionId=' + col.sessionId + ' projectKey=' + col.projectKey + ' cmd=' + col.cmd);
+    var lookupCwd = window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey);
+    console.log('[ctx-meter ' + ts + '] tick col=' + colId + ' sessionId=' + col.sessionId + ' projectKey=' + col.projectKey + ' lookupCwd=' + lookupCwd + ' cmd=' + col.cmd);
     if (!col.sessionId) {
       showCtxMeterPlaceholder(col, '…');
       return;
@@ -15031,7 +15046,7 @@ function startContextMeterPoll(colId) {
       console.log('[ctx-meter] electronAPI.getSessionContextTokens missing');
       return;
     }
-    window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId, col.contextSinceMs, col.profileId).then(function (tokens) {
+    window.electronAPI.getSessionContextTokens(lookupCwd, col.sessionId, col.contextSinceMs, col.profileId).then(function (tokens) {
       console.log('[ctx-meter ' + ts + '] col=' + colId + ' → tokens=' + tokens);
       if (tokens == null) {
         showCtxMeterPlaceholder(col, '0');
