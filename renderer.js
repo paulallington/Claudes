@@ -7472,6 +7472,17 @@ function showColumnSessionPicker(colId, clientX, clientY) {
       item.addEventListener('click', function () {
         // Swap to the chosen session and restart in place.
         col.sessionId = s.sessionId;
+        // The `since` filter belongs to the session the column was previously
+        // bound to; every entry in the resumed transcript predates it, so
+        // leaving it set makes the ctx meter read 0.
+        col.contextEnabled = true;
+        col.contextSinceMs = null;
+        // Stale pointers into the previous session's transcript — mirror the
+        // reset done wherever else col.sessionId is reassigned.
+        col.voiceTranscriptPath = null;
+        col.voicePreTurnUuid = undefined;
+        col.lastSpokenUuid = undefined;
+        col.lastSpokenText = undefined;
         codexWatchMaybeStart();
         restartColumn(colId);
         close();
@@ -15016,7 +15027,8 @@ function startContextMeterPoll(colId) {
     var ts = new Date().toISOString().slice(11, 19);
     var col = allColumns.get(colId);
     if (!col || !col.ctxMeterEl) return;
-    console.log('[ctx-meter ' + ts + '] tick col=' + colId + ' sessionId=' + col.sessionId + ' projectKey=' + col.projectKey + ' cmd=' + col.cmd);
+    var lookupCwd = window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey);
+    console.log('[ctx-meter ' + ts + '] tick col=' + colId + ' sessionId=' + col.sessionId + ' projectKey=' + col.projectKey + ' lookupCwd=' + lookupCwd + ' cmd=' + col.cmd);
     if (!col.sessionId) {
       showCtxMeterPlaceholder(col, '…');
       return;
@@ -15031,7 +15043,7 @@ function startContextMeterPoll(colId) {
       console.log('[ctx-meter] electronAPI.getSessionContextTokens missing');
       return;
     }
-    window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId, col.contextSinceMs, col.profileId).then(function (tokens) {
+    window.electronAPI.getSessionContextTokens(lookupCwd, col.sessionId, col.contextSinceMs, col.profileId).then(function (tokens) {
       console.log('[ctx-meter ' + ts + '] col=' + colId + ' → tokens=' + tokens);
       if (tokens == null) {
         showCtxMeterPlaceholder(col, '0');
