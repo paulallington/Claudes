@@ -55,7 +55,26 @@ test('RPC client initializes once and correlates app-server responses', async ()
   assert.deepStrictEqual(await pending, { data: [], nextCursor: null });
 });
 
-test('managed service prepares a resumable thread and publishes sanitized live state', async () => {
+test('RPC client preserves the app-server error code for classified recovery', async () => {
+  class FakeSocket extends EventEmitter {
+    send(raw) {
+      const message = JSON.parse(raw);
+      this.emit('message', JSON.stringify({
+        id: message.id,
+        error: { code: -32600, message: 'no rollout found for thread id 0198f064-8ec4-7a21-82db-0cc0f67c9612' }
+      }));
+    }
+  }
+
+  const client = new CodexRpcClient(new FakeSocket(), { requestTimeoutMs: 100 });
+  await assert.rejects(client.request('thread/read', {}), (error) => {
+    assert.equal(error.code, -32600);
+    assert.match(error.message, /no rollout found/i);
+    return true;
+  });
+});
+
+test('managed service registers a fresh claim, resumes verified threads, and publishes sanitized live state', async () => {
   const threadId = '0198f064-8ec4-7a21-82db-0cc0f67c9612';
   const token = 'a-main-owned-capability-token';
   const spawnCalls = [];
@@ -83,13 +102,6 @@ test('managed service prepares a resumable thread and publishes sanitized live s
             defaultServiceTier: null,
             path: 'must-not-pass-through'
           }], nextCursor: null
-        } }));
-      }
-      if (msg.method === 'thread/start') {
-        this.emit('message', JSON.stringify({ id: msg.id, result: {
-          thread: { id: threadId, status: { type: 'idle' }, cwd: msg.params.cwd, preview: 'private prompt' },
-          model: 'gpt-5.6-sol', reasoningEffort: 'high', serviceTier: 'priority',
-          approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite', writableRoots: [msg.params.cwd] }
         } }));
       }
       if (msg.method === 'thread/read') {
@@ -146,12 +158,22 @@ test('managed service prepares a resumable thread and publishes sanitized live s
   });
 
   const prepared = await service.prepareThread({ cwd: 'D:/safe/project' });
+  assert.match(prepared.claimId, /^[a-f0-9]{32}$/);
   assert.deepStrictEqual(prepared, {
+    mode: 'fresh',
+    claimId: prepared.claimId,
+    remoteUrl: 'ws://127.0.0.1:4567',
+    remoteTokenEnvName: REMOTE_TOKEN_ENV_NAME
+  });
+  assert.strictEqual(socket.sent.some((message) => message.method === 'thread/start'), false);
+
+  const resumed = await service.prepareThread({ cwd: 'd:\\SAFE\\project', threadId });
+  assert.deepStrictEqual(resumed, {
+    mode: 'resume',
     threadId,
     remoteUrl: 'ws://127.0.0.1:4567',
     remoteTokenEnvName: REMOTE_TOKEN_ENV_NAME
   });
-  assert.deepStrictEqual(await service.prepareThread({ cwd: 'd:\\SAFE\\project', threadId }), prepared);
   socket.emit('message', JSON.stringify({
     method: 'thread/tokenUsage/updated',
     params: { threadId, tokenUsage: { last: { totalTokens: 2500 }, modelContextWindow: 10000 } }
@@ -160,7 +182,6 @@ test('managed service prepares a resumable thread and publishes sanitized live s
     usedTokens: 2500, modelContextWindow: 10000, percent: 25
   });
   assert.deepStrictEqual(stateEvents.at(-1), service.getThreadState(threadId));
-  assert.strictEqual(JSON.stringify(stateEvents).includes('private prompt'), false);
   assert.strictEqual(JSON.stringify(stateEvents).includes('D:/safe/project'), false);
 
   service.stop();
@@ -209,6 +230,108 @@ test('resume refuses a thread owned by a different working directory', async () 
   );
   assert.strictEqual(methods.includes('thread/resume'), false);
   service.stop();
+});
+
+test('missing rollout resume intent recovers as fresh but other read failures remain errors', async () => {
+  const threadId = '0198f064-8ec4-7a21-82db-0cc0f67c9612';
+  const methods = [];
+  const service = new CodexAppServerService({
+    token: 'a-main-owned-capability-token',
+    platform: 'win32',
+    spawnProcess: () => new EventEmitter(),
+    createSocket: () => new EventEmitter(),
+    randomBytes: (size) => Buffer.alloc(size, 7)
+  });
+  service.remoteUrl = 'ws://127.0.0.1:4567';
+  service.client = {
+    request(method) {
+      methods.push(method);
+      const error = new Error('thread/read failed: No rollout found for thread id ' + threadId);
+      error.code = -32600;
+      return Promise.reject(error);
+    }
+  };
+
+  assert.deepStrictEqual(await service.prepareThread({ cwd: 'D:/safe/project', threadId }), {
+    mode: 'fresh',
+    claimId: '07070707070707070707070707070707',
+    remoteUrl: 'ws://127.0.0.1:4567',
+    remoteTokenEnvName: REMOTE_TOKEN_ENV_NAME
+  });
+  assert.deepStrictEqual(methods, ['thread/read']);
+
+  service.client.request = () => Promise.reject(new Error('Codex app-server request timed out'));
+  await assert.rejects(
+    service.prepareThread({ cwd: 'D:/safe/project', threadId }),
+    /timed out/i
+  );
+
+  const unrelated = new Error('invalid request');
+  unrelated.code = -32600;
+  service.client.request = () => Promise.reject(unrelated);
+  await assert.rejects(
+    service.prepareThread({ cwd: 'D:/safe/project', threadId }),
+    /invalid request/i
+  );
+});
+
+test('thread started broadcasts claim fresh launches by normalized cwd in FIFO order', async () => {
+  const firstThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9612';
+  const secondThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9613';
+  const unrelatedThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9614';
+  const expiredThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9615';
+  const claims = [];
+  const states = [];
+  let now = 1000;
+  let randomByte = 1;
+  const service = new CodexAppServerService({
+    token: 'a-main-owned-capability-token',
+    platform: 'win32',
+    spawnProcess: () => new EventEmitter(),
+    createSocket: () => new EventEmitter(),
+    now: () => now,
+    randomBytes: (size) => Buffer.alloc(size, randomByte++),
+    claimTtlMs: 100,
+    onThreadClaimed: (claim) => claims.push(claim),
+    onState: (state) => states.push(state)
+  });
+  service.client = {};
+  service.remoteUrl = 'ws://127.0.0.1:4567';
+
+  const first = await service.prepareThread({ cwd: 'D:/safe/project' });
+  const second = await service.prepareThread({ cwd: 'd:\\SAFE\\project\\.' });
+  const expired = await service.prepareThread({ cwd: 'D:/expired/project' });
+
+  service.handleNotification({
+    method: 'thread/started',
+    params: { thread: { id: unrelatedThreadId, cwd: 'D:/other/project', status: { type: 'idle' }, preview: 'private' } }
+  });
+  assert.deepStrictEqual(claims, []);
+  assert.strictEqual(JSON.stringify(states).includes('D:/other/project'), false);
+  assert.strictEqual(JSON.stringify(states).includes('private'), false);
+
+  service.handleNotification({
+    method: 'thread/started',
+    params: { thread: { id: firstThreadId, cwd: 'D:/SAFE/project', status: { type: 'idle' } } }
+  });
+  service.handleNotification({
+    method: 'thread/started',
+    params: { thread: { id: secondThreadId, cwd: 'd:\\safe\\project', status: { type: 'active' } } }
+  });
+  now = 1101;
+  service.handleNotification({
+    method: 'thread/started',
+    params: { thread: { id: expiredThreadId, cwd: 'D:/expired/project', status: { type: 'idle' } } }
+  });
+
+  assert.deepStrictEqual(claims, [
+    { claimId: first.claimId, threadId: firstThreadId },
+    { claimId: second.claimId, threadId: secondThreadId }
+  ]);
+  assert.notStrictEqual(expired.claimId, first.claimId);
+  assert.equal(service.getThreadState(firstThreadId).status, 'idle');
+  assert.equal(service.getThreadState(secondThreadId).status, 'running');
+  assert.equal(service.getThreadState(expiredThreadId).status, 'idle');
 });
 
 test('unexpected app-server exit disables the bridge instead of changing its endpoint', async () => {
