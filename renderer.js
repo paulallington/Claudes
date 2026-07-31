@@ -1160,13 +1160,6 @@ function connectWS() {
     } else if (msg.type === 'exit') {
       var col2 = allColumns.get(msg.id);
       if (col2) {
-        if (col2.suppressNextExit) {
-          col2.suppressNextExit = false;
-          if (col2.suppressNextExitTimer) clearTimeout(col2.suppressNextExitTimer);
-          col2.suppressNextExitTimer = null;
-          col2.element.querySelectorAll('.exit-overlay').forEach(function (node) { node.remove(); });
-          return;
-        }
         // Endpoint failover: if this is a Claude column that died early with a
         // non-zero exit code, and the column was spawned with an endpoint that
         // has a fallback configured, transparently respawn with the fallback
@@ -3865,8 +3858,11 @@ function restoreSessions(projectPath, workspaceId) {
         // Codex entries rebuild validated semantic settings, then resume their
         // native Codex thread through the authenticated app-server when it is
         // available. They remain outside Claude session/Headroom machinery.
-        await ensureCodexCatalog();
-        var codexSpec = window.CodexSpawn.buildCodexRestore(e, rowOpts.cwd || projectPath, codexRestoreModels(e.codexModel));
+        var codexSpec = null;
+        if (e && e.kind === 'codex') {
+          await ensureCodexCatalog();
+          codexSpec = window.CodexSpawn.buildCodexRestore(e, rowOpts.cwd || projectPath, codexRestoreModels(e.codexModel));
+        }
         if (codexSpec) {
           await spawnCodexColumn(rowOpts.cwd || projectPath, targetRow, codexSpec, {
             threadId: codexSpec.opts.codexThreadId,
@@ -3915,8 +3911,11 @@ function restoreSessions(projectPath, workspaceId) {
             console.warn("Minimised column '" + (ment.title || ment.sessionId) + "' had cwd " + ment.cwd + " which no longer exists; restored at project root.");
           }
         }
-        await ensureCodexCatalog();
-        var minCodexSpec = window.CodexSpawn.buildCodexRestore(ment, minRowOpts.cwd || projectPath, codexRestoreModels(ment.codexModel));
+        var minCodexSpec = null;
+        if (ment && ment.kind === 'codex') {
+          await ensureCodexCatalog();
+          minCodexSpec = window.CodexSpawn.buildCodexRestore(ment, minRowOpts.cwd || projectPath, codexRestoreModels(ment.codexModel));
+        }
         if (minCodexSpec) {
           await spawnCodexColumn(minRowOpts.cwd || projectPath, null, minCodexSpec, {
             threadId: minCodexSpec.opts.codexThreadId,
@@ -7047,16 +7046,11 @@ async function restartColumn(id) {
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
   // Passthrough for arbitrary-cmd/endpoint columns; hasMcp from the fresh resolve.
   maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: __rHasMcp, oneMModel: col.model });
-  // Prepare/authorize managed Codex before killing the old PTY. The old exit
-  // arrives asynchronously; suppress exactly that expected event so it cannot
-  // paint an exit overlay on top of the replacement terminal.
+  // Prepare/authorize managed Codex before killing the old PTY. pty-server
+  // removes that exact PTY generation from its map before its async exit
+  // callback runs, so the killed generation cannot emit an exit message here.
+  // Do not suppress the next renderer exit: it would belong to the replacement.
   if (!hadExitOverlay) {
-    col.suppressNextExit = true;
-    if (col.suppressNextExitTimer) clearTimeout(col.suppressNextExitTimer);
-    col.suppressNextExitTimer = setTimeout(function () {
-      var live = allColumns.get(id);
-      if (live) live.suppressNextExit = false;
-    }, 3000);
     wsSend({ type: 'kill', id: id });
   }
   gatedWsSend(sendMsg);
