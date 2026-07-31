@@ -4846,7 +4846,10 @@ function startTitleEdit(id, titleEl) {
       col.customTitle = text;
       persistSessions(col.projectKey, col.workspaceId);
     },
-    onEmpty: function () { return 'Claude #' + id; }
+    onEmpty: function () {
+      var col = allColumns.get(id);
+      return ((col && col.cmd === 'codex') ? 'Codex #' : 'Claude #') + id;
+    }
   });
 }
 
