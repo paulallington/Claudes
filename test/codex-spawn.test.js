@@ -16,6 +16,7 @@ const {
   codexPersistShape,
   codexApprovalLabelFromArgs,
   isCodexThreadId,
+  buildCodexRemoteAttach,
   buildCodexRemoteResume,
   codexContextDisplay
 } = require('../lib/codex-spawn');
@@ -235,6 +236,44 @@ test('managed resume keeps semantic settings but validates bridge coordinates', 
   assert.strictEqual(buildCodexRemoteResume(semantic, {
     threadId: 'not-a-uuid', remoteUrl: 'ws://evil.example:80', remoteTokenEnvName: 'PATH'
   }), null);
+});
+
+test('fresh managed attach keeps semantic settings without resume or a thread UUID', () => {
+  const semantic = buildCodexSpawn('/x', 'auto', {
+    model: 'gpt-5.6-sol', effort: 'ultra', tier: 'priority'
+  }).args;
+  assert.deepStrictEqual(buildCodexRemoteAttach(semantic, {
+    mode: 'fresh',
+    claimId: '0123456789abcdef0123456789abcdef',
+    cwd: 'D:\\Repo Space',
+    remoteUrl: 'ws://127.0.0.1:45678',
+    remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN'
+  }, 'Read .claudes/handoff.md first'), [
+    '-a', 'on-request', '-s', 'workspace-write',
+    '--model', 'gpt-5.6-sol',
+    '-c', 'model_reasoning_effort=ultra',
+    '-c', 'service_tier=priority',
+    '-C', 'D:\\Repo Space',
+    '--remote', 'ws://127.0.0.1:45678',
+    '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN',
+    'Read .claudes/handoff.md first'
+  ]);
+});
+
+test('managed attach rejects malformed or cross-mode identities and shell-active prompts', () => {
+  const bridge = {
+    cwd: 'D:\\Repo Space',
+    remoteUrl: 'ws://127.0.0.1:45678',
+    remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN'
+  };
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'fresh', claimId: 'ABCDEF0123456789ABCDEF0123456789' }), null);
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef', threadId: '123e4567-e89b-42d3-a456-426614174000' }), null);
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'resume', threadId: '123e4567-e89b-42d3-a456-426614174000', claimId: '0123456789abcdef0123456789abcdef' }), null);
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' }, 'hello & whoami'), null);
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, cwd: 'relative/path', mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' }), null);
+  const legalSpecialPath = 'D:\\Repo (100%)!';
+  const specialAttach = buildCodexRemoteAttach([], { ...bridge, cwd: legalSpecialPath, mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' });
+  assert.deepStrictEqual(specialAttach.slice(0, 2), ['-C', legalSpecialPath]);
 });
 
 test('persist/restore carries only a validated native thread id, never bridge details', () => {

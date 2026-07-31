@@ -43,7 +43,7 @@ const {
   filterMcpDefs
 } = require('./lib/interactive-scheduled');
 const { appendWithRotation } = require('./lib/voice-debug-log');
-const { codexLookupCommand, parseWhichOutput } = require('./lib/codex-spawn');
+const { codexLookupCommand, parseWhichOutput, isCodexThreadId } = require('./lib/codex-spawn');
 const { parseCodexRateLimits, pickLatestRolloutPath } = require('./lib/codex-limits');
 const { parseChecksumFile, checksumsMatch } = require('./lib/update-checksum');
 const { resolveProfile, profileClaudeRoot, PRIMARY_ID } = require('./lib/profile-resolve');
@@ -7713,6 +7713,24 @@ function publishCodexThreadState(state) {
   }
 }
 
+function publishCodexThreadClaimed(claim) {
+  if (!claim || typeof claim.claimId !== 'string' || !/^[0-9a-f]{32}$/.test(claim.claimId)) return;
+  if (!isCodexThreadId(claim.threadId)) return;
+  const sanitized = { claimId: claim.claimId, threadId: claim.threadId };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('codex:threadClaimed', sanitized);
+  }
+}
+
+function publishCodexClaimExpired(claim) {
+  if (!claim || typeof claim.claimId !== 'string' || !/^[0-9a-f]{32}$/.test(claim.claimId)) return;
+  if (claim.reason !== 'timeout' && claim.reason !== 'unavailable') return;
+  const sanitized = { claimId: claim.claimId, reason: claim.reason };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('codex:claimExpired', sanitized);
+  }
+}
+
 async function startCodexAppServer() {
   if (codexBridgeDisabled) return false;
   if (!hasCodex()) return false;
@@ -7726,6 +7744,8 @@ async function startCodexAppServer() {
       spawnProcess: spawn,
       createSocket: (url, options) => new WebSocket(url, options),
       onState: publishCodexThreadState,
+      onThreadClaimed: publishCodexThreadClaimed,
+      onClaimExpired: publishCodexClaimExpired,
       onUnavailable: () => {
         if (codexAppServer === service) {
           codexAppServer = null;
@@ -7788,25 +7808,36 @@ ipcMain.handle('codex:prepareThread', async (event, opts) => {
       cwd: safeCwd,
       threadId: opts && opts.threadId
     });
-    const issued = codexSpawnTicketStore.issue({
-      threadId: prepared.threadId,
+    const identity = prepared.mode === 'fresh'
+      ? { claimId: prepared.claimId }
+      : prepared.mode === 'resume'
+        ? { threadId: prepared.threadId }
+        : null;
+    if (!identity) throw new Error('invalid Codex thread preparation mode');
+    const binding = {
+      mode: prepared.mode,
+      ...identity,
       cwd: safeCwd,
       remoteUrl: prepared.remoteUrl
-    }, process.platform);
+    };
+    const issued = codexSpawnTicketStore.issue(binding, process.platform);
     try {
       await sendPtyControl({
         type: 'codex-spawn-authorize',
         ticket: issued.ticket,
-        threadId: prepared.threadId,
-        cwd: safeCwd,
-        remoteUrl: prepared.remoteUrl,
+        ...binding,
         expiresAt: issued.expiresAt
       });
     } finally {
       codexSpawnTicketStore.discard(issued.ticket);
     }
-    return { ok: true, ...prepared, spawnTicket: issued.ticket };
+    if (codexAppServer !== service || !service.isPreparationActive(prepared)) {
+      throw new Error('Codex bridge became unavailable before terminal attach');
+    }
+    diagLog('[codex-bridge] prepared', prepared.mode, 'terminal attach');
+    return { ok: true, ...prepared, cwd: safeCwd, spawnTicket: issued.ticket };
   } catch (err) {
+    diagLog('[codex-bridge] prepare failed:', err && err.message);
     return { ok: false, error: String(err && err.message || err) };
   }
 });

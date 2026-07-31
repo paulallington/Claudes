@@ -40,6 +40,7 @@ var codexCatalogPromise = null;
 var codexCatalogLive = false;
 var codexPendingSelections = { projectKey: null, model: '', effort: '', tier: '' };
 var codexFallbackWarningShown = false;
+var codexAttachWarningShown = false;
 
 function renderCodexPicker(sel, list, inheritLabel, selected) {
   if (!sel) return;
@@ -5702,6 +5703,8 @@ function addColumn(args, targetRow, opts) {
     cmd: cmd,
     cmdArgs: __origArgs,     // ORIGINAL args (no injected --session-id; see __plan above)
     codexThreadId: window.CodexSpawn.isCodexThreadId(opts.codexThreadId) ? opts.codexThreadId : null,
+    codexClaimId: window.CodexSpawn.isCodexClaimId(opts.codexClaimId) ? opts.codexClaimId : null,
+    codexClaimCwd: window.CodexSpawn.isCodexClaimId(opts.codexClaimId) && opts.codexClaimCwd === cwd ? cwd : null,
     codexManaged: !!opts.codexManaged,
     model: detectedModel,    // for ctx meter limit (200k vs 1M)
     effort: detectedEffort,  // current effort; source of truth for the header badge + respawns
@@ -5793,6 +5796,7 @@ function addColumn(args, targetRow, opts) {
   var effortBadgeEl = header.querySelector('.col-effort');
   if (effortBadgeEl && colData.effort && isValidEffort(colData.effort)) effortBadgeEl.value = colData.effort;
   if (cmd === 'codex' && colData.codexThreadId) startCodexThreadState(id);
+  else if (cmd === 'codex' && colData.codexManaged && colData.codexClaimId) showCtxMeterPlaceholder(colData, '…');
   else if (cmd === 'codex') markCodexFallback(colData);
   else startContextMeterPoll(id);
   setFocusedColumn(id);
@@ -7058,20 +7062,31 @@ async function restartColumn(id) {
           threadId: window.CodexSpawn.isCodexThreadId(col.codexThreadId) ? col.codexThreadId : undefined
         });
         var remoteResumeArgs = preparedThread && preparedThread.ok && /^[0-9a-f]{64}$/i.test(preparedThread.spawnTicket || '')
-          ? window.CodexSpawn.buildCodexRemoteResume(col.cmdArgs || [], preparedThread)
+          ? window.CodexSpawn.buildCodexRemoteAttach(col.cmdArgs || [], preparedThread)
           : null;
         if (remoteResumeArgs) {
           sendMsg.args = remoteResumeArgs;
           sendMsg.spawnTicket = preparedThread.spawnTicket;
-          col.codexThreadId = preparedThread.threadId;
           col.codexManaged = true;
           codexRestartManaged = true;
-          startCodexThreadState(id);
+          if (preparedThread.mode === 'resume') {
+            col.codexThreadId = preparedThread.threadId;
+            col.codexClaimId = null;
+            col.codexClaimCwd = null;
+            startCodexThreadState(id);
+          } else if (preparedThread.mode === 'fresh') {
+            col.codexThreadId = null;
+            col.codexClaimId = preparedThread.claimId;
+            col.codexClaimCwd = sendMsg.cwd;
+            showCtxMeterPlaceholder(col, '…');
+          }
         }
       } catch (e) { /* retain the direct CLI fallback argv */ }
     }
     if (col.cmd === 'codex' && !codexRestartManaged) {
       col.codexThreadId = null;
+      col.codexClaimId = null;
+      col.codexClaimCwd = null;
       col.codexManaged = false;
       markCodexFallback(col);
     }
@@ -7837,16 +7852,27 @@ async function spawnCodexColumn(cwd, targetRow, semanticSpec, options) {
     } catch (e) { prepared = null; }
   }
   var managedArgs = prepared && prepared.ok && /^[0-9a-f]{64}$/i.test(prepared.spawnTicket || '')
-    ? window.CodexSpawn.buildCodexRemoteResume(semanticArgs, prepared, options.prompt)
+    ? window.CodexSpawn.buildCodexRemoteAttach(semanticArgs, prepared, options.prompt)
     : null;
   if (managedArgs) {
-    columnOpts.codexThreadId = prepared.threadId;
     columnOpts.codexManaged = true;
     columnOpts.spawnTicket = prepared.spawnTicket;
+    if (prepared.mode === 'resume') {
+      columnOpts.codexThreadId = prepared.threadId;
+      delete columnOpts.codexClaimId;
+      delete columnOpts.codexClaimCwd;
+    } else {
+      delete columnOpts.codexThreadId;
+      columnOpts.codexClaimId = prepared.claimId;
+      columnOpts.codexClaimCwd = effectiveCwd;
+    }
     addColumn(managedArgs, targetRow, columnOpts);
     var managedColumn = allColumns.get(globalColumnId);
     if (managedColumn) persistSessions(managedColumn.projectKey, managedColumn.workspaceId);
-    return { managed: true, threadId: prepared.threadId };
+    return { managed: true,
+      threadId: prepared.mode === 'resume' ? prepared.threadId : null,
+      claimId: prepared.mode === 'fresh' ? prepared.claimId : null
+    };
   }
 
   // App-server is intentionally a progressive enhancement. If it cannot be
@@ -15346,6 +15372,61 @@ function handleCodexThreadState(threadState) {
   });
 }
 
+function markCodexClaimExpired(col, reason) {
+  if (!col || col.cmd !== 'codex') return;
+  showCtxMeterPlaceholder(col, '—');
+  var label = reason === 'unavailable' ? 'Attach unavailable' : 'Attach timed out';
+  col.ctxMeterEl.title = label + ' · live context and native resume are unavailable.\nRelaunch Claudes to retry the managed connection safely.';
+  col.ctxMeterEl.setAttribute('aria-valuetext', label + '; live Codex context unavailable');
+  var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
+  if (badge) {
+    badge.textContent = label;
+    badge.classList.add('col-codex-badge-fallback');
+    updateCodexBadgeAccessibility(badge, null, label + ' · Relaunch Claudes to retry');
+  }
+  if (!codexAttachWarningShown) {
+    codexAttachWarningShown = true;
+    showToast(label + ' — relaunch Claudes to retry live context and native resume.', { kind: 'warn', duration: 7000 });
+  }
+}
+
+function handleCodexThreadClaimed(claim) {
+  if (!claim || !window.CodexSpawn.isCodexClaimId(claim.claimId) || !window.CodexSpawn.isCodexThreadId(claim.threadId)) return;
+  var matches = [];
+  allColumns.forEach(function (col, id) {
+    if (col && col.cmd === 'codex' && col.codexManaged && !col.codexThreadId &&
+        col.codexClaimId === claim.claimId && col.codexClaimCwd && col.codexClaimCwd === col.cwd) {
+      matches.push({ id: id, col: col });
+    }
+  });
+  // A claim is a one-column capability. Reject ambiguity instead of letting a
+  // duplicated transient value cross a project/cwd boundary.
+  if (matches.length !== 1) return;
+  var match = matches[0];
+  match.col.codexThreadId = claim.threadId;
+  match.col.codexClaimId = null;
+  match.col.codexClaimCwd = null;
+  persistSessions(match.col.projectKey, match.col.workspaceId);
+  startCodexThreadState(match.id);
+}
+
+function handleCodexClaimExpired(claim) {
+  if (!claim || !window.CodexSpawn.isCodexClaimId(claim.claimId) ||
+      (claim.reason !== 'timeout' && claim.reason !== 'unavailable')) return;
+  var matches = [];
+  allColumns.forEach(function (col) {
+    if (col && col.cmd === 'codex' && col.codexManaged && !col.codexThreadId &&
+        col.codexClaimId === claim.claimId) matches.push(col);
+  });
+  if (matches.length !== 1) return;
+  var col = matches[0];
+  col.codexClaimId = null;
+  col.codexClaimCwd = null;
+  col.codexManaged = false;
+  persistSessions(col.projectKey, col.workspaceId);
+  markCodexClaimExpired(col, claim.reason);
+}
+
 function startCodexThreadState(colId) {
   var col = allColumns.get(colId);
   if (!col || col.cmd !== 'codex' || !col.codexThreadId) return;
@@ -15359,6 +15440,12 @@ function startCodexThreadState(colId) {
 
 if (window.electronAPI && window.electronAPI.onCodexThreadState) {
   window.electronAPI.onCodexThreadState(handleCodexThreadState);
+}
+if (window.electronAPI && window.electronAPI.onCodexThreadClaimed) {
+  window.electronAPI.onCodexThreadClaimed(handleCodexThreadClaimed);
+}
+if (window.electronAPI && window.electronAPI.onCodexClaimExpired) {
+  window.electronAPI.onCodexClaimExpired(handleCodexClaimExpired);
 }
 
 function startContextMeterPoll(colId) {
