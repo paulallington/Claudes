@@ -171,6 +171,7 @@ function sanitiseEnv(input) {
 }
 
 const CODEX_THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CODEX_CLAIM_ID_RE = /^[0-9a-f]{32}$/;
 const CODEX_REMOTE_RE = /^ws:\/\/127\.0\.0\.1:(?:[1-9]\d{0,4})\/?$/;
 let codexBridgeConfig = null;
 const codexSpawnTickets = new Map();
@@ -182,21 +183,84 @@ function normalizeCodexCwd(cwd) {
   return process.platform === 'win32' ? value.toLowerCase() : value;
 }
 
+function isSafeCodexValue(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9._][A-Za-z0-9._-]*$/.test(value);
+}
+
+function isSafeCodexSemanticArgs(args) {
+  let i = 0;
+  if (args[i] === '--dangerously-bypass-approvals-and-sandbox') {
+    i++;
+  } else if (args[i] === '-a') {
+    const approval = args[i + 1];
+    const sandbox = args[i + 2] === '-s' ? args[i + 3] : null;
+    const pair = approval + ':' + sandbox;
+    if (pair !== 'untrusted:read-only' && pair !== 'on-request:workspace-write' && pair !== 'never:danger-full-access') return false;
+    i += 4;
+  }
+  if (args[i] === '--model') {
+    if (!isSafeCodexValue(args[i + 1])) return false;
+    i += 2;
+  }
+  if (args[i] === '-c' && typeof args[i + 1] === 'string' && args[i + 1].indexOf('model_reasoning_effort=') === 0) {
+    if (!isSafeCodexValue(args[i + 1].slice('model_reasoning_effort='.length))) return false;
+    i += 2;
+  }
+  if (args[i] === '-c' && typeof args[i + 1] === 'string' && args[i + 1].indexOf('service_tier=') === 0) {
+    if (!isSafeCodexValue(args[i + 1].slice('service_tier='.length))) return false;
+    i += 2;
+  }
+  return i === args.length;
+}
+
+function isSafeCodexPrompt(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  // Windows may use cmd.exe only as a last-resort executable shim. Refuse its
+  // metacharacters so the sole trailing positional can never become syntax.
+  return !/[\x00-\x1f\x7f&|<>^%!"()]/.test(value);
+}
+
+function isCodexSubcommand(value) {
+  return /^(exec|e|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|app|completion|update|doctor|sandbox|debug|apply|a|resume|archive|delete|unarchive|fork|cloud|exec-server|features|help)$/.test(value);
+}
+
+function canonicalCodexCwdArg(value) {
+  if (typeof value !== 'string' || !value || /[\x00-\x1f\x7f]/.test(value)) return null;
+  const paths = process.platform === 'win32' ? path.win32 : path.posix;
+  if (!paths.isAbsolute(value)) return null;
+  return normalizeCodexCwd(value);
+}
+
 function codexBindingFromArgs(cmd, args) {
   if (cmd !== 'codex' || !Array.isArray(args) || !codexBridgeConfig) return null;
-  if (args.filter((value) => value === 'resume').length !== 1) return null;
   if (args.filter((value) => value === '--remote').length !== 1) return null;
   if (args.filter((value) => value === '--remote-auth-token-env').length !== 1) return null;
-  const resumeIdx = args.indexOf('resume');
+  const mode = args[0] === 'resume' ? 'resume' : 'fresh';
+  if (args.slice(mode === 'resume' ? 1 : 0).includes('resume')) return null;
   const remoteIdx = args.indexOf('--remote');
   const envIdx = args.indexOf('--remote-auth-token-env');
-  if (remoteIdx <= resumeIdx || envIdx <= resumeIdx) return null;
+  const semanticStart = mode === 'resume' ? 1 : 0;
+  let semanticEnd = remoteIdx;
+  let freshCwd = null;
+  if (mode === 'fresh') {
+    if (args.filter((value) => value === '-C').length !== 1 || remoteIdx < 2 || args[remoteIdx - 2] !== '-C') return null;
+    freshCwd = canonicalCodexCwdArg(args[remoteIdx - 1]);
+    if (!freshCwd) return null;
+    semanticEnd -= 2;
+  } else if (args.includes('-C')) {
+    return null;
+  }
+  if (remoteIdx < semanticStart || envIdx !== remoteIdx + 2 || !isSafeCodexSemanticArgs(args.slice(semanticStart, semanticEnd))) return null;
   const remoteUrl = args[remoteIdx + 1];
   if (remoteUrl !== codexBridgeConfig.remoteUrl) return null;
   if (args[envIdx + 1] !== CODEX_BRIDGE_TOKEN_ENV_NAME) return null;
-  const threadIds = args.slice(resumeIdx + 1).filter((value) => typeof value === 'string' && CODEX_THREAD_ID_RE.test(value));
-  if (threadIds.length !== 1) return null;
-  return { threadId: threadIds[0], remoteUrl };
+  const tail = args.slice(envIdx + 2);
+  if (mode === 'resume') {
+    if (!CODEX_THREAD_ID_RE.test(tail[0] || '') || tail.length > 2 || (tail.length === 2 && !isSafeCodexPrompt(tail[1]))) return null;
+    return { mode, threadId: tail[0], remoteUrl };
+  }
+  if (tail.length > 1 || (tail.length === 1 && (!isSafeCodexPrompt(tail[0]) || CODEX_THREAD_ID_RE.test(tail[0]) || isCodexSubcommand(tail[0])))) return null;
+  return { mode, cwd: freshCwd, remoteUrl };
 }
 
 function codexBridgeEnvForSpawn(cmd, args, cwd, ticket) {
@@ -206,7 +270,9 @@ function codexBridgeEnvForSpawn(cmd, args, cwd, ticket) {
   // Consume before comparing: a guessed/misrouted ticket can never be retried.
   codexSpawnTickets.delete(ticket);
   if (!stored || stored.expiresAt < Date.now()) return {};
-  if (stored.threadId !== binding.threadId || stored.remoteUrl !== binding.remoteUrl || stored.cwd !== normalizeCodexCwd(cwd)) return {};
+  if (stored.mode !== binding.mode || stored.remoteUrl !== binding.remoteUrl || stored.cwd !== normalizeCodexCwd(cwd)) return {};
+  if (binding.mode === 'resume' && stored.threadId !== binding.threadId) return {};
+  if (binding.mode === 'fresh' && stored.cwd !== binding.cwd) return {};
   return { [CODEX_BRIDGE_TOKEN_ENV_NAME]: codexBridgeConfig.token };
 }
 
@@ -232,11 +298,15 @@ process.stdin.on('data', (chunk) => {
       }
     } else if (message.type === 'codex-spawn-authorize' && codexBridgeConfig) {
       const cwd = normalizeCodexCwd(message.cwd);
+      const resumeIdentity = message.mode === 'resume' && !message.claimId && CODEX_THREAD_ID_RE.test(message.threadId || '');
+      const freshIdentity = message.mode === 'fresh' && !message.threadId && CODEX_CLAIM_ID_RE.test(message.claimId || '');
       if (typeof message.ticket === 'string' && /^[0-9a-f]{64}$/i.test(message.ticket) &&
-          CODEX_THREAD_ID_RE.test(message.threadId || '') && cwd &&
+          (resumeIdentity || freshIdentity) && cwd &&
           message.remoteUrl === codexBridgeConfig.remoteUrl && Number.isFinite(message.expiresAt) && message.expiresAt > Date.now()) {
         codexSpawnTickets.set(message.ticket, {
-          threadId: message.threadId, cwd, remoteUrl: message.remoteUrl, expiresAt: message.expiresAt
+          mode: message.mode,
+          ...(resumeIdentity ? { threadId: message.threadId } : { claimId: message.claimId }),
+          cwd, remoteUrl: message.remoteUrl, expiresAt: message.expiresAt
         });
         const ticketToExpire = message.ticket;
         const expiryTimer = setTimeout(() => codexSpawnTickets.delete(ticketToExpire), Math.max(1, message.expiresAt - Date.now() + 1));
@@ -347,6 +417,20 @@ function resolveSpawnCommand(cmd) {
   } catch {
     return cmd;
   }
+}
+
+let codexNodeEntrypoint;
+function resolveCodexNodeEntrypoint() {
+  if (codexNodeEntrypoint !== undefined) return codexNodeEntrypoint;
+  codexNodeEntrypoint = null;
+  if (process.platform !== 'win32') return null;
+  const shim = resolveSpawnCommand('codex');
+  if (typeof shim !== 'string' || !/\.cmd$/i.test(shim)) return null;
+  const candidate = path.join(path.dirname(shim), 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+  try {
+    if (fs.statSync(candidate).isFile()) codexNodeEntrypoint = candidate;
+  } catch { /* managed Windows spawns fail closed below if the trusted entrypoint is unavailable */ }
+  return codexNodeEntrypoint;
 }
 
 // Run claude update at startup (non-blocking). Off by default — the resolved
@@ -525,6 +609,10 @@ function handleConnection(ws, req) {
 
         const safeCols = Math.max(1, Math.min(MAX_COLS, parseInt(cols, 10) || 120));
         const safeRows = Math.max(1, Math.min(MAX_ROWS, parseInt(rows, 10) || 30));
+        const codexBridgeEnv = codexBridgeEnvForSpawn(
+          cmd, Array.isArray(args) ? args : [], cwd || process.cwd(), spawnTicket
+        );
+        const authorizedManagedCodex = typeof codexBridgeEnv[CODEX_BRIDGE_TOKEN_ENV_NAME] === 'string';
 
         // Spawn directly so the child process owns the conpty: this matters
         // for interactive long-running run-tab launches (dotnet run, blazor,
@@ -556,7 +644,7 @@ function handleConnection(ws, req) {
           env: {
             ...process.env,
             ...(sanitiseEnv(env) || {}),
-            ...codexBridgeEnvForSpawn(cmd, Array.isArray(args) ? args : [], cwd || process.cwd(), spawnTicket),
+            ...codexBridgeEnv,
             PATH: AUGMENTED_PATH
           }
         };
@@ -571,16 +659,27 @@ function handleConnection(ws, req) {
         const sessIdx = argList.indexOf('--session-id');
         const resumeTarget = resumeIdx !== -1 ? argList[resumeIdx + 1] : (sessIdx !== -1 ? '(new:' + argList[sessIdx + 1] + ')' : null);
         breadcrumb('create', { id, cols: safeCols, rows: safeRows, cmd: cmd ? String(cmd).slice(0, 60) : 'claude', resume: resumeTarget });
-        const spawnCmd = cmd ? resolveSpawnCommand(cmd) : CLAUDE_PATH;
+        let spawnCmd = cmd ? resolveSpawnCommand(cmd) : CLAUDE_PATH;
+        let spawnArgs = args || [];
+        if (authorizedManagedCodex && process.platform === 'win32') {
+          const entrypoint = resolveCodexNodeEntrypoint();
+          if (!entrypoint) {
+            console.error('Failed to spawn managed Codex: trusted Node entrypoint not found');
+            try { ws.send(JSON.stringify({ type: 'exit', id, exitCode: 1 })); } catch { /* ws closed */ }
+            break;
+          }
+          spawnCmd = process.execPath;
+          spawnArgs = [entrypoint, ...spawnArgs];
+        }
         try {
-          p = pty.spawn(spawnCmd, args || [], ptyOpts);
+          p = pty.spawn(spawnCmd, spawnArgs, ptyOpts);
         } catch (err) {
           // Direct spawn failed — usually because the bare name didn't
           // resolve via PATHEXT (e.g. .cmd shims like npm.cmd, yarn.cmd).
           // Fall back to cmd.exe /c on Windows so the shell does the
           // resolution. Output streaming for the inner process won't be
           // as good under the wrapper, but at least it'll launch.
-          if (cmd && process.platform === 'win32') {
+          if (cmd && process.platform === 'win32' && !authorizedManagedCodex) {
             try {
               p = pty.spawn('cmd.exe', ['/c', cmd, ...(args || [])], ptyOpts);
             } catch (err2) {
