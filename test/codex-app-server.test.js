@@ -258,3 +258,34 @@ test('stopping during asynchronous startup prevents a late app-server child spaw
   await assert.rejects(pending, /stopp/i);
   assert.equal(spawnCount, 0);
 });
+
+test('Windows service shutdown terminates only the owned app-server process tree', () => {
+  const calls = [];
+  let directKillCount = 0;
+  const child = {
+    pid: 4321,
+    killed: false,
+    exitCode: null,
+    signalCode: null,
+    kill() { directKillCount++; }
+  };
+  const service = new CodexAppServerService({
+    token: 'a-main-owned-capability-token',
+    platform: 'win32',
+    spawnProcess: () => child,
+    createSocket: () => new EventEmitter(),
+    execFileSync: (file, args, options) => {
+      calls.push({ file, args, options });
+    }
+  });
+
+  service.child = child;
+  service.stop();
+
+  assert.deepStrictEqual(calls, [{
+    file: 'taskkill.exe',
+    args: ['/PID', '4321', '/T', '/F'],
+    options: { windowsHide: true, stdio: 'ignore' }
+  }]);
+  assert.equal(directKillCount, 0);
+});
