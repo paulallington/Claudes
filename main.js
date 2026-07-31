@@ -7664,29 +7664,30 @@ function publishCodexThreadState(state) {
 
 async function startCodexAppServer() {
   if (!hasCodex()) return false;
-  const service = new CodexAppServerService({
-    command: getCodexCommand(),
-    token: CODEX_BRIDGE_TOKEN,
-    version: app.getVersion(),
-    platform: process.platform,
-    spawnProcess: spawn,
-    createSocket: (url, options) => new WebSocket(url, options),
-    onState: publishCodexThreadState,
-    onUnavailable: () => {
-      if (codexAppServer === service) {
-        codexAppServer = null;
-        codexBridgeRemoteUrl = '';
-        diagLog('[codex-bridge] app-server exited; using direct CLI fallback until restart');
-      }
-    }
-  });
+  let service = null;
   try {
+    service = new CodexAppServerService({
+      command: getCodexCommand(),
+      token: CODEX_BRIDGE_TOKEN,
+      version: app.getVersion(),
+      platform: process.platform,
+      spawnProcess: spawn,
+      createSocket: (url, options) => new WebSocket(url, options),
+      onState: publishCodexThreadState,
+      onUnavailable: () => {
+        if (codexAppServer === service) {
+          codexAppServer = null;
+          codexBridgeRemoteUrl = '';
+          diagLog('[codex-bridge] app-server exited; using direct CLI fallback until restart');
+        }
+      }
+    });
     await service.ensureStarted();
     codexAppServer = service;
     codexBridgeRemoteUrl = service.remoteUrl;
     return true;
   } catch (err) {
-    service.stop();
+    if (service) service.stop();
     codexAppServer = null;
     codexBridgeRemoteUrl = '';
     diagLog('[codex-bridge] unavailable; direct CLI fallback remains active:', err && err.message);
