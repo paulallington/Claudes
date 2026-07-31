@@ -237,13 +237,17 @@ test('fresh claimed thread subscribes the controller before publishing the claim
   const unrelatedThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9613';
   const requests = [];
   const events = [];
+  const cancelledTimers = [];
   let resolveResume;
+  const claimTimer = { unref() {} };
   const service = new CodexAppServerService({
     token: 'a-main-owned-capability-token',
     platform: 'win32',
     spawnProcess: () => new EventEmitter(),
     createSocket: () => new EventEmitter(),
     randomBytes: (size) => Buffer.alloc(size, 1),
+    setTimeout: () => claimTimer,
+    clearTimeout: (timer) => cancelledTimers.push(timer),
     onState: (state) => {
       if (state.threadId === claimedThreadId) events.push(['state', state]);
     },
@@ -271,8 +275,18 @@ test('fresh claimed thread subscribes the controller before publishing the claim
   await Promise.resolve();
   assert.deepStrictEqual(requests, [{
     method: 'thread/resume',
-    params: { threadId: claimedThreadId, cwd: 'D:/SAFE/project' }
+    params: { threadId: claimedThreadId }
   }]);
+  assert.deepStrictEqual(cancelledTimers, [claimTimer]);
+  assert.deepStrictEqual(events, []);
+
+  await service.handleNotification({
+    method: 'thread/tokenUsage/updated',
+    params: {
+      threadId: claimedThreadId,
+      tokenUsage: { last: { totalTokens: 39597 }, modelContextWindow: 258400 }
+    }
+  });
   assert.deepStrictEqual(events, []);
 
   resolveResume({
@@ -282,10 +296,15 @@ test('fresh claimed thread subscribes the controller before publishing the claim
   });
   await adoption;
 
-  assert.deepStrictEqual(events.map(([type]) => type), ['state', 'claim']);
-  assert.deepStrictEqual(events[1][1], { claimId: prepared.claimId, threadId: claimedThreadId });
-  assert.equal(events[0][1].settings.model, 'gpt-5.6-sol');
-  assert.equal(events[0][1].status, 'idle');
+  assert.deepStrictEqual(events.map(([type]) => type), ['claim', 'state']);
+  assert.deepStrictEqual(events[0][1], { claimId: prepared.claimId, threadId: claimedThreadId });
+  assert.equal(events[1][1].settings.model, 'gpt-5.6-sol');
+  assert.equal(events[1][1].status, 'idle');
+  assert.deepStrictEqual(events[1][1].context, {
+    usedTokens: 39597,
+    modelContextWindow: 258400,
+    percent: 15.3
+  });
 });
 
 test('missing rollout resume intent recovers as fresh but other read failures remain errors', async () => {
