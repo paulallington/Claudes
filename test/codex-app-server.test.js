@@ -232,13 +232,13 @@ test('resume refuses a thread owned by a different working directory', async () 
   service.stop();
 });
 
-test('fresh claimed thread subscribes the controller before publishing the claim', async () => {
+test('fresh claimed thread is adopted live without resume or bridge fallback', async () => {
   const claimedThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9612';
   const unrelatedThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9613';
   const requests = [];
   const events = [];
   const cancelledTimers = [];
-  let resolveResume;
+  let unavailableCount = 0;
   const claimTimer = { unref() {} };
   const service = new CodexAppServerService({
     token: 'a-main-owned-capability-token',
@@ -251,12 +251,15 @@ test('fresh claimed thread subscribes the controller before publishing the claim
     onState: (state) => {
       if (state.threadId === claimedThreadId) events.push(['state', state]);
     },
-    onThreadClaimed: (claim) => events.push(['claim', claim])
+    onThreadClaimed: (claim) => events.push(['claim', claim]),
+    onUnavailable: () => { unavailableCount++; }
   });
   service.client = {
     request(method, params) {
       requests.push({ method, params });
-      return new Promise((resolve) => { resolveResume = resolve; });
+      const error = new Error('no rollout found for thread id ' + claimedThreadId);
+      error.code = -32600;
+      return Promise.reject(error);
     }
   };
   service.remoteUrl = 'ws://127.0.0.1:4567';
@@ -268,17 +271,17 @@ test('fresh claimed thread subscribes the controller before publishing the claim
   });
   assert.deepStrictEqual(requests, []);
 
-  const adoption = service.handleNotification({
+  await service.handleNotification({
     method: 'thread/started',
     params: { thread: { id: claimedThreadId, cwd: 'D:/SAFE/project', status: { type: 'active' } } }
   });
-  await Promise.resolve();
-  assert.deepStrictEqual(requests, [{
-    method: 'thread/resume',
-    params: { threadId: claimedThreadId }
-  }]);
+  assert.deepStrictEqual(requests, []);
   assert.deepStrictEqual(cancelledTimers, [claimTimer]);
-  assert.deepStrictEqual(events, []);
+  assert.deepStrictEqual(events.map(([type]) => type), ['claim', 'state']);
+  assert.deepStrictEqual(events[0][1], { claimId: prepared.claimId, threadId: claimedThreadId });
+  assert.equal(events[1][1].status, 'running');
+  assert.equal(unavailableCount, 0);
+  assert.equal(service.unavailable, false);
 
   await service.handleNotification({
     method: 'thread/tokenUsage/updated',
@@ -287,24 +290,14 @@ test('fresh claimed thread subscribes the controller before publishing the claim
       tokenUsage: { last: { totalTokens: 39597 }, modelContextWindow: 258400 }
     }
   });
-  assert.deepStrictEqual(events, []);
-
-  resolveResume({
-    thread: { id: claimedThreadId, cwd: 'D:/SAFE/project', status: { type: 'idle' } },
-    model: 'gpt-5.6-sol', reasoningEffort: 'high', serviceTier: 'priority',
-    approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' }
-  });
-  await adoption;
-
-  assert.deepStrictEqual(events.map(([type]) => type), ['claim', 'state']);
-  assert.deepStrictEqual(events[0][1], { claimId: prepared.claimId, threadId: claimedThreadId });
-  assert.equal(events[1][1].settings.model, 'gpt-5.6-sol');
-  assert.equal(events[1][1].status, 'idle');
-  assert.deepStrictEqual(events[1][1].context, {
+  assert.deepStrictEqual(events.map(([type]) => type), ['claim', 'state', 'state']);
+  assert.deepStrictEqual(events[2][1].context, {
     usedTokens: 39597,
     modelContextWindow: 258400,
     percent: 15.3
   });
+  assert.equal(unavailableCount, 0);
+  assert.equal(service.unavailable, false);
 });
 
 test('missing rollout resume intent recovers as fresh but other read failures remain errors', async () => {
