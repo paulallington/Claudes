@@ -15376,17 +15376,17 @@ function markCodexClaimExpired(col, reason) {
   if (!col || col.cmd !== 'codex') return;
   showCtxMeterPlaceholder(col, '—');
   var label = reason === 'unavailable' ? 'Attach unavailable' : 'Attach timed out';
-  col.ctxMeterEl.title = label + ' · live context and native resume are unavailable.\nRestart this column to retry the managed connection.';
+  col.ctxMeterEl.title = label + ' · live context and native resume are unavailable.\nRelaunch Claudes to retry the managed connection safely.';
   col.ctxMeterEl.setAttribute('aria-valuetext', label + '; live Codex context unavailable');
   var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
   if (badge) {
     badge.textContent = label;
     badge.classList.add('col-codex-badge-fallback');
-    updateCodexBadgeAccessibility(badge, null, label + ' · Restart column to retry');
+    updateCodexBadgeAccessibility(badge, null, label + ' · Relaunch Claudes to retry');
   }
   if (!codexAttachWarningShown) {
     codexAttachWarningShown = true;
-    showToast(label + ' — restart the Codex column to retry live context and native resume.', { kind: 'warn', duration: 7000 });
+    showToast(label + ' — relaunch Claudes to retry live context and native resume.', { kind: 'warn', duration: 7000 });
   }
 }
 

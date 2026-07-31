@@ -353,7 +353,7 @@ test('thread started broadcasts claim fresh launches by normalized cwd in FIFO o
   assert.equal(service.getThreadState(expiredThreadId).status, 'idle');
 });
 
-test('fresh claim timeout publishes expiry and unblocks the next same-cwd preparation without another notification', async () => {
+test('fresh claim timeout publishes expiry and blocks late same-cwd misattribution until restart', async () => {
   let scheduled;
   const expired = [];
   const service = new CodexAppServerService({
@@ -372,10 +372,10 @@ test('fresh claim timeout publishes expiry and unblocks the next same-cwd prepar
   const first = await service.prepareThread({ cwd: '/repo' });
   const secondPromise = service.prepareThread({ cwd: '/repo' });
   scheduled();
-  const second = await secondPromise;
 
   assert.deepStrictEqual(expired, [{ claimId: first.claimId, reason: 'timeout' }]);
-  assert.notEqual(second.claimId, first.claimId);
+  await assert.rejects(secondPromise, /restart Claudes/i);
+  await assert.rejects(service.prepareThread({ cwd: '/repo' }), /restart Claudes/i);
   service.stop();
 });
 
