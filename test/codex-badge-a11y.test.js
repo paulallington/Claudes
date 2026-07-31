@@ -42,6 +42,22 @@ test('Codex badge details use a viewport-clamped body overlay outside clipping c
   assert.match(styles, /\.codex-badge-tooltip\s*\{[^}]*position:\s*fixed[^}]*max-width:\s*calc\(100vw - 16px\)/s);
 });
 
+test('removing a focused Codex column force-cleans its body tooltip before detaching it', () => {
+  const removeStart = renderer.indexOf('function removeColumn');
+  const removeEnd = renderer.indexOf('function killAllInstancesForProject', removeStart);
+  const remove = renderer.slice(removeStart, removeEnd);
+  const cleanupCall = remove.indexOf('dismissCodexBadgeDetailsForColumn(col.element)');
+  const detachCall = remove.indexOf('colElement.remove()');
+  assert.ok(cleanupCall >= 0, 'central column removal should clean up an owned Codex tooltip');
+  assert.ok(detachCall > cleanupCall, 'tooltip owner must be cleared before its badge is detached');
+
+  const helperStart = renderer.indexOf('function dismissCodexBadgeDetailsForColumn');
+  const helperEnd = renderer.indexOf('function updateCodexBadgeAccessibility', helperStart);
+  const helper = renderer.slice(helperStart, helperEnd);
+  assert.match(helper, /window\.CodexBadgePlacement\.dismissOwnedBadgeTooltip\(/);
+  assert.match(helper, /codexBadgeTooltipOwner\s*=\s*window\.CodexBadgePlacement/);
+});
+
 test('Codex badge exposes launch and live safety state to keyboard and accessibility APIs', () => {
   const createStart = renderer.indexOf('function createColumnHeader');
   const createEnd = renderer.indexOf('// Subscription chip', createStart);

@@ -4498,6 +4498,14 @@ function hideCodexBadgeDetails(eventOrBadge) {
   codexBadgeTooltipOwner = null;
 }
 
+function dismissCodexBadgeDetailsForColumn(columnElement) {
+  codexBadgeTooltipOwner = window.CodexBadgePlacement.dismissOwnedBadgeTooltip(
+    columnElement,
+    codexBadgeTooltipOwner,
+    codexBadgeTooltipEl
+  );
+}
+
 function updateCodexBadgeAccessibility(badge, settings, detail) {
   if (!badge) return;
   settings = settings || {};
@@ -6798,6 +6806,7 @@ function persistSessions(projectKey, workspaceId) {
 function removeColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
+  dismissCodexBadgeDetailsForColumn(col.element);
 
   // Clean up diffSlotIndex entries pointing at this id (Critical fix: addDiffColumn
   // registered it, but only the inline close-button handler was deleting it —

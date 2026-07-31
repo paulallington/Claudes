@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { placeBadgeTooltip } = require('../lib/codex-badge-placement');
+const { placeBadgeTooltip, dismissOwnedBadgeTooltip } = require('../lib/codex-badge-placement');
 
 test('placeBadgeTooltip keeps narrow and rightmost-column details inside the viewport', () => {
   assert.deepStrictEqual(placeBadgeTooltip(
@@ -24,4 +24,32 @@ test('placeBadgeTooltip flips above the badge near the bottom edge', () => {
     { width: 240, height: 100 },
     { width: 1280, height: 720 }
   ), { left: 8, top: 574 });
+});
+
+test('dismissOwnedBadgeTooltip hides only a tooltip owned by the removed column', () => {
+  const removedOwner = {};
+  const otherOwner = {};
+  const removedClasses = {
+    removed: [],
+    remove(name) { this.removed.push(name); }
+  };
+  const otherClasses = {
+    removed: [],
+    remove(name) { this.removed.push(name); }
+  };
+  const removedColumn = { contains(node) { return node === removedOwner; } };
+
+  assert.strictEqual(dismissOwnedBadgeTooltip(
+    removedColumn,
+    removedOwner,
+    { classList: removedClasses }
+  ), null);
+  assert.deepStrictEqual(removedClasses.removed, ['codex-badge-tooltip-shown']);
+
+  assert.strictEqual(dismissOwnedBadgeTooltip(
+    removedColumn,
+    otherOwner,
+    { classList: otherClasses }
+  ), otherOwner);
+  assert.deepStrictEqual(otherClasses.removed, []);
 });
