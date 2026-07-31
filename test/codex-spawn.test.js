@@ -14,7 +14,10 @@ const {
   codexTuningFromArgs,
   buildCodexRestore,
   codexPersistShape,
-  codexApprovalLabelFromArgs
+  codexApprovalLabelFromArgs,
+  isCodexThreadId,
+  buildCodexRemoteResume,
+  codexContextDisplay
 } = require('../lib/codex-spawn');
 
 test('CODEX_APPROVAL_PRESETS: exact keys and order', () => {
@@ -208,4 +211,61 @@ test('a persisted shape round-trips back to the same argv', () => {
 test('approval badge survives a trailing handoff prompt (M2 regression)', () => {
   const args = buildCodexSpawn('/x', 'yolo', {}).args.concat(['Read .claudes/h.md first...']);
   assert.strictEqual(codexApprovalLabelFromArgs(args), 'Yolo (bypass)');
+});
+
+test('managed resume keeps semantic settings but validates bridge coordinates', () => {
+  const semantic = buildCodexSpawn('/x', 'auto', {
+    model: 'gpt-5.6-sol', effort: 'ultra', tier: 'priority'
+  }).args;
+  const threadId = '123e4567-e89b-42d3-a456-426614174000';
+  assert.strictEqual(isCodexThreadId(threadId), true);
+  assert.deepStrictEqual(buildCodexRemoteResume(semantic, {
+    threadId,
+    remoteUrl: 'ws://127.0.0.1:45678',
+    remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN'
+  }, 'Read .claudes/handoff.md first'), [
+    'resume', '-a', 'on-request', '-s', 'workspace-write',
+    '--model', 'gpt-5.6-sol',
+    '-c', 'model_reasoning_effort=ultra',
+    '-c', 'service_tier=priority',
+    '--remote', 'ws://127.0.0.1:45678',
+    '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN',
+    threadId, 'Read .claudes/handoff.md first'
+  ]);
+  assert.strictEqual(buildCodexRemoteResume(semantic, {
+    threadId: 'not-a-uuid', remoteUrl: 'ws://evil.example:80', remoteTokenEnvName: 'PATH'
+  }), null);
+});
+
+test('persist/restore carries only a validated native thread id, never bridge details', () => {
+  const threadId = '123e4567-e89b-42d3-a456-426614174000';
+  const shape = codexPersistShape(buildCodexSpawn('/x', 'auto').args, threadId, true);
+  assert.strictEqual(shape.codexThreadId, threadId);
+  assert.ok(!('remoteUrl' in shape));
+  assert.ok(!('remoteTokenEnvName' in shape));
+
+  const restored = buildCodexRestore(shape, '/x', CodexModels);
+  assert.strictEqual(restored.opts.codexThreadId, threadId);
+  const bad = codexPersistShape([], 'not-a-uuid');
+  assert.ok(!('codexThreadId' in bad));
+  assert.ok(!('codexThreadId' in codexPersistShape([], threadId, false)));
+  assert.ok(!('codexThreadId' in buildCodexRestore({
+    kind: 'codex', codexThreadId: '../../inject'
+  }, '/x', CodexModels).opts));
+});
+
+test('codexContextDisplay: derives the top-meter presentation from canonical thread state', () => {
+  assert.deepStrictEqual(codexContextDisplay({
+    status: 'running',
+    settings: { model: 'gpt-5.6-sol', reasoningEffort: 'ultra', serviceTier: 'priority' },
+    context: { usedTokens: 123456, modelContextWindow: 1000000, percent: 12.3456 }
+  }), {
+    usedTokens: 123456,
+    limit: 1000000,
+    percent: 12.3456,
+    text: '123k/1M',
+    title: 'Codex context: 123,456 / 1,000,000 tokens (12%)\nSol 5.6 · Ultra · Priority (faster) · running'
+  });
+  assert.strictEqual(codexContextDisplay({ context: null }), null);
+  assert.strictEqual(codexContextDisplay({ context: { usedTokens: -1, modelContextWindow: 0 } }), null);
 });
