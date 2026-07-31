@@ -28,12 +28,16 @@ test('app-server auth uses a loopback listener and passes only the token digest 
     '--remote-auth-token-env', REMOTE_TOKEN_ENV_NAME,
     '0198f064-8ec4-7a21-82db-0cc0f67c9612'
   ];
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs, token), {
+  const expectedRemoteUrl = 'ws://127.0.0.1:4567';
+  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs, token, expectedRemoteUrl), {
     [REMOTE_TOKEN_ENV_NAME]: token
   });
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('node', resumeArgs, token), {});
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.map((v) => v === 'ws://127.0.0.1:4567' ? 'ws://192.168.1.4:4567' : v), token), {});
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.map((v) => v === REMOTE_TOKEN_ENV_NAME ? 'PATH' : v), token), {});
+  assert.deepStrictEqual(codexBridgeEnvForSpawn('node', resumeArgs, token, expectedRemoteUrl), {});
+  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.map((v) => v === expectedRemoteUrl ? 'ws://192.168.1.4:4567' : v), token, expectedRemoteUrl), {});
+  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.map((v) => v === expectedRemoteUrl ? 'ws://127.0.0.1:9999' : v), token, expectedRemoteUrl), {});
+  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.map((v) => v === REMOTE_TOKEN_ENV_NAME ? 'PATH' : v), token, expectedRemoteUrl), {});
+  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.concat(['--remote', 'ws://127.0.0.1:9999']), token, expectedRemoteUrl), {});
+  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.concat(['resume']), token, expectedRemoteUrl), {});
 });
 
 test('RPC client initializes once and correlates app-server responses', async () => {
