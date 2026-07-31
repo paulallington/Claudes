@@ -4462,6 +4462,42 @@ function showEmptyState() {
 // DOM helpers
 // ============================================================
 
+var codexBadgeTooltipEl = null;
+var codexBadgeTooltipOwner = null;
+
+function showCodexBadgeDetails(eventOrBadge) {
+  var badge = eventOrBadge && eventOrBadge.currentTarget ? eventOrBadge.currentTarget : eventOrBadge;
+  if (!badge || !badge.dataset || !badge.dataset.details) return;
+  var tooltip = codexBadgeTooltipEl;
+  if (!tooltip) {
+    tooltip = document.createElement('div');
+    tooltip.className = 'codex-badge-tooltip';
+    tooltip.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(tooltip);
+    codexBadgeTooltipEl = tooltip;
+  }
+  codexBadgeTooltipOwner = badge;
+  tooltip.textContent = badge.dataset.details;
+  tooltip.classList.add('codex-badge-tooltip-shown');
+  tooltip.style.left = '0px';
+  tooltip.style.top = '0px';
+  var position = window.CodexBadgePlacement.placeBadgeTooltip(
+    badge.getBoundingClientRect(),
+    tooltip.getBoundingClientRect(),
+    { width: window.innerWidth, height: window.innerHeight }
+  );
+  tooltip.style.left = position.left + 'px';
+  tooltip.style.top = position.top + 'px';
+}
+
+function hideCodexBadgeDetails(eventOrBadge) {
+  var badge = eventOrBadge && eventOrBadge.currentTarget ? eventOrBadge.currentTarget : eventOrBadge;
+  if (!codexBadgeTooltipEl || (badge && codexBadgeTooltipOwner !== badge)) return;
+  if (badge && (document.activeElement === badge || badge.matches(':hover'))) return;
+  codexBadgeTooltipEl.classList.remove('codex-badge-tooltip-shown');
+  codexBadgeTooltipOwner = null;
+}
+
 function updateCodexBadgeAccessibility(badge, settings, detail) {
   if (!badge) return;
   settings = settings || {};
@@ -4476,6 +4512,7 @@ function updateCodexBadgeAccessibility(badge, settings, detail) {
   badge.title = description.join('\n');
   badge.dataset.details = description.join('\n');
   badge.setAttribute('aria-label', description.join('. '));
+  if (codexBadgeTooltipOwner === badge) showCodexBadgeDetails(badge);
 }
 
 function createColumnHeader(id, customTitle, opts) {
@@ -4499,6 +4536,10 @@ function createColumnHeader(id, customTitle, opts) {
     codexBadge.tabIndex = 0;
     codexBadge.setAttribute('role', 'note');
     updateCodexBadgeAccessibility(codexBadge);
+    codexBadge.addEventListener('mouseenter', showCodexBadgeDetails);
+    codexBadge.addEventListener('focus', showCodexBadgeDetails);
+    codexBadge.addEventListener('mouseleave', hideCodexBadgeDetails);
+    codexBadge.addEventListener('blur', hideCodexBadgeDetails);
   }
 
   // Subscription chip — hidden by default (empty text, no background), toggled

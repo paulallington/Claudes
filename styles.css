@@ -1575,18 +1575,14 @@ html[data-platform="darwin"] #toolbar {
   background: rgba(120, 170, 255, 0.18);
   color: #a9c7ff;
   vertical-align: middle;
-  position: relative;
   cursor: help;
 }
 
-.column-header .col-codex-badge::after {
-  content: attr(data-details);
-  position: absolute;
-  z-index: 30;
-  top: calc(100% + 6px);
-  left: 0;
+.codex-badge-tooltip {
+  position: fixed;
+  z-index: 900;
   width: max-content;
-  max-width: min(280px, calc(100vw - 24px));
+  max-width: calc(100vw - 16px);
   padding: 7px 9px;
   border: 1px solid var(--border-primary);
   border-radius: 5px;
@@ -1604,8 +1600,7 @@ html[data-platform="darwin"] #toolbar {
   transition: opacity 100ms ease;
 }
 
-.column-header .col-codex-badge:hover::after,
-.column-header .col-codex-badge:focus-visible::after {
+.codex-badge-tooltip.codex-badge-tooltip-shown {
   visibility: visible;
   opacity: 1;
 }
