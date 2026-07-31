@@ -119,6 +119,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   codexPrepareThread: (opts) => ipcRenderer.invoke('codex:prepareThread', opts),
   codexGetThreadState: (threadId) => ipcRenderer.invoke('codex:getThreadState', threadId),
   onCodexThreadState: (cb) => ipcRenderer.on('codex:threadState', (_e, state) => cb(state)),
+  onCodexThreadClaimed: (cb) => {
+    const listener = (_e, claim) => {
+      if (!claim || typeof claim.claimId !== 'string' || !/^[0-9a-f]{32}$/.test(claim.claimId)) return;
+      if (typeof claim.threadId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claim.threadId)) return;
+      cb({ claimId: claim.claimId, threadId: claim.threadId });
+    };
+    ipcRenderer.on('codex:threadClaimed', listener);
+    return () => ipcRenderer.removeListener('codex:threadClaimed', listener);
+  },
   codexWatchListJobs: (sel) => ipcRenderer.invoke('codexwatch:listJobs', sel),
   codexWatchOpen: (o) => ipcRenderer.invoke('codexwatch:open', o),
   codexWatchOpenStream: (o) => ipcRenderer.invoke('codexwatch:openStream', o),
