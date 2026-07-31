@@ -169,3 +169,47 @@ test('managed service prepares a resumable thread and publishes sanitized live s
   service.stop();
   assert.strictEqual(child.killed, true);
 });
+
+test('resume refuses a thread owned by a different working directory', async () => {
+  const threadId = '0198f064-8ec4-7a21-82db-0cc0f67c9612';
+  const methods = [];
+  class FakeSocket extends EventEmitter {
+    constructor() { super(); this.readyState = 1; }
+    send(raw) {
+      const msg = JSON.parse(raw);
+      methods.push(msg.method);
+      if (msg.method === 'initialize') this.emit('message', JSON.stringify({ id: msg.id, result: {} }));
+      if (msg.method === 'thread/read') {
+        this.emit('message', JSON.stringify({
+          id: msg.id,
+          result: { thread: { id: threadId, cwd: 'D:/someone-elses-project' } }
+        }));
+      }
+      if (msg.method === 'thread/resume') {
+        this.emit('message', JSON.stringify({ id: msg.id, result: {
+          thread: { id: threadId, cwd: msg.params.cwd, status: { type: 'idle' } },
+          model: 'gpt-5.6-sol', reasoningEffort: 'high', serviceTier: null,
+          approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' }
+        } }));
+      }
+    }
+    close() { this.emit('close'); }
+  }
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new EventEmitter(), stderr: new EventEmitter(), killed: false,
+    kill() { this.killed = true; }
+  });
+  const service = new CodexAppServerService({
+    token: 'a-main-owned-capability-token', platform: 'win32',
+    allocatePort: async () => 4567,
+    spawnProcess: () => child,
+    createSocket: () => new FakeSocket()
+  });
+
+  await assert.rejects(
+    service.prepareThread({ cwd: 'D:/safe/project', threadId }),
+    /working directory/i
+  );
+  assert.strictEqual(methods.includes('thread/resume'), false);
+  service.stop();
+});
