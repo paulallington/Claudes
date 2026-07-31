@@ -108,6 +108,18 @@ test('managed service prepares a resumable thread and publishes sanitized live s
           approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite', writableRoots: [msg.params.cwd] }
         } }));
       }
+      if (msg.method === 'thread/read') {
+        this.emit('message', JSON.stringify({ id: msg.id, result: {
+          thread: { id: threadId, cwd: 'D:/safe/project' }
+        } }));
+      }
+      if (msg.method === 'thread/resume') {
+        this.emit('message', JSON.stringify({ id: msg.id, result: {
+          thread: { id: threadId, status: { type: 'idle' }, cwd: msg.params.cwd },
+          model: 'gpt-5.6-sol', reasoningEffort: 'high', serviceTier: 'priority',
+          approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' }
+        } }));
+      }
     }
     close() { this.emit('close'); }
   }
@@ -155,6 +167,7 @@ test('managed service prepares a resumable thread and publishes sanitized live s
     remoteUrl: 'ws://127.0.0.1:4567',
     remoteTokenEnvName: REMOTE_TOKEN_ENV_NAME
   });
+  assert.deepStrictEqual(await service.prepareThread({ cwd: 'd:\\SAFE\\project', threadId }), prepared);
   socket.emit('message', JSON.stringify({
     method: 'thread/tokenUsage/updated',
     params: { threadId, tokenUsage: { last: { totalTokens: 2500 }, modelContextWindow: 10000 } }
@@ -212,4 +225,36 @@ test('resume refuses a thread owned by a different working directory', async () 
   );
   assert.strictEqual(methods.includes('thread/resume'), false);
   service.stop();
+});
+
+test('unexpected app-server exit disables the bridge instead of changing its endpoint', async () => {
+  let spawnCount = 0;
+  let unavailableCount = 0;
+  class FakeSocket extends EventEmitter {
+    constructor() { super(); this.readyState = 1; }
+    send(raw) {
+      const msg = JSON.parse(raw);
+      if (msg.method === 'initialize') this.emit('message', JSON.stringify({ id: msg.id, result: {} }));
+      if (msg.method === 'model/list') this.emit('message', JSON.stringify({ id: msg.id, result: { data: [], nextCursor: null } }));
+    }
+    close() { this.emit('close'); }
+  }
+  let child;
+  const service = new CodexAppServerService({
+    token: 'a-main-owned-capability-token',
+    allocatePort: async () => 4567 + spawnCount,
+    spawnProcess: () => {
+      spawnCount++;
+      child = Object.assign(new EventEmitter(), { killed: false, kill() { this.killed = true; } });
+      return child;
+    },
+    createSocket: () => new FakeSocket(),
+    onUnavailable: () => { unavailableCount++; }
+  });
+
+  await service.getCatalog();
+  child.emit('exit', 1);
+  await assert.rejects(service.getCatalog(), /unavailable/i);
+  assert.strictEqual(spawnCount, 1);
+  assert.strictEqual(unavailableCount, 1);
 });

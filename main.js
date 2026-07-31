@@ -51,6 +51,7 @@ const { extractSeedClaudeJson } = require('./lib/profile-seed');
 const CodexWatchJobs = require('./lib/codex-watch-jobs');
 const CodexWatchLog = require('./lib/codex-watch-log');
 const CodexWatchTail = require('./lib/codex-watch-tail');
+const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-app-server');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -321,6 +322,10 @@ process.on('unhandledRejection', (reason) => {
 // this, any local process (including any web page in any browser) could
 // connect to 127.0.0.1:<ptyPort> and spawn arbitrary commands as the user.
 const PTY_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
+// Main owns the Codex app-server capability. It is passed only to the trusted
+// PTY sidecar, which injects it for an exact managed Codex resume command.
+// The renderer receives the env variable name, never this value.
+const CODEX_BRIDGE_TOKEN = crypto.randomBytes(32).toString('hex');
 
 // Per-launch token gating the local hook HTTP server (POST /hook). Without this,
 // any local process — including a JS payload running in any browser tab — could
@@ -364,6 +369,8 @@ let ptyActualPort = ptyPort;                       // updated from the pty-serve
 let ptyRestartTimestamps = [];                     // rolling record of crash-recovery restarts (see lib/pty-restart-policy)
 const hookServerListenPort = app.isPackaged ? 53456 : 53457;
 let ptyServerProcess;
+let codexAppServer = null;
+let codexBridgeRemoteUrl = '';
 
 const CONFIG_DIR = path.join(os.homedir(), '.claudes');
 // Dev builds use a separate projects file so running dev alongside an
@@ -1194,13 +1201,18 @@ function startPtyServer() {
     // is '1'. Off by default to avoid running whichever `claude` binary is
     // first on PATH unprompted. See Settings → Updates.
     const autoUpdateClaude = readConfig().autoUpdateClaude === true ? '1' : '0';
+    const ptyEnv = { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN, CLAUDES_AUTO_UPDATE_CLAUDE: autoUpdateClaude };
+    if (codexAppServer && codexBridgeRemoteUrl) {
+      ptyEnv[REMOTE_TOKEN_ENV_NAME] = CODEX_BRIDGE_TOKEN;
+      ptyEnv.CLAUDES_CODEX_BRIDGE_REMOTE_URL = codexBridgeRemoteUrl;
+    }
     ptyServerProcess = spawn(nodePath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
       // Hide the console window Windows would otherwise pop up (and minimise)
       // each time we spawn system Node from this GUI app — most visibly on every
       // crash-recovery restart. No effect on non-Windows.
       windowsHide: true,
-      env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN, CLAUDES_AUTO_UPDATE_CLAUDE: autoUpdateClaude }
+      env: ptyEnv
     });
 
     ptyServerProcess.on('error', (err) => {
@@ -7616,6 +7628,7 @@ function getClaudePath() {
 // won't change while the app runs). Mirrors findClaudePath(); a missing binary
 // simply means the "Spawn Codex" affordance is never offered.
 let codexAvailable = null;
+let codexCommand = null;
 function hasCodex() {
   if (codexAvailable !== null) return codexAvailable;
   try {
@@ -7628,6 +7641,85 @@ function hasCodex() {
 }
 
 ipcMain.handle('config:hasCodex', () => hasCodex());
+
+function getCodexCommand() {
+  if (codexCommand) return codexCommand;
+  const out = execFileSync(codexLookupCommand(process.platform), ['codex'], { encoding: 'utf8' });
+  const found = out.trim().split(/\r?\n/).filter(Boolean);
+  if (!found.length) throw new Error('Codex CLI not found');
+  // `where codex` commonly returns a POSIX shim first and codex.cmd second.
+  // Node can spawn the latter reliably through the Windows shell.
+  codexCommand = process.platform === 'win32'
+    ? (found.find((value) => /\.(cmd|exe)$/i.test(value)) || found[0])
+    : found[0];
+  return codexCommand;
+}
+
+function publishCodexThreadState(state) {
+  if (!state) return;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('codex:threadState', state);
+  }
+}
+
+async function startCodexAppServer() {
+  if (!hasCodex()) return false;
+  const service = new CodexAppServerService({
+    command: getCodexCommand(),
+    token: CODEX_BRIDGE_TOKEN,
+    version: app.getVersion(),
+    platform: process.platform,
+    spawnProcess: spawn,
+    createSocket: (url, options) => new WebSocket(url, options),
+    onState: publishCodexThreadState,
+    onUnavailable: () => {
+      if (codexAppServer === service) {
+        codexAppServer = null;
+        codexBridgeRemoteUrl = '';
+        diagLog('[codex-bridge] app-server exited; using direct CLI fallback until restart');
+      }
+    }
+  });
+  try {
+    await service.ensureStarted();
+    codexAppServer = service;
+    codexBridgeRemoteUrl = service.remoteUrl;
+    return true;
+  } catch (err) {
+    service.stop();
+    codexAppServer = null;
+    codexBridgeRemoteUrl = '';
+    diagLog('[codex-bridge] unavailable; direct CLI fallback remains active:', err && err.message);
+    return false;
+  }
+}
+
+ipcMain.handle('codex:getCatalog', async () => {
+  if (!codexAppServer) return { ok: false, error: 'Codex bridge unavailable' };
+  try {
+    return { ok: true, models: await codexAppServer.getCatalog() };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('codex:prepareThread', async (event, opts) => {
+  if (!codexAppServer) return { ok: false, error: 'Codex bridge unavailable' };
+  try {
+    const safeCwd = assertInsideAllowedRoots(opts && opts.cwd);
+    const prepared = await codexAppServer.prepareThread({
+      cwd: safeCwd,
+      threadId: opts && opts.threadId
+    });
+    return { ok: true, ...prepared };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('codex:getThreadState', (event, threadId) => {
+  return codexAppServer ? codexAppServer.getThreadState(threadId) : null;
+});
 
 // --- Codex watcher -------------------------------------------------------
 //
@@ -9545,6 +9637,9 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     seedAuthorizedProjectRoots(); // authorize pre-existing project roots BEFORE the renderer can persist new ones
     reconcileInterruptedHeadlessRuns();
+    // Start before the PTY sidecar so its private launch environment can be
+    // pinned to this exact authenticated loopback listener.
+    await startCodexAppServer();
     await startPtyServer();
     startHookServer();
     createTray();
@@ -9673,6 +9768,12 @@ app.on('before-quit', () => {
   _headroomShuttingDown = true;    // block any in-flight watchdog restart from respawning the proxy
   stopHeadroomWatchdog();          // stop supervising before we intentionally kill the proxy
   stopHeadroomProxyProcess();
+  step('codexAppServer.stop');
+  if (codexAppServer) {
+    codexAppServer.stop();
+    codexAppServer = null;
+    codexBridgeRemoteUrl = '';
+  }
   step('killPtyServer');
   killPtyServer();
   // The hook server's listening socket keeps the event loop alive; close it

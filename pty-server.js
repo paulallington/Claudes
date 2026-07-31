@@ -113,6 +113,14 @@ function killPtyTree(p) {
 
 const PORT = parseInt(process.env.PTY_PORT || '3456', 10);
 const AUTH_TOKEN = process.env.PTY_AUTH_TOKEN || '';
+const CODEX_BRIDGE_TOKEN_ENV_NAME = 'CLAUDES_CODEX_BRIDGE_TOKEN';
+const CODEX_BRIDGE_REMOTE_ENV_NAME = 'CLAUDES_CODEX_BRIDGE_REMOTE_URL';
+const CODEX_BRIDGE_TOKEN = process.env[CODEX_BRIDGE_TOKEN_ENV_NAME] || '';
+const CODEX_BRIDGE_REMOTE_URL = process.env[CODEX_BRIDGE_REMOTE_ENV_NAME] || '';
+// The sidecar needs the capability, but ordinary PTY children must not inherit
+// it. Capture once, then remove both private values from the inherited base.
+delete process.env[CODEX_BRIDGE_TOKEN_ENV_NAME];
+delete process.env[CODEX_BRIDGE_REMOTE_ENV_NAME];
 // Subprotocol the renderer presents on the WebSocket handshake. The token is
 // passed via env from the parent Electron process and never logged. If the
 // token is missing or wrong, handleProtocols returns false and the WS
@@ -142,6 +150,7 @@ const ENV_BLOCKLIST = new Set([
   'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH', 'DYLD_FRAMEWORK_PATH', 'DYLD_FALLBACK_LIBRARY_PATH',
   'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME',
   'PERL5LIB', 'PERL5OPT', 'RUBYLIB', 'RUBYOPT',
+  CODEX_BRIDGE_TOKEN_ENV_NAME, CODEX_BRIDGE_REMOTE_ENV_NAME,
   'PATH', 'Path' // PATH is intentionally excluded so a renderer can't shadow `claude` or `node` with an attacker-controlled directory.
 ]);
 function sanitiseEnv(input) {
@@ -160,6 +169,23 @@ function sanitiseEnv(input) {
     out[k] = input[k];
   }
   return out;
+}
+
+const CODEX_THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function codexBridgeEnvForSpawn(cmd, args) {
+  if (cmd !== 'codex' || !Array.isArray(args) || !CODEX_BRIDGE_TOKEN || !CODEX_BRIDGE_REMOTE_URL) return {};
+  if (!/^ws:\/\/127\.0\.0\.1:\d{1,5}\/?$/.test(CODEX_BRIDGE_REMOTE_URL)) return {};
+  if (args.filter((value) => value === 'resume').length !== 1) return {};
+  if (args.filter((value) => value === '--remote').length !== 1) return {};
+  if (args.filter((value) => value === '--remote-auth-token-env').length !== 1) return {};
+  const resumeIdx = args.indexOf('resume');
+  const remoteIdx = args.indexOf('--remote');
+  const envIdx = args.indexOf('--remote-auth-token-env');
+  if (remoteIdx <= resumeIdx || envIdx <= resumeIdx) return {};
+  if (args[remoteIdx + 1] !== CODEX_BRIDGE_REMOTE_URL) return {};
+  if (args[envIdx + 1] !== CODEX_BRIDGE_TOKEN_ENV_NAME) return {};
+  if (!args.slice(resumeIdx + 1).some((value) => typeof value === 'string' && CODEX_THREAD_ID_RE.test(value))) return {};
+  return { [CODEX_BRIDGE_TOKEN_ENV_NAME]: CODEX_BRIDGE_TOKEN };
 }
 
 // On macOS, GUI-launched apps inherit a minimal PATH that omits Homebrew,
@@ -466,7 +492,12 @@ function handleConnection(ws, req) {
           // blocklist-checked. PATH is overridden with AUGMENTED_PATH so
           // GUI-launched macOS instances (which inherit a minimal PATH from
           // launchd) can still find Homebrew/nvm/~/.local/bin tools.
-          env: { ...process.env, ...(sanitiseEnv(env) || {}), PATH: AUGMENTED_PATH }
+          env: {
+            ...process.env,
+            ...(sanitiseEnv(env) || {}),
+            ...codexBridgeEnvForSpawn(cmd, Array.isArray(args) ? args : []),
+            PATH: AUGMENTED_PATH
+          }
         };
 
         let p;
