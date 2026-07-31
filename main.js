@@ -7831,6 +7831,9 @@ ipcMain.handle('codex:prepareThread', async (event, opts) => {
     } finally {
       codexSpawnTicketStore.discard(issued.ticket);
     }
+    if (codexAppServer !== service || !service.isPreparationActive(prepared)) {
+      throw new Error('Codex bridge became unavailable before terminal attach');
+    }
     diagLog('[codex-bridge] prepared', prepared.mode, 'terminal attach');
     return { ok: true, ...prepared, cwd: safeCwd, spawnTicket: issued.ticket };
   } catch (err) {

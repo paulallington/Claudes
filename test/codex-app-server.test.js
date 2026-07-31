@@ -353,6 +353,25 @@ test('thread started broadcasts claim fresh launches by normalized cwd in FIFO o
   assert.equal(service.getThreadState(expiredThreadId).status, 'idle');
 });
 
+test('preparation liveness rejects a claim released by bridge failure before attach', async () => {
+  const service = new CodexAppServerService({
+    token: 'a-main-owned-capability-token',
+    platform: 'linux',
+    spawnProcess: () => new EventEmitter(),
+    createSocket: () => new EventEmitter(),
+    randomBytes: (size) => Buffer.alloc(size, 1),
+    onClaimExpired: () => {}
+  });
+  service.client = {};
+  service.remoteUrl = 'ws://127.0.0.1:4567';
+
+  const prepared = await service.prepareThread({ cwd: '/repo' });
+  assert.equal(service.isPreparationActive(prepared), true);
+
+  service.markUnavailable(true);
+  assert.equal(service.isPreparationActive(prepared), false);
+});
+
 test('fresh claim timeout publishes expiry and blocks late same-cwd misattribution until restart', async () => {
   let scheduled;
   const expired = [];

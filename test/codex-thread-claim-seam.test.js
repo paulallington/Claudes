@@ -64,6 +64,7 @@ test('main publishes only validated claim identities and authorizes mode-aware t
   assert.match(prepare, /mode:\s*prepared\.mode/);
   assert.match(prepare, /prepared\.mode === 'fresh'[\s\S]*claimId:\s*prepared\.claimId/);
   assert.match(prepare, /prepared\.mode === 'resume'[\s\S]*threadId:\s*prepared\.threadId/);
+  assert.match(prepare, /codexAppServer !== service \|\| !service\.isPreparationActive\(prepared\)/);
   assert.match(main, /onThreadClaimed:\s*publishCodexThreadClaimed/);
 
   const expiryPublisher = functionSource(main, 'publishCodexClaimExpired');
