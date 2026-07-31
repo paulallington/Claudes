@@ -171,6 +171,7 @@ function sanitiseEnv(input) {
 }
 
 const CODEX_THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CODEX_CLAIM_ID_RE = /^[0-9a-f]{32}$/;
 const CODEX_REMOTE_RE = /^ws:\/\/127\.0\.0\.1:(?:[1-9]\d{0,4})\/?$/;
 let codexBridgeConfig = null;
 const codexSpawnTickets = new Map();
@@ -182,21 +183,67 @@ function normalizeCodexCwd(cwd) {
   return process.platform === 'win32' ? value.toLowerCase() : value;
 }
 
+function isSafeCodexValue(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9._][A-Za-z0-9._-]*$/.test(value);
+}
+
+function isSafeCodexSemanticArgs(args) {
+  let i = 0;
+  if (args[i] === '--dangerously-bypass-approvals-and-sandbox') {
+    i++;
+  } else if (args[i] === '-a') {
+    const approval = args[i + 1];
+    const sandbox = args[i + 2] === '-s' ? args[i + 3] : null;
+    const pair = approval + ':' + sandbox;
+    if (pair !== 'untrusted:read-only' && pair !== 'on-request:workspace-write' && pair !== 'never:danger-full-access') return false;
+    i += 4;
+  }
+  if (args[i] === '--model') {
+    if (!isSafeCodexValue(args[i + 1])) return false;
+    i += 2;
+  }
+  if (args[i] === '-c' && typeof args[i + 1] === 'string' && args[i + 1].indexOf('model_reasoning_effort=') === 0) {
+    if (!isSafeCodexValue(args[i + 1].slice('model_reasoning_effort='.length))) return false;
+    i += 2;
+  }
+  if (args[i] === '-c' && typeof args[i + 1] === 'string' && args[i + 1].indexOf('service_tier=') === 0) {
+    if (!isSafeCodexValue(args[i + 1].slice('service_tier='.length))) return false;
+    i += 2;
+  }
+  return i === args.length;
+}
+
+function isSafeCodexPrompt(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  // Windows may use cmd.exe only as a last-resort executable shim. Refuse its
+  // metacharacters so the sole trailing positional can never become syntax.
+  return !/[\x00-\x1f\x7f&|<>^%!"()]/.test(value);
+}
+
+function isCodexSubcommand(value) {
+  return /^(exec|e|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|app|completion|update|doctor|sandbox|debug|apply|a|resume|archive|delete|unarchive|fork|cloud|exec-server|features|help)$/.test(value);
+}
+
 function codexBindingFromArgs(cmd, args) {
   if (cmd !== 'codex' || !Array.isArray(args) || !codexBridgeConfig) return null;
-  if (args.filter((value) => value === 'resume').length !== 1) return null;
   if (args.filter((value) => value === '--remote').length !== 1) return null;
   if (args.filter((value) => value === '--remote-auth-token-env').length !== 1) return null;
-  const resumeIdx = args.indexOf('resume');
+  const mode = args[0] === 'resume' ? 'resume' : 'fresh';
+  if (args.slice(mode === 'resume' ? 1 : 0).includes('resume')) return null;
   const remoteIdx = args.indexOf('--remote');
   const envIdx = args.indexOf('--remote-auth-token-env');
-  if (remoteIdx <= resumeIdx || envIdx <= resumeIdx) return null;
+  const semanticStart = mode === 'resume' ? 1 : 0;
+  if (remoteIdx < semanticStart || envIdx !== remoteIdx + 2 || !isSafeCodexSemanticArgs(args.slice(semanticStart, remoteIdx))) return null;
   const remoteUrl = args[remoteIdx + 1];
   if (remoteUrl !== codexBridgeConfig.remoteUrl) return null;
   if (args[envIdx + 1] !== CODEX_BRIDGE_TOKEN_ENV_NAME) return null;
-  const threadIds = args.slice(resumeIdx + 1).filter((value) => typeof value === 'string' && CODEX_THREAD_ID_RE.test(value));
-  if (threadIds.length !== 1) return null;
-  return { threadId: threadIds[0], remoteUrl };
+  const tail = args.slice(envIdx + 2);
+  if (mode === 'resume') {
+    if (!CODEX_THREAD_ID_RE.test(tail[0] || '') || tail.length > 2 || (tail.length === 2 && !isSafeCodexPrompt(tail[1]))) return null;
+    return { mode, threadId: tail[0], remoteUrl };
+  }
+  if (tail.length > 1 || (tail.length === 1 && (!isSafeCodexPrompt(tail[0]) || CODEX_THREAD_ID_RE.test(tail[0]) || isCodexSubcommand(tail[0])))) return null;
+  return { mode, remoteUrl };
 }
 
 function codexBridgeEnvForSpawn(cmd, args, cwd, ticket) {
@@ -206,7 +253,8 @@ function codexBridgeEnvForSpawn(cmd, args, cwd, ticket) {
   // Consume before comparing: a guessed/misrouted ticket can never be retried.
   codexSpawnTickets.delete(ticket);
   if (!stored || stored.expiresAt < Date.now()) return {};
-  if (stored.threadId !== binding.threadId || stored.remoteUrl !== binding.remoteUrl || stored.cwd !== normalizeCodexCwd(cwd)) return {};
+  if (stored.mode !== binding.mode || stored.remoteUrl !== binding.remoteUrl || stored.cwd !== normalizeCodexCwd(cwd)) return {};
+  if (binding.mode === 'resume' && stored.threadId !== binding.threadId) return {};
   return { [CODEX_BRIDGE_TOKEN_ENV_NAME]: codexBridgeConfig.token };
 }
 
@@ -232,11 +280,15 @@ process.stdin.on('data', (chunk) => {
       }
     } else if (message.type === 'codex-spawn-authorize' && codexBridgeConfig) {
       const cwd = normalizeCodexCwd(message.cwd);
+      const resumeIdentity = message.mode === 'resume' && !message.claimId && CODEX_THREAD_ID_RE.test(message.threadId || '');
+      const freshIdentity = message.mode === 'fresh' && !message.threadId && CODEX_CLAIM_ID_RE.test(message.claimId || '');
       if (typeof message.ticket === 'string' && /^[0-9a-f]{64}$/i.test(message.ticket) &&
-          CODEX_THREAD_ID_RE.test(message.threadId || '') && cwd &&
+          (resumeIdentity || freshIdentity) && cwd &&
           message.remoteUrl === codexBridgeConfig.remoteUrl && Number.isFinite(message.expiresAt) && message.expiresAt > Date.now()) {
         codexSpawnTickets.set(message.ticket, {
-          threadId: message.threadId, cwd, remoteUrl: message.remoteUrl, expiresAt: message.expiresAt
+          mode: message.mode,
+          ...(resumeIdentity ? { threadId: message.threadId } : { claimId: message.claimId }),
+          cwd, remoteUrl: message.remoteUrl, expiresAt: message.expiresAt
         });
         const ticketToExpire = message.ticket;
         const expiryTimer = setTimeout(() => codexSpawnTickets.delete(ticketToExpire), Math.max(1, message.expiresAt - Date.now() + 1));
