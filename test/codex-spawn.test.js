@@ -245,6 +245,7 @@ test('fresh managed attach keeps semantic settings without resume or a thread UU
   assert.deepStrictEqual(buildCodexRemoteAttach(semantic, {
     mode: 'fresh',
     claimId: '0123456789abcdef0123456789abcdef',
+    cwd: 'D:\\Repo Space',
     remoteUrl: 'ws://127.0.0.1:45678',
     remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN'
   }, 'Read .claudes/handoff.md first'), [
@@ -252,6 +253,7 @@ test('fresh managed attach keeps semantic settings without resume or a thread UU
     '--model', 'gpt-5.6-sol',
     '-c', 'model_reasoning_effort=ultra',
     '-c', 'service_tier=priority',
+    '-C', 'D:\\Repo Space',
     '--remote', 'ws://127.0.0.1:45678',
     '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN',
     'Read .claudes/handoff.md first'
@@ -260,6 +262,7 @@ test('fresh managed attach keeps semantic settings without resume or a thread UU
 
 test('managed attach rejects malformed or cross-mode identities and shell-active prompts', () => {
   const bridge = {
+    cwd: 'D:\\Repo Space',
     remoteUrl: 'ws://127.0.0.1:45678',
     remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN'
   };
@@ -267,6 +270,8 @@ test('managed attach rejects malformed or cross-mode identities and shell-active
   assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef', threadId: '123e4567-e89b-42d3-a456-426614174000' }), null);
   assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'resume', threadId: '123e4567-e89b-42d3-a456-426614174000', claimId: '0123456789abcdef0123456789abcdef' }), null);
   assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' }, 'hello & whoami'), null);
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, cwd: 'relative/path', mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' }), null);
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, cwd: 'D:\\Repo%PATH%', mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' }), null);
 });
 
 test('persist/restore carries only a validated native thread id, never bridge details', () => {

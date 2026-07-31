@@ -109,6 +109,7 @@ test('fresh preparation launches managed remote argv without resuming the stale 
         ok: true,
         mode: 'fresh',
         claimId: CLAIM,
+        cwd: 'D:/project',
         remoteUrl: 'ws://127.0.0.1:4567',
         remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN',
         spawnTicket: 'a'.repeat(64)
@@ -149,6 +150,7 @@ test('fresh preparation launches managed remote argv without resuming the stale 
   assert.equal(col.codexManaged, true);
   assert.equal(col.spawnArgs.includes('resume'), false);
   assert.equal(col.spawnArgs.includes(OLD_THREAD), false);
+  assert.deepStrictEqual(col.spawnArgs.slice(col.spawnArgs.indexOf('-C'), col.spawnArgs.indexOf('-C') + 2), ['-C', 'D:/project']);
   assert.equal(persisted.length, 1);
   assert.equal(persisted[0].kind, 'codex');
   assert.equal(persisted[0].codexPreset, 'auto');

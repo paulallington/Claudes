@@ -224,6 +224,13 @@ function isCodexSubcommand(value) {
   return /^(exec|e|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|app|completion|update|doctor|sandbox|debug|apply|a|resume|archive|delete|unarchive|fork|cloud|exec-server|features|help)$/.test(value);
 }
 
+function canonicalCodexCwdArg(value) {
+  if (typeof value !== 'string' || !value || /[\x00-\x1f\x7f&|<>^%!"()]/.test(value)) return null;
+  const paths = process.platform === 'win32' ? path.win32 : path.posix;
+  if (!paths.isAbsolute(value)) return null;
+  return normalizeCodexCwd(value);
+}
+
 function codexBindingFromArgs(cmd, args) {
   if (cmd !== 'codex' || !Array.isArray(args) || !codexBridgeConfig) return null;
   if (args.filter((value) => value === '--remote').length !== 1) return null;
@@ -233,7 +240,17 @@ function codexBindingFromArgs(cmd, args) {
   const remoteIdx = args.indexOf('--remote');
   const envIdx = args.indexOf('--remote-auth-token-env');
   const semanticStart = mode === 'resume' ? 1 : 0;
-  if (remoteIdx < semanticStart || envIdx !== remoteIdx + 2 || !isSafeCodexSemanticArgs(args.slice(semanticStart, remoteIdx))) return null;
+  let semanticEnd = remoteIdx;
+  let freshCwd = null;
+  if (mode === 'fresh') {
+    if (args.filter((value) => value === '-C').length !== 1 || remoteIdx < 2 || args[remoteIdx - 2] !== '-C') return null;
+    freshCwd = canonicalCodexCwdArg(args[remoteIdx - 1]);
+    if (!freshCwd) return null;
+    semanticEnd -= 2;
+  } else if (args.includes('-C')) {
+    return null;
+  }
+  if (remoteIdx < semanticStart || envIdx !== remoteIdx + 2 || !isSafeCodexSemanticArgs(args.slice(semanticStart, semanticEnd))) return null;
   const remoteUrl = args[remoteIdx + 1];
   if (remoteUrl !== codexBridgeConfig.remoteUrl) return null;
   if (args[envIdx + 1] !== CODEX_BRIDGE_TOKEN_ENV_NAME) return null;
@@ -243,7 +260,7 @@ function codexBindingFromArgs(cmd, args) {
     return { mode, threadId: tail[0], remoteUrl };
   }
   if (tail.length > 1 || (tail.length === 1 && (!isSafeCodexPrompt(tail[0]) || CODEX_THREAD_ID_RE.test(tail[0]) || isCodexSubcommand(tail[0])))) return null;
-  return { mode, remoteUrl };
+  return { mode, cwd: freshCwd, remoteUrl };
 }
 
 function codexBridgeEnvForSpawn(cmd, args, cwd, ticket) {
@@ -255,6 +272,7 @@ function codexBridgeEnvForSpawn(cmd, args, cwd, ticket) {
   if (!stored || stored.expiresAt < Date.now()) return {};
   if (stored.mode !== binding.mode || stored.remoteUrl !== binding.remoteUrl || stored.cwd !== normalizeCodexCwd(cwd)) return {};
   if (binding.mode === 'resume' && stored.threadId !== binding.threadId) return {};
+  if (binding.mode === 'fresh' && stored.cwd !== binding.cwd) return {};
   return { [CODEX_BRIDGE_TOKEN_ENV_NAME]: codexBridgeConfig.token };
 }
 

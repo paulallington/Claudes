@@ -7821,8 +7821,10 @@ ipcMain.handle('codex:prepareThread', async (event, opts) => {
     } finally {
       codexSpawnTicketStore.discard(issued.ticket);
     }
-    return { ok: true, ...prepared, spawnTicket: issued.ticket };
+    diagLog('[codex-bridge] prepared', prepared.mode, 'terminal attach');
+    return { ok: true, ...prepared, cwd: safeCwd, spawnTicket: issued.ticket };
   } catch (err) {
+    diagLog('[codex-bridge] prepare failed:', err && err.message);
     return { ok: false, error: String(err && err.message || err) };
   }
 });

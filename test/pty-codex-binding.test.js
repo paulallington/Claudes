@@ -69,11 +69,12 @@ test('PTY accepts the canonical fresh remote TUI shape without exposing its priv
     '--model', 'gpt-5.6-sol',
     '-c', 'model_reasoning_effort=ultra',
     '-c', 'service_tier=priority',
+    '-C', '/repo',
     '--remote', 'ws://127.0.0.1:4567',
     '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN',
     'hello'
   ])`, sandbox);
-  assert.deepEqual({ ...binding }, { mode: 'fresh', remoteUrl: 'ws://127.0.0.1:4567' });
+  assert.deepEqual({ ...binding }, { mode: 'fresh', cwd: '/repo', remoteUrl: 'ws://127.0.0.1:4567' });
 });
 
 test('PTY preserves the exact canonical resume shape and thread UUID binding', () => {
@@ -107,7 +108,7 @@ test('PTY rejects fresh subcommands, UUID positionals, malformed resumes, and un
 
 test('PTY injects the bearer once only for a mode/cwd/endpoint-bound private authorization', () => {
   const sandbox = loadBindingSandbox();
-  const freshArgs = "['--remote', 'ws://127.0.0.1:4567', '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN']";
+  const freshArgs = "['-C', '/repo', '--remote', 'ws://127.0.0.1:4567', '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN']";
   vm.runInContext(`codexSpawnTickets.set('ticket', {
     mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef', cwd: '/repo',
     remoteUrl: 'ws://127.0.0.1:4567', expiresAt: Date.now() + 5000

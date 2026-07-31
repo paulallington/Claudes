@@ -260,6 +260,13 @@ test('missing rollout resume intent recovers as fresh but other read failures re
   });
   assert.deepStrictEqual(methods, ['thread/read']);
 
+  const notLoaded = new Error('thread not loaded: ' + threadId);
+  notLoaded.code = -32600;
+  service.client.request = () => Promise.reject(notLoaded);
+  const recoveredNotLoaded = await service.prepareThread({ cwd: 'D:/safe/project', threadId });
+  assert.strictEqual(recoveredNotLoaded.mode, 'fresh');
+  assert.match(recoveredNotLoaded.claimId, /^[0-9a-f]{32}$/);
+
   service.client.request = () => Promise.reject(new Error('Codex app-server request timed out'));
   await assert.rejects(
     service.prepareThread({ cwd: 'D:/safe/project', threadId }),
