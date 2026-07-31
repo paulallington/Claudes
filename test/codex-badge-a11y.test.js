@@ -6,6 +6,21 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+const styles = fs.readFileSync(path.join(__dirname, '..', 'styles.css'), 'utf8');
+
+test('Codex badge has a readable light-theme palette', () => {
+  assert.match(styles, /\[data-theme="light"\] \.column-header \.col-codex-badge\s*\{[^}]*background:\s*rgba\(9, 105, 218,[^}]*color:\s*#0550ae/s);
+});
+
+test('Codex badge reveals its detailed live metadata on hover and keyboard focus', () => {
+  const helperStart = renderer.indexOf('function updateCodexBadgeAccessibility');
+  const helperEnd = renderer.indexOf('function createColumnHeader', helperStart);
+  const helper = renderer.slice(helperStart, helperEnd);
+  assert.match(helper, /badge\.dataset\.details\s*=\s*description\.join\('\\n'\)/);
+  assert.match(styles, /\.col-codex-badge::after\s*\{[^}]*content:\s*attr\(data-details\)[^}]*white-space:\s*pre-line/s);
+  assert.match(styles, /\.col-codex-badge:hover::after,[\s\S]*\.col-codex-badge:focus-visible::after\s*\{[^}]*visibility:\s*visible[^}]*opacity:\s*1/s);
+  assert.match(styles, /\.col-codex-badge:focus-visible\s*\{[^}]*outline:/s);
+});
 
 test('Codex badge exposes launch and live safety state to keyboard and accessibility APIs', () => {
   const createStart = renderer.indexOf('function createColumnHeader');
@@ -26,4 +41,20 @@ test('Codex badge exposes launch and live safety state to keyboard and accessibi
   const stateEnd = renderer.indexOf('function handleCodexThreadState', stateStart);
   const stateUpdate = renderer.slice(stateStart, stateEnd);
   assert.match(stateUpdate, /updateCodexBadgeAccessibility\(badge/);
+});
+
+test('direct CLI fallback remains disclosed by the Codex badge in narrow columns', () => {
+  const fallbackStart = renderer.indexOf('function markCodexFallback');
+  const fallbackEnd = renderer.indexOf('function applyCodexThreadState', fallbackStart);
+  const fallback = renderer.slice(fallbackStart, fallbackEnd);
+  assert.match(fallback, /querySelector\('\.col-codex-badge'\)/);
+  assert.match(fallback, /badge\.textContent\s*=\s*'Direct fallback'/);
+  assert.match(fallback, /badge\.classList\.add\('col-codex-badge-fallback'\)/);
+  assert.match(fallback, /updateCodexBadgeAccessibility\(badge,\s*null,\s*'Direct fallback · Live context and native resume unavailable'\)/);
+
+  const liveStart = renderer.indexOf('function applyCodexThreadState');
+  const liveEnd = renderer.indexOf('function handleCodexThreadState', liveStart);
+  const live = renderer.slice(liveStart, liveEnd);
+  assert.match(live, /badge\.textContent\s*=\s*'Codex'/);
+  assert.match(live, /badge\.classList\.remove\('col-codex-badge-fallback'\)/);
 });

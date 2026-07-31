@@ -4474,6 +4474,7 @@ function updateCodexBadgeAccessibility(badge, settings, detail) {
   ];
   var description = ['Codex CLI'].concat(safety).concat(detail ? [detail] : []);
   badge.title = description.join('\n');
+  badge.dataset.details = description.join('\n');
   badge.setAttribute('aria-label', description.join('. '));
 }
 
@@ -15240,6 +15241,12 @@ function markCodexFallback(col) {
   showCtxMeterPlaceholder(col, '—');
   col.ctxMeterEl.title = 'Live Codex context unavailable · direct CLI fallback\nNative thread resume is disabled for this column.';
   col.ctxMeterEl.setAttribute('aria-valuetext', 'Live Codex context unavailable in direct CLI fallback');
+  var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
+  if (badge) {
+    badge.textContent = 'Direct fallback';
+    badge.classList.add('col-codex-badge-fallback');
+    updateCodexBadgeAccessibility(badge, null, 'Direct fallback · Live context and native resume unavailable');
+  }
   if (!codexFallbackWarningShown) {
     codexFallbackWarningShown = true;
     showToast('Codex started in direct fallback mode — live context and native resume are unavailable.', { kind: 'warn', duration: 7000 });
@@ -15253,7 +15260,11 @@ function applyCodexThreadState(col, threadState) {
   var detail = [settings.model, settings.reasoningEffort, settings.serviceTier, threadState.status]
     .filter(function (value) { return !!value; }).join(' · ');
   var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
-  if (badge) updateCodexBadgeAccessibility(badge, settings, detail);
+  if (badge) {
+    badge.textContent = 'Codex';
+    badge.classList.remove('col-codex-badge-fallback');
+    updateCodexBadgeAccessibility(badge, settings, detail);
+  }
 
   var display = window.CodexSpawn.codexContextDisplay(threadState);
   if (!display) {
