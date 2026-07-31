@@ -4463,6 +4463,21 @@ function showEmptyState() {
 // DOM helpers
 // ============================================================
 
+function updateCodexBadgeAccessibility(badge, settings, detail) {
+  if (!badge) return;
+  settings = settings || {};
+  var sandbox = settings.sandbox;
+  if (sandbox && typeof sandbox === 'object') sandbox = sandbox.type || 'configured';
+  var safety = [
+    'Launch preset: ' + (badge.dataset.launchSafety || 'Codex default'),
+    'Effective approval: ' + (settings.approvalPolicy || 'pending live state'),
+    'Effective sandbox: ' + (sandbox || 'pending live state')
+  ];
+  var description = ['Codex CLI'].concat(safety).concat(detail ? [detail] : []);
+  badge.title = description.join('\n');
+  badge.setAttribute('aria-label', description.join('. '));
+}
+
 function createColumnHeader(id, customTitle, opts) {
   opts = opts || {};
   var header = document.createElement('div');
@@ -4481,9 +4496,9 @@ function createColumnHeader(id, customTitle, opts) {
     codexBadge.className = 'col-codex-badge';
     codexBadge.textContent = 'Codex';
     codexBadge.dataset.launchSafety = opts.codexLabel || 'Codex default';
-    codexBadge.title = opts.codexLabel
-      ? ('Codex CLI · ' + opts.codexLabel)
-      : 'This column runs the Codex CLI, not Claude';
+    codexBadge.tabIndex = 0;
+    codexBadge.setAttribute('role', 'note');
+    updateCodexBadgeAccessibility(codexBadge);
   }
 
   // Subscription chip — hidden by default (empty text, no background), toggled
@@ -15241,16 +15256,7 @@ function applyCodexThreadState(col, threadState) {
   var detail = [settings.model, settings.reasoningEffort, settings.serviceTier, threadState.status]
     .filter(function (value) { return !!value; }).join(' · ');
   var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
-  if (badge) {
-    var sandbox = settings.sandbox;
-    if (sandbox && typeof sandbox === 'object') sandbox = sandbox.type || 'configured';
-    var safety = [
-      'Launch preset: ' + (badge.dataset.launchSafety || 'Codex default'),
-      settings.approvalPolicy ? ('Effective approval: ' + settings.approvalPolicy) : '',
-      sandbox ? ('Effective sandbox: ' + sandbox) : ''
-    ].filter(function (value) { return !!value; });
-    badge.title = ['Codex CLI'].concat(safety).concat(detail ? [detail] : []).join('\n');
-  }
+  if (badge) updateCodexBadgeAccessibility(badge, settings, detail);
 
   var display = window.CodexSpawn.codexContextDisplay(threadState);
   if (!display) {
