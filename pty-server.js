@@ -225,7 +225,7 @@ function isCodexSubcommand(value) {
 }
 
 function canonicalCodexCwdArg(value) {
-  if (typeof value !== 'string' || !value || /[\x00-\x1f\x7f&|<>^%!"()]/.test(value)) return null;
+  if (typeof value !== 'string' || !value || /[\x00-\x1f\x7f]/.test(value)) return null;
   const paths = process.platform === 'win32' ? path.win32 : path.posix;
   if (!paths.isAbsolute(value)) return null;
   return normalizeCodexCwd(value);
@@ -419,6 +419,20 @@ function resolveSpawnCommand(cmd) {
   }
 }
 
+let codexNodeEntrypoint;
+function resolveCodexNodeEntrypoint() {
+  if (codexNodeEntrypoint !== undefined) return codexNodeEntrypoint;
+  codexNodeEntrypoint = null;
+  if (process.platform !== 'win32') return null;
+  const shim = resolveSpawnCommand('codex');
+  if (typeof shim !== 'string' || !/\.cmd$/i.test(shim)) return null;
+  const candidate = path.join(path.dirname(shim), 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+  try {
+    if (fs.statSync(candidate).isFile()) codexNodeEntrypoint = candidate;
+  } catch { /* managed Windows spawns fail closed below if the trusted entrypoint is unavailable */ }
+  return codexNodeEntrypoint;
+}
+
 // Run claude update at startup (non-blocking). Off by default — the resolved
 // CLAUDE_PATH is whatever `which`/`where` returns first, so a malicious
 // `claude.cmd` shim earlier on PATH would execute here unprompted. Users can
@@ -595,6 +609,10 @@ function handleConnection(ws, req) {
 
         const safeCols = Math.max(1, Math.min(MAX_COLS, parseInt(cols, 10) || 120));
         const safeRows = Math.max(1, Math.min(MAX_ROWS, parseInt(rows, 10) || 30));
+        const codexBridgeEnv = codexBridgeEnvForSpawn(
+          cmd, Array.isArray(args) ? args : [], cwd || process.cwd(), spawnTicket
+        );
+        const authorizedManagedCodex = typeof codexBridgeEnv[CODEX_BRIDGE_TOKEN_ENV_NAME] === 'string';
 
         // Spawn directly so the child process owns the conpty: this matters
         // for interactive long-running run-tab launches (dotnet run, blazor,
@@ -626,7 +644,7 @@ function handleConnection(ws, req) {
           env: {
             ...process.env,
             ...(sanitiseEnv(env) || {}),
-            ...codexBridgeEnvForSpawn(cmd, Array.isArray(args) ? args : [], cwd || process.cwd(), spawnTicket),
+            ...codexBridgeEnv,
             PATH: AUGMENTED_PATH
           }
         };
@@ -641,16 +659,27 @@ function handleConnection(ws, req) {
         const sessIdx = argList.indexOf('--session-id');
         const resumeTarget = resumeIdx !== -1 ? argList[resumeIdx + 1] : (sessIdx !== -1 ? '(new:' + argList[sessIdx + 1] + ')' : null);
         breadcrumb('create', { id, cols: safeCols, rows: safeRows, cmd: cmd ? String(cmd).slice(0, 60) : 'claude', resume: resumeTarget });
-        const spawnCmd = cmd ? resolveSpawnCommand(cmd) : CLAUDE_PATH;
+        let spawnCmd = cmd ? resolveSpawnCommand(cmd) : CLAUDE_PATH;
+        let spawnArgs = args || [];
+        if (authorizedManagedCodex && process.platform === 'win32') {
+          const entrypoint = resolveCodexNodeEntrypoint();
+          if (!entrypoint) {
+            console.error('Failed to spawn managed Codex: trusted Node entrypoint not found');
+            try { ws.send(JSON.stringify({ type: 'exit', id, exitCode: 1 })); } catch { /* ws closed */ }
+            break;
+          }
+          spawnCmd = process.execPath;
+          spawnArgs = [entrypoint, ...spawnArgs];
+        }
         try {
-          p = pty.spawn(spawnCmd, args || [], ptyOpts);
+          p = pty.spawn(spawnCmd, spawnArgs, ptyOpts);
         } catch (err) {
           // Direct spawn failed — usually because the bare name didn't
           // resolve via PATHEXT (e.g. .cmd shims like npm.cmd, yarn.cmd).
           // Fall back to cmd.exe /c on Windows so the shell does the
           // resolution. Output streaming for the inner process won't be
           // as good under the wrapper, but at least it'll launch.
-          if (cmd && process.platform === 'win32') {
+          if (cmd && process.platform === 'win32' && !authorizedManagedCodex) {
             try {
               p = pty.spawn('cmd.exe', ['/c', cmd, ...(args || [])], ptyOpts);
             } catch (err2) {

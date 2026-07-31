@@ -65,6 +65,14 @@ test('main publishes only validated claim identities and authorizes mode-aware t
   assert.match(prepare, /prepared\.mode === 'fresh'[\s\S]*claimId:\s*prepared\.claimId/);
   assert.match(prepare, /prepared\.mode === 'resume'[\s\S]*threadId:\s*prepared\.threadId/);
   assert.match(main, /onThreadClaimed:\s*publishCodexThreadClaimed/);
+
+  const expiryPublisher = functionSource(main, 'publishCodexClaimExpired');
+  const publishExpiry = new Function('BrowserWindow', `${expiryPublisher}; return publishCodexClaimExpired;`)(BrowserWindow);
+  publishExpiry({ claimId: CLAIM, reason: 'timeout', cwd: 'D:/must-not-leak' });
+  publishExpiry({ claimId: CLAIM.toUpperCase(), reason: 'timeout' });
+  publishExpiry({ claimId: CLAIM, reason: 'other' });
+  assert.deepStrictEqual(sent.at(-1), ['codex:claimExpired', { claimId: CLAIM, reason: 'timeout' }]);
+  assert.match(main, /onClaimExpired:\s*publishCodexClaimExpired/);
 });
 
 test('preload claim listener filters payloads and follows the unsubscribe convention', () => {
@@ -95,6 +103,15 @@ test('preload claim listener filters payloads and follows the unsubscribe conven
   assert.equal(typeof unsubscribe, 'function');
   unsubscribe();
   assert.equal(listeners.has('codex:threadClaimed'), false);
+
+  const expiries = [];
+  const unsubscribeExpiry = exposed.onCodexClaimExpired((claim) => expiries.push(claim));
+  const expiryListener = listeners.get('codex:claimExpired');
+  expiryListener({}, { claimId: CLAIM, reason: 'timeout', cwd: 'D:/must-not-leak' });
+  expiryListener({}, { claimId: CLAIM, reason: 'other' });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(expiries)), [{ claimId: CLAIM, reason: 'timeout' }]);
+  unsubscribeExpiry();
+  assert.equal(listeners.has('codex:claimExpired'), false);
 });
 
 test('fresh preparation launches managed remote argv without resuming the stale UUID', async () => {
@@ -252,6 +269,28 @@ test('matching claim atomically adopts and persists the real UUID while rejectin
   assert.equal(first.codexThreadId, null);
   assert.equal(duplicateClaim.codexThreadId, null);
   assert.equal(persisted.length, 1);
+});
+
+test('expired fresh claims leave the loading state and persist an explicit untracked state', () => {
+  const source = functionSource(renderer, 'handleCodexClaimExpired');
+  const col = {
+    cmd: 'codex', codexManaged: true, codexClaimId: CLAIM, codexClaimCwd: 'D:/project',
+    codexThreadId: null, cwd: 'D:/project', projectKey: 'D:/project', workspaceId: null
+  };
+  const allColumns = new Map([[1, col]]);
+  const persisted = [];
+  const marked = [];
+  const handle = new Function(
+    'window', 'allColumns', 'persistSessions', 'markCodexClaimExpired',
+    `${source}; return handleCodexClaimExpired;`
+  )({ CodexSpawn }, allColumns, (...args) => persisted.push(args), (...args) => marked.push(args));
+
+  handle({ claimId: CLAIM, reason: 'timeout' });
+  assert.equal(col.codexManaged, false);
+  assert.equal(col.codexClaimId, null);
+  assert.equal(col.codexClaimCwd, null);
+  assert.deepStrictEqual(persisted, [['D:/project', null]]);
+  assert.deepStrictEqual(marked, [[col, 'timeout']]);
 });
 
 test('restart uses the mode-aware attach builder and stores a pending fresh claim', () => {

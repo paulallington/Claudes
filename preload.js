@@ -128,6 +128,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('codex:threadClaimed', listener);
     return () => ipcRenderer.removeListener('codex:threadClaimed', listener);
   },
+  onCodexClaimExpired: (cb) => {
+    const listener = (_e, claim) => {
+      if (!claim || typeof claim.claimId !== 'string' || !/^[0-9a-f]{32}$/.test(claim.claimId)) return;
+      if (claim.reason !== 'timeout' && claim.reason !== 'unavailable') return;
+      cb({ claimId: claim.claimId, reason: claim.reason });
+    };
+    ipcRenderer.on('codex:claimExpired', listener);
+    return () => ipcRenderer.removeListener('codex:claimExpired', listener);
+  },
   codexWatchListJobs: (sel) => ipcRenderer.invoke('codexwatch:listJobs', sel),
   codexWatchOpen: (o) => ipcRenderer.invoke('codexwatch:open', o),
   codexWatchOpenStream: (o) => ipcRenderer.invoke('codexwatch:openStream', o),

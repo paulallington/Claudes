@@ -7722,6 +7722,15 @@ function publishCodexThreadClaimed(claim) {
   }
 }
 
+function publishCodexClaimExpired(claim) {
+  if (!claim || typeof claim.claimId !== 'string' || !/^[0-9a-f]{32}$/.test(claim.claimId)) return;
+  if (claim.reason !== 'timeout' && claim.reason !== 'unavailable') return;
+  const sanitized = { claimId: claim.claimId, reason: claim.reason };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('codex:claimExpired', sanitized);
+  }
+}
+
 async function startCodexAppServer() {
   if (codexBridgeDisabled) return false;
   if (!hasCodex()) return false;
@@ -7736,6 +7745,7 @@ async function startCodexAppServer() {
       createSocket: (url, options) => new WebSocket(url, options),
       onState: publishCodexThreadState,
       onThreadClaimed: publishCodexThreadClaimed,
+      onClaimExpired: publishCodexClaimExpired,
       onUnavailable: () => {
         if (codexAppServer === service) {
           codexAppServer = null;

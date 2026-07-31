@@ -92,6 +92,17 @@ test('PTY preserves the exact canonical resume shape and thread UUID binding', (
   });
 });
 
+test('PTY accepts legal shell-active path characters because managed Windows spawns bypass cmd.exe', () => {
+  const sandbox = loadBindingSandbox();
+  const binding = vm.runInContext(`codexBindingFromArgs('codex', [
+    '-C', "/repo/(100%)!'", '--remote', 'ws://127.0.0.1:4567',
+    '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN'
+  ])`, sandbox);
+  assert.deepEqual({ ...binding }, { mode: 'fresh', cwd: "/repo/(100%)!'", remoteUrl: 'ws://127.0.0.1:4567' });
+  const source = fs.readFileSync(path.join(__dirname, '..', 'pty-server.js'), 'utf8');
+  assert.match(source, /authorizedManagedCodex[\s\S]*resolveCodexNodeEntrypoint[\s\S]*process\.execPath/);
+});
+
 test('PTY rejects fresh subcommands, UUID positionals, malformed resumes, and unsafe semantic argv', () => {
   const sandbox = loadBindingSandbox();
   const rejected = vm.runInContext(`[

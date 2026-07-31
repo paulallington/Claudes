@@ -40,6 +40,7 @@ var codexCatalogPromise = null;
 var codexCatalogLive = false;
 var codexPendingSelections = { projectKey: null, model: '', effort: '', tier: '' };
 var codexFallbackWarningShown = false;
+var codexAttachWarningShown = false;
 
 function renderCodexPicker(sel, list, inheritLabel, selected) {
   if (!sel) return;
@@ -15371,6 +15372,24 @@ function handleCodexThreadState(threadState) {
   });
 }
 
+function markCodexClaimExpired(col, reason) {
+  if (!col || col.cmd !== 'codex') return;
+  showCtxMeterPlaceholder(col, '—');
+  var label = reason === 'unavailable' ? 'Attach unavailable' : 'Attach timed out';
+  col.ctxMeterEl.title = label + ' · live context and native resume are unavailable.\nRestart this column to retry the managed connection.';
+  col.ctxMeterEl.setAttribute('aria-valuetext', label + '; live Codex context unavailable');
+  var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
+  if (badge) {
+    badge.textContent = label;
+    badge.classList.add('col-codex-badge-fallback');
+    updateCodexBadgeAccessibility(badge, null, label + ' · Restart column to retry');
+  }
+  if (!codexAttachWarningShown) {
+    codexAttachWarningShown = true;
+    showToast(label + ' — restart the Codex column to retry live context and native resume.', { kind: 'warn', duration: 7000 });
+  }
+}
+
 function handleCodexThreadClaimed(claim) {
   if (!claim || !window.CodexSpawn.isCodexClaimId(claim.claimId) || !window.CodexSpawn.isCodexThreadId(claim.threadId)) return;
   var matches = [];
@@ -15391,6 +15410,23 @@ function handleCodexThreadClaimed(claim) {
   startCodexThreadState(match.id);
 }
 
+function handleCodexClaimExpired(claim) {
+  if (!claim || !window.CodexSpawn.isCodexClaimId(claim.claimId) ||
+      (claim.reason !== 'timeout' && claim.reason !== 'unavailable')) return;
+  var matches = [];
+  allColumns.forEach(function (col) {
+    if (col && col.cmd === 'codex' && col.codexManaged && !col.codexThreadId &&
+        col.codexClaimId === claim.claimId) matches.push(col);
+  });
+  if (matches.length !== 1) return;
+  var col = matches[0];
+  col.codexClaimId = null;
+  col.codexClaimCwd = null;
+  col.codexManaged = false;
+  persistSessions(col.projectKey, col.workspaceId);
+  markCodexClaimExpired(col, claim.reason);
+}
+
 function startCodexThreadState(colId) {
   var col = allColumns.get(colId);
   if (!col || col.cmd !== 'codex' || !col.codexThreadId) return;
@@ -15407,6 +15443,9 @@ if (window.electronAPI && window.electronAPI.onCodexThreadState) {
 }
 if (window.electronAPI && window.electronAPI.onCodexThreadClaimed) {
   window.electronAPI.onCodexThreadClaimed(handleCodexThreadClaimed);
+}
+if (window.electronAPI && window.electronAPI.onCodexClaimExpired) {
+  window.electronAPI.onCodexClaimExpired(handleCodexClaimExpired);
 }
 
 function startContextMeterPoll(colId) {

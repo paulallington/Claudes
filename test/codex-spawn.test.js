@@ -271,7 +271,9 @@ test('managed attach rejects malformed or cross-mode identities and shell-active
   assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'resume', threadId: '123e4567-e89b-42d3-a456-426614174000', claimId: '0123456789abcdef0123456789abcdef' }), null);
   assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' }, 'hello & whoami'), null);
   assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, cwd: 'relative/path', mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' }), null);
-  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, cwd: 'D:\\Repo%PATH%', mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' }), null);
+  const legalSpecialPath = 'D:\\Repo (100%)!';
+  const specialAttach = buildCodexRemoteAttach([], { ...bridge, cwd: legalSpecialPath, mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' });
+  assert.deepStrictEqual(specialAttach.slice(0, 2), ['-C', legalSpecialPath]);
 });
 
 test('persist/restore carries only a validated native thread id, never bridge details', () => {

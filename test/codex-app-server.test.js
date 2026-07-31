@@ -259,6 +259,10 @@ test('missing rollout resume intent recovers as fresh but other read failures re
     remoteTokenEnvName: REMOTE_TOKEN_ENV_NAME
   });
   assert.deepStrictEqual(methods, ['thread/read']);
+  service.handleNotification({
+    method: 'thread/started',
+    params: { thread: { id: threadId, cwd: 'D:/safe/project', status: { type: 'idle' } } }
+  });
 
   const notLoaded = new Error('thread not loaded: ' + threadId);
   notLoaded.code = -32600;
@@ -288,6 +292,7 @@ test('thread started broadcasts claim fresh launches by normalized cwd in FIFO o
   const unrelatedThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9614';
   const expiredThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9615';
   const claims = [];
+  const expiredClaims = [];
   const states = [];
   let now = 1000;
   let randomByte = 1;
@@ -300,14 +305,19 @@ test('thread started broadcasts claim fresh launches by normalized cwd in FIFO o
     randomBytes: (size) => Buffer.alloc(size, randomByte++),
     claimTtlMs: 100,
     onThreadClaimed: (claim) => claims.push(claim),
+    onClaimExpired: (claim) => expiredClaims.push(claim),
     onState: (state) => states.push(state)
   });
   service.client = {};
   service.remoteUrl = 'ws://127.0.0.1:4567';
 
   const first = await service.prepareThread({ cwd: 'D:/safe/project' });
-  const second = await service.prepareThread({ cwd: 'd:\\SAFE\\project\\.' });
+  let secondSettled = false;
+  const secondPromise = service.prepareThread({ cwd: 'd:\\SAFE\\project\\.' })
+    .then((prepared) => { secondSettled = true; return prepared; });
   const expired = await service.prepareThread({ cwd: 'D:/expired/project' });
+  await Promise.resolve();
+  assert.equal(secondSettled, false, 'same-cwd fresh launches must serialize until the prior claim settles');
 
   service.handleNotification({
     method: 'thread/started',
@@ -321,6 +331,7 @@ test('thread started broadcasts claim fresh launches by normalized cwd in FIFO o
     method: 'thread/started',
     params: { thread: { id: firstThreadId, cwd: 'D:/SAFE/project', status: { type: 'idle' } } }
   });
+  const second = await secondPromise;
   service.handleNotification({
     method: 'thread/started',
     params: { thread: { id: secondThreadId, cwd: 'd:\\safe\\project', status: { type: 'active' } } }
@@ -336,9 +347,36 @@ test('thread started broadcasts claim fresh launches by normalized cwd in FIFO o
     { claimId: second.claimId, threadId: secondThreadId }
   ]);
   assert.notStrictEqual(expired.claimId, first.claimId);
+  assert.deepStrictEqual(expiredClaims, [{ claimId: expired.claimId, reason: 'timeout' }]);
   assert.equal(service.getThreadState(firstThreadId).status, 'idle');
   assert.equal(service.getThreadState(secondThreadId).status, 'running');
   assert.equal(service.getThreadState(expiredThreadId).status, 'idle');
+});
+
+test('fresh claim timeout publishes expiry and unblocks the next same-cwd preparation without another notification', async () => {
+  let scheduled;
+  const expired = [];
+  const service = new CodexAppServerService({
+    token: 'a-main-owned-capability-token',
+    platform: 'linux',
+    spawnProcess: () => new EventEmitter(),
+    createSocket: () => new EventEmitter(),
+    randomBytes: (size) => Buffer.alloc(size, expired.length + 1),
+    setTimeout: (fn) => { scheduled = fn; return { unref() {} }; },
+    clearTimeout: () => {},
+    onClaimExpired: (claim) => expired.push(claim)
+  });
+  service.client = {};
+  service.remoteUrl = 'ws://127.0.0.1:4567';
+
+  const first = await service.prepareThread({ cwd: '/repo' });
+  const secondPromise = service.prepareThread({ cwd: '/repo' });
+  scheduled();
+  const second = await secondPromise;
+
+  assert.deepStrictEqual(expired, [{ claimId: first.claimId, reason: 'timeout' }]);
+  assert.notEqual(second.claimId, first.claimId);
+  service.stop();
 });
 
 test('unexpected app-server exit disables the bridge instead of changing its endpoint', async () => {
