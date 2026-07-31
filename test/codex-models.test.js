@@ -54,3 +54,16 @@ test('normalizeCatalog: de-duplicates ids while preserving server order and firs
   assert.deepStrictEqual(catalog.models[0].efforts.map((e) => e.id), ['high']);
   assert.deepStrictEqual(catalog.models[0].tiers.map((t) => t.id), ['priority']);
 });
+
+test('pickerSelection preserves a saved live-only value until the authoritative catalog arrives', () => {
+  const fallback = [{ id: 'gpt-fallback' }];
+  assert.deepStrictEqual(CodexModels.pickerSelection(fallback, 'gpt-live-only', false), {
+    value: 'gpt-live-only', includePending: true
+  });
+  assert.deepStrictEqual(CodexModels.pickerSelection([{ id: 'gpt-live-only' }], 'gpt-live-only', true), {
+    value: 'gpt-live-only', includePending: false
+  });
+  assert.deepStrictEqual(CodexModels.pickerSelection([{ id: 'gpt-other' }], 'gpt-live-only', true), {
+    value: '', includePending: false
+  });
+});

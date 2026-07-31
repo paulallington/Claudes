@@ -6,7 +6,6 @@ const { EventEmitter } = require('node:events');
 const {
   REMOTE_TOKEN_ENV_NAME,
   buildAppServerArgs,
-  codexBridgeEnvForSpawn,
   CodexRpcClient,
   CodexAppServerService
 } = require('../lib/codex-app-server');
@@ -23,21 +22,6 @@ test('app-server auth uses a loopback listener and passes only the token digest 
   ]);
   assert.strictEqual(args.join(' ').includes(token), false);
 
-  const resumeArgs = [
-    'resume', '--remote', 'ws://127.0.0.1:4567',
-    '--remote-auth-token-env', REMOTE_TOKEN_ENV_NAME,
-    '0198f064-8ec4-7a21-82db-0cc0f67c9612'
-  ];
-  const expectedRemoteUrl = 'ws://127.0.0.1:4567';
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs, token, expectedRemoteUrl), {
-    [REMOTE_TOKEN_ENV_NAME]: token
-  });
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('node', resumeArgs, token, expectedRemoteUrl), {});
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.map((v) => v === expectedRemoteUrl ? 'ws://192.168.1.4:4567' : v), token, expectedRemoteUrl), {});
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.map((v) => v === expectedRemoteUrl ? 'ws://127.0.0.1:9999' : v), token, expectedRemoteUrl), {});
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.map((v) => v === REMOTE_TOKEN_ENV_NAME ? 'PATH' : v), token, expectedRemoteUrl), {});
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.concat(['--remote', 'ws://127.0.0.1:9999']), token, expectedRemoteUrl), {});
-  assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.concat(['resume']), token, expectedRemoteUrl), {});
 });
 
 test('RPC client initializes once and correlates app-server responses', async () => {
@@ -257,4 +241,20 @@ test('unexpected app-server exit disables the bridge instead of changing its end
   await assert.rejects(service.getCatalog(), /unavailable/i);
   assert.strictEqual(spawnCount, 1);
   assert.strictEqual(unavailableCount, 1);
+});
+
+test('stopping during asynchronous startup prevents a late app-server child spawn', async () => {
+  let releasePort;
+  let spawnCount = 0;
+  const service = new CodexAppServerService({
+    token: 'a-main-owned-capability-token',
+    allocatePort: () => new Promise((resolve) => { releasePort = resolve; }),
+    spawnProcess: () => { spawnCount++; return new EventEmitter(); },
+    createSocket: () => new EventEmitter()
+  });
+  const pending = service.ensureStarted();
+  service.stop();
+  releasePort(4567);
+  await assert.rejects(pending, /stopp/i);
+  assert.equal(spawnCount, 0);
 });

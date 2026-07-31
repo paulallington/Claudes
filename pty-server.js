@@ -115,10 +115,9 @@ const PORT = parseInt(process.env.PTY_PORT || '3456', 10);
 const AUTH_TOKEN = process.env.PTY_AUTH_TOKEN || '';
 const CODEX_BRIDGE_TOKEN_ENV_NAME = 'CLAUDES_CODEX_BRIDGE_TOKEN';
 const CODEX_BRIDGE_REMOTE_ENV_NAME = 'CLAUDES_CODEX_BRIDGE_REMOTE_URL';
-const CODEX_BRIDGE_TOKEN = process.env[CODEX_BRIDGE_TOKEN_ENV_NAME] || '';
-const CODEX_BRIDGE_REMOTE_URL = process.env[CODEX_BRIDGE_REMOTE_ENV_NAME] || '';
-// The sidecar needs the capability, but ordinary PTY children must not inherit
-// it. Capture once, then remove both private values from the inherited base.
+// A previous version inherited these values at sidecar startup. Strip them even
+// if an old launcher supplies them: bridge authorization now arrives only over
+// the private parent-owned stdin control channel below.
 delete process.env[CODEX_BRIDGE_TOKEN_ENV_NAME];
 delete process.env[CODEX_BRIDGE_REMOTE_ENV_NAME];
 // Subprotocol the renderer presents on the WebSocket handshake. The token is
@@ -172,21 +171,83 @@ function sanitiseEnv(input) {
 }
 
 const CODEX_THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-function codexBridgeEnvForSpawn(cmd, args) {
-  if (cmd !== 'codex' || !Array.isArray(args) || !CODEX_BRIDGE_TOKEN || !CODEX_BRIDGE_REMOTE_URL) return {};
-  if (!/^ws:\/\/127\.0\.0\.1:\d{1,5}\/?$/.test(CODEX_BRIDGE_REMOTE_URL)) return {};
-  if (args.filter((value) => value === 'resume').length !== 1) return {};
-  if (args.filter((value) => value === '--remote').length !== 1) return {};
-  if (args.filter((value) => value === '--remote-auth-token-env').length !== 1) return {};
+const CODEX_REMOTE_RE = /^ws:\/\/127\.0\.0\.1:(?:[1-9]\d{0,4})\/?$/;
+let codexBridgeConfig = null;
+const codexSpawnTickets = new Map();
+
+function normalizeCodexCwd(cwd) {
+  if (typeof cwd !== 'string' || !cwd) return null;
+  const paths = process.platform === 'win32' ? path.win32 : path.posix;
+  const value = paths.normalize(paths.resolve(cwd));
+  return process.platform === 'win32' ? value.toLowerCase() : value;
+}
+
+function codexBindingFromArgs(cmd, args) {
+  if (cmd !== 'codex' || !Array.isArray(args) || !codexBridgeConfig) return null;
+  if (args.filter((value) => value === 'resume').length !== 1) return null;
+  if (args.filter((value) => value === '--remote').length !== 1) return null;
+  if (args.filter((value) => value === '--remote-auth-token-env').length !== 1) return null;
   const resumeIdx = args.indexOf('resume');
   const remoteIdx = args.indexOf('--remote');
   const envIdx = args.indexOf('--remote-auth-token-env');
-  if (remoteIdx <= resumeIdx || envIdx <= resumeIdx) return {};
-  if (args[remoteIdx + 1] !== CODEX_BRIDGE_REMOTE_URL) return {};
-  if (args[envIdx + 1] !== CODEX_BRIDGE_TOKEN_ENV_NAME) return {};
-  if (!args.slice(resumeIdx + 1).some((value) => typeof value === 'string' && CODEX_THREAD_ID_RE.test(value))) return {};
-  return { [CODEX_BRIDGE_TOKEN_ENV_NAME]: CODEX_BRIDGE_TOKEN };
+  if (remoteIdx <= resumeIdx || envIdx <= resumeIdx) return null;
+  const remoteUrl = args[remoteIdx + 1];
+  if (remoteUrl !== codexBridgeConfig.remoteUrl) return null;
+  if (args[envIdx + 1] !== CODEX_BRIDGE_TOKEN_ENV_NAME) return null;
+  const threadIds = args.slice(resumeIdx + 1).filter((value) => typeof value === 'string' && CODEX_THREAD_ID_RE.test(value));
+  if (threadIds.length !== 1) return null;
+  return { threadId: threadIds[0], remoteUrl };
 }
+
+function codexBridgeEnvForSpawn(cmd, args, cwd, ticket) {
+  const binding = codexBindingFromArgs(cmd, args);
+  if (!binding || typeof ticket !== 'string' || !ticket) return {};
+  const stored = codexSpawnTickets.get(ticket);
+  // Consume before comparing: a guessed/misrouted ticket can never be retried.
+  codexSpawnTickets.delete(ticket);
+  if (!stored || stored.expiresAt < Date.now()) return {};
+  if (stored.threadId !== binding.threadId || stored.remoteUrl !== binding.remoteUrl || stored.cwd !== normalizeCodexCwd(cwd)) return {};
+  return { [CODEX_BRIDGE_TOKEN_ENV_NAME]: codexBridgeConfig.token };
+}
+
+// Parent-only control plane. The Electron main process writes newline-delimited
+// JSON to this process's stdin; renderer WebSocket clients cannot reach it.
+let codexControlBuffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  codexControlBuffer += chunk;
+  let newline;
+  while ((newline = codexControlBuffer.indexOf('\n')) !== -1) {
+    const line = codexControlBuffer.slice(0, newline);
+    codexControlBuffer = codexControlBuffer.slice(newline + 1);
+    let message = null;
+    try { message = JSON.parse(line); } catch { /* malformed private control message */ }
+    if (!message || typeof message.requestId !== 'string') continue;
+    let ok = false;
+    if (message.type === 'codex-bridge-config') {
+      if (CODEX_REMOTE_RE.test(message.remoteUrl) && typeof message.token === 'string' && message.token.length >= 16) {
+        codexBridgeConfig = { remoteUrl: message.remoteUrl, token: message.token };
+        codexSpawnTickets.clear();
+        ok = true;
+      }
+    } else if (message.type === 'codex-spawn-authorize' && codexBridgeConfig) {
+      const cwd = normalizeCodexCwd(message.cwd);
+      if (typeof message.ticket === 'string' && /^[0-9a-f]{64}$/i.test(message.ticket) &&
+          CODEX_THREAD_ID_RE.test(message.threadId || '') && cwd &&
+          message.remoteUrl === codexBridgeConfig.remoteUrl && Number.isFinite(message.expiresAt) && message.expiresAt > Date.now()) {
+        codexSpawnTickets.set(message.ticket, {
+          threadId: message.threadId, cwd, remoteUrl: message.remoteUrl, expiresAt: message.expiresAt
+        });
+        const ticketToExpire = message.ticket;
+        const expiryTimer = setTimeout(() => codexSpawnTickets.delete(ticketToExpire), Math.max(1, message.expiresAt - Date.now() + 1));
+        if (expiryTimer.unref) expiryTimer.unref();
+        ok = true;
+      }
+    }
+    // requestId is random correlation metadata, never the spawn ticket.
+    console.log('CONTROL_ACK:' + message.requestId + ':' + (ok ? 'OK' : 'ERR'));
+  }
+});
 
 // On macOS, GUI-launched apps inherit a minimal PATH that omits Homebrew,
 // nvm, ~/.local/bin, etc. Augment PATH for our `which claude` lookup AND
@@ -452,7 +513,7 @@ function handleConnection(ws, req) {
 
     switch (msg.type) {
       case 'create': {
-        const { id, cols, rows, cwd, args, cmd, env } = msg;
+        const { id, cols, rows, cwd, args, cmd, env, spawnTicket } = msg;
 
         // Reject if global or per-connection caps would be exceeded. Without
         // these, an authenticated peer can fork-bomb the host by looping
@@ -495,7 +556,7 @@ function handleConnection(ws, req) {
           env: {
             ...process.env,
             ...(sanitiseEnv(env) || {}),
-            ...codexBridgeEnvForSpawn(cmd, Array.isArray(args) ? args : []),
+            ...codexBridgeEnvForSpawn(cmd, Array.isArray(args) ? args : [], cwd || process.cwd(), spawnTicket),
             PATH: AUGMENTED_PATH
           }
         };

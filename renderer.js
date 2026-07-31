@@ -37,23 +37,30 @@ var codexTierRow = document.getElementById('opt-codex-tier-row');
 // touches these gets exactly the old behaviour.
 var codexCatalog = window.CodexModels ? window.CodexModels.fallbackCatalog() : { models: [], defaultModel: '' };
 var codexCatalogPromise = null;
+var codexCatalogLive = false;
+var codexPendingSelections = { projectKey: null, model: '', effort: '', tier: '' };
+var codexFallbackWarningShown = false;
 
 function renderCodexPicker(sel, list, inheritLabel, selected) {
   if (!sel) return;
+  var selection = window.CodexModels.pickerSelection(list, selected, codexCatalogLive);
   var html = '<option value="">' + escapeHtml(inheritLabel) + '</option>';
   list.forEach(function (item) {
     html += '<option value="' + escapeHtml(item.id) + '"' +
       (item.hint ? ' title="' + escapeHtml(item.hint) + '"' : '') + '>' +
       escapeHtml(item.label) + '</option>';
   });
+  if (selection.includePending) {
+    html += '<option value="' + escapeHtml(selected) + '">Saved: ' + escapeHtml(selected) + ' (loading…)</option>';
+  }
   sel.innerHTML = html;
-  sel.value = list.some(function (item) { return item.id === selected; }) ? selected : '';
+  sel.value = selection.value;
 }
 
 function refreshCodexCapabilityPickers() {
   var CM = window.CodexModels;
   if (!CM) return;
-  var selectedModel = optCodexModel ? optCodexModel.value : '';
+  var selectedModel = codexPendingSelections.model || (optCodexModel ? optCodexModel.value : '');
   var capabilities;
   if (selectedModel) {
     capabilities = CM.optionsForModel(codexCatalog, selectedModel);
@@ -69,14 +76,14 @@ function refreshCodexCapabilityPickers() {
     });
     capabilities = { efforts: Array.from(efforts.values()), tiers: Array.from(tiers.values()) };
   }
-  renderCodexPicker(optCodexEffort, capabilities.efforts, 'Codex default', optCodexEffort ? optCodexEffort.value : '');
-  renderCodexPicker(optCodexTier, capabilities.tiers, 'Codex default', optCodexTier ? optCodexTier.value : '');
+  renderCodexPicker(optCodexEffort, capabilities.efforts, 'Codex default', codexPendingSelections.effort || (optCodexEffort ? optCodexEffort.value : ''));
+  renderCodexPicker(optCodexTier, capabilities.tiers, 'Codex default', codexPendingSelections.tier || (optCodexTier ? optCodexTier.value : ''));
 }
 
 function initCodexPickers() {
   var CM = window.CodexModels;
   if (!CM) return;
-  renderCodexPicker(optCodexModel, codexCatalog.models || [], 'Codex default', optCodexModel ? optCodexModel.value : '');
+  renderCodexPicker(optCodexModel, codexCatalog.models || [], 'Codex default', codexPendingSelections.model || (optCodexModel ? optCodexModel.value : ''));
   refreshCodexCapabilityPickers();
 }
 
@@ -85,6 +92,7 @@ function ensureCodexCatalog() {
   if (!window.electronAPI || !window.electronAPI.codexGetCatalog) return Promise.resolve(codexCatalog);
   codexCatalogPromise = window.electronAPI.codexGetCatalog().then(function (raw) {
     codexCatalog = window.CodexModels.normalizeCatalog(raw);
+    codexCatalogLive = !!(raw && raw.ok);
     initCodexPickers();
     return codexCatalog;
   }).catch(function () { return codexCatalog; });
@@ -1152,6 +1160,13 @@ function connectWS() {
     } else if (msg.type === 'exit') {
       var col2 = allColumns.get(msg.id);
       if (col2) {
+        if (col2.suppressNextExit) {
+          col2.suppressNextExit = false;
+          if (col2.suppressNextExitTimer) clearTimeout(col2.suppressNextExitTimer);
+          col2.suppressNextExitTimer = null;
+          col2.element.querySelectorAll('.exit-overlay').forEach(function (node) { node.remove(); });
+          return;
+        }
         // Endpoint failover: if this is a Claude column that died early with a
         // non-zero exit code, and the column was spawned with an endpoint that
         // has a fallback configured, transparently respawn with the fallback
@@ -4465,10 +4480,10 @@ function createColumnHeader(id, customTitle, opts) {
     var codexBadge = document.createElement('span');
     codexBadge.className = 'col-codex-badge';
     codexBadge.textContent = 'Codex';
+    codexBadge.dataset.launchSafety = opts.codexLabel || 'Codex default';
     codexBadge.title = opts.codexLabel
       ? ('Codex CLI · ' + opts.codexLabel)
       : 'This column runs the Codex CLI, not Claude';
-    title.appendChild(codexBadge);
   }
 
   // Subscription chip — hidden by default (empty text, no background), toggled
@@ -4569,6 +4584,12 @@ function createColumnHeader(id, customTitle, opts) {
     ctxMeter.className = 'col-ctx-meter';
     ctxMeter.dataset.colCtx = '';
     ctxMeter.setAttribute('hidden', '');
+    ctxMeter.setAttribute('tabindex', '0');
+    ctxMeter.setAttribute('role', 'progressbar');
+    ctxMeter.setAttribute('aria-label', 'Context window usage');
+    ctxMeter.setAttribute('aria-valuemin', '0');
+    ctxMeter.setAttribute('aria-valuemax', '100');
+    ctxMeter.setAttribute('aria-valuetext', 'Context usage unavailable');
     ctxMeter.title = 'Context window usage';
     var ctxFill = document.createElement('div');
     ctxFill.className = 'col-ctx-fill';
@@ -4623,6 +4644,7 @@ function createColumnHeader(id, customTitle, opts) {
   actions.appendChild(closeBtn);
 
   header.appendChild(title);
+  if (codexBadge) header.appendChild(codexBadge);
   if (codexWatchBadge) header.appendChild(codexWatchBadge);
   header.appendChild(actions);
 
@@ -5320,6 +5342,7 @@ function addColumn(args, targetRow, opts) {
     var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: claudeArgs };
     if (cmd) sendMsg.cmd = cmd;
     if (opts.env) sendMsg.env = opts.env;
+    if (cmd === 'codex' && typeof opts.spawnTicket === 'string') sendMsg.spawnTicket = opts.spawnTicket;
 
     // Project-scoped MCP: for claude columns, resolve the project's inherited-server
     // selection and append --mcp-config/--strict-mcp-config. No-op when inheriting
@@ -5703,6 +5726,7 @@ function addColumn(args, targetRow, opts) {
   var effortBadgeEl = header.querySelector('.col-effort');
   if (effortBadgeEl && colData.effort && isValidEffort(colData.effort)) effortBadgeEl.value = colData.effort;
   if (cmd === 'codex' && colData.codexThreadId) startCodexThreadState(id);
+  else if (cmd === 'codex') markCodexFallback(colData);
   else startContextMeterPoll(id);
   setFocusedColumn(id);
   if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
@@ -6920,9 +6944,7 @@ async function restartColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
   if (col.isDiff) return;
-
-  // Kill the current process
-  wsSend({ type: 'kill', id: id });
+  var hadExitOverlay = !!col.element.querySelector('.exit-overlay');
 
   // Reset the per-column delta baseline so the Δ pill measures from this respawn,
   // not from the original spawn. The next ctx poll repopulates spawnSessionTokens.
@@ -6967,11 +6989,12 @@ async function restartColumn(id) {
           cwd: sendMsg.cwd,
           threadId: window.CodexSpawn.isCodexThreadId(col.codexThreadId) ? col.codexThreadId : undefined
         });
-        var remoteResumeArgs = preparedThread && preparedThread.ok
+        var remoteResumeArgs = preparedThread && preparedThread.ok && /^[0-9a-f]{64}$/i.test(preparedThread.spawnTicket || '')
           ? window.CodexSpawn.buildCodexRemoteResume(col.cmdArgs || [], preparedThread)
           : null;
         if (remoteResumeArgs) {
           sendMsg.args = remoteResumeArgs;
+          sendMsg.spawnTicket = preparedThread.spawnTicket;
           col.codexThreadId = preparedThread.threadId;
           col.codexManaged = true;
           codexRestartManaged = true;
@@ -6982,6 +7005,7 @@ async function restartColumn(id) {
     if (col.cmd === 'codex' && !codexRestartManaged) {
       col.codexThreadId = null;
       col.codexManaged = false;
+      markCodexFallback(col);
     }
   } else {
     sendMsg.args = buildResumeArgs(col);
@@ -7008,6 +7032,18 @@ async function restartColumn(id) {
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
   // Passthrough for arbitrary-cmd/endpoint columns; hasMcp from the fresh resolve.
   maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: __rHasMcp, oneMModel: col.model });
+  // Prepare/authorize managed Codex before killing the old PTY. The old exit
+  // arrives asynchronously; suppress exactly that expected event so it cannot
+  // paint an exit overlay on top of the replacement terminal.
+  if (!hadExitOverlay) {
+    col.suppressNextExit = true;
+    if (col.suppressNextExitTimer) clearTimeout(col.suppressNextExitTimer);
+    col.suppressNextExitTimer = setTimeout(function () {
+      var live = allColumns.get(id);
+      if (live) live.suppressNextExit = false;
+    }, 3000);
+    wsSend({ type: 'kill', id: id });
+  }
   gatedWsSend(sendMsg);
   // Re-evaluate stale-hook health from a clean slate for the new session: if
   // hooks now reach the column it will never re-flag; if they still don't, the
@@ -7736,12 +7772,13 @@ async function spawnCodexColumn(cwd, targetRow, semanticSpec, options) {
       });
     } catch (e) { prepared = null; }
   }
-  var managedArgs = prepared && prepared.ok
+  var managedArgs = prepared && prepared.ok && /^[0-9a-f]{64}$/i.test(prepared.spawnTicket || '')
     ? window.CodexSpawn.buildCodexRemoteResume(semanticArgs, prepared, options.prompt)
     : null;
   if (managedArgs) {
     columnOpts.codexThreadId = prepared.threadId;
     columnOpts.codexManaged = true;
+    columnOpts.spawnTicket = prepared.spawnTicket;
     addColumn(managedArgs, targetRow, columnOpts);
     return { managed: true, threadId: prepared.threadId };
   }
@@ -12183,11 +12220,14 @@ function loadSpawnOptions() {
   if (optCodexApproval) {
     optCodexApproval.value = opts.codexApprovalMode || window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
   }
+  codexPendingSelections = {
+    projectKey: activeProjectKey,
+    model: opts.codexModel || '',
+    effort: opts.codexEffort || '',
+    tier: opts.codexTier || ''
+  };
   initCodexPickers();
-  if (optCodexModel) optCodexModel.value = opts.codexModel || '';
   refreshCodexCapabilityPickers();
-  if (optCodexEffort) optCodexEffort.value = opts.codexEffort || '';
-  if (optCodexTier) optCodexTier.value = opts.codexTier || '';
 
   // First call on app boot always defaults to cloud (Anthropic), regardless of
   // what was saved. Subsequent calls (project switches within the session)
@@ -12272,6 +12312,9 @@ if (optCodexApproval) {
   [optCodexModel, optCodexEffort, optCodexTier].forEach(function (sel) {
     if (!sel) return;
     sel.addEventListener('change', function () {
+      if (sel === optCodexModel) codexPendingSelections.model = sel.value;
+      else if (sel === optCodexEffort) codexPendingSelections.effort = sel.value;
+      else if (sel === optCodexTier) codexPendingSelections.tier = sel.value;
       if (sel === optCodexModel) refreshCodexCapabilityPickers();
       saveSpawnOptions();
     });
@@ -15169,6 +15212,8 @@ function showCtxMeterPlaceholder(col, label) {
   if (col.ctxFillEl) col.ctxFillEl.style.width = '0%';
   if (col.ctxTextEl) col.ctxTextEl.textContent = label;
   col.ctxMeterEl.title = label;
+  col.ctxMeterEl.removeAttribute('aria-valuenow');
+  col.ctxMeterEl.setAttribute('aria-valuetext', label === '…' ? 'Context usage loading' : 'Context usage unavailable');
 }
 
 function showDeltaPillPlaceholder(col) {
@@ -15178,6 +15223,17 @@ function showDeltaPillPlaceholder(col) {
   col.deltaSessionEl.title = 'Waiting for first assistant turn…';
 }
 
+function markCodexFallback(col) {
+  if (!col || col.cmd !== 'codex') return;
+  showCtxMeterPlaceholder(col, '—');
+  col.ctxMeterEl.title = 'Live Codex context unavailable · direct CLI fallback\nNative thread resume is disabled for this column.';
+  col.ctxMeterEl.setAttribute('aria-valuetext', 'Live Codex context unavailable in direct CLI fallback');
+  if (!codexFallbackWarningShown) {
+    codexFallbackWarningShown = true;
+    showToast('Codex started in direct fallback mode — live context and native resume are unavailable.', { kind: 'warn', duration: 7000 });
+  }
+}
+
 function applyCodexThreadState(col, threadState) {
   if (!col || !threadState || threadState.threadId !== col.codexThreadId) return;
   col.codexThreadState = threadState;
@@ -15185,7 +15241,16 @@ function applyCodexThreadState(col, threadState) {
   var detail = [settings.model, settings.reasoningEffort, settings.serviceTier, threadState.status]
     .filter(function (value) { return !!value; }).join(' · ');
   var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
-  if (badge && detail) badge.title = 'Codex CLI · ' + detail;
+  if (badge) {
+    var sandbox = settings.sandbox;
+    if (sandbox && typeof sandbox === 'object') sandbox = sandbox.type || 'configured';
+    var safety = [
+      'Launch preset: ' + (badge.dataset.launchSafety || 'Codex default'),
+      settings.approvalPolicy ? ('Effective approval: ' + settings.approvalPolicy) : '',
+      sandbox ? ('Effective sandbox: ' + sandbox) : ''
+    ].filter(function (value) { return !!value; });
+    badge.title = ['Codex CLI'].concat(safety).concat(detail ? [detail] : []).join('\n');
+  }
 
   var display = window.CodexSpawn.codexContextDisplay(threadState);
   if (!display) {
@@ -15199,6 +15264,8 @@ function applyCodexThreadState(col, threadState) {
   col.ctxFillEl.classList.toggle('critical', display.percent >= 90);
   col.ctxTextEl.textContent = display.text;
   col.ctxMeterEl.title = display.title;
+  col.ctxMeterEl.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, display.percent))));
+  col.ctxMeterEl.setAttribute('aria-valuetext', display.text + ' · ' + Math.round(display.percent) + '% of Codex context used');
 }
 
 function handleCodexThreadState(threadState) {
@@ -15332,6 +15399,8 @@ function startContextMeterPoll(colId) {
         col.ctxMeterEl.title =
           'Context window: ' + tokens.toLocaleString() + ' / ' + effLim.toLocaleString() + ' tokens (' + Math.round(pct) + '%)\n' +
           'Cumulative tokens currently held in this session\'s context.';
+        col.ctxMeterEl.setAttribute('aria-valuenow', String(pct));
+        col.ctxMeterEl.setAttribute('aria-valuetext', tokens.toLocaleString() + ' of ' + effLim.toLocaleString() + ' context tokens used (' + Math.round(pct) + '%)');
       }
       if (limit) { draw(); return; }
       window.electronAPI.getModelContextLimit(modelKey).then(function (lim) {
