@@ -1,11 +1,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { EventEmitter } = require('node:events');
 
 const {
   REMOTE_TOKEN_ENV_NAME,
   buildAppServerArgs,
-  codexBridgeEnvForSpawn
+  codexBridgeEnvForSpawn,
+  CodexRpcClient
 } = require('../lib/codex-app-server');
 
 test('app-server auth uses a loopback listener and passes only the token digest on argv', () => {
@@ -31,4 +33,35 @@ test('app-server auth uses a loopback listener and passes only the token digest 
   assert.deepStrictEqual(codexBridgeEnvForSpawn('node', resumeArgs, token), {});
   assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.map((v) => v === 'ws://127.0.0.1:4567' ? 'ws://192.168.1.4:4567' : v), token), {});
   assert.deepStrictEqual(codexBridgeEnvForSpawn('codex', resumeArgs.map((v) => v === REMOTE_TOKEN_ENV_NAME ? 'PATH' : v), token), {});
+});
+
+test('RPC client initializes once and correlates app-server responses', async () => {
+  class FakeSocket extends EventEmitter {
+    constructor() {
+      super();
+      this.sent = [];
+    }
+    send(raw) { this.sent.push(JSON.parse(raw)); }
+  }
+
+  const socket = new FakeSocket();
+  const client = new CodexRpcClient(socket, { requestTimeoutMs: 100 });
+  const initializing = client.initialize({ name: 'claudes', title: 'Claudes', version: '1.2.3' });
+
+  assert.deepStrictEqual(socket.sent[0], {
+    id: 1,
+    method: 'initialize',
+    params: {
+      clientInfo: { name: 'claudes', title: 'Claudes', version: '1.2.3' },
+      capabilities: { experimentalApi: true, requestAttestation: false }
+    }
+  });
+  socket.emit('message', JSON.stringify({ id: 1, result: { userAgent: 'codex-cli' } }));
+  await initializing;
+  assert.deepStrictEqual(socket.sent[1], { method: 'initialized' });
+
+  const pending = client.request('model/list', { includeHidden: false });
+  assert.deepStrictEqual(socket.sent[2], { id: 2, method: 'model/list', params: { includeHidden: false } });
+  socket.emit('message', JSON.stringify({ id: 2, result: { data: [], nextCursor: null } }));
+  assert.deepStrictEqual(await pending, { data: [], nextCursor: null });
 });
