@@ -1575,6 +1575,56 @@ html[data-platform="darwin"] #toolbar {
   background: rgba(120, 170, 255, 0.18);
   color: #a9c7ff;
   vertical-align: middle;
+  cursor: help;
+}
+
+.codex-badge-tooltip {
+  position: fixed;
+  z-index: 900;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 7px 9px;
+  border: 1px solid var(--border-primary);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  box-shadow: 0 5px 14px var(--shadow);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  white-space: pre-line;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms ease;
+}
+
+.codex-badge-tooltip.codex-badge-tooltip-shown {
+  visibility: visible;
+  opacity: 1;
+}
+
+.column-header .col-codex-badge:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 2px;
+}
+
+.column-header .col-codex-badge.col-codex-badge-fallback {
+  background: rgba(255, 214, 10, 0.15);
+  color: var(--color-yellow);
+}
+
+/* The dark-theme blue is too pale against the light header. Keep the blue
+   identity, but use the theme's dark cyan-blue text on a restrained wash. */
+[data-theme="light"] .column-header .col-codex-badge {
+  background: rgba(9, 105, 218, 0.12);
+  color: #0550ae;
+}
+
+[data-theme="light"] .column-header .col-codex-badge.col-codex-badge-fallback {
+  background: rgba(154, 103, 0, 0.12);
+  color: #6e4b00;
 }
 
 /* Codex-watch running-job count badge (see updateCodexWatchBadge in

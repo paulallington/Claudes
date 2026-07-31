@@ -51,6 +51,8 @@ const { extractSeedClaudeJson } = require('./lib/profile-seed');
 const CodexWatchJobs = require('./lib/codex-watch-jobs');
 const CodexWatchLog = require('./lib/codex-watch-log');
 const CodexWatchTail = require('./lib/codex-watch-tail');
+const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-app-server');
+const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -321,6 +323,10 @@ process.on('unhandledRejection', (reason) => {
 // this, any local process (including any web page in any browser) could
 // connect to 127.0.0.1:<ptyPort> and spawn arbitrary commands as the user.
 const PTY_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
+// Main owns the Codex app-server capability. It is passed only to the trusted
+// PTY sidecar, which injects it for an exact managed Codex resume command.
+// The renderer receives the env variable name, never this value.
+const CODEX_BRIDGE_TOKEN = crypto.randomBytes(32).toString('hex');
 
 // Per-launch token gating the local hook HTTP server (POST /hook). Without this,
 // any local process — including a JS payload running in any browser tab — could
@@ -364,6 +370,13 @@ let ptyActualPort = ptyPort;                       // updated from the pty-serve
 let ptyRestartTimestamps = [];                     // rolling record of crash-recovery restarts (see lib/pty-restart-policy)
 const hookServerListenPort = app.isPackaged ? 53456 : 53457;
 let ptyServerProcess;
+let codexAppServer = null;
+let codexStartingService = null;
+let codexBridgeRemoteUrl = '';
+let codexBridgeStartPromise = null;
+let codexBridgeDisabled = false;
+const codexSpawnTicketStore = createSpawnTicketStore();
+const ptyControlAcks = new Map();
 
 const CONFIG_DIR = path.join(os.homedir(), '.claudes');
 // Dev builds use a separate projects file so running dev alongside an
@@ -1184,23 +1197,51 @@ function getPtyServerScript() {
   return path.join(__dirname, 'pty-server.js');
 }
 
+function sendPtyControl(message, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (!ptyServerProcess || !ptyServerProcess.stdin || ptyServerProcess.killed) return reject(new Error('terminal sidecar unavailable'));
+    const requestId = crypto.randomBytes(12).toString('hex');
+    const timer = setTimeout(() => {
+      ptyControlAcks.delete(requestId);
+      reject(new Error('terminal sidecar control timed out'));
+    }, timeoutMs || 3000);
+    if (timer.unref) timer.unref();
+    ptyControlAcks.set(requestId, {
+      resolve: () => { clearTimeout(timer); resolve(); },
+      reject: (error) => { clearTimeout(timer); reject(error); }
+    });
+    try { ptyServerProcess.stdin.write(JSON.stringify({ ...message, requestId }) + '\n'); }
+    catch (error) { ptyControlAcks.delete(requestId); clearTimeout(timer); reject(error); }
+  });
+}
+
+async function configurePtyCodexBridge() {
+  if (!codexAppServer || !codexBridgeRemoteUrl) throw new Error('Codex bridge unavailable');
+  await sendPtyControl({ type: 'codex-bridge-config', remoteUrl: codexBridgeRemoteUrl, token: CODEX_BRIDGE_TOKEN });
+  codexSpawnTicketStore.configure(codexBridgeRemoteUrl, CODEX_BRIDGE_TOKEN);
+}
+
 function startPtyServer() {
   return new Promise((resolve, reject) => {
     const nodePath = findSystemNode();
     const serverScript = getPtyServerScript();
     let resolved = false;
+    let controlOutputBuffer = '';
 
     // Opt-in: pty-server runs `claude update` on every startup if this env
     // is '1'. Off by default to avoid running whichever `claude` binary is
     // first on PATH unprompted. See Settings → Updates.
     const autoUpdateClaude = readConfig().autoUpdateClaude === true ? '1' : '0';
+    const ptyEnv = { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN, CLAUDES_AUTO_UPDATE_CLAUDE: autoUpdateClaude };
+    delete ptyEnv[REMOTE_TOKEN_ENV_NAME];
+    delete ptyEnv.CLAUDES_CODEX_BRIDGE_REMOTE_URL;
     ptyServerProcess = spawn(nodePath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
       // Hide the console window Windows would otherwise pop up (and minimise)
       // each time we spawn system Node from this GUI app — most visibly on every
       // crash-recovery restart. No effect on non-Windows.
       windowsHide: true,
-      env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN, CLAUDES_AUTO_UPDATE_CLAUDE: autoUpdateClaude }
+      env: ptyEnv
     });
 
     ptyServerProcess.on('error', (err) => {
@@ -1234,6 +1275,8 @@ function startPtyServer() {
       // it so the renderer's existing reconnect → reattach → resume chain fires,
       // instead of leaving the user with a dead app they must quit and relaunch.
       ptyServerProcess = null;
+      for (const pending of ptyControlAcks.values()) pending.reject(new Error('terminal sidecar exited'));
+      ptyControlAcks.clear();
       const plan = planPtyServerRestart(ptyRestartTimestamps, { isQuitting, signal, code, now: Date.now() });
       ptyRestartTimestamps = plan.timestamps;
       if (plan.giveUp) {
@@ -1245,13 +1288,33 @@ function startPtyServer() {
       setTimeout(() => {
         if (isQuitting) return;
         startPtyServer()
-          .then(() => diagLog('[pty-server] restarted after crash — renderer will reconnect and resume sessions'))
+          .then(async () => {
+            if (codexAppServer && codexBridgeRemoteUrl) {
+              try { await configurePtyCodexBridge(); }
+              catch (error) { diagLog('[codex-bridge] sidecar reconfigure failed:', error && error.message); }
+            }
+            diagLog('[pty-server] restarted after crash — renderer will reconnect and resume sessions');
+          })
           .catch((e) => diagLog('[pty-server] crash-recovery restart failed:', (e && e.message) || String(e)));
       }, plan.delayMs).unref();
     });
 
     ptyServerProcess.stdout.on('data', (data) => {
       const output = data.toString();
+      controlOutputBuffer += output;
+      let newline;
+      while ((newline = controlOutputBuffer.indexOf('\n')) !== -1) {
+        const line = controlOutputBuffer.slice(0, newline).replace(/\r$/, '');
+        controlOutputBuffer = controlOutputBuffer.slice(newline + 1);
+        const ack = /^CONTROL_ACK:([0-9a-f]+):(OK|ERR)$/.exec(line);
+        if (!ack) continue;
+        const pending = ptyControlAcks.get(ack[1]);
+        if (!pending) continue;
+        ptyControlAcks.delete(ack[1]);
+        if (ack[2] === 'OK') pending.resolve();
+        else pending.reject(new Error('terminal sidecar refused Codex authorization'));
+      }
+      if (controlOutputBuffer.length > 8192) controlOutputBuffer = controlOutputBuffer.slice(-8192);
       // The pty-server announces the port it actually bound — which differs
       // from ptyPort if the preferred port was unavailable and it fell back to
       // an OS-assigned one. Capture it so pty:getPort hands the renderer the
@@ -7616,6 +7679,7 @@ function getClaudePath() {
 // won't change while the app runs). Mirrors findClaudePath(); a missing binary
 // simply means the "Spawn Codex" affordance is never offered.
 let codexAvailable = null;
+let codexCommand = null;
 function hasCodex() {
   if (codexAvailable !== null) return codexAvailable;
   try {
@@ -7628,6 +7692,128 @@ function hasCodex() {
 }
 
 ipcMain.handle('config:hasCodex', () => hasCodex());
+
+function getCodexCommand() {
+  if (codexCommand) return codexCommand;
+  const out = execFileSync(codexLookupCommand(process.platform), ['codex'], { encoding: 'utf8' });
+  const found = out.trim().split(/\r?\n/).filter(Boolean);
+  if (!found.length) throw new Error('Codex CLI not found');
+  // `where codex` commonly returns a POSIX shim first and codex.cmd second.
+  // Node can spawn the latter reliably through the Windows shell.
+  codexCommand = process.platform === 'win32'
+    ? (found.find((value) => /\.(cmd|exe)$/i.test(value)) || found[0])
+    : found[0];
+  return codexCommand;
+}
+
+function publishCodexThreadState(state) {
+  if (!state) return;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('codex:threadState', state);
+  }
+}
+
+async function startCodexAppServer() {
+  if (codexBridgeDisabled) return false;
+  if (!hasCodex()) return false;
+  let service = null;
+  try {
+    service = new CodexAppServerService({
+      command: getCodexCommand(),
+      token: CODEX_BRIDGE_TOKEN,
+      version: app.getVersion(),
+      platform: process.platform,
+      spawnProcess: spawn,
+      createSocket: (url, options) => new WebSocket(url, options),
+      onState: publishCodexThreadState,
+      onUnavailable: () => {
+        if (codexAppServer === service) {
+          codexAppServer = null;
+          codexBridgeRemoteUrl = '';
+          codexBridgeDisabled = true;
+          diagLog('[codex-bridge] app-server exited; using direct CLI fallback until restart');
+        }
+      }
+    });
+    codexStartingService = service;
+    await service.ensureStarted();
+    if (isQuitting) {
+      service.stop();
+      codexStartingService = null;
+      return false;
+    }
+    codexAppServer = service;
+    codexStartingService = null;
+    codexBridgeRemoteUrl = service.remoteUrl;
+    await configurePtyCodexBridge();
+    return true;
+  } catch (err) {
+    if (service) service.stop();
+    if (codexStartingService === service) codexStartingService = null;
+    codexAppServer = null;
+    codexBridgeRemoteUrl = '';
+    codexBridgeDisabled = true;
+    diagLog('[codex-bridge] unavailable; direct CLI fallback remains active:', err && err.message);
+    return false;
+  }
+}
+
+function ensureCodexAppServer() {
+  if (codexAppServer) return Promise.resolve(codexAppServer);
+  if (codexBridgeDisabled) return Promise.resolve(null);
+  if (!codexBridgeStartPromise) {
+    codexBridgeStartPromise = startCodexAppServer()
+      .then((ok) => ok ? codexAppServer : null)
+      .finally(() => { codexBridgeStartPromise = null; });
+  }
+  return codexBridgeStartPromise;
+}
+
+ipcMain.handle('codex:getCatalog', async () => {
+  const service = await ensureCodexAppServer();
+  if (!service) return { ok: false, error: 'Codex bridge unavailable' };
+  try {
+    return { ok: true, models: await service.getCatalog() };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('codex:prepareThread', async (event, opts) => {
+  const service = await ensureCodexAppServer();
+  if (!service) return { ok: false, error: 'Codex bridge unavailable' };
+  try {
+    const safeCwd = assertInsideAllowedRoots(opts && opts.cwd);
+    const prepared = await service.prepareThread({
+      cwd: safeCwd,
+      threadId: opts && opts.threadId
+    });
+    const issued = codexSpawnTicketStore.issue({
+      threadId: prepared.threadId,
+      cwd: safeCwd,
+      remoteUrl: prepared.remoteUrl
+    }, process.platform);
+    try {
+      await sendPtyControl({
+        type: 'codex-spawn-authorize',
+        ticket: issued.ticket,
+        threadId: prepared.threadId,
+        cwd: safeCwd,
+        remoteUrl: prepared.remoteUrl,
+        expiresAt: issued.expiresAt
+      });
+    } finally {
+      codexSpawnTicketStore.discard(issued.ticket);
+    }
+    return { ok: true, ...prepared, spawnTicket: issued.ticket };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('codex:getThreadState', (event, threadId) => {
+  return codexAppServer ? codexAppServer.getThreadState(threadId) : null;
+});
 
 // --- Codex watcher -------------------------------------------------------
 //
@@ -9549,6 +9735,10 @@ if (!gotLock) {
     startHookServer();
     createTray();
     createWindow();
+    // Codex is a progressive enhancement. Bring up the terminal/window first;
+    // the bounded app-server connection and private sidecar configuration run
+    // in the background and prepare/catalog IPC awaits this same promise.
+    ensureCodexAppServer().catch((error) => diagLog('[codex-bridge] async startup failed:', error && error.message));
     setupAutoUpdater();
     migrateLoopsToAutomations();
     sweepMcpTmp();
@@ -9673,6 +9863,16 @@ app.on('before-quit', () => {
   _headroomShuttingDown = true;    // block any in-flight watchdog restart from respawning the proxy
   stopHeadroomWatchdog();          // stop supervising before we intentionally kill the proxy
   stopHeadroomProxyProcess();
+  step('codexAppServer.stop');
+  if (codexAppServer) {
+    codexAppServer.stop();
+    codexAppServer = null;
+    codexBridgeRemoteUrl = '';
+  }
+  if (codexStartingService) {
+    codexStartingService.stop();
+    codexStartingService = null;
+  }
   step('killPtyServer');
   killPtyServer();
   // The hook server's listening socket keeps the event loop alive; close it

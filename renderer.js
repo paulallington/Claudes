@@ -35,22 +35,87 @@ var codexTierRow = document.getElementById('opt-codex-tier-row');
 // carries a leading "Codex default" option whose value is '' — meaning "emit no
 // flag", so the CLI falls back to ~/.codex/config.toml and a user who never
 // touches these gets exactly the old behaviour.
+var codexCatalog = window.CodexModels ? window.CodexModels.fallbackCatalog() : { models: [], defaultModel: '' };
+var codexCatalogPromise = null;
+var codexCatalogLive = false;
+var codexPendingSelections = { projectKey: null, model: '', effort: '', tier: '' };
+var codexFallbackWarningShown = false;
+
+function renderCodexPicker(sel, list, inheritLabel, selected) {
+  if (!sel) return;
+  var selection = window.CodexModels.pickerSelection(list, selected, codexCatalogLive);
+  var html = '<option value="">' + escapeHtml(inheritLabel) + '</option>';
+  list.forEach(function (item) {
+    html += '<option value="' + escapeHtml(item.id) + '"' +
+      (item.hint ? ' title="' + escapeHtml(item.hint) + '"' : '') + '>' +
+      escapeHtml(item.label) + '</option>';
+  });
+  if (selection.includePending) {
+    html += '<option value="' + escapeHtml(selected) + '">Saved: ' + escapeHtml(selected) + ' (loading…)</option>';
+  }
+  sel.innerHTML = html;
+  sel.value = selection.value;
+}
+
+function refreshCodexCapabilityPickers() {
+  var CM = window.CodexModels;
+  if (!CM) return;
+  var selectedModel = codexPendingSelections.model || (optCodexModel ? optCodexModel.value : '');
+  var capabilities;
+  if (selectedModel) {
+    capabilities = CM.optionsForModel(codexCatalog, selectedModel);
+  } else {
+    // Inherit leaves the effective model to config.toml, so its capabilities
+    // are unknowable. Use the union from the live catalogue and let Codex be
+    // the final authority; selecting a concrete model immediately narrows it.
+    var efforts = new Map();
+    var tiers = new Map();
+    (codexCatalog.models || []).forEach(function (model) {
+      (model.efforts || []).forEach(function (item) { if (!efforts.has(item.id)) efforts.set(item.id, item); });
+      (model.tiers || []).forEach(function (item) { if (!tiers.has(item.id)) tiers.set(item.id, item); });
+    });
+    capabilities = { efforts: Array.from(efforts.values()), tiers: Array.from(tiers.values()) };
+  }
+  renderCodexPicker(optCodexEffort, capabilities.efforts, 'Codex default', codexPendingSelections.effort || (optCodexEffort ? optCodexEffort.value : ''));
+  renderCodexPicker(optCodexTier, capabilities.tiers, 'Codex default', codexPendingSelections.tier || (optCodexTier ? optCodexTier.value : ''));
+}
+
 function initCodexPickers() {
   var CM = window.CodexModels;
   if (!CM) return;
-  function fill(sel, list, inheritLabel) {
-    if (!sel || sel.options.length) return;
-    var html = '<option value="">' + escapeHtml(inheritLabel) + '</option>';
-    list.forEach(function (m) {
-      html += '<option value="' + escapeHtml(m.id) + '"' +
-        (m.hint ? ' title="' + escapeHtml(m.hint) + '"' : '') + '>' +
-        escapeHtml(m.label) + '</option>';
+  renderCodexPicker(optCodexModel, codexCatalog.models || [], 'Codex default', codexPendingSelections.model || (optCodexModel ? optCodexModel.value : ''));
+  refreshCodexCapabilityPickers();
+}
+
+function ensureCodexCatalog() {
+  if (codexCatalogPromise) return codexCatalogPromise;
+  if (!window.electronAPI || !window.electronAPI.codexGetCatalog) return Promise.resolve(codexCatalog);
+  codexCatalogPromise = window.electronAPI.codexGetCatalog().then(function (raw) {
+    codexCatalog = window.CodexModels.normalizeCatalog(raw);
+    codexCatalogLive = !!(raw && raw.ok);
+    initCodexPickers();
+    return codexCatalog;
+  }).catch(function () { return codexCatalog; });
+  return codexCatalogPromise;
+}
+
+function codexRestoreModels(selectedModelId) {
+  var selected = (codexCatalog.models || []).find(function (model) { return model.id === selectedModelId; });
+  function anyOption(key, id) {
+    if (!id) return false;
+    var candidates = selected ? [selected]
+      : (selectedModelId ? [] : (codexCatalog.models || []));
+    return candidates.some(function (model) {
+      return (model[key] || []).some(function (item) { return item.id === id; });
     });
-    sel.innerHTML = html;
   }
-  fill(optCodexModel, CM.CODEX_MODELS, 'Codex default');
-  fill(optCodexEffort, CM.CODEX_EFFORTS, 'Codex default');
-  fill(optCodexTier, CM.CODEX_TIERS, 'Codex default');
+  return {
+    isKnownModel: function (id) {
+      return !!id && (codexCatalog.models || []).some(function (model) { return model.id === id; });
+    },
+    isKnownEffort: function (id) { return anyOption('efforts', id); },
+    isKnownTier: function (id) { return anyOption('tiers', id); }
+  };
 }
 var spawnDropdown = document.getElementById('spawn-dropdown');
 var optPermissionMode = document.getElementById('opt-permission-mode');
@@ -3684,11 +3749,12 @@ function restoreSessions(projectPath, workspaceId) {
         var entry = slice[i];
         var sid = typeof entry === 'string' ? entry : entry && entry.sessionId;
         var cmdVal = (typeof entry === 'object' && entry && entry.cmd) ? entry.cmd : null;
+        var isCodexEntry = !!(entry && typeof entry === 'object' && entry.kind === 'codex');
         var cmdArgsVal = (typeof entry === 'object' && entry && Array.isArray(entry.cmdArgs)) ? entry.cmdArgs : [];
         // A cmd entry (Codex, custom run config) has no sessionId to key on —
         // it persists on cmd alone (see isPersistableColumn), so only bail
         // when NEITHER is present.
-        if (!sid && !cmdVal) continue;
+        if (!sid && !cmdVal && !isCodexEntry) continue;
         var rowIdx = (typeof entry === 'object' && entry && typeof entry.rowIdx === 'number' && isFinite(entry.rowIdx)) ? entry.rowIdx : 0;
         var widthRatio = (typeof entry === 'object' && entry && typeof entry.widthRatio === 'number' && isFinite(entry.widthRatio) && entry.widthRatio > 0) ? entry.widthRatio : null;
         var title = (typeof entry === 'object' && entry && entry.title) ? entry.title : null;
@@ -3708,7 +3774,11 @@ function restoreSessions(projectPath, workspaceId) {
           if (endpointId) minEntry.endpointId = endpointId;
           if (model) minEntry.model = model;
           if (profileId) minEntry.profileId = profileId;
-          if (e && e.kind === 'codex') { minEntry.kind = 'codex'; minEntry.codexPreset = e.codexPreset; minEntry.codexModel = e.codexModel; minEntry.codexEffort = e.codexEffort; minEntry.codexTier = e.codexTier; }
+          if (isCodexEntry) {
+            minEntry.kind = 'codex'; minEntry.codexPreset = entry.codexPreset;
+            minEntry.codexModel = entry.codexModel; minEntry.codexEffort = entry.codexEffort;
+            minEntry.codexTier = entry.codexTier; minEntry.codexThreadId = entry.codexThreadId;
+          }
           minimizedEntries.push(minEntry);
           continue;
         }
@@ -3719,7 +3789,11 @@ function restoreSessions(projectPath, workspaceId) {
         if (endpointId) pushedEntry.endpointId = endpointId;
         if (model) pushedEntry.model = model;
         if (profileId) pushedEntry.profileId = profileId;
-        if (e && e.kind === 'codex') { pushedEntry.kind = 'codex'; pushedEntry.codexPreset = e.codexPreset; pushedEntry.codexModel = e.codexModel; pushedEntry.codexEffort = e.codexEffort; pushedEntry.codexTier = e.codexTier; }
+        if (isCodexEntry) {
+          pushedEntry.kind = 'codex'; pushedEntry.codexPreset = entry.codexPreset;
+          pushedEntry.codexModel = entry.codexModel; pushedEntry.codexEffort = entry.codexEffort;
+          pushedEntry.codexTier = entry.codexTier; pushedEntry.codexThreadId = entry.codexThreadId;
+        }
         entries.push(pushedEntry);
       }
       if (rowHeightRatios) {
@@ -3781,14 +3855,19 @@ function restoreSessions(projectPath, workspaceId) {
           }
         }
 
-        // cmd entries (Codex, custom run configs) replay their literal cmd +
-        // cmdArgs directly — no --resume, no --session-id, no endpoint
-        // rewriting, no Headroom binding. Codex runs direct, never through
-        // Headroom (see CLAUDE.md), and it never had a Claude session to
-        // resume in the first place.
-        var codexSpec = window.CodexSpawn.buildCodexRestore(e, rowOpts.cwd || projectPath, window.CodexModels);
+        // Codex entries rebuild validated semantic settings, then resume their
+        // native Codex thread through the authenticated app-server when it is
+        // available. They remain outside Claude session/Headroom machinery.
+        var codexSpec = null;
+        if (e && e.kind === 'codex') {
+          await ensureCodexCatalog();
+          codexSpec = window.CodexSpawn.buildCodexRestore(e, rowOpts.cwd || projectPath, codexRestoreModels(e.codexModel));
+        }
         if (codexSpec) {
-          addColumn(codexSpec.args, targetRow, Object.assign({}, rowOpts, codexSpec.opts));
+          await spawnCodexColumn(rowOpts.cwd || projectPath, targetRow, codexSpec, {
+            threadId: codexSpec.opts.codexThreadId,
+            columnOpts: rowOpts
+          });
           continue;
         }
         // A legacy entry carrying a raw cmd/cmdArgs is the exact shape of the
@@ -3832,9 +3911,16 @@ function restoreSessions(projectPath, workspaceId) {
             console.warn("Minimised column '" + (ment.title || ment.sessionId) + "' had cwd " + ment.cwd + " which no longer exists; restored at project root.");
           }
         }
-        var minCodexSpec = window.CodexSpawn.buildCodexRestore(ment, minRowOpts.cwd || projectPath, window.CodexModels);
+        var minCodexSpec = null;
+        if (ment && ment.kind === 'codex') {
+          await ensureCodexCatalog();
+          minCodexSpec = window.CodexSpawn.buildCodexRestore(ment, minRowOpts.cwd || projectPath, codexRestoreModels(ment.codexModel));
+        }
         if (minCodexSpec) {
-          addColumn(minCodexSpec.args, null, Object.assign({}, minRowOpts, minCodexSpec.opts));
+          await spawnCodexColumn(minRowOpts.cwd || projectPath, null, minCodexSpec, {
+            threadId: minCodexSpec.opts.codexThreadId,
+            columnOpts: minRowOpts
+          });
         } else {
           var mBuilt = await buildResumeForEntry(ment, minRowOpts);
           addColumn(mBuilt.resumeArgs, null, mBuilt.resumeRowOpts);
@@ -4376,6 +4462,67 @@ function showEmptyState() {
 // DOM helpers
 // ============================================================
 
+var codexBadgeTooltipEl = null;
+var codexBadgeTooltipOwner = null;
+
+function showCodexBadgeDetails(eventOrBadge) {
+  var badge = eventOrBadge && eventOrBadge.currentTarget ? eventOrBadge.currentTarget : eventOrBadge;
+  if (!badge || !badge.dataset || !badge.dataset.details) return;
+  var tooltip = codexBadgeTooltipEl;
+  if (!tooltip) {
+    tooltip = document.createElement('div');
+    tooltip.className = 'codex-badge-tooltip';
+    tooltip.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(tooltip);
+    codexBadgeTooltipEl = tooltip;
+  }
+  codexBadgeTooltipOwner = badge;
+  tooltip.textContent = badge.dataset.details;
+  tooltip.classList.add('codex-badge-tooltip-shown');
+  tooltip.style.left = '0px';
+  tooltip.style.top = '0px';
+  var position = window.CodexBadgePlacement.placeBadgeTooltip(
+    badge.getBoundingClientRect(),
+    tooltip.getBoundingClientRect(),
+    { width: window.innerWidth, height: window.innerHeight }
+  );
+  tooltip.style.left = position.left + 'px';
+  tooltip.style.top = position.top + 'px';
+}
+
+function hideCodexBadgeDetails(eventOrBadge) {
+  var badge = eventOrBadge && eventOrBadge.currentTarget ? eventOrBadge.currentTarget : eventOrBadge;
+  if (!codexBadgeTooltipEl || (badge && codexBadgeTooltipOwner !== badge)) return;
+  if (badge && (document.activeElement === badge || badge.matches(':hover'))) return;
+  codexBadgeTooltipEl.classList.remove('codex-badge-tooltip-shown');
+  codexBadgeTooltipOwner = null;
+}
+
+function dismissCodexBadgeDetailsForColumn(columnElement) {
+  codexBadgeTooltipOwner = window.CodexBadgePlacement.dismissOwnedBadgeTooltip(
+    columnElement,
+    codexBadgeTooltipOwner,
+    codexBadgeTooltipEl
+  );
+}
+
+function updateCodexBadgeAccessibility(badge, settings, detail) {
+  if (!badge) return;
+  settings = settings || {};
+  var sandbox = settings.sandbox;
+  if (sandbox && typeof sandbox === 'object') sandbox = sandbox.type || 'configured';
+  var safety = [
+    'Launch preset: ' + (badge.dataset.launchSafety || 'Codex default'),
+    'Effective approval: ' + (settings.approvalPolicy || 'pending live state'),
+    'Effective sandbox: ' + (sandbox || 'pending live state')
+  ];
+  var description = ['Codex CLI'].concat(safety).concat(detail ? [detail] : []);
+  badge.title = description.join('\n');
+  badge.dataset.details = description.join('\n');
+  badge.setAttribute('aria-label', description.join('. '));
+  if (codexBadgeTooltipOwner === badge) showCodexBadgeDetails(badge);
+}
+
 function createColumnHeader(id, customTitle, opts) {
   opts = opts || {};
   var header = document.createElement('div');
@@ -4393,10 +4540,14 @@ function createColumnHeader(id, customTitle, opts) {
     var codexBadge = document.createElement('span');
     codexBadge.className = 'col-codex-badge';
     codexBadge.textContent = 'Codex';
-    codexBadge.title = opts.codexLabel
-      ? ('Codex CLI · ' + opts.codexLabel)
-      : 'This column runs the Codex CLI, not Claude';
-    title.appendChild(codexBadge);
+    codexBadge.dataset.launchSafety = opts.codexLabel || 'Codex default';
+    codexBadge.tabIndex = 0;
+    codexBadge.setAttribute('role', 'note');
+    updateCodexBadgeAccessibility(codexBadge);
+    codexBadge.addEventListener('mouseenter', showCodexBadgeDetails);
+    codexBadge.addEventListener('focus', showCodexBadgeDetails);
+    codexBadge.addEventListener('mouseleave', hideCodexBadgeDetails);
+    codexBadge.addEventListener('blur', hideCodexBadgeDetails);
   }
 
   // Subscription chip — hidden by default (empty text, no background), toggled
@@ -4497,6 +4648,12 @@ function createColumnHeader(id, customTitle, opts) {
     ctxMeter.className = 'col-ctx-meter';
     ctxMeter.dataset.colCtx = '';
     ctxMeter.setAttribute('hidden', '');
+    ctxMeter.setAttribute('tabindex', '0');
+    ctxMeter.setAttribute('role', 'progressbar');
+    ctxMeter.setAttribute('aria-label', 'Context window usage');
+    ctxMeter.setAttribute('aria-valuemin', '0');
+    ctxMeter.setAttribute('aria-valuemax', '100');
+    ctxMeter.setAttribute('aria-valuetext', 'Context usage unavailable');
     ctxMeter.title = 'Context window usage';
     var ctxFill = document.createElement('div');
     ctxFill.className = 'col-ctx-fill';
@@ -4551,6 +4708,7 @@ function createColumnHeader(id, customTitle, opts) {
   actions.appendChild(closeBtn);
 
   header.appendChild(title);
+  if (codexBadge) header.appendChild(codexBadge);
   if (codexWatchBadge) header.appendChild(codexWatchBadge);
   header.appendChild(actions);
 
@@ -4738,7 +4896,10 @@ function startTitleEdit(id, titleEl) {
       col.customTitle = text;
       persistSessions(col.projectKey, col.workspaceId);
     },
-    onEmpty: function () { return 'Claude #' + id; }
+    onEmpty: function () {
+      var col = allColumns.get(id);
+      return ((col && col.cmd === 'codex') ? 'Codex #' : 'Claude #') + id;
+    }
   });
 }
 
@@ -4756,6 +4917,10 @@ function createExitOverlay(id, exitCode, col) {
 
   restartBtn.addEventListener('click', function () {
     overlay.remove();
+    if (col.cmd === 'codex') {
+      restartColumn(id);
+      return;
+    }
     fitTerminal(col.terminal, col.fitAddon);
     var sendMsg = { type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey) };
     if (col.cmd) {
@@ -4842,7 +5007,7 @@ function addColumn(args, targetRow, opts) {
   col.id = 'col-' + id;
 
   var codexLabel = (opts.cmd === 'codex' && window.CodexSpawn)
-    ? window.CodexSpawn.codexApprovalLabelFromArgs(args || [])
+    ? window.CodexSpawn.codexApprovalLabelFromArgs(opts.persistedCmdArgs || args || [])
     : null;
   var header = createColumnHeader(id, opts.title, { cmd: opts.cmd || null, codexLabel: codexLabel });
 
@@ -5199,7 +5364,11 @@ function addColumn(args, targetRow, opts) {
   // cmdArgs stays ORIGINAL so respawn rebuilds as original + --resume <id>
   // (never --session-id <existing-id>, which the CLI rejects) and popout
   // transfer / saved-layout never see an orphan --session-id flag.
-  var __origArgs = claudeArgs;
+  // Managed Codex columns launch with transient app-server coordinates, but
+  // retain only their semantic approval/model intent for respawn/persistence.
+  // This is also the boundary that keeps the loopback URL and auth-env name
+  // out of repository-controlled sessions.json.
+  var __origArgs = Array.isArray(opts.persistedCmdArgs) ? opts.persistedCmdArgs.slice() : claudeArgs;
   var __plan = window.SpawnSession.planFreshSessionId(
     { args: claudeArgs, cmd: cmd, hasEndpoint: !!(opts.endpointId || (opts.env && opts.env.ANTHROPIC_BASE_URL)) },
     window.SpawnSession.randomUuidV4);
@@ -5240,6 +5409,7 @@ function addColumn(args, targetRow, opts) {
     var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: claudeArgs };
     if (cmd) sendMsg.cmd = cmd;
     if (opts.env) sendMsg.env = opts.env;
+    if (cmd === 'codex' && typeof opts.spawnTicket === 'string') sendMsg.spawnTicket = opts.spawnTicket;
 
     // Project-scoped MCP: for claude columns, resolve the project's inherited-server
     // selection and append --mcp-config/--strict-mcp-config. No-op when inheriting
@@ -5531,6 +5701,8 @@ function addColumn(args, targetRow, opts) {
     customTitle: opts.title || null,
     cmd: cmd,
     cmdArgs: __origArgs,     // ORIGINAL args (no injected --session-id; see __plan above)
+    codexThreadId: window.CodexSpawn.isCodexThreadId(opts.codexThreadId) ? opts.codexThreadId : null,
+    codexManaged: !!opts.codexManaged,
     model: detectedModel,    // for ctx meter limit (200k vs 1M)
     effort: detectedEffort,  // current effort; source of truth for the header badge + respawns
     env: opts.env || null,
@@ -5620,7 +5792,9 @@ function addColumn(args, targetRow, opts) {
   // Make the header effort badge reflect the column's actual launch effort.
   var effortBadgeEl = header.querySelector('.col-effort');
   if (effortBadgeEl && colData.effort && isValidEffort(colData.effort)) effortBadgeEl.value = colData.effort;
-  startContextMeterPoll(id);
+  if (cmd === 'codex' && colData.codexThreadId) startCodexThreadState(id);
+  else if (cmd === 'codex') markCodexFallback(colData);
+  else startContextMeterPoll(id);
   setFocusedColumn(id);
   if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
     var d0 = lastPlanLimitsResult.data;
@@ -6562,7 +6736,7 @@ function persistSessions(projectKey, workspaceId) {
           // storing a `cmd` there turns a data file into an execution vector on
           // project open. Store validated intent and rebuild the command from
           // our own catalogue on restore instead.
-          Object.assign(entry, window.CodexSpawn.codexPersistShape(col2.cmdArgs || []));
+          Object.assign(entry, window.CodexSpawn.codexPersistShape(col2.cmdArgs || [], col2.codexThreadId, col2.codexManaged));
         }
         rowEntries.push(entry);
       }
@@ -6594,7 +6768,7 @@ function persistSessions(projectKey, workspaceId) {
       if (mcol.model) ment.model = mcol.model;
       if (mcol.cmd) {
         // See the security note in the grid loop above.
-        Object.assign(ment, window.CodexSpawn.codexPersistShape(mcol.cmdArgs || []));
+        Object.assign(ment, window.CodexSpawn.codexPersistShape(mcol.cmdArgs || [], mcol.codexThreadId, mcol.codexManaged));
       }
       sessionData.push(ment);
     }
@@ -6632,6 +6806,7 @@ function persistSessions(projectKey, workspaceId) {
 function removeColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
+  dismissCodexBadgeDetailsForColumn(col.element);
 
   // Clean up diffSlotIndex entries pointing at this id (Critical fix: addDiffColumn
   // registered it, but only the inline close-button handler was deleting it —
@@ -6837,9 +7012,7 @@ async function restartColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
   if (col.isDiff) return;
-
-  // Kill the current process
-  wsSend({ type: 'kill', id: id });
+  var hadExitOverlay = !!col.element.querySelector('.exit-overlay');
 
   // Reset the per-column delta baseline so the Δ pill measures from this respawn,
   // not from the original spawn. The next ctx poll repopulates spawnSessionTokens.
@@ -6877,6 +7050,32 @@ async function restartColumn(id) {
   if (col.cmd) {
     sendMsg.cmd = col.cmd;
     sendMsg.args = col.cmdArgs || [];
+    var codexRestartManaged = false;
+    if (col.cmd === 'codex' && window.electronAPI && window.electronAPI.codexPrepareThread) {
+      try {
+        var preparedThread = await window.electronAPI.codexPrepareThread({
+          cwd: sendMsg.cwd,
+          threadId: window.CodexSpawn.isCodexThreadId(col.codexThreadId) ? col.codexThreadId : undefined
+        });
+        var remoteResumeArgs = preparedThread && preparedThread.ok && /^[0-9a-f]{64}$/i.test(preparedThread.spawnTicket || '')
+          ? window.CodexSpawn.buildCodexRemoteResume(col.cmdArgs || [], preparedThread)
+          : null;
+        if (remoteResumeArgs) {
+          sendMsg.args = remoteResumeArgs;
+          sendMsg.spawnTicket = preparedThread.spawnTicket;
+          col.codexThreadId = preparedThread.threadId;
+          col.codexManaged = true;
+          codexRestartManaged = true;
+          startCodexThreadState(id);
+        }
+      } catch (e) { /* retain the direct CLI fallback argv */ }
+    }
+    if (col.cmd === 'codex' && !codexRestartManaged) {
+      col.codexThreadId = null;
+      col.codexManaged = false;
+      markCodexFallback(col);
+    }
+    if (col.cmd === 'codex') persistSessions(col.projectKey, col.workspaceId);
   } else {
     sendMsg.args = buildResumeArgs(col);
   }
@@ -6902,6 +7101,13 @@ async function restartColumn(id) {
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
   // Passthrough for arbitrary-cmd/endpoint columns; hasMcp from the fresh resolve.
   maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: __rHasMcp, oneMModel: col.model });
+  // Prepare/authorize managed Codex before killing the old PTY. pty-server
+  // removes that exact PTY generation from its map before its async exit
+  // callback runs, so the killed generation cannot emit an exit message here.
+  // Do not suppress the next renderer exit: it would belong to the replacement.
+  if (!hadExitOverlay) {
+    wsSend({ type: 'kill', id: id });
+  }
   gatedWsSend(sendMsg);
   // Re-evaluate stale-hook health from a clean slate for the new session: if
   // hooks now reach the column it will never re-flag; if they still don't, the
@@ -7610,6 +7816,54 @@ async function openCodexWatchWindow(id) {
 // (which does a document-wide querySelectorAll for those classes on every
 // play/pause/end event) keeps finding and highlighting them while the menu
 // is open, exactly like the old inline buttons did.
+async function spawnCodexColumn(cwd, targetRow, semanticSpec, options) {
+  options = options || {};
+  var effectiveCwd = cwd || activeProjectKey;
+  var spec = semanticSpec || window.CodexSpawn.buildCodexSpawn(effectiveCwd);
+  var semanticArgs = Array.isArray(spec.args) ? spec.args.slice() : [];
+  var columnOpts = Object.assign({}, spec.opts || {}, options.columnOpts || {}, {
+    cmd: 'codex',
+    cwd: effectiveCwd,
+    persistedCmdArgs: semanticArgs
+  });
+  var requestedThreadId = options.threadId || columnOpts.codexThreadId || null;
+  var prepared = null;
+  if (window.electronAPI && window.electronAPI.codexPrepareThread) {
+    try {
+      prepared = await window.electronAPI.codexPrepareThread({
+        cwd: effectiveCwd,
+        threadId: window.CodexSpawn.isCodexThreadId(requestedThreadId) ? requestedThreadId : undefined
+      });
+    } catch (e) { prepared = null; }
+  }
+  var managedArgs = prepared && prepared.ok && /^[0-9a-f]{64}$/i.test(prepared.spawnTicket || '')
+    ? window.CodexSpawn.buildCodexRemoteResume(semanticArgs, prepared, options.prompt)
+    : null;
+  if (managedArgs) {
+    columnOpts.codexThreadId = prepared.threadId;
+    columnOpts.codexManaged = true;
+    columnOpts.spawnTicket = prepared.spawnTicket;
+    addColumn(managedArgs, targetRow, columnOpts);
+    var managedColumn = allColumns.get(globalColumnId);
+    if (managedColumn) persistSessions(managedColumn.projectKey, managedColumn.workspaceId);
+    return { managed: true, threadId: prepared.threadId };
+  }
+
+  // App-server is intentionally a progressive enhancement. If it cannot be
+  // started, keep the shipped direct CLI path fully usable.
+  var directArgs = semanticArgs.slice();
+  if (typeof options.prompt === 'string' && options.prompt.trim()) directArgs.push(options.prompt.trim());
+  // A direct TUI starts a different conversation. Carrying the old managed
+  // id would make the next app launch jump backwards to the pre-fallback
+  // thread, so deliberately sever that association.
+  delete columnOpts.codexThreadId;
+  columnOpts.codexManaged = false;
+  addColumn(directArgs, targetRow, columnOpts);
+  var directColumn = allColumns.get(globalColumnId);
+  if (directColumn) persistSessions(directColumn.projectKey, directColumn.workspaceId);
+  return { managed: false, threadId: null };
+}
+
 function showColumnOverflowMenu(id, x, y) {
   var col = allColumns.get(id);
   if (!col) return;
@@ -7656,7 +7910,8 @@ function showColumnOverflowMenu(id, x, y) {
   }
 
   // Teleport isn't created for Codex (or other non-Claude-chrome cmd) columns.
-  if (window.CodexSpawn.columnUsesClaudeChrome({ cmd: col.cmd })) {
+  var usesClaudeChrome = window.CodexSpawn.columnUsesClaudeChrome({ cmd: col.cmd });
+  if (usesClaudeChrome) {
     addRow('↖', 'Teleport to claude.ai', function () {
       wsSend({ type: 'write', id: id, data: '/teleport\n' });
     });
@@ -7689,19 +7944,21 @@ function showColumnOverflowMenu(id, x, y) {
     if (c && c.terminal) c.terminal.clear();
   });
 
-  addRow('⏳', 'Recent sessions', function () {
-    showColumnSessionPicker(id, x, y);
-  });
+  if (usesClaudeChrome) {
+    addRow('⏳', 'Recent sessions', function () {
+      showColumnSessionPicker(id, x, y);
+    });
 
-  var playFullRow = addRow('🔊', 'Play reply', function () {
-    playColumnReply(id, 'full');
-  });
-  playFullRow.classList.add('col-play-full');
+    var playFullRow = addRow('🔊', 'Play reply', function () {
+      playColumnReply(id, 'full');
+    });
+    playFullRow.classList.add('col-play-full');
 
-  var playSummaryRow = addRow('❝', 'Play summary', function () {
-    playColumnReply(id, 'summary');
-  });
-  playSummaryRow.classList.add('col-play-summary');
+    var playSummaryRow = addRow('❝', 'Play summary', function () {
+      playColumnReply(id, 'summary');
+    });
+    playSummaryRow.classList.add('col-play-summary');
+  }
 
   document.body.appendChild(menu);
   var overflowRect = menu.getBoundingClientRect();
@@ -7785,8 +8042,9 @@ async function handoffColumnToCodex(id) {
     effort: optCodexEffort ? optCodexEffort.value : '',
     tier: optCodexTier ? optCodexTier.value : ''
   });
-  spec.args = spec.args.concat([window.CodexHandoff.buildHandoffPrompt(relPath)]);
-  addColumn(spec.args, null, spec.opts);
+  await spawnCodexColumn(cwd, null, spec, {
+    prompt: window.CodexHandoff.buildHandoffPrompt(relPath)
+  });
   showToast('Handed off to a new Codex column (' + turns.length + ' turn(s))', { kind: 'success' });
 }
 
@@ -11827,7 +12085,7 @@ btnAdd.addEventListener('click', async function () {
 // is just a cmd column running `codex`, which the rest of the app already
 // treats as "not Claude" (no headroom/voice/session machinery attaches).
 if (btnSpawnCodex) {
-  btnSpawnCodex.addEventListener('click', function (e) {
+  btnSpawnCodex.addEventListener('click', async function (e) {
     e.stopPropagation();
     var preset = optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
     var spec = window.CodexSpawn.buildCodexSpawn(null, preset, {
@@ -11835,7 +12093,7 @@ if (btnSpawnCodex) {
       effort: optCodexEffort ? optCodexEffort.value : '',
       tier: optCodexTier ? optCodexTier.value : ''
     });
-    addColumn(spec.args, null, spec.opts);
+    await spawnCodexColumn(null, null, spec);
     closeSpawnDropdown();
   });
 }
@@ -12030,10 +12288,14 @@ function loadSpawnOptions() {
   if (optCodexApproval) {
     optCodexApproval.value = opts.codexApprovalMode || window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
   }
+  codexPendingSelections = {
+    projectKey: activeProjectKey,
+    model: opts.codexModel || '',
+    effort: opts.codexEffort || '',
+    tier: opts.codexTier || ''
+  };
   initCodexPickers();
-  if (optCodexModel) optCodexModel.value = opts.codexModel || '';
-  if (optCodexEffort) optCodexEffort.value = opts.codexEffort || '';
-  if (optCodexTier) optCodexTier.value = opts.codexTier || '';
+  refreshCodexCapabilityPickers();
 
   // First call on app boot always defaults to cloud (Anthropic), regardless of
   // what was saved. Subsequent calls (project switches within the session)
@@ -12117,7 +12379,13 @@ if (optCodexApproval) {
   optCodexApproval.addEventListener('change', function () { saveSpawnOptions(); });
   [optCodexModel, optCodexEffort, optCodexTier].forEach(function (sel) {
     if (!sel) return;
-    sel.addEventListener('change', function () { saveSpawnOptions(); });
+    sel.addEventListener('change', function () {
+      if (sel === optCodexModel) codexPendingSelections.model = sel.value;
+      else if (sel === optCodexEffort) codexPendingSelections.effort = sel.value;
+      else if (sel === optCodexTier) codexPendingSelections.tier = sel.value;
+      if (sel === optCodexModel) refreshCodexCapabilityPickers();
+      saveSpawnOptions();
+    });
     sel.addEventListener('mousedown', function (e) { e.stopPropagation(); });
     sel.addEventListener('click', function (e) { e.stopPropagation(); });
   });
@@ -12193,6 +12461,7 @@ function initCodexUI() {
     if (spawnCodexDivider) spawnCodexDivider.classList.remove('codex-hidden');
     if (codexApprovalRow) codexApprovalRow.classList.remove('codex-hidden');
     initCodexPickers();
+    ensureCodexCatalog();
     [codexModelRow, codexEffortRow, codexTierRow].forEach(function (r) {
       if (r) r.classList.remove('codex-hidden');
     });
@@ -15011,6 +15280,8 @@ function showCtxMeterPlaceholder(col, label) {
   if (col.ctxFillEl) col.ctxFillEl.style.width = '0%';
   if (col.ctxTextEl) col.ctxTextEl.textContent = label;
   col.ctxMeterEl.title = label;
+  col.ctxMeterEl.removeAttribute('aria-valuenow');
+  col.ctxMeterEl.setAttribute('aria-valuetext', label === '…' ? 'Context usage loading' : 'Context usage unavailable');
 }
 
 function showDeltaPillPlaceholder(col) {
@@ -15018,6 +15289,76 @@ function showDeltaPillPlaceholder(col) {
   col.deltaSessionEl.removeAttribute('hidden');
   col.deltaSessionEl.textContent = 'Δ —';
   col.deltaSessionEl.title = 'Waiting for first assistant turn…';
+}
+
+function markCodexFallback(col) {
+  if (!col || col.cmd !== 'codex') return;
+  showCtxMeterPlaceholder(col, '—');
+  col.ctxMeterEl.title = 'Live Codex context unavailable · direct CLI fallback\nNative thread resume is disabled for this column.';
+  col.ctxMeterEl.setAttribute('aria-valuetext', 'Live Codex context unavailable in direct CLI fallback');
+  var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
+  if (badge) {
+    badge.textContent = 'Direct fallback';
+    badge.classList.add('col-codex-badge-fallback');
+    updateCodexBadgeAccessibility(badge, null, 'Direct fallback · Live context and native resume unavailable');
+  }
+  if (!codexFallbackWarningShown) {
+    codexFallbackWarningShown = true;
+    showToast('Codex started in direct fallback mode — live context and native resume are unavailable.', { kind: 'warn', duration: 7000 });
+  }
+}
+
+function applyCodexThreadState(col, threadState) {
+  if (!col || !threadState || threadState.threadId !== col.codexThreadId) return;
+  col.codexThreadState = threadState;
+  var settings = threadState.settings || {};
+  var detail = [settings.model, settings.reasoningEffort, settings.serviceTier, threadState.status]
+    .filter(function (value) { return !!value; }).join(' · ');
+  var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
+  if (badge) {
+    badge.textContent = 'Codex';
+    badge.classList.remove('col-codex-badge-fallback');
+    updateCodexBadgeAccessibility(badge, settings, detail);
+  }
+
+  var display = window.CodexSpawn.codexContextDisplay(threadState);
+  if (!display) {
+    showCtxMeterPlaceholder(col, threadState.status === 'running' ? '…' : '—');
+    if (col.ctxMeterEl && detail) col.ctxMeterEl.title = 'Codex · ' + detail + '\nWaiting for token usage…';
+    return;
+  }
+  col.ctxMeterEl.removeAttribute('hidden');
+  col.ctxFillEl.style.width = display.percent + '%';
+  col.ctxFillEl.classList.toggle('warning', display.percent >= 70 && display.percent < 90);
+  col.ctxFillEl.classList.toggle('critical', display.percent >= 90);
+  col.ctxTextEl.textContent = display.text;
+  col.ctxMeterEl.title = display.title;
+  col.ctxMeterEl.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, display.percent))));
+  col.ctxMeterEl.setAttribute('aria-valuetext', display.text + ' · ' + Math.round(display.percent) + '% of Codex context used');
+}
+
+function handleCodexThreadState(threadState) {
+  if (!threadState || !window.CodexSpawn.isCodexThreadId(threadState.threadId)) return;
+  allColumns.forEach(function (col) {
+    if (col && col.cmd === 'codex' && col.codexThreadId === threadState.threadId) {
+      applyCodexThreadState(col, threadState);
+    }
+  });
+}
+
+function startCodexThreadState(colId) {
+  var col = allColumns.get(colId);
+  if (!col || col.cmd !== 'codex' || !col.codexThreadId) return;
+  showCtxMeterPlaceholder(col, '…');
+  if (!window.electronAPI || !window.electronAPI.codexGetThreadState) return;
+  window.electronAPI.codexGetThreadState(col.codexThreadId).then(function (threadState) {
+    var live = allColumns.get(colId);
+    if (live) applyCodexThreadState(live, threadState);
+  }).catch(function () { /* pushed updates will retry naturally */ });
+}
+
+if (window.electronAPI && window.electronAPI.onCodexThreadState) {
+  window.electronAPI.onCodexThreadState(handleCodexThreadState);
 }
 
 function startContextMeterPoll(colId) {
@@ -15127,6 +15468,8 @@ function startContextMeterPoll(colId) {
         col.ctxMeterEl.title =
           'Context window: ' + tokens.toLocaleString() + ' / ' + effLim.toLocaleString() + ' tokens (' + Math.round(pct) + '%)\n' +
           'Cumulative tokens currently held in this session\'s context.';
+        col.ctxMeterEl.setAttribute('aria-valuenow', String(pct));
+        col.ctxMeterEl.setAttribute('aria-valuetext', tokens.toLocaleString() + ' of ' + effLim.toLocaleString() + ' context tokens used (' + Math.round(pct) + '%)');
       }
       if (limit) { draw(); return; }
       window.electronAPI.getModelContextLimit(modelKey).then(function (lim) {
