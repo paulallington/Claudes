@@ -232,6 +232,62 @@ test('resume refuses a thread owned by a different working directory', async () 
   service.stop();
 });
 
+test('fresh claimed thread subscribes the controller before publishing the claim', async () => {
+  const claimedThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9612';
+  const unrelatedThreadId = '0198f064-8ec4-7a21-82db-0cc0f67c9613';
+  const requests = [];
+  const events = [];
+  let resolveResume;
+  const service = new CodexAppServerService({
+    token: 'a-main-owned-capability-token',
+    platform: 'win32',
+    spawnProcess: () => new EventEmitter(),
+    createSocket: () => new EventEmitter(),
+    randomBytes: (size) => Buffer.alloc(size, 1),
+    onState: (state) => {
+      if (state.threadId === claimedThreadId) events.push(['state', state]);
+    },
+    onThreadClaimed: (claim) => events.push(['claim', claim])
+  });
+  service.client = {
+    request(method, params) {
+      requests.push({ method, params });
+      return new Promise((resolve) => { resolveResume = resolve; });
+    }
+  };
+  service.remoteUrl = 'ws://127.0.0.1:4567';
+
+  const prepared = await service.prepareThread({ cwd: 'D:/safe/project' });
+  await service.handleNotification({
+    method: 'thread/started',
+    params: { thread: { id: unrelatedThreadId, cwd: 'D:/other/project', status: { type: 'idle' } } }
+  });
+  assert.deepStrictEqual(requests, []);
+
+  const adoption = service.handleNotification({
+    method: 'thread/started',
+    params: { thread: { id: claimedThreadId, cwd: 'D:/SAFE/project', status: { type: 'active' } } }
+  });
+  await Promise.resolve();
+  assert.deepStrictEqual(requests, [{
+    method: 'thread/resume',
+    params: { threadId: claimedThreadId, cwd: 'D:/SAFE/project' }
+  }]);
+  assert.deepStrictEqual(events, []);
+
+  resolveResume({
+    thread: { id: claimedThreadId, cwd: 'D:/SAFE/project', status: { type: 'idle' } },
+    model: 'gpt-5.6-sol', reasoningEffort: 'high', serviceTier: 'priority',
+    approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' }
+  });
+  await adoption;
+
+  assert.deepStrictEqual(events.map(([type]) => type), ['state', 'claim']);
+  assert.deepStrictEqual(events[1][1], { claimId: prepared.claimId, threadId: claimedThreadId });
+  assert.equal(events[0][1].settings.model, 'gpt-5.6-sol');
+  assert.equal(events[0][1].status, 'idle');
+});
+
 test('missing rollout resume intent recovers as fresh but other read failures remain errors', async () => {
   const threadId = '0198f064-8ec4-7a21-82db-0cc0f67c9612';
   const methods = [];
@@ -259,7 +315,12 @@ test('missing rollout resume intent recovers as fresh but other read failures re
     remoteTokenEnvName: REMOTE_TOKEN_ENV_NAME
   });
   assert.deepStrictEqual(methods, ['thread/read']);
-  service.handleNotification({
+  service.client.request = (method, params) => Promise.resolve({
+    thread: { id: params.threadId, cwd: params.cwd, status: { type: 'idle' } },
+    model: 'gpt-5.6-sol', reasoningEffort: 'high', serviceTier: null,
+    approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' }
+  });
+  await service.handleNotification({
     method: 'thread/started',
     params: { thread: { id: threadId, cwd: 'D:/safe/project', status: { type: 'idle' } } }
   });
@@ -308,7 +369,19 @@ test('thread started broadcasts claim fresh launches by normalized cwd in FIFO o
     onClaimExpired: (claim) => expiredClaims.push(claim),
     onState: (state) => states.push(state)
   });
-  service.client = {};
+  service.client = {
+    request(method, params) {
+      return Promise.resolve({
+        thread: {
+          id: params.threadId,
+          cwd: params.cwd,
+          status: { type: params.threadId === secondThreadId ? 'active' : 'idle' }
+        },
+        model: 'gpt-5.6-sol', reasoningEffort: 'high', serviceTier: null,
+        approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' }
+      });
+    }
+  };
   service.remoteUrl = 'ws://127.0.0.1:4567';
 
   const first = await service.prepareThread({ cwd: 'D:/safe/project' });
@@ -319,7 +392,7 @@ test('thread started broadcasts claim fresh launches by normalized cwd in FIFO o
   await Promise.resolve();
   assert.equal(secondSettled, false, 'same-cwd fresh launches must serialize until the prior claim settles');
 
-  service.handleNotification({
+  await service.handleNotification({
     method: 'thread/started',
     params: { thread: { id: unrelatedThreadId, cwd: 'D:/other/project', status: { type: 'idle' }, preview: 'private' } }
   });
@@ -327,17 +400,17 @@ test('thread started broadcasts claim fresh launches by normalized cwd in FIFO o
   assert.strictEqual(JSON.stringify(states).includes('D:/other/project'), false);
   assert.strictEqual(JSON.stringify(states).includes('private'), false);
 
-  service.handleNotification({
+  await service.handleNotification({
     method: 'thread/started',
     params: { thread: { id: firstThreadId, cwd: 'D:/SAFE/project', status: { type: 'idle' } } }
   });
   const second = await secondPromise;
-  service.handleNotification({
+  await service.handleNotification({
     method: 'thread/started',
     params: { thread: { id: secondThreadId, cwd: 'd:\\safe\\project', status: { type: 'active' } } }
   });
   now = 1101;
-  service.handleNotification({
+  await service.handleNotification({
     method: 'thread/started',
     params: { thread: { id: expiredThreadId, cwd: 'D:/expired/project', status: { type: 'idle' } } }
   });
