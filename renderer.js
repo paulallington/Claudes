@@ -7025,6 +7025,7 @@ async function restartColumn(id) {
       col.codexManaged = false;
       markCodexFallback(col);
     }
+    if (col.cmd === 'codex') persistSessions(col.projectKey, col.workspaceId);
   } else {
     sendMsg.args = buildResumeArgs(col);
   }
@@ -7793,6 +7794,8 @@ async function spawnCodexColumn(cwd, targetRow, semanticSpec, options) {
     columnOpts.codexManaged = true;
     columnOpts.spawnTicket = prepared.spawnTicket;
     addColumn(managedArgs, targetRow, columnOpts);
+    var managedColumn = allColumns.get(globalColumnId);
+    if (managedColumn) persistSessions(managedColumn.projectKey, managedColumn.workspaceId);
     return { managed: true, threadId: prepared.threadId };
   }
 
@@ -7806,6 +7809,8 @@ async function spawnCodexColumn(cwd, targetRow, semanticSpec, options) {
   delete columnOpts.codexThreadId;
   columnOpts.codexManaged = false;
   addColumn(directArgs, targetRow, columnOpts);
+  var directColumn = allColumns.get(globalColumnId);
+  if (directColumn) persistSessions(directColumn.projectKey, directColumn.workspaceId);
   return { managed: false, threadId: null };
 }
 
