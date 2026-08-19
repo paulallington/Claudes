@@ -407,3 +407,94 @@ test('resolveBaseUrlBinding: disabled -> direct Anthropic base URL (sticky-state
 test('resolveBaseUrlBinding: no input -> direct Anthropic base URL (disabled is the default)', () => {
   assert.deepStrictEqual(resolveBaseUrlBinding(), { ANTHROPIC_BASE_URL: DIRECT_ANTHROPIC_BASE_URL });
 });
+
+// --- applyBaseUrlSettingsArg ---------------------------------------------
+// `--settings '{"env":{...}}'` outranks project/user settings.json files —
+// that's what makes the app's binding authoritative rather than advisory.
+
+test('applyBaseUrlSettingsArg: appends a --settings pair for the given env', () => {
+  const out = applyBaseUrlSettingsArg(['--effort', 'high'], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(out, [
+    '--effort', 'high',
+    '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } }),
+  ]);
+});
+
+test('applyBaseUrlSettingsArg: does not mutate the input array', () => {
+  const args = ['--effort', 'high'];
+  applyBaseUrlSettingsArg(args, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(args, ['--effort', 'high']);
+});
+
+test('applyBaseUrlSettingsArg: null/undefined/empty env strips any prior injected --settings and appends nothing', () => {
+  const injected = ['--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } })];
+  assert.deepStrictEqual(applyBaseUrlSettingsArg(['--effort', 'high', ...injected], null), ['--effort', 'high']);
+  assert.deepStrictEqual(applyBaseUrlSettingsArg(['--effort', 'high', ...injected], undefined), ['--effort', 'high']);
+  assert.deepStrictEqual(applyBaseUrlSettingsArg(['--effort', 'high', ...injected], {}), ['--effort', 'high']);
+});
+
+test('applyBaseUrlSettingsArg: non-array args treated as empty', () => {
+  const out = applyBaseUrlSettingsArg(undefined, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(out, ['--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } })]);
+});
+
+test('applyBaseUrlSettingsArg: idempotent across respawn - second application does not duplicate', () => {
+  const env = { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' };
+  const once = applyBaseUrlSettingsArg(['--effort', 'high'], env);
+  const twice = applyBaseUrlSettingsArg(once, env);
+  assert.deepStrictEqual(twice, once);
+});
+
+test('applyBaseUrlSettingsArg: respawn with a DIFFERENT env replaces the prior injected pair, not appends a second', () => {
+  const first = applyBaseUrlSettingsArg(['--effort', 'high'], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  const second = applyBaseUrlSettingsArg(first, { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' });
+  assert.deepStrictEqual(second, [
+    '--effort', 'high',
+    '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' } }),
+  ]);
+});
+
+test("applyBaseUrlSettingsArg: user's own --settings <file path> survives untouched", () => {
+  const out = applyBaseUrlSettingsArg(['--settings', './my-settings.json', '--effort', 'high'], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(out, [
+    '--settings', './my-settings.json', '--effort', 'high',
+    '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } }),
+  ]);
+});
+
+test("applyBaseUrlSettingsArg: user's own --settings '{other JSON}' survives untouched", () => {
+  const userSettings = JSON.stringify({ permissions: { allow: ['Bash'] } });
+  const out = applyBaseUrlSettingsArg(['--settings', userSettings], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(out, [
+    '--settings', userSettings,
+    '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } }),
+  ]);
+});
+
+test('applyBaseUrlSettingsArg: --settings=<json> single-token injected form is recognised and stripped', () => {
+  const injectedToken = '--settings=' + JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } });
+  const out = applyBaseUrlSettingsArg(['--effort', 'high', injectedToken], { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' });
+  assert.deepStrictEqual(out, [
+    '--effort', 'high',
+    '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' } }),
+  ]);
+});
+
+test('applyBaseUrlSettingsArg: malformed trailing bare --settings is always dropped', () => {
+  const out = applyBaseUrlSettingsArg(['--effort', 'high', '--settings'], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(out, [
+    '--effort', 'high',
+    '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } }),
+  ]);
+});
+
+test('applyBaseUrlSettingsArg: key order in the JSON is deterministic (byte-identical across respawn)', () => {
+  const out = applyBaseUrlSettingsArg([], { ENABLE_TOOL_SEARCH: 'true', ANTHROPIC_MODEL: 'claude-opus-5[1m]', ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.strictEqual(out[1], JSON.stringify({
+    env: {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787',
+      ANTHROPIC_MODEL: 'claude-opus-5[1m]',
+      ENABLE_TOOL_SEARCH: 'true',
+    },
+  }));
+});
