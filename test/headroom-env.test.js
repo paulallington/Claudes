@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { buildHeadroomEnv, buildHeadroomProxyArgs, headroomModelWindow, headroomOwnsModel, reconcileModelArgForRespawn } = require('../lib/headroom-env');
+const { buildHeadroomEnv, buildHeadroomProxyArgs, headroomModelWindow, headroomOwnsModel, reconcileModelArgForRespawn, resolveBaseUrlBinding, applyBaseUrlSettingsArg, findUnmergeableSettingsFile, DIRECT_ANTHROPIC_BASE_URL } = require('../lib/headroom-env');
 
 test('enabled claude column -> base URL + tool search', () => {
   const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false });
@@ -371,4 +371,235 @@ test('repeated --model collapses to exactly one selector (CLI is last-wins)', ()
     r(['--model', 'a', '--model', 'b'], 'claude-sonnet-5', false, false),
     ['--model', 'claude-sonnet-5']
   );
+});
+
+// --- resolveBaseUrlBinding ---------------------------------------------
+// The app's toggle must always win the base URL, in BOTH directions — see
+// the module doc-comment for the settings.json-override proof. This is a
+// separate function from buildHeadroomEnv (whose null-on-disabled contract
+// other callers, e.g. the renderer's context meter, already depend on).
+
+test('resolveBaseUrlBinding: non-Claude column -> null (app has no opinion)', () => {
+  assert.strictEqual(resolveBaseUrlBinding({ enabled: true, isClaude: false }), null);
+});
+
+test('resolveBaseUrlBinding: endpoint present -> null (endpoint owns the base URL)', () => {
+  assert.strictEqual(resolveBaseUrlBinding({ enabled: false, hasEndpoint: true }), null);
+  assert.strictEqual(resolveBaseUrlBinding({ enabled: true, hasEndpoint: true }), null);
+});
+
+test('resolveBaseUrlBinding: enabled -> delegates to buildHeadroomEnv (port/1M/hasMcp flow through)', () => {
+  const input = { enabled: true, hasEndpoint: false, port: 9191, oneM: true, oneMModel: 'claude-opus-4-8', hasMcp: true };
+  assert.deepStrictEqual(resolveBaseUrlBinding(input), buildHeadroomEnv(input));
+  assert.deepStrictEqual(resolveBaseUrlBinding(input), {
+    ANTHROPIC_BASE_URL: 'http://127.0.0.1:9191',
+    ANTHROPIC_MODEL: 'claude-opus-4-8[1m]',
+  });
+});
+
+test('resolveBaseUrlBinding: disabled -> direct Anthropic base URL (sticky-state fix)', () => {
+  assert.deepStrictEqual(resolveBaseUrlBinding({ enabled: false, hasEndpoint: false }), {
+    ANTHROPIC_BASE_URL: DIRECT_ANTHROPIC_BASE_URL,
+  });
+  assert.strictEqual(DIRECT_ANTHROPIC_BASE_URL, 'https://api.anthropic.com');
+});
+
+test('resolveBaseUrlBinding: no input -> direct Anthropic base URL (disabled is the default)', () => {
+  assert.deepStrictEqual(resolveBaseUrlBinding(), { ANTHROPIC_BASE_URL: DIRECT_ANTHROPIC_BASE_URL });
+});
+
+// --- applyBaseUrlSettingsArg ---------------------------------------------
+// `--settings '{"env":{...}}'` outranks project/user settings.json files —
+// that's what makes the app's binding authoritative rather than advisory.
+
+test('applyBaseUrlSettingsArg: appends a --settings pair for the given env', () => {
+  const out = applyBaseUrlSettingsArg(['--effort', 'high'], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(out, [
+    '--effort', 'high',
+    '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } }),
+  ]);
+});
+
+test('applyBaseUrlSettingsArg: does not mutate the input array', () => {
+  const args = ['--effort', 'high'];
+  applyBaseUrlSettingsArg(args, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(args, ['--effort', 'high']);
+});
+
+test('applyBaseUrlSettingsArg: null/undefined/empty env is a no-op - no token appended, nothing merged or stripped', () => {
+  // Merge-in-place needs nothing undone on a no-binding call (unlike the old
+  // strip-then-append approach) - an existing --settings, ours or the
+  // user's, is left exactly as-is.
+  const args = ['--effort', 'high', '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } })];
+  assert.deepStrictEqual(applyBaseUrlSettingsArg(args, null), args);
+  assert.deepStrictEqual(applyBaseUrlSettingsArg(args, undefined), args);
+  assert.deepStrictEqual(applyBaseUrlSettingsArg(args, {}), args);
+  assert.deepStrictEqual(applyBaseUrlSettingsArg(['--effort', 'high'], {}), ['--effort', 'high']);
+});
+
+test('applyBaseUrlSettingsArg: non-array args treated as empty', () => {
+  const out = applyBaseUrlSettingsArg(undefined, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(out, ['--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } })]);
+});
+
+test('applyBaseUrlSettingsArg: idempotent across respawn - second application does not duplicate', () => {
+  const env = { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' };
+  const once = applyBaseUrlSettingsArg(['--effort', 'high'], env);
+  const twice = applyBaseUrlSettingsArg(once, env);
+  assert.deepStrictEqual(twice, once);
+});
+
+test('applyBaseUrlSettingsArg: respawn with a DIFFERENT env replaces the prior injected pair, not appends a second', () => {
+  const first = applyBaseUrlSettingsArg(['--effort', 'high'], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  const second = applyBaseUrlSettingsArg(first, { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' });
+  assert.deepStrictEqual(second, [
+    '--effort', 'high',
+    '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' } }),
+  ]);
+});
+
+test("applyBaseUrlSettingsArg: user's own --settings <file path> is unmergeable - args returned unchanged", () => {
+  // --settings is last-wins, not merged: appending a second one after a file
+  // path would silently neutralise the user's file (their permissions/hooks
+  // never load, no error). We can't read the file to merge it, so we stand
+  // down entirely for this column instead.
+  const args = ['--settings', './my-settings.json', '--effort', 'high'];
+  const out = applyBaseUrlSettingsArg(args, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(out, args);
+});
+
+test('findUnmergeableSettingsFile: reports the file path when the last --settings is not JSON', () => {
+  assert.strictEqual(
+    findUnmergeableSettingsFile(['--settings', './team.json', '--effort', 'high']),
+    './team.json'
+  );
+});
+
+test('findUnmergeableSettingsFile: null when the last --settings is a JSON object', () => {
+  assert.strictEqual(
+    findUnmergeableSettingsFile(['--settings', JSON.stringify({ permissions: {} })]),
+    null
+  );
+});
+
+test('findUnmergeableSettingsFile: null when there is no --settings at all', () => {
+  assert.strictEqual(findUnmergeableSettingsFile(['--effort', 'high']), null);
+});
+
+test("applyBaseUrlSettingsArg: user's own --settings '{other JSON}' is merged, not appended twice", () => {
+  const userSettings = JSON.stringify({ permissions: { allow: ['Bash'] }, env: { MY_OWN_VAR: 'x' } });
+  const out = applyBaseUrlSettingsArg(['--settings', userSettings], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(out, [
+    '--settings', JSON.stringify({
+      permissions: { allow: ['Bash'] },
+      env: { MY_OWN_VAR: 'x', ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' },
+    }),
+  ]);
+});
+
+test("applyBaseUrlSettingsArg: our value wins for a key the user's own env already sets, other keys survive", () => {
+  const userSettings = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://my-gateway', MY_OWN_VAR: 'x' } });
+  const out = applyBaseUrlSettingsArg(['--settings', userSettings], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(JSON.parse(out[1]), {
+    env: { MY_OWN_VAR: 'x', ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' },
+  });
+  // Still exactly one --settings, still positional (--settings <value>).
+  assert.strictEqual(out.length, 2);
+  assert.deepStrictEqual(out.slice(0, 1), ['--settings']);
+});
+
+test("applyBaseUrlSettingsArg: malformed non-object env in the user's --settings ('env': a string) is dropped, not spread into index-keyed junk", () => {
+  const userSettings = JSON.stringify({ env: 'x' });
+  const out = applyBaseUrlSettingsArg(['--settings', userSettings], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(JSON.parse(out[1]), {
+    env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' },
+  });
+});
+
+test("applyBaseUrlSettingsArg: malformed array env in the user's --settings ('env': []) is dropped, not spread into index-keyed junk", () => {
+  const userSettings = JSON.stringify({ env: [] });
+  const out = applyBaseUrlSettingsArg(['--settings', userSettings], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(JSON.parse(out[1]), {
+    env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' },
+  });
+});
+
+test('applyBaseUrlSettingsArg: --settings=<json> single-token form merges and stays single-token', () => {
+  const token = '--settings=' + JSON.stringify({ permissions: { allow: ['Bash'] } });
+  const out = applyBaseUrlSettingsArg(['--effort', 'high', token], { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' });
+  assert.deepStrictEqual(out, [
+    '--effort', 'high',
+    '--settings=' + JSON.stringify({
+      permissions: { allow: ['Bash'] },
+      env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' },
+    }),
+  ]);
+});
+
+test('applyBaseUrlSettingsArg: an ultracode column keeps its ultracode settings AND gains our env - exactly one --settings', () => {
+  const args = ['--effort', 'xhigh', '--settings', JSON.stringify({ ultracode: true, enableWorkflows: true })];
+  const env = { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787', ENABLE_TOOL_SEARCH: 'true' };
+  const out = applyBaseUrlSettingsArg(args, env);
+  assert.deepStrictEqual(out, [
+    '--effort', 'xhigh',
+    '--settings', JSON.stringify({
+      ultracode: true,
+      enableWorkflows: true,
+      env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787', ENABLE_TOOL_SEARCH: 'true' },
+    }),
+  ]);
+  // Exactly one --settings token in the output.
+  assert.strictEqual(out.filter((a) => a === '--settings').length, 1);
+});
+
+test('applyBaseUrlSettingsArg: merging an ultracode column twice with the same env is idempotent', () => {
+  const args = ['--effort', 'xhigh', '--settings', JSON.stringify({ ultracode: true, enableWorkflows: true })];
+  const env = { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787', ENABLE_TOOL_SEARCH: 'true' };
+  const once = applyBaseUrlSettingsArg(args, env);
+  const twice = applyBaseUrlSettingsArg(once, env);
+  assert.deepStrictEqual(twice, once);
+});
+
+test('applyBaseUrlSettingsArg: malformed trailing bare --settings is always dropped', () => {
+  const out = applyBaseUrlSettingsArg(['--effort', 'high', '--settings'], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(out, [
+    '--effort', 'high',
+    '--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' } }),
+  ]);
+});
+
+test('applyBaseUrlSettingsArg: key order in the JSON is deterministic (byte-identical across respawn)', () => {
+  const out = applyBaseUrlSettingsArg([], { ENABLE_TOOL_SEARCH: 'true', ANTHROPIC_MODEL: 'claude-opus-5[1m]', ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.strictEqual(out[1], JSON.stringify({
+    env: {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787',
+      ANTHROPIC_MODEL: 'claude-opus-5[1m]',
+      ENABLE_TOOL_SEARCH: 'true',
+    },
+  }));
+});
+
+test('applyBaseUrlSettingsArg: re-stamping proxy binding with direct binding fully replaces app-owned keys, no stale ANTHROPIC_MODEL/ENABLE_TOOL_SEARCH', () => {
+  const proxyEnv = buildHeadroomEnv({ enabled: true, oneM: true, oneMModel: 'opus', port: 8787 });
+  const withProxy = applyBaseUrlSettingsArg(['--dangerously-skip-permissions'], proxyEnv);
+
+  const directEnv = resolveBaseUrlBinding({ enabled: false, isClaude: true });
+  const withDirect = applyBaseUrlSettingsArg(withProxy, directEnv);
+
+  const settingsValue = withDirect[withDirect.indexOf('--settings') + 1];
+  assert.deepStrictEqual(JSON.parse(settingsValue), {
+    env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' },
+  });
+});
+
+test('applyBaseUrlSettingsArg: re-stamping with direct binding drops app-owned keys but keeps user top-level keys and other env keys', () => {
+  const userSettings = JSON.stringify({ ultracode: true, env: { MY_OWN_KEY: 'keep-me', ANTHROPIC_MODEL: 'user-model' } });
+  const directEnv = resolveBaseUrlBinding({ enabled: false, isClaude: true });
+  const out = applyBaseUrlSettingsArg(['--settings', userSettings], directEnv);
+
+  const settingsValue = out[out.indexOf('--settings') + 1];
+  assert.deepStrictEqual(JSON.parse(settingsValue), {
+    ultracode: true,
+    env: { MY_OWN_KEY: 'keep-me', ANTHROPIC_BASE_URL: 'https://api.anthropic.com' },
+  });
 });

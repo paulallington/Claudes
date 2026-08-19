@@ -176,6 +176,7 @@ var optHeadroomShaper = document.getElementById('opt-headroom-shaper');
 var optHeadroomAutostart = document.getElementById('opt-headroom-autostart');
 var headroomSubs = document.getElementById('opt-headroom-subs');
 var headroomInstalled = false;  // resolved async from main; gates wrapping + UI
+var headroomServicePort = 8787;  // refreshed from headroom:serviceStatus's `port`; main resolves it from HEADROOM_PORT, so 8787 is only the pre-probe assumption
 var codexPresent = false;  // resolved async from main (initCodexUI); gates the handoff menu row too
 var headroomProbed = false;     // true once main's post-probe status has landed (gates the not-installed prompt so it doesn't flash before the probe)
 
@@ -1196,7 +1197,7 @@ function connectWS() {
           if (col3.env) respawnMsg.env = col3.env;
           // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
           // Re-derived from the live global flag; never persisted on the column.
-          maybeBindHeadroom(respawnMsg, { hasEndpoint: !!(col3.endpointId || (col3.env && col3.env.ANTHROPIC_BASE_URL)), isClaude: !col3.cmd, hasMcp: !!(col3 && col3.hasMcp), oneMModel: col3.model });
+          bindColumnBaseUrl(respawnMsg, { hasEndpoint: !!(col3.endpointId || (col3.env && col3.env.ANTHROPIC_BASE_URL)), isClaude: !col3.cmd, hasMcp: !!(col3 && col3.hasMcp), oneMModel: col3.model });
           col3.terminal.clear();
           gatedWsSend(respawnMsg);
           setColumnActivity(msg.id, 'working');
@@ -1282,13 +1283,38 @@ function reattachAllColumns() {
   });
 }
 
-// Ensure the app-owned Headroom proxy is up before sending a wrapped ('headroom')
-// spawn/respawn wire message. On failure, rewrite `msg` in place to an unwrapped
-// spawn (using `plainArgs`) so the column still works instead of exiting (code 1)
-// with ConnectionRefused. `send` runs exactly once with the final `msg`. Every
-// spawn/respawn path routes through here so they all self-heal identically.
-function maybeBindHeadroom(msg, ctx) {
+// Bind a spawn/respawn wire message's ANTHROPIC_BASE_URL — in BOTH directions
+// — and make that binding authoritative against settings.json. Two problems,
+// one fix:
+//
+//   1. Historically this only had an opinion when Headroom was ON — turning it
+//      off left ANTHROPIC_BASE_URL unset, so a column fell back to whatever
+//      was already in scope. Now every Claude column gets an explicit
+//      resolveBaseUrlBinding() result: the proxy URL when Headroom is on, the
+//      direct Anthropic URL otherwise. "Off" is an assertion, not an absence.
+//   2. Passing that binding as process env ALONE is not enough — Claude Code's
+//      own `~/.claude/settings.json` / `<project>/.claude/settings*.json` can
+//      carry an `env` block that OVERRIDES inherited process env entirely
+//      (proven empirically). So the resolved binding is ALSO stamped onto
+//      `msg.args` as `--settings '{"env":{...}}'` via applyBaseUrlSettingsArg,
+//      which outranks those files — see lib/headroom-env.js's doc-comments on
+//      both functions for the full reasoning.
+//
+// No-ops (leaves msg.env/msg.args untouched) for endpoint columns and
+// arbitrary-cmd columns, exactly like the old buildHeadroomEnv-only behaviour
+// — those have their own base-URL story or none at all.
+function bindColumnBaseUrl(msg, ctx) {
   if (!msg || !window.HeadroomEnv) return;
+  // Only assert a binding at all when Headroom is actually installed — i.e.
+  // when the app is plausibly the thing that set a proxy URL in the first
+  // place. A user who has never installed Headroom may be routing Claude
+  // through their own gateway via ~/.claude/settings.json or a shell export
+  // (not via the app's endpoint feature); asserting direct-Anthropic here
+  // would silently override that and leak their gateway auth token to
+  // Anthropic proper. Stay neutral (no env, no --settings) in that case,
+  // exactly like before this binding existed. Headroom-installed-but-toggle-
+  // off still asserts direct below — that's the user-reported bug this fixes.
+  if (!headroomInstalled) return;
   // The spawn Model dropdown is the ONE model control — deliberately not a
   // second Headroom-specific picker, which only invited "I set it there and it
   // did nothing" (the dropdown wins, so the other control was decorative).
@@ -1304,15 +1330,30 @@ function maybeBindHeadroom(msg, ctx) {
   // catalogue keeps it current by construction.
   var oneMModel = (ctx && ctx.oneMModel) || (config && config.headroom1mModel) ||
     (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL);
-  var env = window.HeadroomEnv.buildHeadroomEnv({
+  var env = window.HeadroomEnv.resolveBaseUrlBinding({
     enabled: !!(headroomInstalled && config && config.useHeadroom),
     hasEndpoint: !!(ctx && ctx.hasEndpoint),
     isClaude: !(ctx && ctx.isClaude === false),
     oneM: !!(config && config.useHeadroom1m !== false),
     oneMModel: oneMModel,
+    port: headroomServicePort,
     hasMcp: !!(ctx && ctx.hasMcp)
   });
-  if (env) msg.env = Object.assign({}, msg.env, env);
+  if (!env) return;
+  msg.env = Object.assign({}, msg.env, env);
+  msg.args = window.HeadroomEnv.applyBaseUrlSettingsArg(msg.args, env);
+  // A --settings pointing at a file path can't be merged (see that
+  // function's doc-comment) — the binding stood down for this column, so
+  // process env alone is carrying it, and settings.json can still win.
+  // Surface that once per column (latched on the column object) so a
+  // respawn loop doesn't spam the same warning on every spawn/respawn.
+  if (window.HeadroomEnv.findUnmergeableSettingsFile(msg.args)) {
+    var col = (msg.id && allColumns && allColumns.get) ? allColumns.get(msg.id) : null;
+    if (col && col.terminal && !col.__baseUrlStandDownWarned) {
+      col.__baseUrlStandDownWarned = true;
+      try { col.terminal.write('\x1b[2m⚠ Custom --settings file in use — base URL binding not enforced for this column.\x1b[0m\r\n'); } catch (e) { /* ignore */ }
+    }
+  }
 }
 
 function wsSend(obj) {
@@ -1333,6 +1374,7 @@ function ensureHeadroomReady() {
   if (!api || !api.getHeadroomServiceStatus) return Promise.resolve(true);
   if (_headroomReadyInflight) return _headroomReadyInflight;
   var work = api.getHeadroomServiceStatus().then(function (st) {
+    if (st && st.port && st.port > 0 && st.port <= 65535) headroomServicePort = st.port;
     if (st && st.running) return true;                 // already up
     if (!api.startHeadroomService) return false;
     return api.startHeadroomService().then(function (r) { return !!(r && r.running); });
@@ -1345,14 +1387,68 @@ function ensureHeadroomReady() {
   return capped;
 }
 // Drop-in for wsSend at the Headroom-aware spawn sites: gates the create when the
-// message carries a proxy base URL, passes everything else straight through.
+// message is bound to the LOCAL Headroom proxy specifically. Since
+// bindColumnBaseUrl now stamps ANTHROPIC_BASE_URL on every Claude column
+// (direct-Anthropic included — see its doc-comment), gating on mere presence of
+// the var would wrongly stall every direct/endpoint spawn on Headroom
+// readiness too; only the proxy URL itself means "wait for it".
 function gatedWsSend(msg) {
-  if (!msg || !msg.env || !msg.env.ANTHROPIC_BASE_URL) { wsSend(msg); return; }
+  var gatePort = headroomServicePort;
+  var proxyUrl = 'http://127.0.0.1:' + gatePort;
+  if (!msg || !msg.env || msg.env.ANTHROPIC_BASE_URL !== proxyUrl) { wsSend(msg); return; }
   var col = (msg.id && allColumns && allColumns.get) ? allColumns.get(msg.id) : null;
+  // An endpoint preset whose base URL happens to literally be the loopback
+  // Headroom port owns its own env block (see getEndpointEnv in main.js) —
+  // gating it on Headroom readiness, or rewriting it on !ready below, would
+  // hijack a column the app has no business touching. col is null on a
+  // fresh spawn (nothing to protect yet), so this only guards respawns of
+  // an already-known endpoint column.
+  if (col && col.endpointId) { wsSend(msg); return; }
   var hintTimer = setTimeout(function () {
     if (col && col.terminal) { try { col.terminal.write('\x1b[2m⧗ Waiting for the Headroom proxy to start…\x1b[0m\r\n'); } catch (e) { /* ignore */ } }
   }, 500);
-  ensureHeadroomReady().then(function () { clearTimeout(hintTimer); wsSend(msg); });
+  ensureHeadroomReady().then(function (ready) {
+    clearTimeout(hintTimer);
+    // headroomServicePort is refreshed asynchronously inside
+    // ensureHeadroomReady — a non-default HEADROOM_PORT can mean the port we
+    // gated on (the stale default) differs from the real one by the time the
+    // status lands. Re-stamp the msg at the CURRENT port before sending, or
+    // it goes to a dead URL despite the proxy being healthy.
+    if (ready && headroomServicePort !== gatePort) {
+      var freshUrl = 'http://127.0.0.1:' + headroomServicePort;
+      msg.env = Object.assign({}, msg.env, { ANTHROPIC_BASE_URL: freshUrl });
+      if (window.HeadroomEnv) {
+        msg.args = window.HeadroomEnv.applyBaseUrlSettingsArg(msg.args, msg.env);
+      }
+    }
+    if (!ready) {
+      // Proxy never came up — fall back to an unwrapped, direct-Anthropic spawn
+      // instead of sending a column into a dead port (ConnectionRefused, exit
+      // code 1). Rebuild the binding as explicitly direct and re-stamp
+      // --settings so it, not a stale proxy pair, wins against settings.json.
+      var directEnv = window.HeadroomEnv
+        ? window.HeadroomEnv.resolveBaseUrlBinding({ enabled: false, isClaude: true })
+        : { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' };
+      msg.env = Object.assign({}, msg.env, directEnv);
+      delete msg.env.ANTHROPIC_MODEL;
+      delete msg.env.ENABLE_TOOL_SEARCH;
+      if (window.HeadroomEnv) msg.args = window.HeadroomEnv.applyBaseUrlSettingsArg(msg.args, directEnv);
+      // Headroom owning the model meant --model was deliberately omitted
+      // (ANTHROPIC_MODEL carried it) — without the env binding that would
+      // silently fall the column back to the CLI default, so restore the flag.
+      // A legacy restored column can have no saved col.model at all — fall
+      // back to the same chain bindColumnBaseUrl uses for its own pin
+      // (headroom1mModel override, then the catalogue default) rather than
+      // silently sending nothing.
+      if (window.HeadroomEnv && col) {
+        var fallbackModel = col.model || (config && config.headroom1mModel) ||
+          (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL);
+        msg.args = window.HeadroomEnv.reconcileModelArgForRespawn(msg.args, fallbackModel, false, false);
+      }
+      if (col && col.terminal) { try { col.terminal.write('\x1b[2m⚠ Headroom proxy unavailable — connected directly to Anthropic.\x1b[0m\r\n'); } catch (e) { /* ignore */ } }
+    }
+    wsSend(msg);
+  });
 }
 
 // ============================================================
@@ -3687,7 +3783,7 @@ function restoreSessions(projectPath, workspaceId) {
       // Reconcile against what will ACTUALLY be spawned, not against the saved
       // entry. They differ on one path: when e.endpointId names a preset whose
       // env can no longer be resolved (deleted, or an IPC failure), the fallback
-      // above drops endpointId/env from resumeRowOpts — so maybeBindHeadroom
+      // above drops endpointId/env from resumeRowOpts — so bindColumnBaseUrl
       // sees hasEndpoint:false and binds ANTHROPIC_MODEL, while keying this off
       // `e` would still see the stale endpointId, decide Headroom does NOT own
       // the model, and inject --model too. Both selectors, flag wins, 1M window
@@ -3841,7 +3937,7 @@ function restoreSessions(projectPath, workspaceId) {
         }
         var rowOpts = { workspaceId: workspaceId };
         if (e.title) rowOpts.title = e.title;
-        // Threaded through to addColumn's opts.model -> maybeBindHeadroom's
+        // Threaded through to addColumn's opts.model -> bindColumnBaseUrl's
         // oneMModel, so a Headroom-bound column restores pinned to the model
         // it was actually running, not the config's 1M default.
         if (e.model) rowOpts.model = e.model;
@@ -4933,7 +5029,7 @@ function createExitOverlay(id, exitCode, col) {
     if (col.env) sendMsg.env = col.env;
     // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
     // Re-derived from the live global flag; passthrough for endpoint/arbitrary cmd.
-    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp), oneMModel: col.model });
+    bindColumnBaseUrl(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp), oneMModel: col.model });
     gatedWsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
@@ -5058,7 +5154,7 @@ function addColumn(args, targetRow, opts) {
   if (endpointBanner) {
     var __hrTag = endpointBanner.querySelector('.endpoint-banner-tag--headroom');
     if (__hrTag) __hrTag.addEventListener('click', function () {
-      if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard');
+      if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:' + headroomServicePort + '/dashboard');
     });
   }
 
@@ -5402,11 +5498,12 @@ function addColumn(args, targetRow, opts) {
       wsSend({ type: 'reattach', id: id, cols: terminal.cols, rows: terminal.rows });
       return;
     }
-    // Bind this column to the app-managed Headroom proxy by env var (no fragile
-    // `headroom wrap` subprocess). maybeBindHeadroom no-ops unless the global
-    // toggle is on AND this is a plain default-Claude spawn (no endpoint, no
-    // arbitrary cmd). We keep `cmd`/`claudeArgs`/session-id pinning intact — the
-    // detectSession guard below relies on `cmd` staying falsy for default cols.
+    // Bind this column's base URL — to the app-managed Headroom proxy when the
+    // global toggle is on, to direct Anthropic otherwise — for any plain
+    // default-Claude spawn (no endpoint, no arbitrary cmd; bindColumnBaseUrl
+    // no-ops for those, which own their own base URL or none at all). We keep
+    // `cmd`/`claudeArgs`/session-id pinning intact — the detectSession guard
+    // below relies on `cmd` staying falsy for default cols.
     var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: claudeArgs };
     if (cmd) sendMsg.cmd = cmd;
     if (opts.env) sendMsg.env = opts.env;
@@ -5416,7 +5513,7 @@ function addColumn(args, targetRow, opts) {
     // selection and append --mcp-config/--strict-mcp-config. No-op when inheriting
     // all (returns {inherit:true}) or when "Strip MCPs" already put --mcp-config in
     // args (appendProjectMcpArgs guards that). Never blocks the spawn on failure.
-    // Resolved BEFORE maybeBindHeadroom so hasMcp is known when we decide whether
+    // Resolved BEFORE bindColumnBaseUrl so hasMcp is known when we decide whether
     // to enable Headroom's tool-search deferral (it would otherwise swallow mcp__*
     // tool schemas out of reach — see lib/headroom-env.js).
     var mcpRes = null;
@@ -5432,7 +5529,7 @@ function addColumn(args, targetRow, opts) {
     // Persist so respawn/reattach paths keep MCP inlined (Headroom tool-search off) without re-resolving.
     var __col = allColumns.get(id);
     if (__col) __col.hasMcp = __hasMcp;
-    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || (opts.env && opts.env.ANTHROPIC_BASE_URL)), isClaude: !cmd, hasMcp: __hasMcp, oneMModel: opts.model });
+    bindColumnBaseUrl(sendMsg, { hasEndpoint: !!(opts.endpointId || (opts.env && opts.env.ANTHROPIC_BASE_URL)), isClaude: !cmd, hasMcp: __hasMcp, oneMModel: opts.model });
     if (mcpRes) sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
 
     vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
@@ -7115,7 +7212,7 @@ async function restartColumn(id) {
   }
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
   // Passthrough for arbitrary-cmd/endpoint columns; hasMcp from the fresh resolve.
-  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: __rHasMcp, oneMModel: col.model });
+  bindColumnBaseUrl(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: __rHasMcp, oneMModel: col.model });
   // Prepare/authorize managed Codex before killing the old PTY. pty-server
   // removes that exact PTY generation from its map before its async exit
   // callback runs, so the killed generation cannot emit an exit message here.
@@ -12081,7 +12178,7 @@ async function spawnFromOptions(makeRow) {
     extra.cwd = resolved.path;
     extra.cwdSource = 'manual';
   }
-  // Threaded through to maybeBindHeadroom (via addColumn's opts.model) so a
+  // Threaded through to bindColumnBaseUrl (via addColumn's opts.model) so a
   // Headroom-bound spawn pins ANTHROPIC_MODEL to the dropdown pick even
   // though buildSpawnArgs skips --model for that case (see below).
   if (optModel.value) extra.model = optModel.value;
@@ -12207,9 +12304,9 @@ function buildSpawnArgs(resolved) {
   // preset is active we skip it — the env block already pins every model tier
   // to the preset's model and CLI flags would override that. Same reasoning
   // extends to Headroom's 1M binding: pushing --model here would override the
-  // ANTHROPIC_MODEL=<model>[1m] maybeBindHeadroom is about to inject, silently
+  // ANTHROPIC_MODEL=<model>[1m] bindColumnBaseUrl is about to inject, silently
   // dropping the 1M window — so let the env carry the choice instead (threaded
-  // through opts.model -> maybeBindHeadroom's oneMModel).
+  // through opts.model -> bindColumnBaseUrl's oneMModel).
   var headroomOwnsModel = window.HeadroomEnv && window.HeadroomEnv.headroomOwnsModel({
     headroomInstalled: headroomInstalled,
     useHeadroom: config && config.useHeadroom,
@@ -12369,7 +12466,7 @@ function spawnOpts(extra) {
   if (currentEndpointEnv) o.env = currentEndpointEnv;
   // Profile env (CLAUDE_CONFIG_DIR) layers on top of, and never replaces, the
   // endpoint env: they bind different things (credentials vs base URL) and a
-  // column can legitimately have both. Never touches maybeBindHeadroom, which
+  // column can legitimately have both. Never touches bindColumnBaseUrl, which
   // is orthogonal (binds ANTHROPIC_BASE_URL, not credentials).
   if (currentProfileEnv) o.env = Object.assign({}, o.env, currentProfileEnv);
   if (!o.profileId && currentProfileId) o.profileId = currentProfileId;
@@ -12599,7 +12696,7 @@ if (optHeadroomShaper) {
     }
   });
 }
-if (headroomDashboardLink) headroomDashboardLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard'); });
+if (headroomDashboardLink) headroomDashboardLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('http://127.0.0.1:' + headroomServicePort + '/dashboard'); });
 if (headroomInstallLink) headroomInstallLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('https://github.com/headroomlabs-ai/headroom'); });
 var headroomInstallDocs = document.getElementById('headroom-install-docs');
 if (headroomInstallDocs) headroomInstallDocs.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('https://github.com/headroomlabs-ai/headroom'); });
@@ -12661,6 +12758,7 @@ function renderHeadroomService() {
 function refreshHeadroomService() {
   if (!window.electronAPI || !window.electronAPI.getHeadroomServiceStatus) return;
   window.electronAPI.getHeadroomServiceStatus().then(function (st) {
+    if (st && st.port && st.port > 0 && st.port <= 65535) headroomServicePort = st.port;
     if (st && st.ok) headroomServiceState.running = !!st.running;
     renderHeadroomService();
   }).catch(function () {});
@@ -12707,7 +12805,7 @@ function initHeadroomServiceUI() {
   }
   if (headroomServiceDash) headroomServiceDash.addEventListener('click', function (e) {
     e.preventDefault();
-    if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard');
+    if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:' + headroomServicePort + '/dashboard');
   });
   if (headroomServiceRestart) headroomServiceRestart.addEventListener('click', doHeadroomRestart);
   if (window.electronAPI && window.electronAPI.onHeadroomServiceLog) {
@@ -15514,7 +15612,8 @@ function startContextMeterPoll(colId) {
             isClaude: !col.cmd,
             oneM: !!(config && config.useHeadroom1m !== false),
             oneMModel: col.model || (config && config.headroom1mModel) ||
-              (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL)
+              (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL),
+            port: headroomServicePort
           };
           var hrEnv = window.HeadroomEnv.buildHeadroomEnv(hrInput);
           // Only pin the denominator when Headroom actually pinned a model
