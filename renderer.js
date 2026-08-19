@@ -1305,6 +1305,16 @@ function reattachAllColumns() {
 // — those have their own base-URL story or none at all.
 function bindColumnBaseUrl(msg, ctx) {
   if (!msg || !window.HeadroomEnv) return;
+  // Only assert a binding at all when Headroom is actually installed — i.e.
+  // when the app is plausibly the thing that set a proxy URL in the first
+  // place. A user who has never installed Headroom may be routing Claude
+  // through their own gateway via ~/.claude/settings.json or a shell export
+  // (not via the app's endpoint feature); asserting direct-Anthropic here
+  // would silently override that and leak their gateway auth token to
+  // Anthropic proper. Stay neutral (no env, no --settings) in that case,
+  // exactly like before this binding existed. Headroom-installed-but-toggle-
+  // off still asserts direct below — that's the user-reported bug this fixes.
+  if (!headroomInstalled) return;
   // The spawn Model dropdown is the ONE model control — deliberately not a
   // second Headroom-specific picker, which only invited "I set it there and it
   // did nothing" (the dropdown wins, so the other control was decorative).
@@ -1335,10 +1345,12 @@ function bindColumnBaseUrl(msg, ctx) {
   // A --settings pointing at a file path can't be merged (see that
   // function's doc-comment) — the binding stood down for this column, so
   // process env alone is carrying it, and settings.json can still win.
-  // Surface that once so it isn't a silent gap.
+  // Surface that once per column (latched on the column object) so a
+  // respawn loop doesn't spam the same warning on every spawn/respawn.
   if (window.HeadroomEnv.findUnmergeableSettingsFile(msg.args)) {
     var col = (msg.id && allColumns && allColumns.get) ? allColumns.get(msg.id) : null;
-    if (col && col.terminal) {
+    if (col && col.terminal && !col.__baseUrlStandDownWarned) {
+      col.__baseUrlStandDownWarned = true;
       try { col.terminal.write('\x1b[2m⚠ Custom --settings file in use — base URL binding not enforced for this column.\x1b[0m\r\n'); } catch (e) { /* ignore */ }
     }
   }
@@ -1385,6 +1397,13 @@ function gatedWsSend(msg) {
   var proxyUrl = 'http://127.0.0.1:' + gatePort;
   if (!msg || !msg.env || msg.env.ANTHROPIC_BASE_URL !== proxyUrl) { wsSend(msg); return; }
   var col = (msg.id && allColumns && allColumns.get) ? allColumns.get(msg.id) : null;
+  // An endpoint preset whose base URL happens to literally be the loopback
+  // Headroom port owns its own env block (see getEndpointEnv in main.js) —
+  // gating it on Headroom readiness, or rewriting it on !ready below, would
+  // hijack a column the app has no business touching. col is null on a
+  // fresh spawn (nothing to protect yet), so this only guards respawns of
+  // an already-known endpoint column.
+  if (col && col.endpointId) { wsSend(msg); return; }
   var hintTimer = setTimeout(function () {
     if (col && col.terminal) { try { col.terminal.write('\x1b[2m⧗ Waiting for the Headroom proxy to start…\x1b[0m\r\n'); } catch (e) { /* ignore */ } }
   }, 500);
@@ -1417,8 +1436,14 @@ function gatedWsSend(msg) {
       // Headroom owning the model meant --model was deliberately omitted
       // (ANTHROPIC_MODEL carried it) — without the env binding that would
       // silently fall the column back to the CLI default, so restore the flag.
+      // A legacy restored column can have no saved col.model at all — fall
+      // back to the same chain bindColumnBaseUrl uses for its own pin
+      // (headroom1mModel override, then the catalogue default) rather than
+      // silently sending nothing.
       if (window.HeadroomEnv && col) {
-        msg.args = window.HeadroomEnv.reconcileModelArgForRespawn(msg.args, col.model, false, false);
+        var fallbackModel = col.model || (config && config.headroom1mModel) ||
+          (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL);
+        msg.args = window.HeadroomEnv.reconcileModelArgForRespawn(msg.args, fallbackModel, false, false);
       }
       if (col && col.terminal) { try { col.terminal.write('\x1b[2m⚠ Headroom proxy unavailable — connected directly to Anthropic.\x1b[0m\r\n'); } catch (e) { /* ignore */ } }
     }

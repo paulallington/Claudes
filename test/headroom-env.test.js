@@ -503,6 +503,25 @@ test("applyBaseUrlSettingsArg: our value wins for a key the user's own env alrea
   assert.deepStrictEqual(JSON.parse(out[1]), {
     env: { MY_OWN_VAR: 'x', ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' },
   });
+  // Still exactly one --settings, still positional (--settings <value>).
+  assert.strictEqual(out.length, 2);
+  assert.deepStrictEqual(out.slice(0, 1), ['--settings']);
+});
+
+test("applyBaseUrlSettingsArg: malformed non-object env in the user's --settings ('env': a string) is dropped, not spread into index-keyed junk", () => {
+  const userSettings = JSON.stringify({ env: 'x' });
+  const out = applyBaseUrlSettingsArg(['--settings', userSettings], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(JSON.parse(out[1]), {
+    env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' },
+  });
+});
+
+test("applyBaseUrlSettingsArg: malformed array env in the user's --settings ('env': []) is dropped, not spread into index-keyed junk", () => {
+  const userSettings = JSON.stringify({ env: [] });
+  const out = applyBaseUrlSettingsArg(['--settings', userSettings], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
+  assert.deepStrictEqual(JSON.parse(out[1]), {
+    env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' },
+  });
 });
 
 test('applyBaseUrlSettingsArg: --settings=<json> single-token form merges and stays single-token', () => {
