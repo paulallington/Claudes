@@ -500,11 +500,9 @@ test("applyBaseUrlSettingsArg: user's own --settings '{other JSON}' is merged, n
 test("applyBaseUrlSettingsArg: our value wins for a key the user's own env already sets, other keys survive", () => {
   const userSettings = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://my-gateway', MY_OWN_VAR: 'x' } });
   const out = applyBaseUrlSettingsArg(['--settings', userSettings], { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' });
-  assert.deepStrictEqual(out, [
-    '--settings', JSON.stringify({
-      env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787', MY_OWN_VAR: 'x' },
-    }),
-  ]);
+  assert.deepStrictEqual(JSON.parse(out[1]), {
+    env: { MY_OWN_VAR: 'x', ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' },
+  });
 });
 
 test('applyBaseUrlSettingsArg: --settings=<json> single-token form merges and stays single-token', () => {
@@ -560,4 +558,29 @@ test('applyBaseUrlSettingsArg: key order in the JSON is deterministic (byte-iden
       ENABLE_TOOL_SEARCH: 'true',
     },
   }));
+});
+
+test('applyBaseUrlSettingsArg: re-stamping proxy binding with direct binding fully replaces app-owned keys, no stale ANTHROPIC_MODEL/ENABLE_TOOL_SEARCH', () => {
+  const proxyEnv = buildHeadroomEnv({ enabled: true, oneM: true, oneMModel: 'opus', port: 8787 });
+  const withProxy = applyBaseUrlSettingsArg(['--dangerously-skip-permissions'], proxyEnv);
+
+  const directEnv = resolveBaseUrlBinding({ enabled: false, isClaude: true });
+  const withDirect = applyBaseUrlSettingsArg(withProxy, directEnv);
+
+  const settingsValue = withDirect[withDirect.indexOf('--settings') + 1];
+  assert.deepStrictEqual(JSON.parse(settingsValue), {
+    env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' },
+  });
+});
+
+test('applyBaseUrlSettingsArg: re-stamping with direct binding drops app-owned keys but keeps user top-level keys and other env keys', () => {
+  const userSettings = JSON.stringify({ ultracode: true, env: { MY_OWN_KEY: 'keep-me', ANTHROPIC_MODEL: 'user-model' } });
+  const directEnv = resolveBaseUrlBinding({ enabled: false, isClaude: true });
+  const out = applyBaseUrlSettingsArg(['--settings', userSettings], directEnv);
+
+  const settingsValue = out[out.indexOf('--settings') + 1];
+  assert.deepStrictEqual(JSON.parse(settingsValue), {
+    ultracode: true,
+    env: { MY_OWN_KEY: 'keep-me', ANTHROPIC_BASE_URL: 'https://api.anthropic.com' },
+  });
 });
