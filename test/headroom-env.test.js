@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { buildHeadroomEnv, buildHeadroomProxyArgs, headroomModelWindow, headroomOwnsModel, reconcileModelArgForRespawn } = require('../lib/headroom-env');
+const { buildHeadroomEnv, buildHeadroomProxyArgs, headroomModelWindow, headroomOwnsModel, reconcileModelArgForRespawn, resolveBaseUrlBinding, applyBaseUrlSettingsArg, DIRECT_ANTHROPIC_BASE_URL } = require('../lib/headroom-env');
 
 test('enabled claude column -> base URL + tool search', () => {
   const env = buildHeadroomEnv({ enabled: true, hasEndpoint: false });
@@ -371,4 +371,39 @@ test('repeated --model collapses to exactly one selector (CLI is last-wins)', ()
     r(['--model', 'a', '--model', 'b'], 'claude-sonnet-5', false, false),
     ['--model', 'claude-sonnet-5']
   );
+});
+
+// --- resolveBaseUrlBinding ---------------------------------------------
+// The app's toggle must always win the base URL, in BOTH directions — see
+// the module doc-comment for the settings.json-override proof. This is a
+// separate function from buildHeadroomEnv (whose null-on-disabled contract
+// other callers, e.g. the renderer's context meter, already depend on).
+
+test('resolveBaseUrlBinding: non-Claude column -> null (app has no opinion)', () => {
+  assert.strictEqual(resolveBaseUrlBinding({ enabled: true, isClaude: false }), null);
+});
+
+test('resolveBaseUrlBinding: endpoint present -> null (endpoint owns the base URL)', () => {
+  assert.strictEqual(resolveBaseUrlBinding({ enabled: false, hasEndpoint: true }), null);
+  assert.strictEqual(resolveBaseUrlBinding({ enabled: true, hasEndpoint: true }), null);
+});
+
+test('resolveBaseUrlBinding: enabled -> delegates to buildHeadroomEnv (port/1M/hasMcp flow through)', () => {
+  const input = { enabled: true, hasEndpoint: false, port: 9191, oneM: true, oneMModel: 'claude-opus-4-8', hasMcp: true };
+  assert.deepStrictEqual(resolveBaseUrlBinding(input), buildHeadroomEnv(input));
+  assert.deepStrictEqual(resolveBaseUrlBinding(input), {
+    ANTHROPIC_BASE_URL: 'http://127.0.0.1:9191',
+    ANTHROPIC_MODEL: 'claude-opus-4-8[1m]',
+  });
+});
+
+test('resolveBaseUrlBinding: disabled -> direct Anthropic base URL (sticky-state fix)', () => {
+  assert.deepStrictEqual(resolveBaseUrlBinding({ enabled: false, hasEndpoint: false }), {
+    ANTHROPIC_BASE_URL: DIRECT_ANTHROPIC_BASE_URL,
+  });
+  assert.strictEqual(DIRECT_ANTHROPIC_BASE_URL, 'https://api.anthropic.com');
+});
+
+test('resolveBaseUrlBinding: no input -> direct Anthropic base URL (disabled is the default)', () => {
+  assert.deepStrictEqual(resolveBaseUrlBinding(), { ANTHROPIC_BASE_URL: DIRECT_ANTHROPIC_BASE_URL });
 });
