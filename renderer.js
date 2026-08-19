@@ -1332,6 +1332,16 @@ function bindColumnBaseUrl(msg, ctx) {
   if (!env) return;
   msg.env = Object.assign({}, msg.env, env);
   msg.args = window.HeadroomEnv.applyBaseUrlSettingsArg(msg.args, env);
+  // A --settings pointing at a file path can't be merged (see that
+  // function's doc-comment) — the binding stood down for this column, so
+  // process env alone is carrying it, and settings.json can still win.
+  // Surface that once so it isn't a silent gap.
+  if (window.HeadroomEnv.findUnmergeableSettingsFile(msg.args)) {
+    var col = (msg.id && allColumns && allColumns.get) ? allColumns.get(msg.id) : null;
+    if (col && col.terminal) {
+      try { col.terminal.write('\x1b[2m⚠ Custom --settings file in use — base URL binding not enforced for this column.\x1b[0m\r\n'); } catch (e) { /* ignore */ }
+    }
+  }
 }
 
 function wsSend(obj) {
@@ -1371,7 +1381,8 @@ function ensureHeadroomReady() {
 // the var would wrongly stall every direct/endpoint spawn on Headroom
 // readiness too; only the proxy URL itself means "wait for it".
 function gatedWsSend(msg) {
-  var proxyUrl = 'http://127.0.0.1:' + headroomServicePort;
+  var gatePort = headroomServicePort;
+  var proxyUrl = 'http://127.0.0.1:' + gatePort;
   if (!msg || !msg.env || msg.env.ANTHROPIC_BASE_URL !== proxyUrl) { wsSend(msg); return; }
   var col = (msg.id && allColumns && allColumns.get) ? allColumns.get(msg.id) : null;
   var hintTimer = setTimeout(function () {
@@ -1379,6 +1390,18 @@ function gatedWsSend(msg) {
   }, 500);
   ensureHeadroomReady().then(function (ready) {
     clearTimeout(hintTimer);
+    // headroomServicePort is refreshed asynchronously inside
+    // ensureHeadroomReady — a non-default HEADROOM_PORT can mean the port we
+    // gated on (the stale default) differs from the real one by the time the
+    // status lands. Re-stamp the msg at the CURRENT port before sending, or
+    // it goes to a dead URL despite the proxy being healthy.
+    if (ready && headroomServicePort !== gatePort) {
+      var freshUrl = 'http://127.0.0.1:' + headroomServicePort;
+      msg.env = Object.assign({}, msg.env, { ANTHROPIC_BASE_URL: freshUrl });
+      if (window.HeadroomEnv) {
+        msg.args = window.HeadroomEnv.applyBaseUrlSettingsArg(msg.args, msg.env);
+      }
+    }
     if (!ready) {
       // Proxy never came up — fall back to an unwrapped, direct-Anthropic spawn
       // instead of sending a column into a dead port (ConnectionRefused, exit
