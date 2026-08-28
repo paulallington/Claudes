@@ -53,6 +53,7 @@ const CodexWatchLog = require('./lib/codex-watch-log');
 const CodexWatchTail = require('./lib/codex-watch-tail');
 const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-app-server');
 const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
+const { checkAttachmentPath } = require('./lib/attachment-file-guard');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -2886,6 +2887,27 @@ ipcMain.handle('fs:readFile', (event, filePath) => {
     return { content: buf.toString('utf8') };
   } catch (err) {
     return { error: err.message };
+  }
+});
+
+// Reads an image Claude handed to the user via SendUserFile and returns it as
+// a data: URI so the renderer can display it despite the page CSP forbidding
+// file: URIs. These attachments live OUTSIDE the normal allowed roots (under
+// <os.tmpdir()>/claude/), so this is deliberately narrower than
+// assertInsideAllowedRoots in every other respect — see lib/attachment-file-guard.js.
+ipcMain.handle('attachments:readImage', (event, filePath) => {
+  try {
+    const roots = listAllowedRoots().concat([path.join(os.tmpdir(), 'claude')]);
+    const result = checkAttachmentPath(filePath, roots, process.platform, {
+      realpath: (p) => (fs.realpathSync.native ? fs.realpathSync.native(p) : fs.realpathSync(p)),
+      stat: (p) => fs.statSync(p),
+    });
+    if (!result.ok) return { ok: false, error: result.error };
+    const buf = fs.readFileSync(result.path);
+    const dataUri = `data:${result.mediaType};base64,${buf.toString('base64')}`;
+    return { ok: true, dataUri, mediaType: result.mediaType, size: result.size };
+  } catch (err) {
+    return { ok: false, error: 'read failed' };
   }
 });
 
