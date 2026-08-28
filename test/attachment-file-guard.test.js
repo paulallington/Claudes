@@ -102,3 +102,47 @@ test('checkAttachmentPath never leaks the resolved path in a refusal error', () 
   assert.equal(/secret|Windows/i.test(result.error), false);
 });
 
+test('checkAttachmentPath refuses a sibling directory with the root as a name prefix (win32)', () => {
+  const roots = ['C:\\tmp\\claude'];
+  const candidate = 'C:\\tmp\\claude-evil\\x.png';
+  const result = checkAttachmentPath(candidate, roots, 'win32', {
+    realpath: (p) => p,
+    stat: () => ({ isFile: () => true, size: 1000 }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'outside allowed roots');
+});
+
+test('checkAttachmentPath refuses a sibling directory with the root as a name prefix (posix)', () => {
+  const roots = ['/tmp/claude'];
+  const candidate = '/tmp/claude-evil/x.png';
+  const result = checkAttachmentPath(candidate, roots, 'linux', {
+    realpath: (p) => p,
+    stat: () => ({ isFile: () => true, size: 1000 }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'outside allowed roots');
+});
+
+test('checkAttachmentPath accepts a path inside an allowed root on posix', () => {
+  const roots = ['/tmp/claude'];
+  const candidate = '/tmp/claude/hero.png';
+  const result = checkAttachmentPath(candidate, roots, 'linux', {
+    realpath: (p) => p,
+    stat: () => ({ isFile: () => true, size: 1000 }),
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.path, path.posix.resolve(candidate));
+});
+
+test('checkAttachmentPath refuses a symlink whose realpath resolves to a disallowed extension, even though containment passes', () => {
+  const roots = ['C:\\tmp\\claude', 'C:\\Users\\paul\\.claude'];
+  const candidate = 'C:\\tmp\\claude\\x.png';
+  const result = checkAttachmentPath(candidate, roots, 'win32', {
+    realpath: () => 'C:\\Users\\paul\\.claude\\.credentials.json',
+    stat: () => ({ isFile: () => true, size: 1000 }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'unsupported extension');
+});
+
