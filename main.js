@@ -53,7 +53,7 @@ const CodexWatchLog = require('./lib/codex-watch-log');
 const CodexWatchTail = require('./lib/codex-watch-tail');
 const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-app-server');
 const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
-const { checkAttachmentPath, checkAttachmentContainment } = require('./lib/attachment-file-guard');
+const { checkAttachmentPath, checkAttachmentOpenPath, checkAttachmentContainment } = require('./lib/attachment-file-guard');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -2993,6 +2993,26 @@ ipcMain.handle('attachments:reveal', (event, filePath) => {
     return { ok: true };
   } catch (err) {
     return { ok: false, error: 'reveal failed' };
+  }
+});
+
+// Launches an attachment with its OS default handler. Unlike the general
+// shell:openPath (extension blocklist only, no containment), attachments
+// live OUTSIDE the normal allowed roots (under <os.tmpdir()>/claude/) and can
+// originate from a prompt-injected tool call or a crafted transcript, so this
+// applies the same containment policy as attachments:reveal PLUS an
+// allowlist of openable document/image types (checkAttachmentOpenPath) — an
+// attacker who could plant an executable under an attachment root must not
+// be able to get it launched. Never throws across the IPC boundary; refusals
+// are short and path-free.
+ipcMain.handle('attachments:openPath', (event, filePath) => {
+  try {
+    const result = checkAttachmentOpenPath(filePath, attachmentGuardRoots(), process.platform, attachmentGuardDeps());
+    if (!result.ok) return { ok: false, error: result.error };
+    shell.openPath(result.path);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: 'open failed' };
   }
 });
 

@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
-const { checkAttachmentPath, isAllowedImageExt, mediaTypeFor } = require('../lib/attachment-file-guard');
+const { checkAttachmentPath, checkAttachmentOpenPath, isAllowedImageExt, isAllowedOpenExt, mediaTypeFor } = require('../lib/attachment-file-guard');
 
 test('checkAttachmentPath accepts a path inside an allowed root with an allowed extension', () => {
   const roots = ['C:\\Users\\paul\\.claudes'];
@@ -144,5 +144,49 @@ test('checkAttachmentPath refuses a symlink whose realpath resolves to a disallo
   });
   assert.equal(result.ok, false);
   assert.equal(result.error, 'unsupported extension');
+});
+
+test('checkAttachmentOpenPath refuses .bat / .exe / .ps1 candidates', () => {
+  const roots = ['C:\\tmp\\claude'];
+  const deps = { realpath: (p) => p, stat: () => ({ isFile: () => true, size: 1000 }) };
+  for (const name of ['payload.bat', 'payload.exe', 'payload.ps1']) {
+    const candidate = 'C:\\tmp\\claude\\' + name;
+    assert.equal(isAllowedOpenExt(candidate), false, name);
+    const result = checkAttachmentOpenPath(candidate, roots, 'win32', deps);
+    assert.equal(result.ok, false, name);
+    assert.equal(result.error, 'unsupported extension', name);
+  }
+});
+
+test('checkAttachmentOpenPath refuses a symlink whose realpath resolves to .bat even though the candidate is .pdf', () => {
+  const roots = ['C:\\tmp\\claude'];
+  const candidate = 'C:\\tmp\\claude\\report.pdf';
+  const result = checkAttachmentOpenPath(candidate, roots, 'win32', {
+    realpath: () => 'C:\\tmp\\claude\\payload.bat',
+    stat: () => ({ isFile: () => true, size: 1000 }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'unsupported extension');
+});
+
+test('checkAttachmentOpenPath accepts .html and .png', () => {
+  const roots = ['C:\\tmp\\claude'];
+  const deps = { realpath: (p) => p, stat: () => ({ isFile: () => true, size: 1000 }) };
+  for (const name of ['mockup.html', 'hero.png']) {
+    const candidate = 'C:\\tmp\\claude\\' + name;
+    assert.equal(isAllowedOpenExt(candidate), true, name);
+    const result = checkAttachmentOpenPath(candidate, roots, 'win32', deps);
+    assert.equal(result.ok, true, name);
+    assert.equal(result.path, path.resolve(candidate));
+  }
+});
+
+test('checkAttachmentOpenPath refuses a path outside every allowed root', () => {
+  const result = checkAttachmentOpenPath('C:\\Windows\\evil.pdf', ['C:\\tmp\\claude'], 'win32', {
+    realpath: (p) => p,
+    stat: () => ({ isFile: () => true, size: 1000 }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'outside allowed roots');
 });
 

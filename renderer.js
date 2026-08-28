@@ -11724,11 +11724,24 @@ function openAttachmentLightbox(entry) {
   captionEl.textContent = vm.caption || '';
   captionEl.classList.toggle('hidden', !vm.caption);
 
-  // shell:openExternal only allows http(s)/mailto (Follina-class guard), so
-  // "Open" for a local file goes through openPath — the existing API for
-  // launching a file with its OS default handler.
+  // shell:openExternal only allows http(s)/mailto (Follina-class guard), and
+  // the general shell:openPath has no containment check — an attachment path
+  // can originate from a prompt-injected tool call or a crafted transcript,
+  // so "Open" goes through openAttachment instead, which applies the same
+  // containment policy as revealAttachment plus an extension allowlist.
+  // Quiet toast on failure rather than a silently dead button.
   overlay.querySelector('.attachment-lightbox-open').onclick = function () {
-    if (window.electronAPI && window.electronAPI.openPath) window.electronAPI.openPath(entry.path);
+    if (window.electronAPI && window.electronAPI.openAttachment) {
+      window.electronAPI.openAttachment(entry.path).then(function (res) {
+        if (!res || !res.ok) {
+          if (typeof showToast === 'function') {
+            showToast('Could not open file' + (res && res.error ? ': ' + res.error : ''), { kind: 'error' });
+          }
+        }
+      }).catch(function () {
+        if (typeof showToast === 'function') showToast('Could not open file', { kind: 'error' });
+      });
+    }
   };
   overlay.querySelector('.attachment-lightbox-reveal').onclick = function () {
     // showItemInFolder runs assertInsideAllowedRoots, and attachments live
