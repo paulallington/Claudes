@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
-const { checkAttachmentPath, checkAttachmentOpenPath, isAllowedImageExt, isAllowedOpenExt, mediaTypeFor } = require('../lib/attachment-file-guard');
+const { checkAttachmentPath, checkAttachmentOpenPath, isAllowedImageExt, isAllowedOpenExt, mediaTypeFor, extOf } = require('../lib/attachment-file-guard');
 
 test('checkAttachmentPath accepts a path inside an allowed root with an allowed extension', () => {
   const roots = ['C:\\Users\\paul\\.claudes'];
@@ -102,6 +102,12 @@ test('checkAttachmentPath never leaks the resolved path in a refusal error', () 
   assert.equal(/secret|Windows/i.test(result.error), false);
 });
 
+// Note: these two sibling-prefix tests stay green even under a `path.sep`
+// regression in isInsideRoot (e.g. `sepChar` hardcoded wrong) — `rNorm +
+// wrongSep` still won't be found in 'C:\tmp\claude-evil\x.png' either way,
+// so the refusal still happens for the wrong reason. The separator boundary
+// is actually held by the POSITIVE tests below ('accepts a path inside an
+// allowed root...', win32 and posix) — those fail if the separator is wrong.
 test('checkAttachmentPath refuses a sibling directory with the root as a name prefix (win32)', () => {
   const roots = ['C:\\tmp\\claude'];
   const candidate = 'C:\\tmp\\claude-evil\\x.png';
@@ -179,6 +185,44 @@ test('checkAttachmentOpenPath accepts .html and .png', () => {
     assert.equal(result.ok, true, name);
     assert.equal(result.path, path.resolve(candidate));
   }
+});
+
+test('extOf resolves extensions using the requested target platform, not the host running the test', () => {
+  // This machine's ambient `path` module is win32-flavoured (it treats
+  // backslash as a separator even on POSIX-style inputs run here), so a
+  // 'win32' target test can't expose the bug — it needs a non-'win32'
+  // target to prove extOf isn't secretly using the host's module.
+  // path.posix treats backslash as a literal filename character, not a
+  // separator, so the "extension" is everything from the last real dot
+  // to the end of the string, backslash included.
+  assert.equal(extOf('folder.tar\\archive', 'linux'), '.tar\\archive');
+  // On a win32 target the same backslash IS a separator, so this is a
+  // clean, empty-extension file inside a dotted directory name.
+  assert.equal(extOf('folder.tar\\archive', 'win32'), '');
+});
+
+test('checkAttachmentOpenPath refuses an NTFS alternate-data-stream suffix on win32 (payload.bat:evil.pdf)', () => {
+  // path.win32.extname('payload.bat:evil.pdf') is '.pdf' and
+  // fs.realpathSync.native preserves the ':evil.pdf' suffix, so without an
+  // explicit colon check this candidate would pass the extension allowlist,
+  // containment, AND the realpath re-check.
+  const roots = ['C:\\tmp\\claude'];
+  const candidate = 'C:\\tmp\\claude\\payload.bat:evil.pdf';
+  const result = checkAttachmentOpenPath(candidate, roots, 'win32', {
+    realpath: (p) => p,
+    stat: () => ({ isFile: () => true, size: 1000 }),
+  });
+  assert.equal(result.ok, false);
+});
+
+test('checkAttachmentPath refuses an NTFS alternate-data-stream suffix on win32', () => {
+  const roots = ['C:\\tmp\\claude'];
+  const candidate = 'C:\\tmp\\claude\\hero.png:evil.png';
+  const result = checkAttachmentPath(candidate, roots, 'win32', {
+    realpath: (p) => p,
+    stat: () => ({ isFile: () => true, size: 1000 }),
+  });
+  assert.equal(result.ok, false);
 });
 
 test('checkAttachmentOpenPath refuses a path outside every allowed root', () => {

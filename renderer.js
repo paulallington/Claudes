@@ -11576,6 +11576,47 @@ function renderAttachmentImageFallback(item, entry, vm) {
   item.appendChild(chip);
 }
 
+// Caps concurrent attachments:readImage IPC calls and de-dupes repeat reads
+// of the same path — without this, a restored column with 24 image
+// attachments fires 24 concurrent reads at once (~190MB of base64 built in
+// main and structured-cloned across IPC, per column, at the guard's 8MB
+// cap), and renderAttachmentStrip's innerHTML rebuild-on-every-render
+// abandons and restarts any still-in-flight reads for entries that haven't
+// cached a thumbnail yet, compounding it further.
+var ATTACHMENT_READ_CONCURRENCY = 3;
+var attachmentImageReadInFlight = new Map(); // path -> Promise<result>
+var attachmentImageReadActive = 0;
+var attachmentImageReadQueue = []; // { path, resolve, reject }
+
+function pumpAttachmentImageReadQueue() {
+  while (attachmentImageReadActive < ATTACHMENT_READ_CONCURRENCY && attachmentImageReadQueue.length) {
+    var job = attachmentImageReadQueue.shift();
+    attachmentImageReadActive++;
+    window.electronAPI.readAttachmentImage(job.path).then(job.resolve, job.reject).then(function () {
+      attachmentImageReadActive--;
+      pumpAttachmentImageReadQueue();
+    });
+  }
+}
+
+function readAttachmentImageLimited(path) {
+  var existing = attachmentImageReadInFlight.get(path);
+  if (existing) return existing;
+  var promise = new Promise(function (resolve, reject) {
+    attachmentImageReadQueue.push({ path: path, resolve: resolve, reject: reject });
+    pumpAttachmentImageReadQueue();
+  });
+  var tracked = promise.then(function (res) {
+    attachmentImageReadInFlight.delete(path);
+    return res;
+  }, function (err) {
+    attachmentImageReadInFlight.delete(path);
+    throw err;
+  });
+  attachmentImageReadInFlight.set(path, tracked);
+  return tracked;
+}
+
 function loadAttachmentThumbnail(colId, entry, itemEl, imgEl) {
   if (!window.electronAPI || !window.electronAPI.readAttachmentImage) {
     entry._imgState = 'error';
@@ -11583,7 +11624,7 @@ function loadAttachmentThumbnail(colId, entry, itemEl, imgEl) {
     renderAttachmentImageFallback(itemEl, entry, null);
     return;
   }
-  window.electronAPI.readAttachmentImage(entry.path).then(function (res) {
+  readAttachmentImageLimited(entry.path).then(function (res) {
     // Column may have been killed, or the strip re-rendered onto a fresh
     // element, while this read was in flight — never touch a stale node.
     var col = allColumns.get(colId);
@@ -11645,6 +11686,7 @@ function attachmentLightboxKeydown(e) {
   if (!attachmentLightboxEl || attachmentLightboxEl.classList.contains('hidden')) return;
   if (e.key === 'Escape') {
     closeAttachmentLightbox();
+    e.stopPropagation();
     return;
   }
   if (e.key === 'Tab') {
@@ -11741,13 +11783,19 @@ function openAttachmentLightbox(entry) {
       }).catch(function () {
         if (typeof showToast === 'function') showToast('Could not open file', { kind: 'error' });
       });
+    } else if (typeof showToast === 'function') {
+      showToast('Could not open file', { kind: 'error' });
     }
   };
   overlay.querySelector('.attachment-lightbox-reveal').onclick = function () {
     // showItemInFolder runs assertInsideAllowedRoots, and attachments live
     // under the OS temp dir (not an allowed root) — revealAttachment applies
     // the attachment containment policy instead. Quiet toast on failure
-    // rather than a silently dead button.
+    // rather than a silently dead button. No fallback to the old
+    // showItemInFolder IPC here: it would run assertInsideAllowedRoots
+    // against an attachment path outside every allowed root and reject with
+    // no return value or toast — reintroducing the exact dead-button bug
+    // this handler exists to fix.
     if (window.electronAPI && window.electronAPI.revealAttachment) {
       window.electronAPI.revealAttachment(entry.path).then(function (res) {
         if (!res || !res.ok) {
@@ -11758,8 +11806,8 @@ function openAttachmentLightbox(entry) {
       }).catch(function () {
         if (typeof showToast === 'function') showToast('Could not reveal file', { kind: 'error' });
       });
-    } else if (window.electronAPI && window.electronAPI.showItemInFolder) {
-      window.electronAPI.showItemInFolder(entry.path);
+    } else if (typeof showToast === 'function') {
+      showToast('Could not reveal file', { kind: 'error' });
     }
   };
 

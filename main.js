@@ -2436,9 +2436,19 @@ const SCAN_SESSION_MAX_ATTACHMENTS = 24;
 // Restoring N columns fires N of these at once; without a limit, N concurrent
 // streams over tens-of-MB transcripts stall the main process. A single-flight
 // queue runs them one at a time — later requests wait rather than reject.
+const SCAN_SESSION_TIMEOUT_MS = 30000;
 let scanSessionQueueTail = Promise.resolve();
 function queueScanSession(run) {
-  const result = scanSessionQueueTail.then(run, run);
+  // A stream that never emits 'close' or 'error' (a FIFO, a hung network
+  // mount) would otherwise wedge the tail forever — every attachment
+  // backfill for the rest of the app's lifetime would silently never
+  // resolve. Race against a timeout so the chain always advances; the
+  // orphaned scan is left to finish (or not) on its own.
+  const withTimeout = () => Promise.race([
+    run(),
+    new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: 'timeout' }), SCAN_SESSION_TIMEOUT_MS)),
+  ]);
+  const result = scanSessionQueueTail.then(withTimeout, withTimeout);
   scanSessionQueueTail = result.then(() => {}, () => {});
   return result;
 }
@@ -3005,11 +3015,16 @@ ipcMain.handle('attachments:reveal', (event, filePath) => {
 // attacker who could plant an executable under an attachment root must not
 // be able to get it launched. Never throws across the IPC boundary; refusals
 // are short and path-free.
-ipcMain.handle('attachments:openPath', (event, filePath) => {
+ipcMain.handle('attachments:openPath', async (event, filePath) => {
   try {
     const result = checkAttachmentOpenPath(filePath, attachmentGuardRoots(), process.platform, attachmentGuardDeps());
     if (!result.ok) return { ok: false, error: result.error };
-    shell.openPath(result.path);
+    // shell.openPath() resolves '' on success or a non-empty error message
+    // on failure (e.g. no handler registered for the extension) — it does
+    // NOT reject, so the result must be awaited and checked or a failed
+    // launch (no app for .md, etc.) silently reports ok: true.
+    const openErr = await shell.openPath(result.path);
+    if (openErr) return { ok: false, error: 'no handler' };
     return { ok: true };
   } catch (err) {
     return { ok: false, error: 'open failed' };
