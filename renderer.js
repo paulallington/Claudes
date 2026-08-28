@@ -11461,8 +11461,52 @@ function clawdResolveHookColumn(event) {
 // lib/user-file-attachments.js parsing the raw hook event); this section is
 // just DOM wiring — build each entry, lazily load image thumbnails via
 // electronAPI.readAttachmentImage, and drive the click-to-enlarge lightbox.
-// Thumbnail data URIs are cached directly on the (renderer-owned) attachment
-// entry objects so re-renders and the lightbox never re-read the same file.
+// Only a downscaled JPEG thumbnail (entry._thumbDataUri, ~2x the rendered
+// 60x44 box) is cached on the entry so re-renders don't re-read the file —
+// the full-size data URI is never retained: at the read guard's 8MB cap,
+// caching that on up to 24 entries per column, across every column, would
+// hold ~256MB indefinitely. The lightbox re-reads the full-size image fresh
+// each time it opens and releases it on close.
+var ATTACHMENT_THUMB_W = 120; // 2x the .attachment-thumb CSS box (60x44)
+var ATTACHMENT_THUMB_H = 88;
+
+// Downscale a full-size data URI into a small JPEG thumbnail via an
+// offscreen canvas, cropped to the strip's aspect ratio like object-fit:
+// cover. Resolves null (never rejects) on any decode/draw failure so the
+// caller can fall back to the extension chip.
+function makeAttachmentThumbnail(dataUri) {
+  return new Promise(function (resolve) {
+    var img = new Image();
+    img.onload = function () {
+      try {
+        var canvas = document.createElement('canvas');
+        canvas.width = ATTACHMENT_THUMB_W;
+        canvas.height = ATTACHMENT_THUMB_H;
+        var ctx = canvas.getContext('2d');
+        var srcRatio = img.naturalWidth / img.naturalHeight;
+        var dstRatio = ATTACHMENT_THUMB_W / ATTACHMENT_THUMB_H;
+        var sx, sy, sw, sh;
+        if (srcRatio > dstRatio) {
+          sh = img.naturalHeight;
+          sw = sh * dstRatio;
+          sx = (img.naturalWidth - sw) / 2;
+          sy = 0;
+        } else {
+          sw = img.naturalWidth;
+          sh = sw / dstRatio;
+          sx = 0;
+          sy = (img.naturalHeight - sh) / 2;
+        }
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, ATTACHMENT_THUMB_W, ATTACHMENT_THUMB_H);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      } catch (e) {
+        resolve(null);
+      }
+    };
+    img.onerror = function () { resolve(null); };
+    img.src = dataUri;
+  });
+}
 
 function renderAttachmentStrip(colId) {
   var col = allColumns.get(colId);
@@ -11499,8 +11543,8 @@ function buildAttachmentItemEl(colId, entry) {
       img.className = 'attachment-thumb';
       img.alt = vm.name;
       item.appendChild(img);
-      if (entry._dataUri) {
-        img.src = entry._dataUri;
+      if (entry._thumbDataUri) {
+        img.src = entry._thumbDataUri;
       } else {
         item.classList.add('attachment-item--loading');
         loadAttachmentThumbnail(colId, entry, item, img);
@@ -11545,9 +11589,21 @@ function loadAttachmentThumbnail(colId, entry, itemEl, imgEl) {
     var col = allColumns.get(colId);
     if (!col || !col.attachmentStripEl || !col.attachmentStripEl.contains(itemEl)) return;
     if (res && res.ok && res.dataUri) {
-      entry._dataUri = res.dataUri;
-      itemEl.classList.remove('attachment-item--loading');
-      imgEl.src = res.dataUri;
+      // Downscale to a small thumbnail before caching — the full-size data
+      // URI is intentionally never retained (see comment above).
+      return makeAttachmentThumbnail(res.dataUri).then(function (thumbDataUri) {
+        var col2 = allColumns.get(colId);
+        if (!col2 || !col2.attachmentStripEl || !col2.attachmentStripEl.contains(itemEl)) return;
+        if (thumbDataUri) {
+          entry._thumbDataUri = thumbDataUri;
+          itemEl.classList.remove('attachment-item--loading');
+          imgEl.src = thumbDataUri;
+        } else {
+          entry._imgState = 'error';
+          itemEl.innerHTML = '';
+          renderAttachmentImageFallback(itemEl, entry, null);
+        }
+      });
     } else {
       entry._imgState = 'error';
       itemEl.innerHTML = '';
@@ -11572,6 +11628,43 @@ function dismissAttachmentStrip(colId) {
 // Single overlay shared by every column — built lazily on first use.
 var attachmentLightboxEl = null;
 var attachmentLightboxEntry = null;
+var attachmentLightboxPreviouslyFocused = null;
+
+// Focusable elements inside the lightbox dialog, in DOM (tab) order.
+function attachmentLightboxFocusable() {
+  if (!attachmentLightboxEl) return [];
+  var nodes = attachmentLightboxEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+  return Array.prototype.filter.call(nodes, function (el) { return !el.disabled && el.offsetParent !== null; });
+}
+
+// Capture-phase so this runs before xterm's own listeners: with the
+// lightbox open, Tab cycles within the dialog instead of escaping it, and
+// every other key (besides Escape, handled below) is stopped from reaching
+// the terminal underneath.
+function attachmentLightboxKeydown(e) {
+  if (!attachmentLightboxEl || attachmentLightboxEl.classList.contains('hidden')) return;
+  if (e.key === 'Escape') {
+    closeAttachmentLightbox();
+    return;
+  }
+  if (e.key === 'Tab') {
+    var focusable = attachmentLightboxFocusable();
+    if (!focusable.length) { e.preventDefault(); return; }
+    var first = focusable[0];
+    var last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    } else if (!attachmentLightboxEl.contains(document.activeElement)) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+  e.stopPropagation();
+}
 
 function ensureAttachmentLightbox() {
   if (attachmentLightboxEl) return attachmentLightboxEl;
@@ -11593,17 +11686,14 @@ function ensureAttachmentLightbox() {
     if (e.target === overlay) closeAttachmentLightbox();
   });
   overlay.querySelector('.attachment-lightbox-close').addEventListener('click', closeAttachmentLightbox);
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && attachmentLightboxEl && !attachmentLightboxEl.classList.contains('hidden')) {
-      closeAttachmentLightbox();
-    }
-  });
+  document.addEventListener('keydown', attachmentLightboxKeydown, true);
   attachmentLightboxEl = overlay;
   return overlay;
 }
 
 function openAttachmentLightbox(entry) {
   var overlay = ensureAttachmentLightbox();
+  attachmentLightboxPreviouslyFocused = document.activeElement;
   var state = window.AttachmentStrip ? window.AttachmentStrip.openLightbox(entry) : { open: true, entry: entry };
   attachmentLightboxEntry = state.entry;
   var vm = window.AttachmentStrip ? window.AttachmentStrip.entryViewModel(entry) : {
@@ -11615,19 +11705,17 @@ function openAttachmentLightbox(entry) {
   imgWrap.classList.toggle('hidden', !vm.isImage);
   if (vm.isImage) {
     imgEl.alt = vm.name;
-    if (entry._dataUri) {
-      imgEl.src = entry._dataUri;
-    } else {
-      imgEl.removeAttribute('src');
-      if (window.electronAPI && window.electronAPI.readAttachmentImage) {
-        window.electronAPI.readAttachmentImage(entry.path).then(function (res) {
-          if (attachmentLightboxEntry !== entry) return; // closed, or switched to another entry
-          if (res && res.ok && res.dataUri) {
-            entry._dataUri = res.dataUri;
-            imgEl.src = res.dataUri;
-          }
-        }).catch(function () {});
-      }
+    // Always read the full-size image fresh — it is never cached on the
+    // entry (see FIX 2 note above buildAttachmentItemEl) — and released via
+    // closeAttachmentLightbox.
+    imgEl.removeAttribute('src');
+    if (window.electronAPI && window.electronAPI.readAttachmentImage) {
+      window.electronAPI.readAttachmentImage(entry.path).then(function (res) {
+        if (attachmentLightboxEntry !== entry) return; // closed, or switched to another entry
+        if (res && res.ok && res.dataUri) {
+          imgEl.src = res.dataUri;
+        }
+      }).catch(function () {});
     }
   }
 
@@ -11643,17 +11731,47 @@ function openAttachmentLightbox(entry) {
     if (window.electronAPI && window.electronAPI.openPath) window.electronAPI.openPath(entry.path);
   };
   overlay.querySelector('.attachment-lightbox-reveal').onclick = function () {
-    if (window.electronAPI && window.electronAPI.showItemInFolder) window.electronAPI.showItemInFolder(entry.path);
+    // showItemInFolder runs assertInsideAllowedRoots, and attachments live
+    // under the OS temp dir (not an allowed root) — revealAttachment applies
+    // the attachment containment policy instead. Quiet toast on failure
+    // rather than a silently dead button.
+    if (window.electronAPI && window.electronAPI.revealAttachment) {
+      window.electronAPI.revealAttachment(entry.path).then(function (res) {
+        if (!res || !res.ok) {
+          if (typeof showToast === 'function') {
+            showToast('Could not reveal file' + (res && res.error ? ': ' + res.error : ''), { kind: 'error' });
+          }
+        }
+      }).catch(function () {
+        if (typeof showToast === 'function') showToast('Could not reveal file', { kind: 'error' });
+      });
+    } else if (window.electronAPI && window.electronAPI.showItemInFolder) {
+      window.electronAPI.showItemInFolder(entry.path);
+    }
   };
 
   overlay.classList.remove('hidden');
+  // Move DOM focus into the dialog so keystrokes stop reaching the xterm
+  // instance underneath — attachmentLightboxKeydown then traps Tab within it.
+  var closeBtn = overlay.querySelector('.attachment-lightbox-close');
+  if (closeBtn) closeBtn.focus();
 }
 
 function closeAttachmentLightbox() {
   if (!attachmentLightboxEl) return;
   attachmentLightboxEl.classList.add('hidden');
+  // Release the full-size image — it was never cached on the entry, just
+  // held by this <img> while the lightbox was open.
+  var imgEl = attachmentLightboxEl.querySelector('.attachment-lightbox-img');
+  if (imgEl) imgEl.removeAttribute('src');
   var state = window.AttachmentStrip ? window.AttachmentStrip.closeLightbox() : { open: false, entry: null };
   attachmentLightboxEntry = state.entry;
+  // Restore focus to whatever had it before the lightbox opened (typically
+  // the terminal) rather than leaving it stranded on a hidden button.
+  if (attachmentLightboxPreviouslyFocused && typeof attachmentLightboxPreviouslyFocused.focus === 'function') {
+    attachmentLightboxPreviouslyFocused.focus();
+  }
+  attachmentLightboxPreviouslyFocused = null;
 }
 
 if (window.electronAPI && window.electronAPI.onHookEvent) {
@@ -11704,13 +11822,20 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
     if (col) { col.lastHookAt = Date.now(); col.hookEverSeen = true; }
     // SendUserFile: the terminal only prints `[image] <path> (41.4KB)` for
     // these, so surface the real files in the attachment strip. A no-op
-    // (same array reference back) for every other event/tool.
-    if (col && window.AttachmentStrip) {
-      var __nextAttachments = window.AttachmentStrip.nextAttachments(col.attachments, event);
-      if (__nextAttachments !== col.attachments) {
-        col.attachments = __nextAttachments;
-        renderAttachmentStrip(colId);
+    // (same array reference back) for every other event/tool. Wrapped —
+    // preload invokes this callback bare, so an uncaught throw here would
+    // abort the rest of the handler, including the /clear session rebind
+    // below.
+    try {
+      if (col && window.AttachmentStrip) {
+        var __nextAttachments = window.AttachmentStrip.nextAttachments(col.attachments, event);
+        if (__nextAttachments !== col.attachments) {
+          col.attachments = __nextAttachments;
+          renderAttachmentStrip(colId);
+        }
       }
+    } catch (e) {
+      console.error('[attachments] onHookEvent handler failed', e);
     }
     // Self-heal a /clear fork: a UserPromptSubmit that resolved by unambiguous
     // cwd OR by dominant-recent-input (ambiguous cwd) carries the column's TRUE
@@ -11738,7 +11863,7 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
       persistSessions(col.projectKey, col.workspaceId);
       ensureClawdTail(colId);
       fetchAndSetSessionTitle(colId, col.projectKey, sid);
-      maybeBackfillAttachments(colId, col.projectKey, sid);
+      maybeBackfillAttachments(colId, col.cwd || col.projectKey, sid);
       codexWatchMaybeStart();
     }
     var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);

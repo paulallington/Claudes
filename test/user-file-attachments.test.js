@@ -201,3 +201,29 @@ test('mergeAttachments does not mutate existing', () => {
   mergeAttachments(existing, [{ path: '/2' }]);
   assert.deepEqual(existing, existingCopy);
 });
+
+test('mergeAttachments dedupes the same path across a null-toolUseId live entry and a toolUseId-bearing transcript entry', () => {
+  // Live hook entries may carry no toolUseId at all, while a later transcript
+  // backfill for the identical file carries one — same attachment, must
+  // collapse to a single thumbnail regardless of which source produced it.
+  const existing = [{ path: '/a.png', toolUseId: null }];
+  const incoming = [{ path: '/a.png', toolUseId: 't1' }];
+  const result = mergeAttachments(existing, incoming);
+  assert.equal(result.length, 1);
+  assert.deepEqual(result, [{ path: '/a.png', toolUseId: 't1' }]);
+});
+
+test('mergeAttachments floats a re-sent path to the newest position', () => {
+  const existing = [{ path: '/a.png', toolUseId: 't1' }, { path: '/b.png', toolUseId: 't2' }];
+  const incoming = [{ path: '/a.png', toolUseId: 't3' }];
+  assert.deepEqual(mergeAttachments(existing, incoming), [
+    { path: '/b.png', toolUseId: 't2' },
+    { path: '/a.png', toolUseId: 't3' },
+  ]);
+});
+
+test('mergeAttachments and classifyFile do not fall prey to prototype pollution via a __proto__ path', () => {
+  const result = mergeAttachments([{ path: '__proto__' }], [{ path: '__proto__' }]);
+  assert.deepEqual(result, [{ path: '__proto__' }]);
+  assert.deepEqual(classifyFile('/x/a.constructor').kind, 'file');
+});
