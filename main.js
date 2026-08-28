@@ -43,9 +43,16 @@ const {
   filterMcpDefs
 } = require('./lib/interactive-scheduled');
 const { appendWithRotation } = require('./lib/voice-debug-log');
-const { codexLookupCommand, parseWhichOutput } = require('./lib/codex-spawn');
+const { codexLookupCommand, parseWhichOutput, isCodexThreadId } = require('./lib/codex-spawn');
 const { parseCodexRateLimits, pickLatestRolloutPath } = require('./lib/codex-limits');
 const { parseChecksumFile, checksumsMatch } = require('./lib/update-checksum');
+const { resolveProfile, profileClaudeRoot, PRIMARY_ID } = require('./lib/profile-resolve');
+const { extractSeedClaudeJson } = require('./lib/profile-seed');
+const CodexWatchJobs = require('./lib/codex-watch-jobs');
+const CodexWatchLog = require('./lib/codex-watch-log');
+const CodexWatchTail = require('./lib/codex-watch-tail');
+const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-app-server');
+const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -316,6 +323,10 @@ process.on('unhandledRejection', (reason) => {
 // this, any local process (including any web page in any browser) could
 // connect to 127.0.0.1:<ptyPort> and spawn arbitrary commands as the user.
 const PTY_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
+// Main owns the Codex app-server capability. It is passed only to the trusted
+// PTY sidecar, which injects it for an exact managed Codex resume command.
+// The renderer receives the env variable name, never this value.
+const CODEX_BRIDGE_TOKEN = crypto.randomBytes(32).toString('hex');
 
 // Per-launch token gating the local hook HTTP server (POST /hook). Without this,
 // any local process — including a JS payload running in any browser tab — could
@@ -359,6 +370,13 @@ let ptyActualPort = ptyPort;                       // updated from the pty-serve
 let ptyRestartTimestamps = [];                     // rolling record of crash-recovery restarts (see lib/pty-restart-policy)
 const hookServerListenPort = app.isPackaged ? 53456 : 53457;
 let ptyServerProcess;
+let codexAppServer = null;
+let codexStartingService = null;
+let codexBridgeRemoteUrl = '';
+let codexBridgeStartPromise = null;
+let codexBridgeDisabled = false;
+const codexSpawnTicketStore = createSpawnTicketStore();
+const ptyControlAcks = new Map();
 
 const CONFIG_DIR = path.join(os.homedir(), '.claudes');
 // Dev builds use a separate projects file so running dev alongside an
@@ -371,6 +389,8 @@ const AUTOMATIONS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'automations.jso
 const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-runs' : 'automation-runs-dev');
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
+const PROFILES_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'profiles.json' : 'profiles-dev.json');
+const PROFILES_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'profiles' : 'profiles-dev');
 const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
 const VOICE_DEBUG_LOG = path.join(CONFIG_DIR, app.isPackaged ? 'voice-debug.log' : 'voice-debug-dev.log');
 
@@ -683,6 +703,248 @@ function getProjectEndpointEnvByPath(projectPath) {
   return buildEndpointEnv(id, modelOverride);
 }
 
+// Look up a project by its filesystem path and return its assigned profile id
+// (or null if unset), the same pattern as getProjectEndpointEnvByPath above.
+// Background spawn paths only know the project path, so this is how they feed
+// resolveProfileFor's projectProfileId without the renderer's cached state.
+function getProjectProfileIdByPath(projectPath) {
+  if (!projectPath) return null;
+  const cfg = readConfig();
+  const project = (cfg.projects || []).find((p) => p && p.path === projectPath);
+  return (project && project.profileId) || null;
+}
+
+// --- Profile (multi-subscription) store ---
+//
+// Profiles live in their own file, not projects.json, for the same reason
+// endpoints do (see the ENDPOINTS_FILE note): the renderer round-trips
+// projects.json wholesale and would clobber anything written outside its view.
+const DEFAULT_PRIMARY = { id: PRIMARY_ID, name: 'Primary', configDir: null, colour: '#d97757' };
+
+// readProfiles is on the hot path of every re-rooted IPC call (session:contextTokens
+// on every live column, the 15-attempt detectSession loop, …) and used to do a fresh
+// ensureConfigDir + readFileSync + JSON.parse on every single call. Cache the parsed
+// store behind an mtime check so a burst of calls between actual writes costs one
+// stat, not one full read+parse; writeProfiles also clears it directly so a write
+// from THIS process is picked up immediately without waiting on mtime resolution
+// (some filesystems only have 1-2s mtime granularity).
+let profilesCache = null; // { mtimeMs, store } — mtimeMs is null when the file is absent (also cacheable)
+function readProfiles() {
+  ensureConfigDir();
+  let stat = null;
+  try { stat = fs.statSync(PROFILES_FILE); } catch { stat = null; }
+  const statMtime = stat ? stat.mtimeMs : null;
+  if (profilesCache && statMtime === profilesCache.mtimeMs) return profilesCache.store;
+
+  let data = null;
+  // Single-Primary users never call writeProfiles, so the file legitimately
+  // doesn't exist yet — that's not an error, just an empty store to cache.
+  if (stat) {
+    try { data = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8')); } catch { data = null; }
+  }
+  const list = (data && Array.isArray(data.profiles)) ? data.profiles.filter((p) => p && p.id) : [];
+  // Primary is synthetic when absent: a missing/corrupt profiles.json must
+  // still yield a working single-subscription app.
+  if (!list.find((p) => p.id === PRIMARY_ID)) list.unshift({ ...DEFAULT_PRIMARY });
+  const defaultProfileId = (data && typeof data.defaultProfileId === 'string' && list.find((p) => p.id === data.defaultProfileId))
+    ? data.defaultProfileId
+    : PRIMARY_ID;
+  const store = { profiles: list, defaultProfileId };
+  profilesCache = { mtimeMs: stat ? stat.mtimeMs : null, store };
+  // Callers (profile:create/update/setDefault/delete) mutate the returned
+  // object in place, then call writeProfiles to persist + invalidate the
+  // cache. Clone here so an early return between mutation and write can
+  // never leave profilesCache diverged from disk with no mtime change to
+  // ever correct it.
+  return structuredClone(store);
+}
+
+function writeProfiles(store) {
+  ensureConfigDir();
+  atomicWriteJson(PROFILES_FILE, {
+    defaultProfileId: store.defaultProfileId || PRIMARY_ID,
+    profiles: store.profiles || []
+  });
+  profilesCache = null;
+  BrowserWindow.getAllWindows().forEach((w) => {
+    try { w.webContents.send('profiles:updated'); } catch { /* ignore */ }
+  });
+}
+
+// The single resolution entry point for main. Every re-rooted handler goes
+// through this, never through its own homedir join.
+function resolveProfileFor(sel) {
+  const store = readProfiles();
+  const r = resolveProfile({
+    profiles: store.profiles,
+    defaultProfileId: store.defaultProfileId,
+    columnProfileId: sel && sel.columnProfileId,
+    workspaceProfileId: sel && sel.workspaceProfileId,
+    projectProfileId: sel && sel.projectProfileId
+  });
+  if (r.warning) console.warn('[profiles]', r.warning, '- falling back to Primary');
+  return r;
+}
+
+// Root that stands in for ~/.claude for a given profile id.
+// NOTE: profileId is overloaded elsewhere - undefined/null means "inherit the
+// cascade" (falls through to defaultProfileId) in resolveProfileFor's normal
+// callers, but a persisted column's profileId: null means "Primary,
+// explicitly". Coalesce to PRIMARY_ID here so a non-Primary default profile
+// can't get substituted in for columns that are actually on Primary.
+function claudeRootFor(profileId) {
+  return profileClaudeRoot(resolveProfileFor({ columnProfileId: profileId || PRIMARY_ID }), os.homedir());
+}
+
+// Primary (~/.claude) is authoritative for app-managed config. After a
+// successful write there, copy the file into every secondary profile so a hook
+// or permission the user just enabled is live on every subscription. Profiles
+// are clones that differ only in credentials and transcripts.
+//
+// A failure here MUST surface. Silently diverging profiles is precisely the
+// "why isn't my hook running on that column" bug this design exists to avoid.
+function mirrorToProfiles(relPath) {
+  const src = path.join(os.homedir(), '.claude', relPath);
+  const failed = [];
+  if (!fs.existsSync(src)) return { ok: true, failed };
+  for (const p of readProfiles().profiles) {
+    if (!p.configDir) continue;   // Primary is the source
+    try {
+      const dest = path.join(p.configDir, relPath);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+    } catch (e) {
+      console.warn('[profiles] mirror failed', p.name, relPath, e.message);
+      failed.push(p.name);
+    }
+  }
+  return { ok: failed.length === 0, failed };
+}
+
+// Broadcast a mirror failure to every window so the renderer can toast it.
+// A silent divergence between profiles is the exact bug mirrorToProfiles
+// exists to prevent, so a failed copy must never fail quietly.
+function notifyMirrorFailed(file, failedProfiles) {
+  BrowserWindow.getAllWindows().forEach((w) => {
+    try { w.webContents.send('profiles:mirrorFailed', { file, profiles: failedProfiles }); }
+    catch { /* ignore */ }
+  });
+}
+
+// The stored configDir is app-written, but a hand-edited profiles.json must
+// not be able to aim this recursive, forced delete at an arbitrary directory. A
+// textual startsWith() is not enough: "<PROFILES_DIR>\..\..\x" satisfies it and
+// then resolves out of the fence inside rmSync, and a junction planted at
+// <PROFILES_DIR>\pf_x would satisfy it too. Canonicalise the same way
+// assertInsideAllowedRoots does, and additionally require the directory to be
+// exactly the one the app would have allocated for this id.
+function profileDirToRemove(p) {
+  if (!p || typeof p.configDir !== 'string' || !p.configDir) return null;
+  if (!/^pf_[A-Za-z0-9_]+$/.test(String(p.id || ''))) return null;
+  const real = (q) => {
+    try { return fs.realpathSync.native ? fs.realpathSync.native(q) : fs.realpathSync(q); }
+    catch { return null; }
+  };
+  const target = real(path.resolve(p.configDir));
+  const expected = real(path.resolve(path.join(PROFILES_DIR, p.id)));
+  const root = real(path.resolve(PROFILES_DIR));
+  if (!target || !expected || !root) return null;
+  const same = process.platform === 'win32'
+    ? target.toLowerCase() === expected.toLowerCase()
+    : target === expected;
+  if (!same || !isInsideRoot(target, root)) return null;
+  return target;
+}
+
+// profile:list is polled on every loadPlanLimits tick, project switch, and
+// picker render — the macOS branch below forks a synchronous /usr/bin/security
+// child on EVERY call, blocking the main process. Cache the signedIn probe
+// behind a short TTL (consistent with planUsageCache's pattern) and invalidate
+// it explicitly whenever a profile's credentials could plausibly have changed.
+const PROFILE_CREDS_CACHE_TTL_MS = 30 * 1000;
+const profileCredsCache = new Map(); // id -> { signedIn, fetchedAt }
+function invalidateProfileCredsCache(id) {
+  if (id) profileCredsCache.delete(id);
+  else profileCredsCache.clear();
+}
+function profileHasCredentials(p) {
+  const cached = profileCredsCache.get(p.id);
+  const now = Date.now();
+  if (cached && (now - cached.fetchedAt) < PROFILE_CREDS_CACHE_TTL_MS) return cached.signedIn;
+  const signedIn = probeProfileCredentials(p);
+  profileCredsCache.set(p.id, { signedIn, fetchedAt: now });
+  return signedIn;
+}
+function probeProfileCredentials(p) {
+  const root = profileClaudeRoot(p, os.homedir());
+  try {
+    if (fs.existsSync(path.join(root, '.credentials.json'))) return true;
+  } catch { /* fall through */ }
+  // Primary on macOS keeps credentials in the login keychain, not a file.
+  if (process.platform === 'darwin' && !p.configDir) {
+    try {
+      execFileSync('/usr/bin/security', ['find-generic-password', '-s', 'Claude Code-credentials',
+        '-a', os.userInfo().username, '-w'], { encoding: 'utf8' });
+      return true;
+    } catch { return false; }
+  }
+  return false;
+}
+
+// Copy the parts of the primary setup that make a profile behave like the app
+// the user already has: settings (hooks, permissions), global memory, agents,
+// and the folder-trust map. Never credentials.
+function seedProfileDir(configDir) {
+  const primaryRoot = path.join(os.homedir(), '.claude');
+  for (const rel of ['settings.json', 'CLAUDE.md']) {
+    try {
+      const src = path.join(primaryRoot, rel);
+      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(configDir, rel));
+    } catch (e) { console.warn('[profiles] seed skipped', rel, e.message); }
+  }
+  try {
+    const agentsSrc = path.join(primaryRoot, 'agents');
+    if (fs.existsSync(agentsSrc)) fs.cpSync(agentsSrc, path.join(configDir, 'agents'), { recursive: true });
+  } catch (e) { console.warn('[profiles] seed skipped agents', e.message); }
+
+  try {
+    const primaryJson = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
+    atomicWriteJson(path.join(configDir, '.claude.json'), extractSeedClaudeJson(primaryJson));
+  } catch (e) { console.warn('[profiles] seed skipped trust map', e.message); }
+}
+
+// Strip a deleted profile's id out of projects.json (project + workspace) and
+// automations.json. Returns a list of what was reassigned so the UI can tell
+// the user. Column-level profileId in each project's sessions.json is
+// deliberately NOT rewritten here: those files live under project directories
+// that may not exist, and the unknown-id fallback in resolveProfile already
+// handles them safely.
+function clearProfileReferences(id) {
+  const reassigned = [];
+  try {
+    const cfg = readConfig();
+    let dirty = false;
+    for (const proj of (cfg.projects || [])) {
+      if (proj.profileId === id) { proj.profileId = null; dirty = true; reassigned.push('project: ' + proj.name); }
+      for (const ws of (proj.workspaces || [])) {
+        if (ws.profileId === id) { ws.profileId = null; dirty = true; reassigned.push('workspace: ' + ws.name); }
+      }
+    }
+    if (dirty) writeConfig(cfg);
+  } catch (e) { console.warn('[profiles] projects cleanup failed', e.message); }
+
+  try {
+    const data = readAutomations();
+    let dirty = false;
+    for (const a of (data.automations || [])) {
+      if (a && a.profileId === id) { a.profileId = null; dirty = true; reassigned.push('automation: ' + (a.name || a.id)); }
+    }
+    if (dirty) writeAutomations(data);
+  } catch (e) { console.warn('[profiles] automations cleanup failed', e.message); }
+
+  return reassigned;
+}
+
 // --- Loops Persistence ---
 
 function readLoops() {
@@ -935,23 +1197,51 @@ function getPtyServerScript() {
   return path.join(__dirname, 'pty-server.js');
 }
 
+function sendPtyControl(message, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (!ptyServerProcess || !ptyServerProcess.stdin || ptyServerProcess.killed) return reject(new Error('terminal sidecar unavailable'));
+    const requestId = crypto.randomBytes(12).toString('hex');
+    const timer = setTimeout(() => {
+      ptyControlAcks.delete(requestId);
+      reject(new Error('terminal sidecar control timed out'));
+    }, timeoutMs || 3000);
+    if (timer.unref) timer.unref();
+    ptyControlAcks.set(requestId, {
+      resolve: () => { clearTimeout(timer); resolve(); },
+      reject: (error) => { clearTimeout(timer); reject(error); }
+    });
+    try { ptyServerProcess.stdin.write(JSON.stringify({ ...message, requestId }) + '\n'); }
+    catch (error) { ptyControlAcks.delete(requestId); clearTimeout(timer); reject(error); }
+  });
+}
+
+async function configurePtyCodexBridge() {
+  if (!codexAppServer || !codexBridgeRemoteUrl) throw new Error('Codex bridge unavailable');
+  await sendPtyControl({ type: 'codex-bridge-config', remoteUrl: codexBridgeRemoteUrl, token: CODEX_BRIDGE_TOKEN });
+  codexSpawnTicketStore.configure(codexBridgeRemoteUrl, CODEX_BRIDGE_TOKEN);
+}
+
 function startPtyServer() {
   return new Promise((resolve, reject) => {
     const nodePath = findSystemNode();
     const serverScript = getPtyServerScript();
     let resolved = false;
+    let controlOutputBuffer = '';
 
     // Opt-in: pty-server runs `claude update` on every startup if this env
     // is '1'. Off by default to avoid running whichever `claude` binary is
     // first on PATH unprompted. See Settings → Updates.
     const autoUpdateClaude = readConfig().autoUpdateClaude === true ? '1' : '0';
+    const ptyEnv = { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN, CLAUDES_AUTO_UPDATE_CLAUDE: autoUpdateClaude };
+    delete ptyEnv[REMOTE_TOKEN_ENV_NAME];
+    delete ptyEnv.CLAUDES_CODEX_BRIDGE_REMOTE_URL;
     ptyServerProcess = spawn(nodePath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
       // Hide the console window Windows would otherwise pop up (and minimise)
       // each time we spawn system Node from this GUI app — most visibly on every
       // crash-recovery restart. No effect on non-Windows.
       windowsHide: true,
-      env: { ...process.env, PTY_PORT: String(ptyPort), PTY_AUTH_TOKEN, CLAUDES_AUTO_UPDATE_CLAUDE: autoUpdateClaude }
+      env: ptyEnv
     });
 
     ptyServerProcess.on('error', (err) => {
@@ -985,6 +1275,8 @@ function startPtyServer() {
       // it so the renderer's existing reconnect → reattach → resume chain fires,
       // instead of leaving the user with a dead app they must quit and relaunch.
       ptyServerProcess = null;
+      for (const pending of ptyControlAcks.values()) pending.reject(new Error('terminal sidecar exited'));
+      ptyControlAcks.clear();
       const plan = planPtyServerRestart(ptyRestartTimestamps, { isQuitting, signal, code, now: Date.now() });
       ptyRestartTimestamps = plan.timestamps;
       if (plan.giveUp) {
@@ -996,13 +1288,33 @@ function startPtyServer() {
       setTimeout(() => {
         if (isQuitting) return;
         startPtyServer()
-          .then(() => diagLog('[pty-server] restarted after crash — renderer will reconnect and resume sessions'))
+          .then(async () => {
+            if (codexAppServer && codexBridgeRemoteUrl) {
+              try { await configurePtyCodexBridge(); }
+              catch (error) { diagLog('[codex-bridge] sidecar reconfigure failed:', error && error.message); }
+            }
+            diagLog('[pty-server] restarted after crash — renderer will reconnect and resume sessions');
+          })
           .catch((e) => diagLog('[pty-server] crash-recovery restart failed:', (e && e.message) || String(e)));
       }, plan.delayMs).unref();
     });
 
     ptyServerProcess.stdout.on('data', (data) => {
       const output = data.toString();
+      controlOutputBuffer += output;
+      let newline;
+      while ((newline = controlOutputBuffer.indexOf('\n')) !== -1) {
+        const line = controlOutputBuffer.slice(0, newline).replace(/\r$/, '');
+        controlOutputBuffer = controlOutputBuffer.slice(newline + 1);
+        const ack = /^CONTROL_ACK:([0-9a-f]+):(OK|ERR)$/.exec(line);
+        if (!ack) continue;
+        const pending = ptyControlAcks.get(ack[1]);
+        if (!pending) continue;
+        ptyControlAcks.delete(ack[1]);
+        if (ack[2] === 'OK') pending.resolve();
+        else pending.reject(new Error('terminal sidecar refused Codex authorization'));
+      }
+      if (controlOutputBuffer.length > 8192) controlOutputBuffer = controlOutputBuffer.slice(-8192);
       // The pty-server announces the port it actually bound — which differs
       // from ptyPort if the preferred port was unavailable and it fell back to
       // an OS-assigned one. Capture it so pty:getPort hands the renderer the
@@ -1296,6 +1608,118 @@ function debouncePopoutBounds(projectKey, win) {
       // internal to the popout. Broadcasting would race with pending renderer
       // edits (like project removal) and overwrite them with readConfig()'s
       // pre-debounce disk state.
+    }, POPOUT_BOUNDS_DEBOUNCE_MS);
+  };
+}
+
+// Registry of open codex watcher windows keyed by columnId.
+const codexWatchOpenWindows = new Map();
+
+// Last visual theme ('light' | 'dark') reported by the main renderer's
+// applyVisualTheme. Remembered so a watcher window opened without an
+// explicit opts.theme (e.g. a stale renderer) still gets the right value.
+let codexWatchLastTheme = 'dark';
+
+function createCodexWatchWindow(opts) {
+  const columnId = opts && opts.columnId;
+  if (codexWatchOpenWindows.has(columnId)) {
+    const existing = codexWatchOpenWindows.get(columnId);
+    if (!existing.isDestroyed()) {
+      const entry = codexWatchWindows.get(existing);
+      const sameSession = entry && entry.sel && entry.sel.sessionId === opts.sessionId;
+      if (sameSession) {
+        existing.show();
+        existing.focus();
+        return existing;
+      }
+      // restartColumn keeps the columnId but can null-and-reacquire
+      // sessionId, so a registered window can be stale for the session it
+      // now needs to show. Patching `sel` alone would leave the page's own
+      // state.selection pointed at the dead job, so recreate outright.
+      existing.destroy();
+      codexWatchOpenWindows.delete(columnId);
+      codexWatchWindows.delete(existing);
+    } else {
+      codexWatchOpenWindows.delete(columnId);
+    }
+  }
+
+  const config = readConfig();
+  const bounds = config.codexWatchBounds || {};
+  const index = codexWatchOpenWindows.size;
+  const cascade = index * 24;
+
+  const theme = opts.theme === 'light' || opts.theme === 'dark' ? opts.theme : codexWatchLastTheme;
+  codexWatchLastTheme = theme; // renderer-supplied theme is authoritative when present, so the did-finish-load re-send can't diverge from it
+
+  const win = new BrowserWindow({
+    width: bounds.width || 900,
+    height: bounds.height || 700,
+    x: typeof bounds.x === 'number' ? bounds.x + cascade : undefined,
+    y: typeof bounds.y === 'number' ? bounds.y + cascade : undefined,
+    minWidth: 400,
+    minHeight: 300,
+    title: 'Codex · ' + (opts.title || 'Watcher'),
+    icon: path.join(__dirname, process.platform === 'win32' ? 'icon-tray.ico' : 'icon.png'),
+    // Match the resolved theme so light-mode watchers don't flash dark before first paint.
+    backgroundColor: theme === 'light' ? '#ffffff' : '#1a1a2e',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+      webviewTag: false
+    }
+  });
+
+  lockdownWebContents(win.webContents);
+  win.loadFile('codex-watch.html', {
+    query: { sessionId: opts.sessionId, title: opts.title || '', theme }
+  });
+
+  // A codexwatch:themeChanged broadcast arriving between loadFile and the
+  // page's DOMContentLoaded would be dropped (onCodexWatchTheme isn't
+  // registered yet), leaving the window stuck on its query-param theme until
+  // the next toggle. Re-send the current theme once the page is ready to
+  // close that race; the query param remains the first-paint value.
+  win.webContents.on('did-finish-load', () => {
+    if (!win.isDestroyed()) win.webContents.send('codexwatch:theme', codexWatchLastTheme);
+  });
+
+  const saveBoundsDebounced = debounceCodexWatchBounds(win);
+  win.on('move', saveBoundsDebounced);
+  win.on('resize', saveBoundsDebounced);
+
+  codexWatchRegisterWindow(win, { sessionId: opts.sessionId, columnProfileId: opts.columnProfileId });
+
+  win.on('closed', () => {
+    codexWatchOpenWindows.delete(columnId);
+    codexWatchUnregisterWindow(win);
+  });
+
+  codexWatchOpenWindows.set(columnId, win);
+  return win;
+}
+
+// Debounce so drag events don't flood writeConfig. Bounds are shared across
+// all watcher windows (a single top-level codexWatchBounds key), same
+// debounce constant as popoutBounds.
+function debounceCodexWatchBounds(win) {
+  let timer = null;
+  return function () {
+    if (win.isDestroyed()) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (win.isDestroyed()) return;
+      const b = win.getBounds();
+      const cfg = readConfig();
+      cfg.codexWatchBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+      scheduleWriteConfig(cfg);
+      // Intentionally no broadcastConfigUpdated here — same reasoning as
+      // debouncePopoutBounds: this is internal bookkeeping, not something the
+      // renderer needs to react to.
     }, POPOUT_BOUNDS_DEBOUNCE_MS);
   };
 }
@@ -1684,6 +2108,121 @@ ipcMain.handle('endpoint:fetchModels', async (event, args) => {
   }
 });
 
+// --- Profile (multi-subscription) IPC handlers ---
+
+ipcMain.handle('profile:list', () => {
+  const store = readProfiles();
+  return {
+    defaultProfileId: store.defaultProfileId,
+    profiles: store.profiles.map((p) => ({
+      id: p.id,
+      name: p.name || '',
+      colour: p.colour || DEFAULT_PRIMARY.colour,
+      isPrimary: !p.configDir,
+      // Sign-in status, so the Subscriptions panel can say "needs /login"
+      // without the renderer ever seeing a token.
+      signedIn: profileHasCredentials(p)
+    }))
+  };
+});
+
+ipcMain.handle('profile:create', (event, input) => {
+  // Unverified whether the macOS keychain service "Claude Code-credentials"
+  // (see usage:getPlanLimits above) is scoped per CLAUDE_CONFIG_DIR — if it
+  // isn't, two accounts fight over one keychain slot. Refuse until that's
+  // proven safe rather than create a profile that can never sign in.
+  if (process.platform === 'darwin') {
+    return {
+      ok: false, error: 'unsupported-platform',
+      message: 'Multiple subscriptions are not supported on macOS yet — the Claude CLI may store all credentials in a single keychain entry. This is unverified; see docs/superpowers/specs/2026-07-27-multi-subscription-profiles-design.md.'
+    };
+  }
+  const name = String((input && input.name) || '').trim();
+  if (!name) return { ok: false, error: 'Name is required.' };
+  const store = readProfiles();
+  if (store.profiles.length >= 8) return { ok: false, error: 'Profile limit reached (8).' };
+
+  const id = 'pf_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  // The app allocates the directory. A user-supplied path is never accepted —
+  // that is what keeps assertInsideAllowedRoots correct without a new root.
+  const configDir = path.join(PROFILES_DIR, id);
+  try {
+    fs.mkdirSync(configDir, { recursive: true });
+    seedProfileDir(configDir);
+  } catch (e) {
+    return { ok: false, error: 'Could not create profile directory: ' + e.message };
+  }
+
+  store.profiles.push({
+    id, name,
+    configDir,
+    colour: String((input && input.colour) || '#5b8def')
+  });
+  writeProfiles(store);
+  invalidateProfileCredsCache(id);
+  return { ok: true, id, configDir };
+});
+
+ipcMain.handle('profile:reseed', (event, id) => {
+  const p = readProfiles().profiles.find((x) => x && x.id === id);
+  if (!p || !p.configDir) return { ok: false, error: 'Cannot re-seed Primary.' };
+  try { seedProfileDir(p.configDir); invalidateProfileCredsCache(id); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('profile:update', (event, input) => {
+  const id = input && input.id;
+  const store = readProfiles();
+  const p = store.profiles.find((x) => x && x.id === id);
+  if (!p) return { ok: false, error: 'No such profile.' };
+  if (input.name != null) p.name = String(input.name).trim() || p.name;
+  if (input.colour != null) p.colour = String(input.colour);
+  // configDir is app-owned and never accepted from the renderer.
+  writeProfiles(store);
+  return { ok: true };
+});
+
+ipcMain.handle('profile:setDefault', (event, id) => {
+  const store = readProfiles();
+  if (!store.profiles.find((p) => p && p.id === id)) return { ok: false, error: 'No such profile.' };
+  store.defaultProfileId = id;
+  writeProfiles(store);
+  return { ok: true };
+});
+
+ipcMain.handle('profile:delete', (event, id) => {
+  if (id === PRIMARY_ID) return { ok: false, error: 'Primary cannot be deleted.' };
+  const store = readProfiles();
+  const p = store.profiles.find((x) => x && x.id === id);
+  if (!p) return { ok: false, error: 'No such profile.' };
+
+  // Clear dangling references BEFORE removing the profile so nothing ever
+  // resolves through the unknown-id path in normal operation.
+  const reassigned = clearProfileReferences(id);
+
+  // The profile is de-registered from profiles.json regardless of what
+  // happens below — a tampered entry must be clearable without granting it
+  // a delete.
+  const dir = profileDirToRemove(p);
+  if (dir) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); }
+    catch (e) { console.warn('[profiles] could not remove dir', e.message); }
+  } else {
+    console.warn('[profiles] refusing to remove configDir outside the profiles root:', p.configDir);
+  }
+
+  store.profiles = store.profiles.filter((x) => x.id !== id);
+  if (store.defaultProfileId === id) store.defaultProfileId = PRIMARY_ID;
+  writeProfiles(store);
+  invalidateProfileCredsCache(id);
+  return { ok: true, reassigned };
+});
+
+ipcMain.handle('profile:resolve', (event, sel) => {
+  const r = resolveProfileFor(sel || {});
+  return { id: r.id, name: r.name, colour: r.colour, isPrimary: r.isPrimary, env: r.env };
+});
+
 ipcMain.handle('popout:setTransfer', (event, projectKey, transferList) => {
   if (transferList && transferList.length > 0) {
     pendingPopoutTransfers.set(projectKey, transferList);
@@ -1812,9 +2351,9 @@ function projectPathToClaudeKey(projectPath) {
 }
 
 // Get recent session IDs for a project by scanning Claude's data directory
-ipcMain.handle('sessions:getRecent', (event, projectPath) => {
+ipcMain.handle('sessions:getRecent', (event, projectPath, profileId) => {
   const claudeKey = projectPathToClaudeKey(projectPath);
-  const claudeProjectDir = path.join(os.homedir(), '.claude', 'projects', claudeKey);
+  const claudeProjectDir = path.join(claudeRootFor(profileId), 'projects', claudeKey);
 
   try {
     if (!fs.existsSync(claudeProjectDir)) return [];
@@ -1843,11 +2382,11 @@ ipcMain.handle('sessions:getRecent', (event, projectPath) => {
 // Does a session's transcript actually exist on disk? Used before a respawn so
 // we never `--resume` a phantom session id (Claude errors "No conversation
 // found"). Validates the id charset to keep it strictly a filename.
-ipcMain.handle('sessions:exists', (event, projectPath, sessionId) => {
+ipcMain.handle('sessions:exists', (event, projectPath, sessionId, profileId) => {
   if (!projectPath || typeof sessionId !== 'string' || !/^[A-Za-z0-9-]+$/.test(sessionId)) return false;
   try {
     const claudeKey = projectPathToClaudeKey(projectPath);
-    const f = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+    const f = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
     return fs.existsSync(f) && fs.statSync(f).size > 0;
   } catch (e) { return false; }
 });
@@ -1855,12 +2394,12 @@ ipcMain.handle('sessions:exists', (event, projectPath, sessionId) => {
 // Live automation/headless/manager session ids — interactive columns must never
 // adopt one as their own sessionId. Renderer fetches this once on startup and
 // then keeps in sync via the 'sessions:backgroundIds' broadcast.
-ipcMain.handle('sessions:getBackgroundIds', () => Array.from(backgroundSessionIds));
+ipcMain.handle('sessions:getBackgroundIds', () => Array.from(backgroundSessionIds, ([id, profileId]) => ({ id, profileId })));
 
 // Get the title (first user message) from a Claude session JSONL file
-ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId) => {
+ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId, profileId) => {
   const claudeKey = projectPathToClaudeKey(projectPath);
-  const jsonlPath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+  const jsonlPath = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
   try {
     // Read only first 32KB — the first user message is always near the top
     const fd = fs.openSync(jsonlPath, 'r');
@@ -1894,11 +2433,11 @@ ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId) => {
 // scanning the JSONL tail for `cd <path>` commands and `"file_path":"..."`
 // entries. The Claude CLI's recorded gitBranch reflects ITS own cwd (project
 // root) — useless for sessions that do their work via Bash `cd worktree && ...`.
-ipcMain.handle('git:detectSessionWorktree', async (event, projectPath, sessionId) => {
+ipcMain.handle('git:detectSessionWorktree', async (event, projectPath, sessionId, profileId) => {
   if (!projectPath || !sessionId) return null;
   try {
     const claudeKey = projectPathToClaudeKey(projectPath);
-    const jsonlPath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+    const jsonlPath = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
     const stat = fs.statSync(jsonlPath);
     const tailSize = Math.min(stat.size, 512 * 1024);
     if (tailSize === 0) return null;
@@ -2295,6 +2834,13 @@ ipcMain.handle('claudemd:save', (event, projectPath, content) => {
       return { success: false, error: 'content exceeds write size cap (5MB)' };
     }
     fs.writeFileSync(filePath, content, 'utf8');
+    // Only the GLOBAL CLAUDE.md is app-managed across profiles — a per-project
+    // CLAUDE.md lives under the project directory, not under ~/.claude, and
+    // has nothing to do with which subscription a column runs on.
+    if (projectPath === GLOBAL_CLAUDEMD_SENTINEL) {
+      const mirror = mirrorToProfiles('CLAUDE.md');
+      if (!mirror.ok) notifyMirrorFailed('CLAUDE.md', mirror.failed);
+    }
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
@@ -2381,6 +2927,15 @@ ipcMain.handle('fs:writeFile', (event, filePath, content) => {
     if (Buffer.byteLength(content, 'utf8') > FS_WRITE_MAX_BYTES) {
       return { success: false, error: 'content exceeds write size cap (5MB)' };
     }
+    // Create the parent dir (e.g. a project's .claudes/) if it doesn't exist yet —
+    // a no-op when it already does. Still inside the assertInsideAllowedRoots gate above.
+    try { fs.mkdirSync(path.dirname(safe), { recursive: true }); } catch { /* exists */ }
+    // Re-assert containment AFTER creating the parent. assertInsideAllowedRoots
+    // falls back to a plain string-prefix check when the path does not exist yet
+    // (it cannot realpath a missing file), so a symlinked directory inside an
+    // allowed root would pass the first check and only resolve outside once
+    // mkdir materialised it. Now the parent exists, realpath is meaningful.
+    assertInsideAllowedRoots(safe);
     fs.writeFileSync(safe, content, 'utf8');
     return { success: true };
   } catch (err) {
@@ -3583,40 +4138,51 @@ async function mapLimit(items, limit, fn) {
 // the bearer token from the CLI's credentials file. Cached briefly because the
 // server-side data updates on its own cadence and we don't want to hammer it.
 const PLAN_USAGE_CACHE_MS = 30_000;
-let planUsageCache = { data: null, fetchedAt: 0 };
-// Server-issued cooldown: when the endpoint returns 429 with a Retry-After,
-// honour it. Hammering during cooldown extends the limit further.
-let planUsageRetryAtMs = 0;
+// Keyed by profile id. One account being rate-limited must never blank
+// another's bars, which is exactly what a pair of module-level scalars would
+// do — so cache and cooldown are per-profile maps, not a single shared state.
+const planUsageCache = new Map();     // id -> { data, fetchedAt }
+const planUsageRetryAt = new Map();   // id -> ms timestamp
 
-ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
+ipcMain.handle('usage:getPlanLimits', async (_event, force, profileId) => {
+  const profile = resolveProfileFor({ columnProfileId: profileId });
+  const pid = profile.id;
   const now = Date.now();
-  if (!force && planUsageCache.data && (now - planUsageCache.fetchedAt) < PLAN_USAGE_CACHE_MS) {
-    return { ok: true, data: planUsageCache.data, fetchedAt: planUsageCache.fetchedAt, cached: true };
+
+  const cached = planUsageCache.get(pid);
+  if (!force && cached && cached.data && (now - cached.fetchedAt) < PLAN_USAGE_CACHE_MS) {
+    return { ok: true, data: cached.data, fetchedAt: cached.fetchedAt, cached: true, profileId: pid };
   }
 
   // Honour server cooldown regardless of `force` — the user clicking refresh
   // can't get fresh data when the API has told us to wait, and bypassing this
   // would just push the unlock further out.
-  if (planUsageRetryAtMs > now) {
-    const remainSec = Math.round((planUsageRetryAtMs - now) / 1000);
+  const retryAtMs = planUsageRetryAt.get(pid) || 0;
+  if (retryAtMs > now) {
+    const remainSec = Math.round((retryAtMs - now) / 1000);
     return {
       ok: false,
       error: 'rate-limited',
-      retryAtMs: planUsageRetryAtMs,
+      retryAtMs,
+      profileId: pid,
       message: 'Usage endpoint rate-limited — retry in ' + (remainSec >= 60 ? Math.round(remainSec / 60) + ' min' : remainSec + 's') + '.'
     };
   }
 
-  const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
+  const root = profileClaudeRoot(profile, os.homedir());
+  const credsPath = path.join(root, '.credentials.json');
   let token;
   try {
     const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
     token = creds?.claudeAiOauth?.accessToken;
   } catch {
     // macOS: Claude CLI stores credentials in the login keychain under
-    // service "Claude Code-credentials" instead of the plaintext file.
-    // Without this fallback the mini usage bar silently stays blank on Mac.
-    if (process.platform === 'darwin') {
+    // service "Claude Code-credentials" instead of the plaintext file — but
+    // that keychain entry is Primary's account. The fallback applies to
+    // PRIMARY ONLY: falling through for a secondary profile would report
+    // Primary's usage under the other profile's name, a wrong number that
+    // looks right, which is worse than a blank bar.
+    if (process.platform === 'darwin' && profile.isPrimary) {
       try {
         const raw = execFileSync('/usr/bin/security', [
           'find-generic-password',
@@ -3627,14 +4193,16 @@ ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
         const creds = JSON.parse(raw);
         token = creds?.claudeAiOauth?.accessToken;
       } catch {
-        return { ok: false, error: 'no-creds', message: 'Could not read Claude credentials from the macOS keychain — is Claude Code logged in?' };
+        return { ok: false, error: 'no-creds', profileId: pid, message: 'Could not read Claude credentials from the macOS keychain — is Claude Code logged in?' };
       }
+    } else if (process.platform === 'darwin') {
+      return { ok: false, error: 'no-creds-macos', profileId: pid, message: 'Secondary profiles are not supported on macOS yet.' };
     } else {
-      return { ok: false, error: 'no-creds', message: 'Could not read ~/.claude/.credentials.json — Claude Code not logged in?' };
+      return { ok: false, error: 'no-creds', profileId: pid, message: 'Could not read ' + credsPath + ' — Claude Code not logged in?' };
     }
   }
   if (!token) {
-    return { ok: false, error: 'no-oauth', message: 'No OAuth token found (API-key users do not have plan limits).' };
+    return { ok: false, error: 'no-oauth', profileId: pid, message: 'No OAuth token found (API-key users do not have plan limits).' };
   }
 
   try {
@@ -3645,30 +4213,32 @@ ipcMain.handle('usage:getPlanLimits', async (_event, force) => {
       }
     });
     if (res.status === 401) {
-      return { ok: false, error: 'unauthorized', message: 'OAuth token expired. Run any Claude Code command to refresh.' };
+      return { ok: false, error: 'unauthorized', profileId: pid, message: 'OAuth token expired. Run any Claude Code command to refresh.' };
     }
     if (res.status === 429) {
       // Clamp Retry-After to [60s, 1h] so a server bug can't pin the bar
       // dead forever, and a missing/zero header still produces a real cooldown.
       const raw = parseInt(res.headers.get('retry-after') || '', 10);
       const retryAfterSec = Math.max(60, Math.min(Number.isFinite(raw) && raw > 0 ? raw : 60, 3600));
-      planUsageRetryAtMs = now + retryAfterSec * 1000;
+      const nextRetryAtMs = now + retryAfterSec * 1000;
+      planUsageRetryAt.set(pid, nextRetryAtMs);
       return {
         ok: false,
         error: 'rate-limited',
-        retryAtMs: planUsageRetryAtMs,
+        retryAtMs: nextRetryAtMs,
+        profileId: pid,
         message: 'Usage endpoint rate-limited (HTTP 429) — retry in ' + (retryAfterSec >= 60 ? Math.round(retryAfterSec / 60) + ' min' : retryAfterSec + 's') + '.'
       };
     }
     if (!res.ok) {
-      return { ok: false, error: 'http-' + res.status, message: 'Usage endpoint returned HTTP ' + res.status };
+      return { ok: false, error: 'http-' + res.status, profileId: pid, message: 'Usage endpoint returned HTTP ' + res.status };
     }
     const data = await res.json();
-    planUsageCache = { data, fetchedAt: now };
-    planUsageRetryAtMs = 0;
-    return { ok: true, data, fetchedAt: now, cached: false };
+    planUsageCache.set(pid, { data, fetchedAt: now });
+    planUsageRetryAt.set(pid, 0);
+    return { ok: true, data, fetchedAt: now, cached: false, profileId: pid };
   } catch (e) {
-    return { ok: false, error: 'fetch-failed', message: e.message };
+    return { ok: false, error: 'fetch-failed', profileId: pid, message: e.message };
   }
 });
 
@@ -3753,13 +4323,13 @@ const { lastAssistantContextTokens, modelContextLimit, sampleAndResetReadStats }
 
 // One-shot read of the live context-token count for a session.
 // Renderer calls this every ~10s while a Claude column is live.
-ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId, sinceMs) => {
+ipcMain.handle('session:contextTokens', (_event, projectPath, sessionId, sinceMs, profileId) => {
   if (!projectPath || !sessionId) return null;
   // projectPath is the renderer's projectKey, which is the raw filesystem path
   // (e.g. "D:\\Git Repos\\Claudes"). Claude stores sessions under the encoded
   // form (e.g. "D--Git-Repos-Claudes"), so we must encode before joining.
   const claudeKey = projectPathToClaudeKey(projectPath);
-  const filePath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+  const filePath = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
   // Perf instrumentation — count every IPC call. Actual fs.readFileSync
   // invocations and bytes read are tracked inside the lib and sampled by
   // perfSample below, so we can see cache effectiveness in the perf line.
@@ -3875,11 +4445,11 @@ function clawdPollTail(columnId) {
   _clawdEmitIfChanged(columnId, t, false);
 }
 
-function clawdStartTail(columnId, projectPath, sessionId, sender) {
+function clawdStartTail(columnId, projectPath, sessionId, sender, profileId) {
   clawdStopTail(columnId);
   if (!projectPath || !sessionId) return;
   const claudeKey = projectPathToClaudeKey(projectPath);
-  const filePath = path.join(os.homedir(), '.claude', 'projects', claudeKey, sessionId + '.jsonl');
+  const filePath = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
   let offset = 0;
   try { offset = fs.statSync(filePath).size; } catch {}
   const t = {
@@ -3904,7 +4474,7 @@ function clawdStopTail(columnId) {
 
 ipcMain.handle('clawd:startTail', (event, args) => {
   if (!args) return;
-  clawdStartTail(args.columnId, args.projectPath, args.sessionId, event.sender);
+  clawdStartTail(args.columnId, args.projectPath, args.sessionId, event.sender, args.profileId);
 });
 ipcMain.handle('clawd:stopTail', (_event, args) => {
   if (!args) return;
@@ -3922,43 +4492,54 @@ ipcMain.handle('notify:show', (_event, opts) => {
 });
 
 ipcMain.handle('usage:getAll', async () => {
-  const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
+  // Union across every profile, not just Primary — each has its own
+  // ~/.claude(s)/…/projects dir. Every result is tagged with its profile so a
+  // future per-profile breakdown can group on it.
+  const roots = readProfiles().profiles.map((p) => ({
+    profileId: p.id,
+    profileName: p.name,
+    dir: path.join(profileClaudeRoot(p, os.homedir()), 'projects')
+  }));
   const results = [];
   const cache = readUsageCache();
   const nextCache = {};
 
-  let projectDirs;
-  try {
-    projectDirs = await fs.promises.readdir(claudeProjectsDir);
-  } catch {
-    return results;
-  }
-
-  // Enumerate all jsonl files up front so we can parse in parallel.
+  // Enumerate all jsonl files up front, across all profiles, so we can parse
+  // in parallel.
   const jobs = [];
-  for (const dir of projectDirs) {
-    const projectDir = path.join(claudeProjectsDir, dir);
-    let dirStat;
-    try { dirStat = await fs.promises.stat(projectDir); } catch { continue; }
-    if (!dirStat.isDirectory()) continue;
+  for (const root of roots) {
+    let projectDirs;
+    try { projectDirs = await fs.promises.readdir(root.dir); } catch { continue; }
 
-    let entries;
-    try { entries = await fs.promises.readdir(projectDir); } catch { continue; }
+    for (const dir of projectDirs) {
+      const projectDir = path.join(root.dir, dir);
+      let dirStat;
+      try { dirStat = await fs.promises.stat(projectDir); } catch { continue; }
+      if (!dirStat.isDirectory()) continue;
 
-    for (const file of entries) {
-      if (!file.endsWith('.jsonl')) continue;
-      const filePath = path.join(projectDir, file);
-      let fileStat;
-      try { fileStat = await fs.promises.stat(filePath); } catch { continue; }
-      const sessionId = file.replace('.jsonl', '');
-      jobs.push({
-        cacheKey: dir + '/' + sessionId,
-        projectKey: dir,
-        sessionId,
-        filePath,
-        size: fileStat.size,
-        mtimeMs: fileStat.mtimeMs
-      });
+      let entries;
+      try { entries = await fs.promises.readdir(projectDir); } catch { continue; }
+
+      for (const file of entries) {
+        if (!file.endsWith('.jsonl')) continue;
+        const filePath = path.join(projectDir, file);
+        let fileStat;
+        try { fileStat = await fs.promises.stat(filePath); } catch { continue; }
+        const sessionId = file.replace('.jsonl', '');
+        jobs.push({
+          // Two profiles can hold a session file with the same name for the
+          // same project key — the profile id MUST be in the cache key, or a
+          // shared key would serve one profile's digest for the other's file.
+          cacheKey: root.profileId + '/' + dir + '/' + sessionId,
+          profileId: root.profileId,
+          profileName: root.profileName,
+          projectKey: dir,
+          sessionId,
+          filePath,
+          size: fileStat.size,
+          mtimeMs: fileStat.mtimeMs
+        });
+      }
     }
   }
 
@@ -3979,6 +4560,8 @@ ipcMain.handle('usage:getAll', async () => {
     if (!digest) continue;
     nextCache[job.cacheKey] = digest;
     results.push({
+      profileId: job.profileId,
+      profileName: job.profileName,
       projectKey: job.projectKey,
       sessionId: job.sessionId,
       model: digest.model,
@@ -4001,13 +4584,14 @@ ipcMain.handle('usage:getAll', async () => {
 });
 
 const { sessionCost: calcSessionCost } = require('./lib/cost-calc');
+const ClaudeModels = require('./lib/claude-models');
 
 // Roll up per-session costs into totals by model, project, and day.
 // Uses the digest cached by usage:getAll (call usage:getAll first; otherwise
 // returns zeros). Costs are computed from each session's single `model` plus
 // its aggregate token counts — see plan note about multi-model sessions.
 function rollupCosts(digests, sinceMs) {
-  const byModel = { opus: 0, sonnet: 0, haiku: 0, unknown: 0 };
+  const byModel = { fable: 0, opus: 0, sonnet: 0, haiku: 0, unknown: 0 };
   const byProject = {};
   const byDay = {};
   // Per-bucket breakdown so the user can see *where* the cost is coming from
@@ -4032,10 +4616,10 @@ function rollupCosts(digests, sinceMs) {
     byBucket.cacheRead     += calcSessionCost({ model: d.model || '', cacheRead: cr });
     byBucket.output        += calcSessionCost({ model: d.model || '', output: out });
     total += c;
-    const m = String(d.model || '').toLowerCase();
-    if (m.indexOf('opus') !== -1) byModel.opus += c;
-    else if (m.indexOf('sonnet') !== -1) byModel.sonnet += c;
-    else if (m.indexOf('haiku') !== -1) byModel.haiku += c;
+    // Reuse the catalogue's family classifier (checked fable-first) rather
+    // than a fourth copy of the substring ladder.
+    const family = ClaudeModels.familyOf(d.model || '');
+    if (family && byModel[family] !== undefined) byModel[family] += c;
     else byModel.unknown += c;
     if (d.projectKey) byProject[d.projectKey] = (byProject[d.projectKey] || 0) + c;
     if (d.lastTimestamp) {
@@ -4148,45 +4732,69 @@ ipcMain.handle('sessions:search', async (_event, query, limit, projectPath) => {
   return hits;
 });
 
-// Prompt-history search across ~/.claude/history.jsonl. Returns hits in
-// reverse-chronological order (most recent first). Distinct from sessions:search
-// — that one searches assistant transcripts; this one searches user prompts.
+// Prompt-history search, unioned across every profile's history.jsonl and
+// sorted by timestamp (most recent first). Distinct from sessions:search —
+// that one searches assistant transcripts; this one searches user prompts.
 ipcMain.handle('history:search', async (_event, query, limit, projectPath) => {
   if (!query || typeof query !== 'string' || query.length < 2) return [];
   const max = Math.max(1, Math.min(200, limit || 100));
-  const file = path.join(os.homedir(), '.claude', 'history.jsonl');
-  let content;
-  try { content = await fs.promises.readFile(file, 'utf8'); } catch { return []; }
   const needle = query.toLowerCase();
   // history.jsonl stores `entry.project` as the raw filesystem path. Compare
   // raw-to-raw to keep the path-shape contract identical to what the entry
   // already uses, avoiding any double-encoding mismatch.
   const scopedProject = (projectPath && typeof projectPath === 'string') ? projectPath : null;
-  const lines = content.split('\n');
+
+  const roots = readProfiles().profiles.map((p) => ({
+    profileId: p.id,
+    profileName: p.name,
+    file: path.join(profileClaudeRoot(p, os.homedir()), 'history.jsonl')
+  }));
+
   const hits = [];
-  for (let i = lines.length - 1; i >= 0 && hits.length < max; i--) {
-    const line = lines[i];
-    if (!line || line[0] !== '{') continue;
-    if (line.toLowerCase().indexOf(needle) === -1) continue;
-    let entry;
-    try { entry = JSON.parse(line); } catch { continue; }
-    if (scopedProject && (entry.project || '') !== scopedProject) continue;
-    const text = entry.display || '';
-    if (!text) continue;
-    if (text.toLowerCase().indexOf(needle) === -1) continue;
-    // Trim to ~200 chars around the needle
-    const matchIdx = text.toLowerCase().indexOf(needle);
-    const start = Math.max(0, matchIdx - 80);
-    const end = Math.min(text.length, matchIdx + 120);
-    const snippet = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
-    hits.push({
-      text,
-      snippet,
-      project: entry.project || '',
-      ts: entry.timestamp || null
-    });
+  for (const root of roots) {
+    let content;
+    try { content = await fs.promises.readFile(root.file, 'utf8'); } catch { continue; }
+    const lines = content.split('\n');
+    // Lines are newest-last on disk, so iterating in reverse yields this file's
+    // entries newest-first; once we've collected `max` hits from THIS file,
+    // every remaining line in it is strictly older than what we already have,
+    // so it's safe to stop early rather than scanning the rest of a keystroke
+    // search across every line of every profile's history. Each file's list is
+    // still capped independently, and the final sort+slice below picks the
+    // true top `max` across all profiles.
+    let fileHits = 0;
+    for (let i = lines.length - 1; i >= 0 && fileHits < max; i--) {
+      const line = lines[i];
+      if (!line || line[0] !== '{') continue;
+      if (line.toLowerCase().indexOf(needle) === -1) continue;
+      let entry;
+      try { entry = JSON.parse(line); } catch { continue; }
+      if (scopedProject && (entry.project || '') !== scopedProject) continue;
+      const text = entry.display || '';
+      if (!text) continue;
+      if (text.toLowerCase().indexOf(needle) === -1) continue;
+      // Trim to ~200 chars around the needle
+      const matchIdx = text.toLowerCase().indexOf(needle);
+      const start = Math.max(0, matchIdx - 80);
+      const end = Math.min(text.length, matchIdx + 120);
+      const snippet = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+      hits.push({
+        text,
+        snippet,
+        project: entry.project || '',
+        ts: entry.timestamp || null,
+        profileId: root.profileId,
+        profileName: root.profileName
+      });
+      fileHits++;
+    }
   }
-  return hits;
+  // ts is a numeric epoch-ms in every history.jsonl observed, but parse
+  // defensively (Number falls through to Date.parse) in case an older/foreign
+  // entry ever carries an ISO string instead.
+  const tsNum = (v) => Number(v) || Date.parse(v) || 0;
+  hits.sort((a, b) => tsNum(b.ts) - tsNum(a.ts));
+  return hits.slice(0, max);
 });
 
 // --- Auto Updater ---
@@ -4896,6 +5504,8 @@ ipcMain.handle('hooks:configure', () => {
       added++;
     }
     writeClaudeSettings(file, data);
+    const mirror = mirrorToProfiles('settings.json');
+    if (!mirror.ok) notifyMirrorFailed('settings.json', mirror.failed);
     return { ok: true, added, migrated, removed, port: hookServerListenPort };
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
@@ -4920,6 +5530,8 @@ ipcMain.handle('hooks:disconnect', () => {
     }
     if (Object.keys(data.hooks).length === 0) delete data.hooks;
     writeClaudeSettings(file, data);
+    const mirror = mirrorToProfiles('settings.json');
+    if (!mirror.ok) notifyMirrorFailed('settings.json', mirror.failed);
     return { ok: true, removed };
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
@@ -5620,7 +6232,7 @@ ipcMain.handle('voice:synthesizeColumn', async (event, args) => {
 // project-key path. Returns null if none resolves to an existing file.
 function resolveColumnTranscriptPath(a) {
   const { resolvedPath } = resolveTranscriptPath({
-    homeDir: os.homedir(),
+    claudeRoot: claudeRootFor(a.profileId),
     transcriptPath: a.transcriptPath,
     cwd: a.cwd,
     projectKey: a.projectKey,
@@ -5637,9 +6249,10 @@ function resolveColumnTranscriptPath(a) {
 function buildVoiceDiag(a, opts) {
   const o = opts || {};
   let resolvedPath = null, triedCwdPath = null, triedProjectPath = null;
+  const claudeRoot = claudeRootFor(a.profileId);
   try {
     const r = resolveTranscriptPath({
-      homeDir: os.homedir(),
+      claudeRoot,
       transcriptPath: a.transcriptPath,
       cwd: a.cwd,
       projectKey: a.projectKey,
@@ -5657,7 +6270,7 @@ function buildVoiceDiag(a, opts) {
     // Defense-in-depth: only stat a path that is contained under the projects
     // root, so this diag oracle can never report on an out-of-root file even if
     // an unsanitized path ever reached here.
-    if (usedPath && isUnderProjectsRoot(os.homedir(), usedPath) && fs.existsSync(usedPath)) {
+    if (usedPath && isUnderProjectsRoot(claudeRoot, usedPath) && fs.existsSync(usedPath)) {
       resolvedExists = true;
       resolvedSize = fs.statSync(usedPath).size;
     }
@@ -5688,6 +6301,27 @@ async function readVoiceTranscript(p) {
   }
   return content;
 }
+
+// Read a column's full Claude Code transcript for a Claude -> Codex handoff.
+// Reuses the same path resolution as voice (transcriptPath -> cwd-keyed ->
+// projectKey-keyed), but does NOT reuse fs:readFile — that handler is gated by
+// assertInsideAllowedRoots, which does not (and must not) cover ~/.claude/projects.
+// isUnderProjectsRoot is checked explicitly here too, in addition to inside
+// resolveColumnTranscriptPath, as defense-in-depth against a future refactor of
+// either path silently loosening it.
+ipcMain.handle('handoff:readTranscript', async (event, args) => {
+  const a = args || {};
+  try {
+    const thePath = resolveColumnTranscriptPath(a);
+    if (!thePath || !isUnderProjectsRoot(claudeRootFor(a.profileId), thePath)) {
+      return { ok: false, error: 'no_transcript' };
+    }
+    const content = await fs.promises.readFile(thePath, 'utf8');
+    return { ok: true, content };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
 
 // Cheap peek: report the last assistant message uuid and whether there is any
 // speakable text, without synthesizing. Lets the renderer record a baseline
@@ -5796,6 +6430,8 @@ ipcMain.handle('voice:setPersonality', (event, personaArg) => {
     const tmp = p + '.tmp';
     fs.writeFileSync(tmp, next, 'utf8');
     fs.renameSync(tmp, p);
+    const mirror = mirrorToProfiles('CLAUDE.md');
+    if (!mirror.ok) notifyMirrorFailed('CLAUDE.md', mirror.failed);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err) };
@@ -5915,7 +6551,8 @@ ipcMain.handle('automations:create', (event, config) => {
     agents: agents,
     enabled: true,
     createdAt: new Date().toISOString(),
-    runWindow: config.runWindow || null
+    runWindow: config.runWindow || null,
+    profileId: config.profileId || null
   };
 
   data.automations.push(automation);
@@ -5963,7 +6600,7 @@ ipcMain.handle('automations:update', (event, automationId, updates) => {
   const data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
   if (!automation) return null;
-  const safeFields = ['name', 'enabled', 'runWindow'];
+  const safeFields = ['name', 'enabled', 'runWindow', 'profileId'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) automation[field] = updates[field];
   });
@@ -6147,6 +6784,31 @@ ipcMain.handle('automations:toggleGlobal', () => {
   data.globalEnabled = !data.globalEnabled;
   writeAutomations(data);
   return data.globalEnabled;
+});
+
+// Pause only the automations effectively running on ONE subscription (the
+// crossing profile from the 90% weekly-limit prompt) rather than every
+// automation across every subscription. Resolves each automation's effective
+// profile the same way runAgent does (automation.profileId ->
+// project's assigned profile -> global default) so an automation that
+// inherits the profile is paused too, not just one with it set explicitly.
+ipcMain.handle('automations:pauseForProfile', (event, profileId) => {
+  const data = readAutomations();
+  const targetId = profileId || PRIMARY_ID;
+  let pausedCount = 0;
+  data.automations.forEach((automation) => {
+    if (!automation.enabled) return;
+    const resolved = resolveProfileFor({
+      columnProfileId: automation.profileId,
+      projectProfileId: getProjectProfileIdByPath(automation.projectPath)
+    });
+    if (resolved.id === targetId) {
+      automation.enabled = false;
+      pausedCount++;
+    }
+  });
+  if (pausedCount) writeAutomations(data);
+  return { ok: true, pausedCount };
 });
 
 ipcMain.handle('automations:getAgentHistory', (event, automationId, agentId, count) => {
@@ -7017,6 +7679,7 @@ function getClaudePath() {
 // won't change while the app runs). Mirrors findClaudePath(); a missing binary
 // simply means the "Spawn Codex" affordance is never offered.
 let codexAvailable = null;
+let codexCommand = null;
 function hasCodex() {
   if (codexAvailable !== null) return codexAvailable;
   try {
@@ -7029,6 +7692,399 @@ function hasCodex() {
 }
 
 ipcMain.handle('config:hasCodex', () => hasCodex());
+
+function getCodexCommand() {
+  if (codexCommand) return codexCommand;
+  const out = execFileSync(codexLookupCommand(process.platform), ['codex'], { encoding: 'utf8' });
+  const found = out.trim().split(/\r?\n/).filter(Boolean);
+  if (!found.length) throw new Error('Codex CLI not found');
+  // `where codex` commonly returns a POSIX shim first and codex.cmd second.
+  // Node can spawn the latter reliably through the Windows shell.
+  codexCommand = process.platform === 'win32'
+    ? (found.find((value) => /\.(cmd|exe)$/i.test(value)) || found[0])
+    : found[0];
+  return codexCommand;
+}
+
+function publishCodexThreadState(state) {
+  if (!state) return;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('codex:threadState', state);
+  }
+}
+
+function publishCodexThreadClaimed(claim) {
+  if (!claim || typeof claim.claimId !== 'string' || !/^[0-9a-f]{32}$/.test(claim.claimId)) return;
+  if (!isCodexThreadId(claim.threadId)) return;
+  const sanitized = { claimId: claim.claimId, threadId: claim.threadId };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('codex:threadClaimed', sanitized);
+  }
+}
+
+function publishCodexClaimExpired(claim) {
+  if (!claim || typeof claim.claimId !== 'string' || !/^[0-9a-f]{32}$/.test(claim.claimId)) return;
+  if (claim.reason !== 'timeout' && claim.reason !== 'unavailable') return;
+  const sanitized = { claimId: claim.claimId, reason: claim.reason };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('codex:claimExpired', sanitized);
+  }
+}
+
+async function startCodexAppServer() {
+  if (codexBridgeDisabled) return false;
+  if (!hasCodex()) return false;
+  let service = null;
+  try {
+    service = new CodexAppServerService({
+      command: getCodexCommand(),
+      token: CODEX_BRIDGE_TOKEN,
+      version: app.getVersion(),
+      platform: process.platform,
+      spawnProcess: spawn,
+      createSocket: (url, options) => new WebSocket(url, options),
+      onState: publishCodexThreadState,
+      onThreadClaimed: publishCodexThreadClaimed,
+      onClaimExpired: publishCodexClaimExpired,
+      onUnavailable: () => {
+        if (codexAppServer === service) {
+          codexAppServer = null;
+          codexBridgeRemoteUrl = '';
+          codexBridgeDisabled = true;
+          diagLog('[codex-bridge] app-server exited; using direct CLI fallback until restart');
+        }
+      }
+    });
+    codexStartingService = service;
+    await service.ensureStarted();
+    if (isQuitting) {
+      service.stop();
+      codexStartingService = null;
+      return false;
+    }
+    codexAppServer = service;
+    codexStartingService = null;
+    codexBridgeRemoteUrl = service.remoteUrl;
+    await configurePtyCodexBridge();
+    return true;
+  } catch (err) {
+    if (service) service.stop();
+    if (codexStartingService === service) codexStartingService = null;
+    codexAppServer = null;
+    codexBridgeRemoteUrl = '';
+    codexBridgeDisabled = true;
+    diagLog('[codex-bridge] unavailable; direct CLI fallback remains active:', err && err.message);
+    return false;
+  }
+}
+
+function ensureCodexAppServer() {
+  if (codexAppServer) return Promise.resolve(codexAppServer);
+  if (codexBridgeDisabled) return Promise.resolve(null);
+  if (!codexBridgeStartPromise) {
+    codexBridgeStartPromise = startCodexAppServer()
+      .then((ok) => ok ? codexAppServer : null)
+      .finally(() => { codexBridgeStartPromise = null; });
+  }
+  return codexBridgeStartPromise;
+}
+
+ipcMain.handle('codex:getCatalog', async () => {
+  const service = await ensureCodexAppServer();
+  if (!service) return { ok: false, error: 'Codex bridge unavailable' };
+  try {
+    return { ok: true, models: await service.getCatalog() };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('codex:prepareThread', async (event, opts) => {
+  const service = await ensureCodexAppServer();
+  if (!service) return { ok: false, error: 'Codex bridge unavailable' };
+  try {
+    const safeCwd = assertInsideAllowedRoots(opts && opts.cwd);
+    const prepared = await service.prepareThread({
+      cwd: safeCwd,
+      threadId: opts && opts.threadId
+    });
+    const identity = prepared.mode === 'fresh'
+      ? { claimId: prepared.claimId }
+      : prepared.mode === 'resume'
+        ? { threadId: prepared.threadId }
+        : null;
+    if (!identity) throw new Error('invalid Codex thread preparation mode');
+    const binding = {
+      mode: prepared.mode,
+      ...identity,
+      cwd: safeCwd,
+      remoteUrl: prepared.remoteUrl
+    };
+    const issued = codexSpawnTicketStore.issue(binding, process.platform);
+    try {
+      await sendPtyControl({
+        type: 'codex-spawn-authorize',
+        ticket: issued.ticket,
+        ...binding,
+        expiresAt: issued.expiresAt
+      });
+    } finally {
+      codexSpawnTicketStore.discard(issued.ticket);
+    }
+    if (codexAppServer !== service || !service.isPreparationActive(prepared)) {
+      throw new Error('Codex bridge became unavailable before terminal attach');
+    }
+    diagLog('[codex-bridge] prepared', prepared.mode, 'terminal attach');
+    return { ok: true, ...prepared, cwd: safeCwd, spawnTicket: issued.ticket };
+  } catch (err) {
+    diagLog('[codex-bridge] prepare failed:', err && err.message);
+    return { ok: false, error: String(err && err.message || err) };
+  }
+});
+
+ipcMain.handle('codex:getThreadState', (event, threadId) => {
+  return codexAppServer ? codexAppServer.getThreadState(threadId) : null;
+});
+
+// --- Codex watcher -------------------------------------------------------
+//
+// The codex plugin resolves its state root from CLAUDE_PLUGIN_DATA, which
+// Claude Code derives from the session's config dir. A column running under a
+// secondary subscription profile therefore writes its job logs under that
+// profile's directory, NOT ~/.claude. Resolve per column, never hardcode.
+
+const CODEX_PLUGIN_DATA_SUBPATH = path.join('plugins', 'data', 'codex-openai-codex', 'state');
+
+// Reuse claudeRootFor() rather than reading profile.env.CLAUDE_CONFIG_DIR
+// directly: it already coalesces a persisted column's `profileId: null` to
+// PRIMARY_ID, which means "Primary, explicitly" for a column and must NOT fall
+// through the cascade to a non-Primary default. The column's Codex logs live
+// wherever the column actually spawned, so this must match spawn resolution.
+function codexWatchStateRoot(sel) {
+  return path.join(claudeRootFor(sel && sel.columnProfileId), CODEX_PLUGIN_DATA_SUBPATH);
+}
+
+// Scan failures (EACCES, a state.json that never stops being malformed) are
+// otherwise indistinguishable from "no jobs yet" — codexWatchTick calls this
+// every tick, so log each faulting path once rather than spamming the log.
+// A missing file/dir (ENOENT) is the normal "not used yet" case and is not
+// logged at all.
+const codexWatchLoggedFailures = new Set();
+function codexWatchLogScanFault(key, err) {
+  if (err && err.code === 'ENOENT') return;
+  if (codexWatchLoggedFailures.has(key)) return;
+  codexWatchLoggedFailures.add(key);
+  console.error('[codex-watch] scan fault for ' + key + ':', String((err && err.message) || err));
+}
+
+// Enumerate <root>/*/state.json. A torn read is expected - the companion does
+// not write these atomically - so a bad file is skipped for this tick rather
+// than failing the whole scan.
+//
+// Memoized behind a short TTL, keyed by root: with N columns each poll tick
+// (and each openStream/resolve call) independently triggers a synchronous
+// readdirSync + readFileSync/JSON.parse per state.json, on the process
+// driving every window. Windows sharing a profile (the common case) then
+// collapse onto one scan per TTL window instead of one each.
+const CODEX_WATCH_SCAN_TTL_MS = 500;
+const codexWatchScanCache = new Map(); // root -> { at, scans }
+
+function codexWatchScanUncached(root) {
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch (err) { codexWatchLogScanFault(root, err); return []; }
+
+  const scans = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const statePath = path.join(root, entry.name, 'state.json');
+    try {
+      const raw = fs.readFileSync(statePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      scans.push({ workspaceKey: entry.name, jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [] });
+    } catch (err) { codexWatchLogScanFault(statePath, err); }
+  }
+  return scans;
+}
+
+function codexWatchScan(root) {
+  const cached = codexWatchScanCache.get(root);
+  const now = Date.now();
+  if (cached && (now - cached.at) < CODEX_WATCH_SCAN_TTL_MS) return cached.scans;
+
+  const scans = codexWatchScanUncached(root);
+  codexWatchScanCache.set(root, { at: now, scans });
+  return scans;
+}
+
+// Resolve a log path from renderer-supplied ids. workspaceKey is accepted ONLY
+// if it exactly matches a directory main itself enumerated, so traversal is
+// structurally impossible rather than filtered. '.'/'..' are rejected
+// explicitly even though the character class already excludes path
+// separators — defence in depth against a jobId of exactly '.' or '..'.
+function codexWatchResolveLogPath(sel, workspaceKey, jobId) {
+  if (typeof workspaceKey !== 'string' || typeof jobId !== 'string') return null;
+  if (!/^[A-Za-z0-9._-]+$/.test(jobId)) return null;
+  if (jobId === '.' || jobId === '..') return null;
+
+  const root = codexWatchStateRoot(sel);
+  const known = codexWatchScan(root).some((s) => s.workspaceKey === workspaceKey);
+  if (!known) return null;
+
+  return CodexWatchTail.logPathFor(path, root, workspaceKey, jobId);
+}
+
+ipcMain.handle('codexwatch:open', (event, opts) => {
+  try {
+    createCodexWatchWindow(opts || {});
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+// Fire-and-forget notification from the main window's applyVisualTheme so
+// any already-open watcher windows follow a live light/dark toggle instead
+// of staying stuck at whatever theme they were opened with.
+ipcMain.on('codexwatch:themeChanged', (event, theme) => {
+  if (theme !== 'light' && theme !== 'dark') return;
+  codexWatchLastTheme = theme;
+  for (const win of codexWatchWindows.keys()) {
+    if (!win.isDestroyed()) win.webContents.send('codexwatch:theme', theme);
+  }
+});
+
+ipcMain.handle('codexwatch:listJobs', (event, sel) => {
+  // A registered watcher window's own sel (columnProfileId + sessionId) is
+  // authoritative — trusting the renderer's copy would resolve the wrong
+  // profile's state root for a fraction of a second on load (the page has no
+  // way to know its own columnProfileId until main tells it), so ignore
+  // whatever the caller sent whenever we already know better.
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const entry = win && codexWatchWindows.get(win);
+  const opts = (entry && entry.sel) || sel || {};
+  if (!opts.sessionId) return { ok: true, jobs: [] };
+  try {
+    const scans = codexWatchScan(codexWatchStateRoot(opts));
+    return { ok: true, jobs: CodexWatchJobs.selectSessionJobs(scans, opts.sessionId, Date.now()) };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+const CODEX_WATCH_FAST_MS = 1000;
+const CODEX_WATCH_SLOW_MS = 3000;
+
+// win -> { sel, streams: Map<streamKey, { workspaceKey, jobId, offset, carry }> }
+const codexWatchWindows = new Map();
+let codexWatchTimer = null;
+
+// '::' is a safe separator: the plugin's dir slug and job ids are both
+// [A-Za-z0-9._-], so neither can contain a colon and the key is unambiguous.
+function streamKey(workspaceKey, jobId) { return workspaceKey + '::' + jobId; }
+
+// The io the pure tail module reaches the filesystem through — real fs here,
+// a fake in lib/codex-watch-tail's own tests.
+const codexWatchTailIo = { statSync: fs.statSync, openSync: fs.openSync, readSync: fs.readSync, closeSync: fs.closeSync };
+
+function codexWatchReadDelta(logPath, state) {
+  const delta = CodexWatchTail.readDelta(codexWatchTailIo, logPath, state);
+  if (!delta) return null;
+
+  const parsed = CodexWatchLog.parseLogChunk(state.carry, delta.chunk);
+  state.carry = parsed.carry;
+  return { events: parsed.events, preview: CodexWatchLog.previewEvent(state.carry) };
+}
+
+function codexWatchTick() {
+  try {
+    for (const [win, entry] of codexWatchWindows) {
+      if (win.isDestroyed()) { codexWatchWindows.delete(win); continue; }
+
+      // A window/webContents can be torn down at any point during this
+      // iteration (between the isDestroyed() check above and a send below) —
+      // any throw here must not escape the loop, or a later window's streams
+      // go unpolled and (more importantly) codexWatchSchedule() below never
+      // runs, permanently killing the poll for every remaining window too.
+      try {
+        let scans = [];
+        try {
+          scans = codexWatchScan(codexWatchStateRoot(entry.sel));
+          const jobs = CodexWatchJobs.selectSessionJobs(scans, entry.sel.sessionId, Date.now());
+          win.webContents.send('codexwatch:jobs', { sessionId: entry.sel.sessionId, jobs });
+        } catch { /* transient scan failure — codexWatchScan already logs faults once; try again next tick */ }
+
+        // Reuse this tick's scan to validate each open stream's workspaceKey
+        // rather than calling codexWatchResolveLogPath (which re-scans the
+        // directory) once per stream per tick.
+        const knownWorkspaceKeys = new Set(scans.map((s) => s.workspaceKey));
+        const root = codexWatchStateRoot(entry.sel);
+
+        for (const state of entry.streams.values()) {
+          if (!knownWorkspaceKeys.has(state.workspaceKey)) continue;
+          const logPath = CodexWatchTail.logPathFor(path, root, state.workspaceKey, state.jobId);
+          let delta = null;
+          try { delta = codexWatchReadDelta(logPath, state); }
+          catch { continue; }
+          if (!delta) continue;
+          win.webContents.send('codexwatch:delta', {
+            workspaceKey: state.workspaceKey,
+            jobId: state.jobId,
+            events: delta.events,
+            preview: delta.preview
+          });
+        }
+      } catch { /* window destroyed mid-tick — skip it this tick, isDestroyed() cleans it up next time */ }
+    }
+  } finally {
+    codexWatchSchedule();
+  }
+}
+
+function codexWatchSchedule() {
+  if (codexWatchTimer) { clearTimeout(codexWatchTimer); codexWatchTimer = null; }
+  if (!codexWatchWindows.size) return;
+  let anyStream = false;
+  for (const entry of codexWatchWindows.values()) if (entry.streams.size) anyStream = true;
+  codexWatchTimer = setTimeout(codexWatchTick, anyStream ? CODEX_WATCH_FAST_MS : CODEX_WATCH_SLOW_MS);
+}
+
+function codexWatchRegisterWindow(win, sel) {
+  codexWatchWindows.set(win, { sel: sel, streams: new Map() });
+  codexWatchSchedule();
+}
+
+function codexWatchUnregisterWindow(win) {
+  codexWatchWindows.delete(win);
+  codexWatchSchedule();
+}
+
+ipcMain.handle('codexwatch:openStream', (event, opts) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const entry = win && codexWatchWindows.get(win);
+  if (!entry) return { ok: false, error: 'not a watcher window' };
+
+  const logPath = codexWatchResolveLogPath(entry.sel, opts && opts.workspaceKey, opts && opts.jobId);
+  if (!logPath) return { ok: false, error: 'unknown job' };
+
+  const state = { workspaceKey: opts.workspaceKey, jobId: opts.jobId, offset: 0, carry: '' };
+  entry.streams.set(streamKey(opts.workspaceKey, opts.jobId), state);
+  codexWatchSchedule();
+
+  let delta = null;
+  try { delta = codexWatchReadDelta(logPath, state); }
+  catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
+
+  return { ok: true, events: (delta && delta.events) || [], preview: (delta && delta.preview) || null };
+});
+
+ipcMain.handle('codexwatch:closeStream', (event, opts) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const entry = win && codexWatchWindows.get(win);
+  if (entry && opts) entry.streams.delete(streamKey(opts.workspaceKey, opts.jobId));
+  codexWatchSchedule();
+  return { ok: true };
+});
 
 function parseAgentResult(output) {
   const result = { summary: '', attentionItems: [] };
@@ -7280,7 +8336,7 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
       if (!line.trim()) continue;
       try {
         const evt = JSON.parse(line);
-        if (evt && evt.session_id) rememberBackgroundSession(evt.session_id, child);
+        if (evt && evt.session_id) rememberBackgroundSession(evt.session_id, child, opts.profileId);
         let text = '';
         if (evt.type === 'assistant' && evt.message && evt.message.content) {
           evt.message.content.forEach(block => {
@@ -7320,22 +8376,27 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
 
 const runningHeadless = new Map(); // runId -> { child, cleanup, projectPath, cancelled? }
 
-// Session-ids of invisible background runs (headless, automation agents, managers).
-// Their Stop hooks share the project cwd with interactive columns, so we tag their
-// broadcast events to keep them from arming voice catch-up on a real column.
-const backgroundSessionIds = new Set();
+// Session-ids of invisible background runs (headless, automation agents, managers),
+// mapped to the profile they ran under. Their Stop hooks share the project cwd with
+// interactive columns, so we tag their broadcast events to keep them from arming
+// voice catch-up on a real column. Keyed by id -> profileId (not a bare Set) because
+// an automation's transcript lands under ITS profile's projects/ dir — an interactive
+// column must only treat a background id as claimed when it shares that profile,
+// otherwise a same-named session under a different root could (in principle) block
+// a column on another subscription from ever detecting its own new session.
+const backgroundSessionIds = new Map();
 function broadcastBackgroundSessionIds() {
   try {
-    const ids = Array.from(backgroundSessionIds);
-    BrowserWindow.getAllWindows().forEach((w) => { try { w.webContents.send('sessions:backgroundIds', ids); } catch {} });
+    const entries = Array.from(backgroundSessionIds, ([id, profileId]) => ({ id, profileId }));
+    BrowserWindow.getAllWindows().forEach((w) => { try { w.webContents.send('sessions:backgroundIds', entries); } catch {} });
   } catch (e) {}
 }
-function rememberBackgroundSession(id, child) {
+function rememberBackgroundSession(id, child, profileId) {
   if (!id) return;
-  backgroundSessionIds.add(id);
+  backgroundSessionIds.set(id, profileId || PRIMARY_ID);
   if (child) child.__bgSessionId = id;
   if (backgroundSessionIds.size > 200) { // defensive bound; session-ids are never reused
-    const oldest = backgroundSessionIds.values().next().value;
+    const oldest = backgroundSessionIds.keys().next().value;
     backgroundSessionIds.delete(oldest);
   }
   broadcastBackgroundSessionIds();
@@ -7402,11 +8463,18 @@ function runHeadless(projectPath, prompt) {
   }
 
   const endpointEnv = getProjectEndpointEnvByPath(projectPath);
+  // Headless runs must inherit the project's assigned profile the same way
+  // interactive columns do — otherwise a headless run silently bills Primary's
+  // subscription (and its background session gets keyed to PRIMARY_ID for
+  // voice catch-up, see rememberBackgroundSession) while the project is
+  // actually assigned to a secondary.
+  const profile = resolveProfileFor({ projectProfileId: getProjectProfileIdByPath(projectPath) });
   const spawned = spawnHeadlessClaude(prompt, projectPath, {
     skipPermissions: !!spawnOptions.skipPermissions,
     bare: !!spawnOptions.bare,
     model: endpointEnv ? null : (spawnOptions.model || null),
-    env: endpointEnv,
+    env: Object.assign({}, endpointEnv, profile.env),
+    profileId: profile.id,
     onText: (text) => {
       try { outputStream.write(text); } catch { /* ignore */ }
       if (mainWindow) mainWindow.webContents.send('headless:output', { projectPath, runId, chunk: text });
@@ -7640,11 +8708,18 @@ function spawnInteractiveScheduled(prompt, cwd, opts) {
     sessionId: opts.sessionId,
     skipPermissions: opts.skipPermissions,
     model: opts.model,
-    hasEndpoint: !!opts.env,
+    hasEndpoint: !!(opts.env && opts.env.ANTHROPIC_BASE_URL),
     mcpConfigPath: opts.mcpConfigPath,
     strictMcp: opts.strictMcp,
     extraArgs: opts.extraArgs
   });
+  // Unlike spawnHeadlessClaude (which only learns session_id from stdout),
+  // an interactive-scheduled run's sessionId is chosen by the caller up
+  // front — register it against its profile right away (after args build
+  // so a throw there can't leak an id into rememberBackgroundSession) so
+  // voice catch-up (sessions:getBackgroundIds) resolves this background
+  // run's transcript under the right subscription's root, not Primary's.
+  if (opts.sessionId) rememberBackgroundSession(opts.sessionId, opts, opts.profileId);
 
   // Write the scoped MCP config (if any) — the pty-spawned claude reads it by path.
   if (opts.mcpConfig && opts.mcpConfigPath) {
@@ -7682,6 +8757,7 @@ function spawnInteractiveScheduled(prompt, cwd, opts) {
     if (watchdog) { clearTimeout(watchdog); watchdog = null; }
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     if (injectTimer) { clearInterval(injectTimer); injectTimer = null; }
+    forgetBackgroundSession(opts);
     try {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'kill', id: ptyId }));
     } catch { /* ignore */ }
@@ -7812,7 +8888,8 @@ function spawnInteractiveScheduled(prompt, cwd, opts) {
   return { kill: () => finish({ status: 'interrupted', output: capTail(denoiseInteractive(buffer), 8000), lastError: 'Killed' }) };
 }
 
-async function runAgent(automationId, agentId) {
+async function runAgent(automationId, agentId, opts) {
+  opts = opts || {};
   let data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
   if (!automation) return;
@@ -8011,7 +9088,14 @@ async function runAgent(automationId, agentId) {
     mcpOpts = { mcpConfig: { mcpServers: mongoServer }, mcpConfigPath, allowedTools: mongoAllowed, strictMcp: false };
   }
 
-  const agentEnv = getAgentEndpointEnv(agent, automation.projectPath);
+  // A manager rerunning one of its own agents passes its already-resolved
+  // profile id explicitly, so the worker never re-resolves independently and
+  // potentially lands on a different subscription than the manager that
+  // triggered it (see runManager's rerun_agent/rerun_all action handling).
+  const profile = opts.forcedProfileId
+    ? resolveProfileFor({ columnProfileId: opts.forcedProfileId })
+    : resolveProfileFor({ columnProfileId: automation.profileId, projectProfileId: getProjectProfileIdByPath(automation.projectPath) });
+  const agentEnv = Object.assign({}, getAgentEndpointEnv(agent, automation.projectPath), profile.env);
 
   // --- Interactive scheduled run (opt-in) ---
   if (agent.sessionMode === 'interactive') {
@@ -8024,6 +9108,7 @@ async function runAgent(automationId, agentId) {
       skipPermissions: !!agent.skipPermissions,
       model: agent.endpointModel || null,
       env: agentEnv,
+      profileId: profile.id,
       mcpConfig: mcpOpts ? mcpOpts.mcpConfig : null,
       mcpConfigPath: mcpOpts ? mcpOpts.mcpConfigPath : null,
       strictMcp: mcpOpts ? mcpOpts.strictMcp : false,
@@ -8065,6 +9150,7 @@ async function runAgent(automationId, agentId) {
     strictMcp: mcpOpts ? mcpOpts.strictMcp : false,
     extraArgs: Array.isArray(agent.extraArgs) ? agent.extraArgs : null,
     env: agentEnv,
+    profileId: profile.id,
     onRaw: (raw) => { outputChunks.push(raw); },
     onText: (text) => {
       textChunks.push(text);
@@ -8277,13 +9363,16 @@ async function runManager(automationId) {
     }
   }
 
-  const managerEndpointEnv = getProjectEndpointEnvByPath(automation.projectPath);
+  // Resolved once, up front, so every worker this manager re-triggers below can
+  // be pinned to the SAME profile via forcedProfileId — an unset worker would
+  // otherwise re-resolve independently and could land on a different
+  // subscription than the manager that's driving it, burning two at once.
+  const managerProfile = resolveProfileFor({ columnProfileId: automation.profileId, projectProfileId: getProjectProfileIdByPath(automation.projectPath) });
+  const managerEndpointEnv = Object.assign({}, getProjectEndpointEnvByPath(automation.projectPath), managerProfile.env);
   const child = spawn(getClaudePath(), args, {
     cwd: cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: managerEndpointEnv
-      ? Object.assign({}, process.env, managerEndpointEnv)
-      : Object.assign({}, process.env)
+    env: Object.assign({}, process.env, managerEndpointEnv)
   });
 
   runningManagers.set(automationId, child);
@@ -8299,7 +9388,7 @@ async function runManager(automationId) {
       if (!line.trim()) continue;
       try {
         const evt = JSON.parse(line);
-        if (evt && evt.session_id) rememberBackgroundSession(evt.session_id, child);
+        if (evt && evt.session_id) rememberBackgroundSession(evt.session_id, child, managerProfile.id);
         let text = '';
         if (evt.type === 'assistant' && evt.message && evt.message.content) {
           evt.message.content.forEach(block => { if (block.type === 'text') text += block.text; });
@@ -8356,7 +9445,7 @@ async function runManager(automationId) {
         if (action.type === 'rerun_agent' && action.agentId) {
           if (currentRetries < maxRetries) {
             managerRetryCounters.set(automationId, currentRetries + 1);
-            runAgent(automationId, action.agentId);
+            runAgent(automationId, action.agentId, { forcedProfileId: managerProfile.id });
             actionsExecuted = true;
           } else {
             // Exceeded retries — escalate
@@ -8370,7 +9459,7 @@ async function runManager(automationId) {
             const freshA = freshD.automations.find(a => a.id === automationId);
             if (freshA) {
               freshA.agents.forEach(ag => {
-                if (ag.enabled && ag.runMode === 'independent') runAgent(automationId, ag.id);
+                if (ag.enabled && ag.runMode === 'independent') runAgent(automationId, ag.id, { forcedProfileId: managerProfile.id });
               });
             }
             actionsExecuted = true;
@@ -8677,6 +9766,10 @@ if (!gotLock) {
     startHookServer();
     createTray();
     createWindow();
+    // Codex is a progressive enhancement. Bring up the terminal/window first;
+    // the bounded app-server connection and private sidecar configuration run
+    // in the background and prepare/catalog IPC awaits this same promise.
+    ensureCodexAppServer().catch((error) => diagLog('[codex-bridge] async startup failed:', error && error.message));
     setupAutoUpdater();
     migrateLoopsToAutomations();
     sweepMcpTmp();
@@ -8801,6 +9894,16 @@ app.on('before-quit', () => {
   _headroomShuttingDown = true;    // block any in-flight watchdog restart from respawning the proxy
   stopHeadroomWatchdog();          // stop supervising before we intentionally kill the proxy
   stopHeadroomProxyProcess();
+  step('codexAppServer.stop');
+  if (codexAppServer) {
+    codexAppServer.stop();
+    codexAppServer = null;
+    codexBridgeRemoteUrl = '';
+  }
+  if (codexStartingService) {
+    codexStartingService.stop();
+    codexStartingService = null;
+  }
   step('killPtyServer');
   killPtyServer();
   // The hook server's listening socket keeps the event loop alive; close it

@@ -160,12 +160,17 @@
               <button class="explorer-refresh" id="btn-add-automation" title="New Automation">+</button>
               <button class="explorer-refresh" id="btn-import-automations" title="Import Automations">&#8615;</button>
               <button class="explorer-refresh" id="btn-export-automations" title="Export All">&#8613;</button>
-              <button class="explorer-refresh" id="btn-pause-all-automations" title="Pause All Automations">&#10074;&#10074;</button>
-              <button class="explorer-refresh" id="btn-resume-all-automations" title="Resume All Automations">&#9654;</button>
+              <button class="explorer-refresh" id="btn-pause-all-automations" title="Disable all automations in this project">&#10074;&#10074;</button>
+              <button class="explorer-refresh" id="btn-resume-all-automations" title="Enable all automations in this project">&#9654;</button>
               <button class="explorer-refresh" id="btn-automations-runwindow-panel" title="Global run window">&#128344;</button>
               <button class="explorer-refresh" id="btn-refresh-automations" title="Refresh">&#8635;</button>
               <button id="btn-clear-automations" class="explorer-refresh" title="Clear All Automations">&#128465;</button>
             </div>
+          </div>
+          <div id="automations-global-paused-banner" class="automations-global-paused-banner hidden">
+            <span class="automations-global-paused-banner-icon">&#9888;</span>
+            <span id="automations-global-paused-banner-text" class="automations-global-paused-banner-text"></span>
+            <button id="btn-automations-global-paused-resume" class="automations-global-paused-banner-resume">Resume</button>
           </div>
           <div id="automations-runwindow-strip" class="automations-runwindow-strip hidden" title="Click to edit the run window">
             <span class="automations-runwindow-strip-dot"></span>
@@ -303,6 +308,18 @@
                   <option value="codex-default">Codex default</option>
                 </select>
               </div>
+              <div class="spawn-option spawn-codex-approval-row codex-hidden" id="opt-codex-model-row" title="Model Codex starts with (--model). Leave on 'Codex default' to inherit whatever ~/.codex/config.toml specifies.">
+                <label for="opt-codex-model">Model:</label>
+                <select id="opt-codex-model"></select>
+              </div>
+              <div class="spawn-option spawn-codex-approval-row codex-hidden" id="opt-codex-effort-row" title="Reasoning effort (model_reasoning_effort). Higher rungs think longer and consume more of your weekly allowance. Unsupported model/effort pairs are silently normalised by the CLI rather than rejected.">
+                <label for="opt-codex-effort">Effort:</label>
+                <select id="opt-codex-effort"></select>
+              </div>
+              <div class="spawn-option spawn-codex-approval-row codex-hidden" id="opt-codex-tier-row" title="Service tier (service_tier). 'Priority (faster)' is the priority-processing tier — noticeably quicker, but it may draw down your subscription allowance faster.">
+                <label for="opt-codex-tier">Speed:</label>
+                <select id="opt-codex-tier"></select>
+              </div>
               <div class="spawn-divider codex-hidden" id="spawn-codex-divider"></div>
               <label class="spawn-option" id="opt-headroom-label">
                 <input type="checkbox" id="opt-use-headroom"> Use Headroom
@@ -350,6 +367,12 @@
                 <label for="opt-endpoint">Endpoint:</label>
                 <select id="opt-endpoint">
                   <option value="">Anthropic (cloud)</option>
+                </select>
+              </div>
+              <div class="spawn-option spawn-profile-row hidden" id="opt-profile-row">
+                <label for="opt-profile">Subscription:</label>
+                <select id="opt-profile">
+                  <option value="">Inherit</option>
                 </select>
               </div>
               <div class="spawn-option spawn-model-row" id="opt-model-row">
@@ -416,7 +439,10 @@
           <span id="automations-flyout-counts" class="automations-flyout-counts"></span>
         </div>
         <div class="automations-flyout-actions">
-          <button id="btn-automations-global-toggle" class="automations-global-toggle" title="Pause/Resume all automations">&#9654;</button>
+          <button id="btn-automations-global-toggle" class="automations-global-toggle" title="Pause scheduler">
+            <span id="automations-global-toggle-glyph" class="automations-global-toggle-glyph">&#10074;&#10074;</span>
+            <span id="automations-global-toggle-label" class="automations-global-toggle-label">Pause scheduler</span>
+          </button>
           <div class="automations-runwindow-wrap" style="position:relative;display:inline-block;">
             <button id="btn-automations-runwindow" class="automations-flyout-action" title="Run window">&#128344;</button>
             <span id="automations-runwindow-indicator" class="automations-runwindow-indicator hidden"></span>
@@ -465,6 +491,7 @@
       <div class="modal-body settings-body">
         <div class="settings-tabs" role="tablist">
           <button class="settings-tab active" data-settings-tab="general" role="tab">General</button>
+          <button class="settings-tab" data-settings-tab="subscriptions" role="tab">Subscriptions</button>
           <button class="settings-tab" data-settings-tab="notifications" role="tab">Notifications</button>
           <button class="settings-tab" data-settings-tab="automations" role="tab">Automations</button>
           <button class="settings-tab" data-settings-tab="sync" role="tab">Sync</button>
@@ -488,6 +515,17 @@
               </select>
               <span class="settings-hint">Used as the initial denominator for column context meters. "Auto" starts at 200k and promotes to 1M when usage exceeds 200k.</span>
             </div>
+          </div>
+          <div class="settings-pane" data-settings-pane="subscriptions">
+            <div class="settings-field">
+              <span class="settings-hint">Assign different Claude Code subscriptions to projects, workspaces, columns and automations. Each is a separate Anthropic account, kept in its own config directory. "Primary" is your existing <code>~/.claude</code> account and can't be deleted.</span>
+            </div>
+            <div id="profiles-list" class="profiles-list"></div>
+            <div class="profiles-add-row">
+              <input type="text" id="profiles-add-name" class="settings-input" placeholder="Subscription name (e.g. Work)" spellcheck="false">
+              <button id="profiles-add-btn" class="settings-browse-btn">+ Add subscription</button>
+            </div>
+            <div id="profiles-add-status" class="settings-hint profiles-add-status"></div>
           </div>
           <div class="settings-pane" data-settings-pane="notifications">
             <label class="settings-toggle">
@@ -825,6 +863,19 @@
     </div>
   </div>
 
+  <!-- Subscription assignment picker — shared by Project settings and the Workspace row context menus -->
+  <div id="profile-assign-modal" class="modal-overlay hidden">
+    <div class="modal-dialog profile-assign-dialog">
+      <div class="modal-header">
+        <span class="modal-title" id="profile-assign-title">Subscription</span>
+        <span id="profile-assign-close" class="modal-close">&times;</span>
+      </div>
+      <div class="modal-body profile-assign-body">
+        <select id="profile-assign-select" class="settings-input"></select>
+      </div>
+    </div>
+  </div>
+
   <!-- Update notification -->
   <div id="update-bar" class="update-bar hidden">
     <span id="update-message"></span>
@@ -901,6 +952,7 @@
             </div>
             <div class="cost-summary">
               <div class="cost-card"><div class="cost-label">Total</div><div class="cost-value" id="cost-total">—</div></div>
+              <div class="cost-card"><div class="cost-label">Fable</div><div class="cost-value" id="cost-fable">—</div></div>
               <div class="cost-card"><div class="cost-label">Opus</div><div class="cost-value" id="cost-opus">—</div></div>
               <div class="cost-card"><div class="cost-label">Sonnet</div><div class="cost-value" id="cost-sonnet">—</div></div>
               <div class="cost-card"><div class="cost-label">Haiku</div><div class="cost-value" id="cost-haiku">—</div></div>
@@ -1068,6 +1120,12 @@
           <div id="automation-name-group" class="automation-form-group" style="display:none;">
             <label for="automation-name">Automation Name</label>
             <input type="text" id="automation-name" class="automation-input" placeholder="e.g. TaskBoard Pipeline" spellcheck="false">
+          </div>
+
+          <!-- Subscription (which Claude account this automation runs on) -->
+          <div class="automation-form-group">
+            <label for="automation-profile">Subscription</label>
+            <select id="automation-profile" class="automation-input"></select>
           </div>
 
           <!-- Run window (optional) -->
@@ -1550,7 +1608,10 @@
   <script src="./lib/clawd-position.js"></script>
   <script src="./lib/clawd-widget.js"></script>
   <script src="./lib/permission-mode.js"></script>
+  <script src="./lib/codex-models.js"></script>
+  <script src="./lib/codex-badge-placement.js"></script>
   <script src="./lib/codex-spawn.js"></script>
+  <script src="./lib/codex-handoff.js"></script>
   <script src="./lib/effort-relaunch.js"></script>
   <script src="./lib/spawn-session.js"></script>
   <script src="./lib/resize-scheduler.js"></script>
@@ -1565,8 +1626,11 @@
   <script src="./lib/reflow-text.js"></script>
   <script src="./lib/osc52.js"></script>
   <script src="./lib/menu-position.js"></script>
+  <script src="./lib/claude-models.js"></script>
   <script src="./lib/headroom-env.js"></script>
   <script src="./lib/mcp-project.js"></script>
+  <script src="./lib/automations-pause-ui.js"></script>
+  <script src="./lib/codex-watch-jobs.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

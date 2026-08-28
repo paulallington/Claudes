@@ -10,7 +10,15 @@ const {
   CODEX_APPROVAL_PRESETS,
   DEFAULT_CODEX_APPROVAL,
   codexApprovalArgs,
-  codexApprovalLabelFromArgs
+  codexTuningArgs,
+  codexTuningFromArgs,
+  buildCodexRestore,
+  codexPersistShape,
+  codexApprovalLabelFromArgs,
+  isCodexThreadId,
+  buildCodexRemoteAttach,
+  buildCodexRemoteResume,
+  codexContextDisplay
 } = require('../lib/codex-spawn');
 
 test('CODEX_APPROVAL_PRESETS: exact keys and order', () => {
@@ -90,4 +98,213 @@ test('columnUsesClaudeChrome: true for Claude, false for cmd columns', () => {
   assert.strictEqual(columnUsesClaudeChrome(null), true);
   assert.strictEqual(columnUsesClaudeChrome({ cmd: 'codex' }), false);
   assert.strictEqual(columnUsesClaudeChrome({ cmd: 'dotnet' }), false);
+});
+
+// --- model / effort / service-tier tuning -----------------------------------
+// Every axis is opt-in: omitted or empty emits nothing, so a Codex column
+// spawned without an explicit choice must be byte-identical to one spawned by
+// the old two-argument signature. That backward compatibility is the point.
+
+test('tuning: omitted or empty emits no flags (falls back to config.toml)', () => {
+  assert.deepStrictEqual(codexTuningArgs(undefined), []);
+  assert.deepStrictEqual(codexTuningArgs({}), []);
+  assert.deepStrictEqual(codexTuningArgs({ model: '', effort: '', tier: '' }), []);
+  // the old 2-arg call must be unchanged by this feature
+  assert.deepStrictEqual(
+    buildCodexSpawn(null, 'yolo').args,
+    ['--dangerously-bypass-approvals-and-sandbox']
+  );
+});
+
+test('tuning: model is a flag, effort and tier are -c config overrides', () => {
+  assert.deepStrictEqual(
+    codexTuningArgs({ model: 'gpt-5.6-sol', effort: 'ultra', tier: 'priority' }),
+    ['--model', 'gpt-5.6-sol',
+     '-c', 'model_reasoning_effort=ultra',
+     '-c', 'service_tier=priority']
+  );
+});
+
+test('tuning: values that would corrupt argv are refused', () => {
+  // whitespace would split into extra argv entries; a leading dash reads as a flag
+  assert.deepStrictEqual(codexTuningArgs({ model: 'a b' }), []);
+  assert.deepStrictEqual(codexTuningArgs({ effort: '--dangerously-bypass-approvals-and-sandbox' }), []);
+  assert.deepStrictEqual(codexTuningArgs({ tier: '   ' }), []);
+});
+
+test('approval badge survives appended tuning flags', () => {
+  // regression: the reverse map compares the WHOLE array, so without stripping
+  // the tuning flags every tuned column would have reported 'Custom'
+  const tuned = buildCodexSpawn(null, 'auto', { model: 'gpt-5.6-sol', effort: 'max' }).args;
+  assert.strictEqual(codexApprovalLabelFromArgs(tuned), 'Auto');
+  const bypass = buildCodexSpawn(null, 'yolo', { tier: 'priority' }).args;
+  assert.strictEqual(codexApprovalLabelFromArgs(bypass), 'Yolo (bypass)');
+  // tuning alone, no preset, is still 'Codex default' not 'Custom'
+  assert.strictEqual(codexApprovalLabelFromArgs(codexTuningArgs({ model: 'gpt-5.6-terra' })), 'Codex default');
+});
+
+test('tuning round-trips back out of cmdArgs', () => {
+  const args = buildCodexSpawn(null, 'read-only',
+    { model: 'gpt-5.3-codex-spark', effort: 'low', tier: 'default' }).args;
+  assert.deepStrictEqual(codexTuningFromArgs(args), {
+    model: 'gpt-5.3-codex-spark', effort: 'low', tier: 'default'
+  });
+  assert.deepStrictEqual(codexTuningFromArgs([]), { model: '', effort: '', tier: '' });
+  assert.deepStrictEqual(codexTuningFromArgs(null), { model: '', effort: '', tier: '' });
+});
+
+// --- SECURITY: sessions.json must never be able to name a program -----------
+// <project>/.claudes/sessions.json lives INSIDE the repository, so it is
+// attacker-controlled, and restoreSessions reads it automatically on project
+// open with no confirmation. Persisting a raw `cmd` there turned a data file
+// into an execution vector. The persisted shape is intent only; the command
+// comes from our constant and every value is validated against the catalogue.
+
+const CodexModels = require('../lib/codex-models');
+
+test('SECURITY: a raw cmd/cmdArgs entry is never honoured on restore', () => {
+  assert.strictEqual(
+    buildCodexRestore({ cmd: 'powershell', cmdArgs: ['-c', 'calc'] }, '/x', CodexModels),
+    null
+  );
+  assert.strictEqual(buildCodexRestore({ cmd: 'codex' }, '/x', CodexModels), null);
+  assert.strictEqual(buildCodexRestore(null, '/x', CodexModels), null);
+  assert.strictEqual(buildCodexRestore({ kind: 'notcodex' }, '/x', CodexModels), null);
+});
+
+test('SECURITY: restore always spawns OUR command, never the file\'s', () => {
+  const spec = buildCodexRestore({ kind: 'codex', codexPreset: 'yolo' }, '/x', CodexModels);
+  assert.strictEqual(spec.opts.cmd, 'codex');
+});
+
+test('SECURITY: unrecognised catalogue values are dropped, not passed through', () => {
+  const spec = buildCodexRestore({
+    kind: 'codex', codexPreset: 'yolo',
+    codexModel: 'powershell', codexEffort: '-c evil', codexTier: 'nonsense'
+  }, '/x', CodexModels);
+  assert.deepStrictEqual(spec.args, ['--dangerously-bypass-approvals-and-sandbox']);
+  assert.ok(!spec.args.join(' ').includes('powershell'));
+});
+
+test('SECURITY: an unknown preset falls back to the default, not to raw input', () => {
+  const spec = buildCodexRestore({ kind: 'codex', codexPreset: 'evil-preset' }, '/x', CodexModels);
+  assert.deepStrictEqual(spec.args, codexApprovalArgs(DEFAULT_CODEX_APPROVAL));
+});
+
+test('persist shape carries no program name and no free-form argv', () => {
+  const args = buildCodexSpawn('/x', 'yolo', { model: 'gpt-5.6-sol', effort: 'ultra' }).args
+    .concat(['Read .claudes/h.md first...']);          // handoff seed prompt
+  const shape = codexPersistShape(args);
+  assert.deepStrictEqual(shape, {
+    kind: 'codex', codexPreset: 'yolo',
+    codexModel: 'gpt-5.6-sol', codexEffort: 'ultra', codexTier: ''
+  });
+  assert.ok(!Object.prototype.hasOwnProperty.call(shape, 'cmd'));
+  assert.ok(!Object.prototype.hasOwnProperty.call(shape, 'cmdArgs'));
+});
+
+test('a persisted shape round-trips back to the same argv', () => {
+  const original = buildCodexSpawn('/x', 'auto', { model: 'gpt-5.6-sol', effort: 'xhigh', tier: 'priority' });
+  const restored = buildCodexRestore(codexPersistShape(original.args), '/x', CodexModels);
+  assert.deepStrictEqual(restored.args, original.args);
+});
+
+test('approval badge survives a trailing handoff prompt (M2 regression)', () => {
+  const args = buildCodexSpawn('/x', 'yolo', {}).args.concat(['Read .claudes/h.md first...']);
+  assert.strictEqual(codexApprovalLabelFromArgs(args), 'Yolo (bypass)');
+});
+
+test('managed resume keeps semantic settings but validates bridge coordinates', () => {
+  const semantic = buildCodexSpawn('/x', 'auto', {
+    model: 'gpt-5.6-sol', effort: 'ultra', tier: 'priority'
+  }).args;
+  const threadId = '123e4567-e89b-42d3-a456-426614174000';
+  assert.strictEqual(isCodexThreadId(threadId), true);
+  assert.deepStrictEqual(buildCodexRemoteResume(semantic, {
+    threadId,
+    remoteUrl: 'ws://127.0.0.1:45678',
+    remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN'
+  }, 'Read .claudes/handoff.md first'), [
+    'resume', '-a', 'on-request', '-s', 'workspace-write',
+    '--model', 'gpt-5.6-sol',
+    '-c', 'model_reasoning_effort=ultra',
+    '-c', 'service_tier=priority',
+    '--remote', 'ws://127.0.0.1:45678',
+    '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN',
+    threadId, 'Read .claudes/handoff.md first'
+  ]);
+  assert.strictEqual(buildCodexRemoteResume(semantic, {
+    threadId: 'not-a-uuid', remoteUrl: 'ws://evil.example:80', remoteTokenEnvName: 'PATH'
+  }), null);
+});
+
+test('fresh managed attach keeps semantic settings without resume or a thread UUID', () => {
+  const semantic = buildCodexSpawn('/x', 'auto', {
+    model: 'gpt-5.6-sol', effort: 'ultra', tier: 'priority'
+  }).args;
+  assert.deepStrictEqual(buildCodexRemoteAttach(semantic, {
+    mode: 'fresh',
+    claimId: '0123456789abcdef0123456789abcdef',
+    cwd: 'D:\\Repo Space',
+    remoteUrl: 'ws://127.0.0.1:45678',
+    remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN'
+  }, 'Read .claudes/handoff.md first'), [
+    '-a', 'on-request', '-s', 'workspace-write',
+    '--model', 'gpt-5.6-sol',
+    '-c', 'model_reasoning_effort=ultra',
+    '-c', 'service_tier=priority',
+    '-C', 'D:\\Repo Space',
+    '--remote', 'ws://127.0.0.1:45678',
+    '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN',
+    'Read .claudes/handoff.md first'
+  ]);
+});
+
+test('managed attach rejects malformed or cross-mode identities and shell-active prompts', () => {
+  const bridge = {
+    cwd: 'D:\\Repo Space',
+    remoteUrl: 'ws://127.0.0.1:45678',
+    remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN'
+  };
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'fresh', claimId: 'ABCDEF0123456789ABCDEF0123456789' }), null);
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef', threadId: '123e4567-e89b-42d3-a456-426614174000' }), null);
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'resume', threadId: '123e4567-e89b-42d3-a456-426614174000', claimId: '0123456789abcdef0123456789abcdef' }), null);
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' }, 'hello & whoami'), null);
+  assert.strictEqual(buildCodexRemoteAttach([], { ...bridge, cwd: 'relative/path', mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' }), null);
+  const legalSpecialPath = 'D:\\Repo (100%)!';
+  const specialAttach = buildCodexRemoteAttach([], { ...bridge, cwd: legalSpecialPath, mode: 'fresh', claimId: '0123456789abcdef0123456789abcdef' });
+  assert.deepStrictEqual(specialAttach.slice(0, 2), ['-C', legalSpecialPath]);
+});
+
+test('persist/restore carries only a validated native thread id, never bridge details', () => {
+  const threadId = '123e4567-e89b-42d3-a456-426614174000';
+  const shape = codexPersistShape(buildCodexSpawn('/x', 'auto').args, threadId, true);
+  assert.strictEqual(shape.codexThreadId, threadId);
+  assert.ok(!('remoteUrl' in shape));
+  assert.ok(!('remoteTokenEnvName' in shape));
+
+  const restored = buildCodexRestore(shape, '/x', CodexModels);
+  assert.strictEqual(restored.opts.codexThreadId, threadId);
+  const bad = codexPersistShape([], 'not-a-uuid');
+  assert.ok(!('codexThreadId' in bad));
+  assert.ok(!('codexThreadId' in codexPersistShape([], threadId, false)));
+  assert.ok(!('codexThreadId' in buildCodexRestore({
+    kind: 'codex', codexThreadId: '../../inject'
+  }, '/x', CodexModels).opts));
+});
+
+test('codexContextDisplay: derives the top-meter presentation from canonical thread state', () => {
+  assert.deepStrictEqual(codexContextDisplay({
+    status: 'running',
+    settings: { model: 'gpt-5.6-sol', reasoningEffort: 'ultra', serviceTier: 'priority' },
+    context: { usedTokens: 123456, modelContextWindow: 1000000, percent: 12.3456 }
+  }), {
+    usedTokens: 123456,
+    limit: 1000000,
+    percent: 12.3456,
+    text: '123k/1M',
+    title: 'Codex context: 123,456 / 1,000,000 tokens (12%)\nSol 5.6 · Ultra · Priority (faster) · running'
+  });
+  assert.strictEqual(codexContextDisplay({ context: null }), null);
+  assert.strictEqual(codexContextDisplay({ context: { usedTokens: -1, modelContextWindow: 0 } }), null);
 });

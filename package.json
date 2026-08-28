@@ -1,6 +1,6 @@
 {
   "name": "claudes",
-  "version": "1.9.55",
+  "version": "1.9.67",
   "description": "Multi-column Claude Code terminal desktop app",
   "author": {
     "name": "The Code Guy",
@@ -55,6 +55,8 @@
       "renderer.js",
       "platform-detect.js",
       "index.html",
+      "codex-watch.html",
+      "codex-watch.js",
       "styles.css",
       "pty-server.js",
       "lib/**/*",

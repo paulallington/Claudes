@@ -24,6 +24,100 @@ var btnSpawnCodex = document.getElementById('btn-spawn-codex');
 var spawnCodexDivider = document.getElementById('spawn-codex-divider');
 var optCodexApproval = document.getElementById('opt-codex-approval');
 var codexApprovalRow = document.getElementById('opt-codex-approval-row');
+var optCodexModel = document.getElementById('opt-codex-model');
+var optCodexEffort = document.getElementById('opt-codex-effort');
+var optCodexTier = document.getElementById('opt-codex-tier');
+var codexModelRow = document.getElementById('opt-codex-model-row');
+var codexEffortRow = document.getElementById('opt-codex-effort-row');
+var codexTierRow = document.getElementById('opt-codex-tier-row');
+
+// Populate the Codex model/effort/tier pickers from lib/codex-models.js. Each
+// carries a leading "Codex default" option whose value is '' — meaning "emit no
+// flag", so the CLI falls back to ~/.codex/config.toml and a user who never
+// touches these gets exactly the old behaviour.
+var codexCatalog = window.CodexModels ? window.CodexModels.fallbackCatalog() : { models: [], defaultModel: '' };
+var codexCatalogPromise = null;
+var codexCatalogLive = false;
+var codexPendingSelections = { projectKey: null, model: '', effort: '', tier: '' };
+var codexFallbackWarningShown = false;
+var codexAttachWarningShown = false;
+
+function renderCodexPicker(sel, list, inheritLabel, selected) {
+  if (!sel) return;
+  var selection = window.CodexModels.pickerSelection(list, selected, codexCatalogLive);
+  var html = '<option value="">' + escapeHtml(inheritLabel) + '</option>';
+  list.forEach(function (item) {
+    html += '<option value="' + escapeHtml(item.id) + '"' +
+      (item.hint ? ' title="' + escapeHtml(item.hint) + '"' : '') + '>' +
+      escapeHtml(item.label) + '</option>';
+  });
+  if (selection.includePending) {
+    html += '<option value="' + escapeHtml(selected) + '">Saved: ' + escapeHtml(selected) + ' (loading…)</option>';
+  }
+  sel.innerHTML = html;
+  sel.value = selection.value;
+}
+
+function refreshCodexCapabilityPickers() {
+  var CM = window.CodexModels;
+  if (!CM) return;
+  var selectedModel = codexPendingSelections.model || (optCodexModel ? optCodexModel.value : '');
+  var capabilities;
+  if (selectedModel) {
+    capabilities = CM.optionsForModel(codexCatalog, selectedModel);
+  } else {
+    // Inherit leaves the effective model to config.toml, so its capabilities
+    // are unknowable. Use the union from the live catalogue and let Codex be
+    // the final authority; selecting a concrete model immediately narrows it.
+    var efforts = new Map();
+    var tiers = new Map();
+    (codexCatalog.models || []).forEach(function (model) {
+      (model.efforts || []).forEach(function (item) { if (!efforts.has(item.id)) efforts.set(item.id, item); });
+      (model.tiers || []).forEach(function (item) { if (!tiers.has(item.id)) tiers.set(item.id, item); });
+    });
+    capabilities = { efforts: Array.from(efforts.values()), tiers: Array.from(tiers.values()) };
+  }
+  renderCodexPicker(optCodexEffort, capabilities.efforts, 'Codex default', codexPendingSelections.effort || (optCodexEffort ? optCodexEffort.value : ''));
+  renderCodexPicker(optCodexTier, capabilities.tiers, 'Codex default', codexPendingSelections.tier || (optCodexTier ? optCodexTier.value : ''));
+}
+
+function initCodexPickers() {
+  var CM = window.CodexModels;
+  if (!CM) return;
+  renderCodexPicker(optCodexModel, codexCatalog.models || [], 'Codex default', codexPendingSelections.model || (optCodexModel ? optCodexModel.value : ''));
+  refreshCodexCapabilityPickers();
+}
+
+function ensureCodexCatalog() {
+  if (codexCatalogPromise) return codexCatalogPromise;
+  if (!window.electronAPI || !window.electronAPI.codexGetCatalog) return Promise.resolve(codexCatalog);
+  codexCatalogPromise = window.electronAPI.codexGetCatalog().then(function (raw) {
+    codexCatalog = window.CodexModels.normalizeCatalog(raw);
+    codexCatalogLive = !!(raw && raw.ok);
+    initCodexPickers();
+    return codexCatalog;
+  }).catch(function () { return codexCatalog; });
+  return codexCatalogPromise;
+}
+
+function codexRestoreModels(selectedModelId) {
+  var selected = (codexCatalog.models || []).find(function (model) { return model.id === selectedModelId; });
+  function anyOption(key, id) {
+    if (!id) return false;
+    var candidates = selected ? [selected]
+      : (selectedModelId ? [] : (codexCatalog.models || []));
+    return candidates.some(function (model) {
+      return (model[key] || []).some(function (item) { return item.id === id; });
+    });
+  }
+  return {
+    isKnownModel: function (id) {
+      return !!id && (codexCatalog.models || []).some(function (model) { return model.id === id; });
+    },
+    isKnownEffort: function (id) { return anyOption('efforts', id); },
+    isKnownTier: function (id) { return anyOption('tiers', id); }
+  };
+}
 var spawnDropdown = document.getElementById('spawn-dropdown');
 var optPermissionMode = document.getElementById('opt-permission-mode');
 var optRemoteControl = document.getElementById('opt-remote-control');
@@ -31,8 +125,34 @@ var optBare = document.getElementById('opt-bare');
 var optStripMcps = document.getElementById('opt-strip-mcps');
 var optHeadless = document.getElementById('opt-headless');
 var optModel = document.getElementById('opt-model');
+
+// Model picker options, built from lib/claude-models.js so the spawn modal, the
+// automation agent form, the Headroom 1M pin, the cost table and the context
+// meter can never disagree about which models exist. Two groups, because they
+// mean different things: an alias tracks whatever the CLI resolves as newest,
+// while a pinned id locks the column to an exact version for reproducibility.
+function buildModelOptionsHtml(selected) {
+  var CM = window.ClaudeModels;
+  var sel = selected || '';
+  function opt(value, label) {
+    return '<option value="' + escapeHtml(value) + '"' +
+      (sel === value ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+  }
+  var html = opt('', 'Default');
+  if (!CM) return html;   // catalogue missing: degrade to Default rather than lie
+  html += '<optgroup label="Latest">';
+  CM.ALIASES.forEach(function (m) { html += opt(m.id, m.label); });
+  html += '</optgroup><optgroup label="Pinned version">';
+  CM.MODELS.forEach(function (m) { if (m.pickable) html += opt(m.id, m.label); });
+  html += '</optgroup>';
+  return html;
+}
+
+if (optModel) optModel.innerHTML = buildModelOptionsHtml(optModel.value);
 var optModelRow = document.getElementById('opt-model-row');
 var optEndpoint = document.getElementById('opt-endpoint');
+var optProfile = document.getElementById('opt-profile');
+var optProfileRow = document.getElementById('opt-profile-row');
 var optEndpointModelRow = document.getElementById('opt-endpoint-model-row');
 var optEndpointModel = document.getElementById('opt-endpoint-model');
 var optEndpointModelRefresh = document.getElementById('opt-endpoint-model-refresh');
@@ -56,6 +176,8 @@ var optHeadroomShaper = document.getElementById('opt-headroom-shaper');
 var optHeadroomAutostart = document.getElementById('opt-headroom-autostart');
 var headroomSubs = document.getElementById('opt-headroom-subs');
 var headroomInstalled = false;  // resolved async from main; gates wrapping + UI
+var headroomServicePort = 8787;  // refreshed from headroom:serviceStatus's `port`; main resolves it from HEADROOM_PORT, so 8787 is only the pre-probe assumption
+var codexPresent = false;  // resolved async from main (initCodexUI); gates the handoff menu row too
 var headroomProbed = false;     // true once main's post-probe status has landed (gates the not-installed prompt so it doesn't flash before the probe)
 
 // Per-endpoint-class default effort applied at spawn. User-configurable in the
@@ -82,6 +204,331 @@ var firstSpawnLoadComplete = false;  // gate for cloud-default-on-boot
 // Cache of fetched models per endpoint id to avoid refetching on every selection.
 // { [endpointId]: { models: string[], fetchedAt: number, ok: boolean } }
 var endpointModelsCache = {};
+
+// Profile (multi-subscription) state, mirroring the currentEndpoint* cache
+// above for the same reason: profile:resolve is async and spawnOpts is sync.
+var currentProfileEnv = null;    // env block from profile:resolve, or null (Primary/no profiles configured)
+var currentProfileId = null;     // resolved profile id for the pending spawn, for the column chip + persistence
+
+// Cache of profile:list's result — the four assignment pickers and the
+// column header chip all read from here rather than re-fetching per render.
+var profilesCache = [];          // [{ id, name, colour, isPrimary, signedIn }]
+var profilesDefaultId = 'primary';
+
+// Refresh the profile a NEW column would spawn on: column picker (not built
+// yet — no picker UI exists until a later task, so this always contributes
+// null) beats workspace beats project beats the global default. Call whenever
+// the active project/workspace changes or main tells us 'profiles:updated'.
+function refreshProfileSelection() {
+  if (!window.electronAPI || !window.electronAPI.profileResolve) return Promise.resolve();
+  var activeProject = config && config.projects ? config.projects[config.activeProjectIndex] : null;
+  var activeWs = (activeProject && activeProject.activeWorkspaceId && Array.isArray(activeProject.workspaces))
+    ? activeProject.workspaces.find(function (w) { return w && w.id === activeProject.activeWorkspaceId; })
+    : null;
+  var sel = {
+    columnProfileId: (typeof optProfile !== 'undefined' && optProfile && optProfile.value) ? optProfile.value : null,
+    workspaceProfileId: activeWs ? activeWs.profileId : null,
+    projectProfileId: activeProject ? activeProject.profileId : null
+  };
+  // main is the single resolver — it's the only place that ever sees a
+  // profile's configDir, so re-running the cascade here would risk a second
+  // copy of the logic drifting from main's. currentProfileId comes straight
+  // off the same round trip that produced currentProfileEnv.
+  return window.electronAPI.profileResolve(sel).then(function (r) {
+    currentProfileEnv = (r && r.env && Object.keys(r.env).length) ? r.env : null;
+    // Persist null for Primary (isPrimary), the same "omit the default" pattern
+    // used elsewhere (cwd, endpointId) — a plain column with no profile config
+    // stays indistinguishable from one that predates this feature.
+    currentProfileId = (r && !r.isPrimary) ? r.id : null;
+    return window.electronAPI.profileList ? window.electronAPI.profileList() : null;
+  }).then(function (store) {
+    if (!store) return;
+    // Keep the picker/chip cache fresh off the same fetch — cheap, and it
+    // means every surface that reads profilesCache sees this round-trip too.
+    profilesCache = store.profiles || [];
+    profilesDefaultId = store.defaultProfileId || PRIMARY_PROFILE_ID;
+  }).catch(function () { currentProfileEnv = null; currentProfileId = null; });
+}
+
+// ============================================================
+// Subscriptions panel (global settings) + assignment pickers
+// ============================================================
+
+var PRIMARY_PROFILE_ID = 'primary';
+
+// One builder for all four assignment pickers so the "inherit" semantics
+// can't drift between Project settings / Workspace row / Spawn options /
+// Automation editor. `currentId` is the persisted profileId (or null/''
+// for inherit); the select's own value is always '' for inherit, never a
+// stored profile id string that happens to be empty.
+function buildProfilePicker(selectEl, currentId, inheritLabel) {
+  if (!selectEl) return Promise.resolve();
+  if (!window.electronAPI || !window.electronAPI.profileList) return Promise.resolve();
+  return window.electronAPI.profileList().then(function (store) {
+    profilesCache = (store && store.profiles) || [];
+    profilesDefaultId = (store && store.defaultProfileId) || PRIMARY_PROFILE_ID;
+    selectEl.innerHTML = '';
+    var inherit = document.createElement('option');
+    inherit.value = '';
+    inherit.textContent = inheritLabel;
+    selectEl.appendChild(inherit);
+    profilesCache.forEach(function (p) {
+      var o = document.createElement('option');
+      o.value = p.id;
+      o.textContent = p.name + (p.signedIn ? '' : ' (not signed in)');
+      selectEl.appendChild(o);
+    });
+    selectEl.value = currentId || '';
+  });
+}
+
+function renderProfilesPanel() {
+  var listEl = document.getElementById('profiles-list');
+  if (!listEl || !window.electronAPI || !window.electronAPI.profileList) return Promise.resolve();
+  return window.electronAPI.profileList().then(function (store) {
+    profilesCache = (store && store.profiles) || [];
+    profilesDefaultId = (store && store.defaultProfileId) || PRIMARY_PROFILE_ID;
+    while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+    profilesCache.forEach(function (p) {
+      listEl.appendChild(buildProfileRow(p));
+    });
+  });
+}
+
+// Scan projects/workspaces/automations for references to a profile BEFORE
+// deleting it, so the confirm dialog can name exactly what falls back to
+// Primary — matching the strings main's clearProfileReferences produces
+// (project: <name>, workspace: <name>, automation: <name>), computed ahead
+// of time since the delete IPC only reports them after the fact.
+function previewProfileReassignments(profileId) {
+  var projects = (config && config.projects) || [];
+  var reassigned = [];
+  projects.forEach(function (proj) {
+    if (proj.profileId === profileId) reassigned.push('project: ' + proj.name);
+    (proj.workspaces || []).forEach(function (ws) {
+      if (ws.profileId === profileId) reassigned.push('workspace: ' + ws.name);
+    });
+  });
+  if (!window.electronAPI || !window.electronAPI.getAutomationsForProject) return Promise.resolve(reassigned);
+  var automationChecks = projects.map(function (proj) {
+    return window.electronAPI.getAutomationsForProject(proj.path).then(function (automations) {
+      (automations || []).forEach(function (a) {
+        if (a.profileId === profileId) reassigned.push('automation: ' + (a.name || a.id));
+      });
+    }).catch(function () { /* project may have no automations file yet */ });
+  });
+  return Promise.all(automationChecks).then(function () { return reassigned; });
+}
+
+function buildProfileRow(p) {
+  var isDefault = p.id === profilesDefaultId;
+  var row = document.createElement('div');
+  row.className = 'profile-row';
+  row.dataset.id = p.id;
+
+  // The colour chip IS the recolour control — a native colour picker behind
+  // a small swatch, rather than a separate button + dialog.
+  var chip = document.createElement('input');
+  chip.type = 'color';
+  chip.className = 'profile-row-chip';
+  chip.value = p.colour || '#5b8def';
+  chip.title = 'Recolour "' + p.name + '"';
+  chip.addEventListener('change', function () {
+    window.electronAPI.profileUpdate({ id: p.id, colour: chip.value });
+  });
+  row.appendChild(chip);
+
+  var name = document.createElement('span');
+  name.className = 'profile-row-name';
+  name.textContent = p.name;
+  row.appendChild(name);
+
+  if (isDefault) {
+    var badge = document.createElement('span');
+    badge.className = 'profile-row-badge';
+    badge.textContent = 'Default';
+    row.appendChild(badge);
+  }
+
+  var signedIn = document.createElement('span');
+  signedIn.className = 'profile-row-signedin' + (p.signedIn ? ' profile-row-signedin-yes' : ' profile-row-signedin-no');
+  signedIn.textContent = p.signedIn ? 'Signed in' : 'Not signed in';
+  row.appendChild(signedIn);
+
+  var actions = document.createElement('div');
+  actions.className = 'profile-row-actions';
+
+  var renameBtn = document.createElement('button');
+  renameBtn.className = 'profile-row-btn';
+  renameBtn.textContent = 'Rename';
+  renameBtn.addEventListener('click', function () {
+    promptForValue('Rename "' + p.name + '" to:').then(function (val) {
+      if (val == null) return;
+      val = val.trim();
+      if (!val) return;
+      window.electronAPI.profileUpdate({ id: p.id, name: val });
+    });
+  });
+  actions.appendChild(renameBtn);
+
+  if (!isDefault) {
+    var defaultBtn = document.createElement('button');
+    defaultBtn.className = 'profile-row-btn';
+    defaultBtn.textContent = 'Set default';
+    defaultBtn.addEventListener('click', function () {
+      window.electronAPI.profileSetDefault(p.id);
+    });
+    actions.appendChild(defaultBtn);
+  }
+
+  if (!p.isPrimary) {
+    var reseedBtn = document.createElement('button');
+    reseedBtn.className = 'profile-row-btn';
+    reseedBtn.textContent = 'Re-seed from Primary';
+    reseedBtn.title = 'Re-copy hooks, permissions and global CLAUDE.md from Primary, overwriting local edits.';
+    reseedBtn.addEventListener('click', function () {
+      confirmDialog('Re-seed "' + p.name + '" from Primary? This overwrites its hooks, permissions and global CLAUDE.md with Primary\'s current copies.').then(function (ok) {
+        if (!ok) return;
+        window.electronAPI.profileReseed(p.id).then(function (r) {
+          if (!r || !r.ok) showToast('Re-seed failed: ' + ((r && r.error) || 'unknown'), { kind: 'error' });
+          else showToast('Re-seeded "' + p.name + '" from Primary.', { kind: 'success' });
+        });
+      });
+    });
+    actions.appendChild(reseedBtn);
+
+    // Primary is never deletable — the UI must not offer it.
+    var deleteBtn = document.createElement('button');
+    deleteBtn.className = 'profile-row-btn profile-row-btn-danger';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', function () {
+      previewProfileReassignments(p.id).then(function (reassigned) {
+        var msg = 'Delete "' + p.name + '"? Its config directory is removed.' +
+          (reassigned.length ? ' These will fall back to Primary: ' + reassigned.join(', ') + '.' : '');
+        confirmDialog(msg, { dangerous: true, okLabel: 'Delete' }).then(function (ok) {
+          if (!ok) return;
+          window.electronAPI.profileDelete(p.id).then(function (r) {
+            if (!r || !r.ok) { showToast('Delete failed: ' + ((r && r.error) || 'unknown'), { kind: 'error' }); return; }
+            if (typeof clearProfileUsageState === 'function') clearProfileUsageState(p.id);
+            showToast('"' + p.name + '" deleted.');
+          });
+        });
+      });
+    });
+    actions.appendChild(deleteBtn);
+  }
+
+  row.appendChild(actions);
+  return row;
+}
+
+if (window.electronAPI && window.electronAPI.onProfilesUpdated) {
+  window.electronAPI.onProfilesUpdated(renderProfilesPanel);
+}
+
+(function initProfilesAddRow() {
+  var nameInput = document.getElementById('profiles-add-name');
+  var addBtn = document.getElementById('profiles-add-btn');
+  var statusEl = document.getElementById('profiles-add-status');
+  if (!nameInput || !addBtn) return;
+
+  // Mirrors main's profile:create darwin guard (unverified whether the
+  // macOS keychain service is scoped per CLAUDE_CONFIG_DIR) — disable here
+  // too so the user gets an explanation instead of a create call that
+  // always fails.
+  if (document.documentElement.dataset.platform === 'darwin') {
+    var macMsg = 'Multiple subscriptions are not supported on macOS yet — the Claude CLI may store all credentials in a single keychain entry.';
+    addBtn.disabled = true;
+    addBtn.title = macMsg;
+    nameInput.disabled = true;
+    nameInput.title = macMsg;
+    if (statusEl) statusEl.textContent = macMsg;
+    return;
+  }
+
+  function doCreate() {
+    var name = nameInput.value.trim();
+    if (!name) return;
+    addBtn.disabled = true;
+    window.electronAPI.profileCreate({ name: name }).then(function (r) {
+      addBtn.disabled = false;
+      if (!r || !r.ok) {
+        if (statusEl) { statusEl.textContent = (r && r.error) || 'Could not create profile.'; statusEl.classList.add('error'); }
+        return;
+      }
+      nameInput.value = '';
+      if (statusEl) statusEl.classList.remove('error');
+      // Nothing else tells the user what to do next — a freshly-created
+      // profile has no credentials yet and just looks broken otherwise.
+      alertDialog('Profile created. Spawn a column on this subscription and run /login to sign in. Your hooks, permissions and global CLAUDE.md were copied from Primary.');
+      renderProfilesPanel();
+    }).catch(function () { addBtn.disabled = false; });
+  }
+
+  addBtn.addEventListener('click', doCreate);
+  nameInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); doCreate(); }
+  });
+})();
+
+// Small shared modal for the Project-settings and Workspace-row assignment
+// pickers — the spawn-options and automation-editor pickers are inline
+// selects on their own surfaces and don't need it (see below).
+var profileAssignModal = document.getElementById('profile-assign-modal');
+var profileAssignSelect = document.getElementById('profile-assign-select');
+var profileAssignTitle = document.getElementById('profile-assign-title');
+if (profileAssignModal) {
+  document.getElementById('profile-assign-close').addEventListener('click', function () {
+    profileAssignModal.classList.add('hidden');
+  });
+  profileAssignModal.addEventListener('click', function (e) {
+    if (e.target === profileAssignModal) profileAssignModal.classList.add('hidden');
+  });
+}
+
+// opts: { title, currentId, inheritLabel, onChange(newIdOrNull) }
+function openProfileAssignPicker(opts) {
+  if (!profileAssignModal) return;
+  profileAssignTitle.textContent = opts.title;
+  buildProfilePicker(profileAssignSelect, opts.currentId, opts.inheritLabel).then(function () {
+    profileAssignModal.classList.remove('hidden');
+  });
+  profileAssignSelect.onchange = function () {
+    // '' means inherit — persist null, never the empty string (Task 1's
+    // cascade in lib/profile-resolve.js only treats null/undefined as "inherit").
+    opts.onChange(profileAssignSelect.value || null);
+    // A selection is a completed pick, not a live-editing control — close so
+    // the user isn't left to dismiss it manually, and so onChange can't fire
+    // again for the same open (a stray second change event on the same select).
+    profileAssignModal.classList.add('hidden');
+  };
+}
+
+// Column header chip — shown only when a column is actually pinned to a
+// non-Primary subscription. A single-subscription user (no profiles beyond
+// Primary ever created) always has col.profileId null/'primary' here, so
+// this never shows anything for them — no visual change at all.
+function updateColumnProfileChip(col) {
+  if (!col || !col.profileChipEl) return;
+  var show = col.profileId && col.profileId !== PRIMARY_PROFILE_ID;
+  col.profileChipEl.classList.toggle('column-profile-chip-shown', !!show);
+  if (show) {
+    var p = (profilesCache || []).find(function (x) { return x.id === col.profileId; });
+    col.profileChipEl.textContent = p ? p.name : '?';
+    col.profileChipEl.style.background = p ? p.colour : '#888';
+    col.profileChipEl.title = 'Subscription: ' + (p ? p.name : col.profileId);
+  }
+}
+
+// Re-sweep every open column's chip whenever the profiles list changes (e.g.
+// a rename or recolour should update any chip currently showing that profile).
+if (window.electronAPI && window.electronAPI.onProfilesUpdated) {
+  window.electronAPI.onProfilesUpdated(function () {
+    if (typeof allColumns !== 'undefined') {
+      allColumns.forEach(function (c) { updateColumnProfileChip(c); });
+    }
+  });
+}
 
 
 // Each window has its own counter for new column/pty ids. Give popouts a high
@@ -150,9 +597,24 @@ var lastFocusedColumnId = null;
 var voiceAttentionColumnId = null;
 
 // Live automation/headless/manager session ids (mirrored from main's
-// backgroundSessionIds). An interactive column must never adopt one of these as
-// its own sessionId — see getClaimedSessionIds. Kept fresh via IPC broadcast.
-var backgroundSessionIdsCache = new Set();
+// backgroundSessionIds), mapped id -> profileId. An interactive column must
+// never adopt one of these as its own sessionId, but only when it shares the
+// same profile — an automation's transcript lands under its own profile's
+// projects/ dir, so a background id under a different profile is no threat.
+// See getClaimedSessionIds. Kept fresh via IPC broadcast.
+var backgroundSessionIdsCache = new Map();
+
+// main sends bare ids (legacy) or {id, profileId} entries; normalise either
+// shape into the id -> profileId map this cache expects.
+function toBackgroundMap(entries) {
+  var map = new Map();
+  (entries || []).forEach(function (entry) {
+    if (!entry) return;
+    if (typeof entry === 'string') map.set(entry, null);
+    else if (entry.id) map.set(entry.id, entry.profileId || null);
+  });
+  return map;
+}
 
 var config = { projects: [], activeProjectIndex: -1 };
 // Guard against clobbering the on-disk config with this empty default before
@@ -735,7 +1197,7 @@ function connectWS() {
           if (col3.env) respawnMsg.env = col3.env;
           // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
           // Re-derived from the live global flag; never persisted on the column.
-          maybeBindHeadroom(respawnMsg, { hasEndpoint: !!(col3.endpointId || col3.env), isClaude: !col3.cmd, hasMcp: !!(col3 && col3.hasMcp) });
+          bindColumnBaseUrl(respawnMsg, { hasEndpoint: !!(col3.endpointId || (col3.env && col3.env.ANTHROPIC_BASE_URL)), isClaude: !col3.cmd, hasMcp: !!(col3 && col3.hasMcp), oneMModel: col3.model });
           col3.terminal.clear();
           gatedWsSend(respawnMsg);
           setColumnActivity(msg.id, 'working');
@@ -821,22 +1283,77 @@ function reattachAllColumns() {
   });
 }
 
-// Ensure the app-owned Headroom proxy is up before sending a wrapped ('headroom')
-// spawn/respawn wire message. On failure, rewrite `msg` in place to an unwrapped
-// spawn (using `plainArgs`) so the column still works instead of exiting (code 1)
-// with ConnectionRefused. `send` runs exactly once with the final `msg`. Every
-// spawn/respawn path routes through here so they all self-heal identically.
-function maybeBindHeadroom(msg, ctx) {
+// Bind a spawn/respawn wire message's ANTHROPIC_BASE_URL — in BOTH directions
+// — and make that binding authoritative against settings.json. Two problems,
+// one fix:
+//
+//   1. Historically this only had an opinion when Headroom was ON — turning it
+//      off left ANTHROPIC_BASE_URL unset, so a column fell back to whatever
+//      was already in scope. Now every Claude column gets an explicit
+//      resolveBaseUrlBinding() result: the proxy URL when Headroom is on, the
+//      direct Anthropic URL otherwise. "Off" is an assertion, not an absence.
+//   2. Passing that binding as process env ALONE is not enough — Claude Code's
+//      own `~/.claude/settings.json` / `<project>/.claude/settings*.json` can
+//      carry an `env` block that OVERRIDES inherited process env entirely
+//      (proven empirically). So the resolved binding is ALSO stamped onto
+//      `msg.args` as `--settings '{"env":{...}}'` via applyBaseUrlSettingsArg,
+//      which outranks those files — see lib/headroom-env.js's doc-comments on
+//      both functions for the full reasoning.
+//
+// No-ops (leaves msg.env/msg.args untouched) for endpoint columns and
+// arbitrary-cmd columns, exactly like the old buildHeadroomEnv-only behaviour
+// — those have their own base-URL story or none at all.
+function bindColumnBaseUrl(msg, ctx) {
   if (!msg || !window.HeadroomEnv) return;
-  var env = window.HeadroomEnv.buildHeadroomEnv({
+  // Only assert a binding at all when Headroom is actually installed — i.e.
+  // when the app is plausibly the thing that set a proxy URL in the first
+  // place. A user who has never installed Headroom may be routing Claude
+  // through their own gateway via ~/.claude/settings.json or a shell export
+  // (not via the app's endpoint feature); asserting direct-Anthropic here
+  // would silently override that and leak their gateway auth token to
+  // Anthropic proper. Stay neutral (no env, no --settings) in that case,
+  // exactly like before this binding existed. Headroom-installed-but-toggle-
+  // off still asserts direct below — that's the user-reported bug this fixes.
+  if (!headroomInstalled) return;
+  // The spawn Model dropdown is the ONE model control — deliberately not a
+  // second Headroom-specific picker, which only invited "I set it there and it
+  // did nothing" (the dropdown wins, so the other control was decorative).
+  // ctx.oneMModel is that pick, threaded from optModel.value at spawn time, so
+  // ANTHROPIC_MODEL — the sole selector once Headroom owns the env block —
+  // reflects what the user actually chose.
+  //
+  // Fallbacks, in order: the dropdown pick → `headroom1mModel` (an undocumented
+  // hand-edit escape hatch in projects.json, no UI) → the catalogue default.
+  // That last one is why this bug survived a whole model generation: it used to
+  // be a hardcoded 'claude-opus-4-8' literal, so it silently outranked nothing
+  // and pinned every column to a superseded model. Sourcing it from the
+  // catalogue keeps it current by construction.
+  var oneMModel = (ctx && ctx.oneMModel) || (config && config.headroom1mModel) ||
+    (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL);
+  var env = window.HeadroomEnv.resolveBaseUrlBinding({
     enabled: !!(headroomInstalled && config && config.useHeadroom),
     hasEndpoint: !!(ctx && ctx.hasEndpoint),
     isClaude: !(ctx && ctx.isClaude === false),
     oneM: !!(config && config.useHeadroom1m !== false),
-    oneMModel: (config && config.headroom1mModel) || 'claude-opus-4-8',
+    oneMModel: oneMModel,
+    port: headroomServicePort,
     hasMcp: !!(ctx && ctx.hasMcp)
   });
-  if (env) msg.env = Object.assign({}, msg.env, env);
+  if (!env) return;
+  msg.env = Object.assign({}, msg.env, env);
+  msg.args = window.HeadroomEnv.applyBaseUrlSettingsArg(msg.args, env);
+  // A --settings pointing at a file path can't be merged (see that
+  // function's doc-comment) — the binding stood down for this column, so
+  // process env alone is carrying it, and settings.json can still win.
+  // Surface that once per column (latched on the column object) so a
+  // respawn loop doesn't spam the same warning on every spawn/respawn.
+  if (window.HeadroomEnv.findUnmergeableSettingsFile(msg.args)) {
+    var col = (msg.id && allColumns && allColumns.get) ? allColumns.get(msg.id) : null;
+    if (col && col.terminal && !col.__baseUrlStandDownWarned) {
+      col.__baseUrlStandDownWarned = true;
+      try { col.terminal.write('\x1b[2m⚠ Custom --settings file in use — base URL binding not enforced for this column.\x1b[0m\r\n'); } catch (e) { /* ignore */ }
+    }
+  }
 }
 
 function wsSend(obj) {
@@ -857,6 +1374,7 @@ function ensureHeadroomReady() {
   if (!api || !api.getHeadroomServiceStatus) return Promise.resolve(true);
   if (_headroomReadyInflight) return _headroomReadyInflight;
   var work = api.getHeadroomServiceStatus().then(function (st) {
+    if (st && st.port && st.port > 0 && st.port <= 65535) headroomServicePort = st.port;
     if (st && st.running) return true;                 // already up
     if (!api.startHeadroomService) return false;
     return api.startHeadroomService().then(function (r) { return !!(r && r.running); });
@@ -869,14 +1387,68 @@ function ensureHeadroomReady() {
   return capped;
 }
 // Drop-in for wsSend at the Headroom-aware spawn sites: gates the create when the
-// message carries a proxy base URL, passes everything else straight through.
+// message is bound to the LOCAL Headroom proxy specifically. Since
+// bindColumnBaseUrl now stamps ANTHROPIC_BASE_URL on every Claude column
+// (direct-Anthropic included — see its doc-comment), gating on mere presence of
+// the var would wrongly stall every direct/endpoint spawn on Headroom
+// readiness too; only the proxy URL itself means "wait for it".
 function gatedWsSend(msg) {
-  if (!msg || !msg.env || !msg.env.ANTHROPIC_BASE_URL) { wsSend(msg); return; }
+  var gatePort = headroomServicePort;
+  var proxyUrl = 'http://127.0.0.1:' + gatePort;
+  if (!msg || !msg.env || msg.env.ANTHROPIC_BASE_URL !== proxyUrl) { wsSend(msg); return; }
   var col = (msg.id && allColumns && allColumns.get) ? allColumns.get(msg.id) : null;
+  // An endpoint preset whose base URL happens to literally be the loopback
+  // Headroom port owns its own env block (see getEndpointEnv in main.js) —
+  // gating it on Headroom readiness, or rewriting it on !ready below, would
+  // hijack a column the app has no business touching. col is null on a
+  // fresh spawn (nothing to protect yet), so this only guards respawns of
+  // an already-known endpoint column.
+  if (col && col.endpointId) { wsSend(msg); return; }
   var hintTimer = setTimeout(function () {
     if (col && col.terminal) { try { col.terminal.write('\x1b[2m⧗ Waiting for the Headroom proxy to start…\x1b[0m\r\n'); } catch (e) { /* ignore */ } }
   }, 500);
-  ensureHeadroomReady().then(function () { clearTimeout(hintTimer); wsSend(msg); });
+  ensureHeadroomReady().then(function (ready) {
+    clearTimeout(hintTimer);
+    // headroomServicePort is refreshed asynchronously inside
+    // ensureHeadroomReady — a non-default HEADROOM_PORT can mean the port we
+    // gated on (the stale default) differs from the real one by the time the
+    // status lands. Re-stamp the msg at the CURRENT port before sending, or
+    // it goes to a dead URL despite the proxy being healthy.
+    if (ready && headroomServicePort !== gatePort) {
+      var freshUrl = 'http://127.0.0.1:' + headroomServicePort;
+      msg.env = Object.assign({}, msg.env, { ANTHROPIC_BASE_URL: freshUrl });
+      if (window.HeadroomEnv) {
+        msg.args = window.HeadroomEnv.applyBaseUrlSettingsArg(msg.args, msg.env);
+      }
+    }
+    if (!ready) {
+      // Proxy never came up — fall back to an unwrapped, direct-Anthropic spawn
+      // instead of sending a column into a dead port (ConnectionRefused, exit
+      // code 1). Rebuild the binding as explicitly direct and re-stamp
+      // --settings so it, not a stale proxy pair, wins against settings.json.
+      var directEnv = window.HeadroomEnv
+        ? window.HeadroomEnv.resolveBaseUrlBinding({ enabled: false, isClaude: true })
+        : { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' };
+      msg.env = Object.assign({}, msg.env, directEnv);
+      delete msg.env.ANTHROPIC_MODEL;
+      delete msg.env.ENABLE_TOOL_SEARCH;
+      if (window.HeadroomEnv) msg.args = window.HeadroomEnv.applyBaseUrlSettingsArg(msg.args, directEnv);
+      // Headroom owning the model meant --model was deliberately omitted
+      // (ANTHROPIC_MODEL carried it) — without the env binding that would
+      // silently fall the column back to the CLI default, so restore the flag.
+      // A legacy restored column can have no saved col.model at all — fall
+      // back to the same chain bindColumnBaseUrl uses for its own pin
+      // (headroom1mModel override, then the catalogue default) rather than
+      // silently sending nothing.
+      if (window.HeadroomEnv && col) {
+        var fallbackModel = col.model || (config && config.headroom1mModel) ||
+          (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL);
+        msg.args = window.HeadroomEnv.reconcileModelArgForRespawn(msg.args, fallbackModel, false, false);
+      }
+      if (col && col.terminal) { try { col.terminal.write('\x1b[2m⚠ Headroom proxy unavailable — connected directly to Anthropic.\x1b[0m\r\n'); } catch (e) { /* ignore */ } }
+    }
+    wsSend(msg);
+  });
 }
 
 // ============================================================
@@ -1215,6 +1787,7 @@ function snapshotProjectLayout(projectPath) {
             }) : [],
             env: c.env || null,
             endpointId: c.endpointId || null,
+            model: c.model || null,
             title: c.customTitle || null
           };
         }).filter(Boolean)
@@ -1325,15 +1898,25 @@ function restoreLayout(projectPath, layout) {
   state.rows.forEach(function (r) { r.columnIds.forEach(function (cid) { existingIds.push(cid); }); });
   existingIds.forEach(function (cid) { try { removeColumn(cid); } catch (e) { /* */ } });
   // Spawn rows + columns. addColumn(args, row, opts) — with row=null it goes
-  // into the current row; with addRow() we create a new one.
+  // into the current row; with addRowToProject(state) we create a new one.
+  // Deliberately not addRow(): that helper is now async (it may await a
+  // worktree resolution) and also spawns its own default column as a side
+  // effect, neither of which this restore path wants — it needs the row
+  // synchronously so the forEach below can target it.
   layout.rows.forEach(function (rowSpec, rIdx) {
-    var row = rIdx === 0 ? null : addRow();
+    // Row must be created in the SAME state addColumn resolves via
+    // getActiveState() — that's keyed on the project's activeWorkspaceId,
+    // while `state` above is Primary-keyed. On a sub-workspace restore the
+    // two would otherwise disagree, appending rows to Primary's hidden
+    // container while addColumn registers columns into the workspace state.
+    var row = rIdx === 0 ? null : addRowToProject(getActiveState() || state);
     rowSpec.columns.forEach(function (colSpec) {
       var opts = {
         title: colSpec.title || null,
         cmd: colSpec.cmd || null,
         env: colSpec.env || null,
-        endpointId: colSpec.endpointId || null
+        endpointId: colSpec.endpointId || null,
+        model: colSpec.model || null
       };
       var argList = colSpec.cmd ? (colSpec.cmdArgs || []) : null;
       addColumn(argList, row, opts);
@@ -1550,6 +2133,43 @@ function confirmDialog(message, opts) {
       if (!overlay.parentNode) { document.removeEventListener('keydown', onKey); return; }
       if (e.key === 'Escape') { e.preventDefault(); done(false); document.removeEventListener('keydown', onKey); }
       else if (e.key === 'Enter') { e.preventDefault(); done(true); document.removeEventListener('keydown', onKey); }
+    });
+  });
+}
+
+// OK-only notice, same non-blocking pattern as confirmDialog/promptForValue.
+// window.alert() is NOT safe to use here — in this sandboxed Electron
+// renderer it blocks the whole app (all columns, all windows), not just the
+// current dialog, until dismissed.
+function alertDialog(message) {
+  return new Promise(function (resolve) {
+    var overlay = document.createElement('div');
+    overlay.className = 'snippet-prompt-overlay';
+    var dialog = document.createElement('div');
+    dialog.className = 'snippet-prompt-dialog';
+    var label = document.createElement('div');
+    label.className = 'snippet-prompt-label';
+    label.textContent = message;
+    var actions = document.createElement('div');
+    actions.className = 'snippet-prompt-actions';
+    var ok = document.createElement('button');
+    ok.className = 'snippet-prompt-ok';
+    ok.textContent = 'Got it';
+    actions.appendChild(ok);
+    dialog.appendChild(label);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    setTimeout(function () { ok.focus(); }, 0);
+    function done() {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      resolve();
+    }
+    ok.addEventListener('click', done);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) done(); });
+    document.addEventListener('keydown', function onKey(e) {
+      if (!overlay.parentNode) { document.removeEventListener('keydown', onKey); return; }
+      if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); done(); document.removeEventListener('keydown', onKey); }
     });
   });
 }
@@ -2022,6 +2642,8 @@ function prepareAndPopOut(projectPath) {
         env: col.env || null,
         sessionId: col.sessionId || null,
         title: col.customTitle || null,
+        model: col.model || null,
+        profileId: col.profileId || null,
         isDiff: !!col.isDiff
       });
     });
@@ -2059,6 +2681,8 @@ window.collectPopoutTransferForClose = function () {
       env: col.env || null,
       sessionId: col.sessionId || null,
       title: col.customTitle || null,
+      model: col.model || null,
+      profileId: col.profileId || null,
       isDiff: !!col.isDiff
     });
   });
@@ -2089,6 +2713,8 @@ function applyTransferredColumns(projIdx, transfer) {
       env: entry.env,
       cwd: entry.cwd,
       cwdSource: entry.cwdSource || null,
+      model: entry.model || null,
+      profileId: entry.profileId || null,
       isDiff: entry.isDiff,
       workspaceId: null // popouts are Primary-only
     });
@@ -2129,6 +2755,7 @@ function disposeColumnLocalOnly(id) {
   releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
+  codexWatchCounts.delete(id);
 
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (state) {
@@ -2357,11 +2984,12 @@ function buildWorkspaceItem(project, projectIndex, ws, wsIndex) {
     setActiveWorkspace(projectIndex, ws.id, false);
   });
 
-  // Suppress the default browser context menu (would otherwise surface inside
-  // the app chrome on right-click). A minimal Rename/Delete menu can land here
-  // in a later phase.
+  // Beyond "Subscription…", a minimal Rename/Delete menu can land here in a
+  // later phase — both are already reachable (dblclick to rename, × to
+  // delete), so this stays a single-item menu for now.
   wsItem.addEventListener('contextmenu', function (e) {
     e.preventDefault();
+    showWorkspaceContextMenu(e, project, projectIndex, ws);
   });
 
   // Drag-reorder within the same project only. Cross-project drops are
@@ -2649,6 +3277,7 @@ function buildProjectItem(project, index) {
     // Explorer tree — at project level it's just a folder-open, which the
     // user can also reach via "Reveal in Explorer" and the file-tree menu.
     addMenuItem('Manage MCP servers…', 'manage-mcp');
+    addMenuItem('Subscription…', 'assign-profile');
     addMenuItem('Skills / agents / commands…', 'manage-ext');
     addMenuItem('Save current layout…', 'layout-save');
     addMenuItem('Restore layout…', 'layout-restore');
@@ -2746,6 +3375,18 @@ function buildProjectItem(project, index) {
         handleSyncForce(config.projects[projIndex].path);
       } else if (action === 'manage-mcp') {
         openMcpModal(config.projects[projIndex].path);
+      } else if (action === 'assign-profile') {
+        var proj = config.projects[projIndex];
+        openProfileAssignPicker({
+          title: 'Subscription for "' + proj.name + '"',
+          currentId: proj.profileId || null,
+          inheritLabel: 'Global default',
+          onChange: function (v) {
+            proj.profileId = v;
+            saveConfig();
+            if (projIndex === config.activeProjectIndex) refreshProfileSelection();
+          }
+        });
       } else if (action === 'manage-ext') {
         openExtensionsModal(config.projects[projIndex].path);
       } else if (action === 'layout-save') {
@@ -3131,7 +3772,7 @@ function restoreSessions(projectPath, workspaceId) {
       var exists = false;
       if (e.sessionId && window.electronAPI && window.electronAPI.sessionExists) {
         try {
-          exists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(e, projectPath), e.sessionId);
+          exists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(e, projectPath), e.sessionId, e.profileId || null);
         } catch (_) { exists = false; }
       }
       if (e.sessionId && !exists) {
@@ -3140,10 +3781,12 @@ function restoreSessions(projectPath, workspaceId) {
 
       var resumeArgs;
       var resumeRowOpts = baseRowOpts;
+      var isLocalResume = false;
       if (e.endpointId && window.electronAPI && window.electronAPI.endpointGetEnv) {
         var envBlock = null;
         try { envBlock = await window.electronAPI.endpointGetEnv(e.endpointId); } catch (_) { envBlock = null; }
         if (envBlock) {
+          isLocalResume = true;
           resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ true);
           resumeRowOpts = Object.assign({}, baseRowOpts, { endpointId: e.endpointId, env: envBlock });
         } else {
@@ -3152,6 +3795,38 @@ function restoreSessions(projectPath, workspaceId) {
       } else {
         resumeArgs = rewriteArgsForEndpoint(spawnArgs, /* isLocal */ false);
       }
+      // Re-resolve the profile's env (CLAUDE_CONFIG_DIR) for this entry and layer
+      // it on top of — never in place of — the endpoint env above, mirroring
+      // spawnOpts' layering. Without this, a restored column on a secondary
+      // profile spawns with no CLAUDE_CONFIG_DIR at all: it runs on Primary's
+      // credentials while col.profileId still claims the secondary.
+      if (e.profileId && window.electronAPI && window.electronAPI.profileResolve) {
+        var profEnv = null;
+        try {
+          var profResolved = await window.electronAPI.profileResolve({ columnProfileId: e.profileId });
+          profEnv = (profResolved && profResolved.env && Object.keys(profResolved.env).length) ? profResolved.env : null;
+        } catch (_) { profEnv = null; }
+        if (profEnv) resumeRowOpts = Object.assign({}, resumeRowOpts, { env: Object.assign({}, resumeRowOpts.env, profEnv) });
+      }
+      // `spawnArgs` above is built ONCE from the current global spawn dropdown,
+      // not from this entry's own saved model — reconcile against e.model the
+      // same way every respawn does, or a Headroom-OFF restore silently carries
+      // the dropdown's --model instead of the pin the column was saved with
+      // (and addColumn's detectedModel scan then re-persists that wrong value,
+      // destroying the saved pin on the very next persistSessions).
+      // Reconcile against what will ACTUALLY be spawned, not against the saved
+      // entry. They differ on one path: when e.endpointId names a preset whose
+      // env can no longer be resolved (deleted, or an IPC failure), the fallback
+      // above drops endpointId/env from resumeRowOpts — so bindColumnBaseUrl
+      // sees hasEndpoint:false and binds ANTHROPIC_MODEL, while keying this off
+      // `e` would still see the stale endpointId, decide Headroom does NOT own
+      // the model, and inject --model too. Both selectors, flag wins, 1M window
+      // silently gone — the exact drift this reconciler exists to prevent.
+      resumeArgs = reconcileModelArgForRespawn(resumeArgs, {
+        model: e.model,
+        endpointId: resumeRowOpts.endpointId,
+        env: resumeRowOpts.env
+      }, isLocalResume);
       resumeArgs = window.SpawnSession.planResumeArgs({ baseArgs: resumeArgs, sessionId: e.sessionId, exists: exists });
       return { resumeArgs: resumeArgs, resumeRowOpts: resumeRowOpts };
     }
@@ -3204,28 +3879,52 @@ function restoreSessions(projectPath, workspaceId) {
       for (var i = 0; i < slice.length; i++) {
         var entry = slice[i];
         var sid = typeof entry === 'string' ? entry : entry && entry.sessionId;
-        if (!sid) continue;
+        var cmdVal = (typeof entry === 'object' && entry && entry.cmd) ? entry.cmd : null;
+        var isCodexEntry = !!(entry && typeof entry === 'object' && entry.kind === 'codex');
+        var cmdArgsVal = (typeof entry === 'object' && entry && Array.isArray(entry.cmdArgs)) ? entry.cmdArgs : [];
+        // A cmd entry (Codex, custom run config) has no sessionId to key on —
+        // it persists on cmd alone (see isPersistableColumn), so only bail
+        // when NEITHER is present.
+        if (!sid && !cmdVal && !isCodexEntry) continue;
         var rowIdx = (typeof entry === 'object' && entry && typeof entry.rowIdx === 'number' && isFinite(entry.rowIdx)) ? entry.rowIdx : 0;
         var widthRatio = (typeof entry === 'object' && entry && typeof entry.widthRatio === 'number' && isFinite(entry.widthRatio) && entry.widthRatio > 0) ? entry.widthRatio : null;
         var title = (typeof entry === 'object' && entry && entry.title) ? entry.title : null;
         var cwd = (typeof entry === 'object' && entry && typeof entry.cwd === 'string' && entry.cwd) ? entry.cwd : null;
         var cwdSource = (typeof entry === 'object' && entry && typeof entry.cwdSource === 'string' && entry.cwdSource) ? entry.cwdSource : null;
         var endpointId = (typeof entry === 'object' && entry && entry.endpointId) ? entry.endpointId : null;
+        var model = (typeof entry === 'object' && entry && entry.model) ? entry.model : null;
+        var profileId = (typeof entry === 'object' && entry && entry.profileId) ? entry.profileId : null;
         // Minimised entries are not part of the grid — route them to a separate
         // list so they don't create rows/affect rowHeightRatios. They restore
         // live-but-minimised into the dock after the grid is built.
         if (typeof entry === 'object' && entry && entry.minimized === true) {
-          var minEntry = { sessionId: sid, title: title };
+          var minEntry = { title: title };
+          if (sid) minEntry.sessionId = sid;
           if (cwd) minEntry.cwd = cwd;
           if (cwdSource) minEntry.cwdSource = cwdSource;
           if (endpointId) minEntry.endpointId = endpointId;
+          if (model) minEntry.model = model;
+          if (profileId) minEntry.profileId = profileId;
+          if (isCodexEntry) {
+            minEntry.kind = 'codex'; minEntry.codexPreset = entry.codexPreset;
+            minEntry.codexModel = entry.codexModel; minEntry.codexEffort = entry.codexEffort;
+            minEntry.codexTier = entry.codexTier; minEntry.codexThreadId = entry.codexThreadId;
+          }
           minimizedEntries.push(minEntry);
           continue;
         }
-        var pushedEntry = { rowIdx: rowIdx, sessionId: sid, title: title, widthRatio: widthRatio };
+        var pushedEntry = { rowIdx: rowIdx, title: title, widthRatio: widthRatio };
+        if (sid) pushedEntry.sessionId = sid;
         if (cwd) pushedEntry.cwd = cwd;
         if (cwdSource) pushedEntry.cwdSource = cwdSource;
         if (endpointId) pushedEntry.endpointId = endpointId;
+        if (model) pushedEntry.model = model;
+        if (profileId) pushedEntry.profileId = profileId;
+        if (isCodexEntry) {
+          pushedEntry.kind = 'codex'; pushedEntry.codexPreset = entry.codexPreset;
+          pushedEntry.codexModel = entry.codexModel; pushedEntry.codexEffort = entry.codexEffort;
+          pushedEntry.codexTier = entry.codexTier; pushedEntry.codexThreadId = entry.codexThreadId;
+        }
         entries.push(pushedEntry);
       }
       if (rowHeightRatios) {
@@ -3272,6 +3971,11 @@ function restoreSessions(projectPath, workspaceId) {
         }
         var rowOpts = { workspaceId: workspaceId };
         if (e.title) rowOpts.title = e.title;
+        // Threaded through to addColumn's opts.model -> bindColumnBaseUrl's
+        // oneMModel, so a Headroom-bound column restores pinned to the model
+        // it was actually running, not the config's 1M default.
+        if (e.model) rowOpts.model = e.model;
+        if (e.profileId) rowOpts.profileId = e.profileId;
         if (e.cwd && e.cwdSource !== 'auto-worktree') {
           var stillExists = await window.electronAPI.pathExists(e.cwd);
           if (stillExists) {
@@ -3281,6 +3985,25 @@ function restoreSessions(projectPath, workspaceId) {
             console.warn("Column '" + (e.title || e.sessionId) + "' had cwd " + e.cwd + " which no longer exists; restored at project root.");
           }
         }
+
+        // Codex entries rebuild validated semantic settings, then resume their
+        // native Codex thread through the authenticated app-server when it is
+        // available. They remain outside Claude session/Headroom machinery.
+        var codexSpec = null;
+        if (e && e.kind === 'codex') {
+          await ensureCodexCatalog();
+          codexSpec = window.CodexSpawn.buildCodexRestore(e, rowOpts.cwd || projectPath, codexRestoreModels(e.codexModel));
+        }
+        if (codexSpec) {
+          await spawnCodexColumn(rowOpts.cwd || projectPath, targetRow, codexSpec, {
+            threadId: codexSpec.opts.codexThreadId,
+            columnOpts: rowOpts
+          });
+          continue;
+        }
+        // A legacy entry carrying a raw cmd/cmdArgs is the exact shape of the
+        // execution vector — drop it rather than honouring it.
+        if (e && e.cmd) { console.warn('Ignoring session entry with a raw cmd (not restorable for safety).'); continue; }
 
         // Endpoint-aware resume: if this column was spawned against a non-cloud
         // endpoint preset, look up the preset's env block and rewrite args. If
@@ -3308,6 +4031,8 @@ function restoreSessions(projectPath, workspaceId) {
         var ment = minimizedEntries[me];
         var minRowOpts = { workspaceId: workspaceId };
         if (ment.title) minRowOpts.title = ment.title;
+        if (ment.model) minRowOpts.model = ment.model;
+        if (ment.profileId) minRowOpts.profileId = ment.profileId;
         if (ment.cwd && ment.cwdSource !== 'auto-worktree') {
           var mExists = await window.electronAPI.pathExists(ment.cwd);
           if (mExists) {
@@ -3317,8 +4042,20 @@ function restoreSessions(projectPath, workspaceId) {
             console.warn("Minimised column '" + (ment.title || ment.sessionId) + "' had cwd " + ment.cwd + " which no longer exists; restored at project root.");
           }
         }
-        var mBuilt = await buildResumeForEntry(ment, minRowOpts);
-        addColumn(mBuilt.resumeArgs, null, mBuilt.resumeRowOpts);
+        var minCodexSpec = null;
+        if (ment && ment.kind === 'codex') {
+          await ensureCodexCatalog();
+          minCodexSpec = window.CodexSpawn.buildCodexRestore(ment, minRowOpts.cwd || projectPath, codexRestoreModels(ment.codexModel));
+        }
+        if (minCodexSpec) {
+          await spawnCodexColumn(minRowOpts.cwd || projectPath, null, minCodexSpec, {
+            threadId: minCodexSpec.opts.codexThreadId,
+            columnOpts: minRowOpts
+          });
+        } else {
+          var mBuilt = await buildResumeForEntry(ment, minRowOpts);
+          addColumn(mBuilt.resumeArgs, null, mBuilt.resumeRowOpts);
+        }
         // addColumn assigns id = ++globalColumnId and registers it synchronously.
         var newId = globalColumnId;
         minimizeColumn(newId);
@@ -3403,7 +4140,32 @@ function buildResumeArgs(col) {
   // enforces endpoint correctness (strips --bare/--model on the wrong endpoint
   // kind, clamps effort to a value that kind accepts).
   var args = EffortRelaunch.buildResumeArgsBase(col, isLocal, defaultEffortLocal);
-  return rewriteArgsForEndpoint(args, isLocal);
+  args = rewriteArgsForEndpoint(args, isLocal);
+  return reconcileModelArgForRespawn(args, col, isLocal);
+}
+
+// Reconcile a stored --model flag against whatever owns the model NOW —
+// thin renderer wrapper around the pure, unit-tested lib/headroom-env.js
+// implementation. `col` is any col-shaped object carrying `.model`,
+// `.endpointId`, `.env` (a saved sessions.json entry qualifies directly).
+// Shared by every respawn (buildResumeArgs) AND restoreSessions'
+// buildResumeForEntry, so both paths reconcile the same way instead of one
+// silently overwriting the saved pin with the current dropdown value.
+//
+// hasEndpoint intentionally requires env.ANTHROPIC_BASE_URL, not just a
+// truthy col.env — a profiled column's env carries CLAUDE_CONFIG_DIR (which
+// subscription's credentials get used), not a base URL override, so it must
+// still let Headroom own the model binding the same as an unprofiled column.
+function reconcileModelArgForRespawn(args, col, isLocal) {
+  var headroomOwnsModel = window.HeadroomEnv && window.HeadroomEnv.headroomOwnsModel({
+    headroomInstalled: headroomInstalled,
+    useHeadroom: config && config.useHeadroom,
+    useHeadroom1m: config && config.useHeadroom1m,
+    hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL))
+  });
+  return window.HeadroomEnv
+    ? window.HeadroomEnv.reconcileModelArgForRespawn(args, col.model, headroomOwnsModel, isLocal)
+    : args;
 }
 
 // Local Anthropic-compat servers (LM Studio etc.) accept low/medium/high/max
@@ -3660,6 +4422,59 @@ function showGroupContextMenu(event, groupKey) {
   }, 0);
 }
 
+// Reuses #project-context-menu (the project-level context menu's element) —
+// they are never open at once, but this rebuilds its children AND overwrites
+// menu.onclick wholesale every call, so whichever of this / the project menu
+// last opened wins the handler. Don't add per-menu-type state to `menu`
+// without accounting for that shared-element coupling.
+function showWorkspaceContextMenu(event, project, projectIndex, ws) {
+  var menu = document.getElementById('project-context-menu');
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.id = 'project-context-menu';
+    menu.className = 'project-context-menu';
+    document.body.appendChild(menu);
+  }
+  while (menu.firstChild) menu.removeChild(menu.firstChild);
+
+  function addItem(label, action) {
+    var mi = document.createElement('div');
+    mi.className = 'project-context-item';
+    mi.dataset.action = action;
+    mi.textContent = label;
+    menu.appendChild(mi);
+  }
+  addItem('Subscription…', 'assign-profile');
+
+  menu.style.left = event.clientX + 'px';
+  menu.style.top = event.clientY + 'px';
+  menu.style.display = 'block';
+
+  menu.onclick = function (ev) {
+    var action = ev.target.dataset.action;
+    if (action === 'assign-profile') {
+      openProfileAssignPicker({
+        title: 'Subscription for workspace "' + ws.name + '"',
+        currentId: ws.profileId || null,
+        inheritLabel: 'Inherit from project',
+        onChange: function (v) {
+          ws.profileId = v;
+          saveConfig();
+          if (projectIndex === config.activeProjectIndex && project.activeWorkspaceId === ws.id) refreshProfileSelection();
+        }
+      });
+    }
+    menu.style.display = 'none';
+  };
+
+  setTimeout(function () {
+    document.addEventListener('click', function closeMenu() {
+      menu.style.display = 'none';
+      document.removeEventListener('click', closeMenu);
+    });
+  }, 0);
+}
+
 function toggleProjectSortMode() {
   var current = config.projectSortMode || 'manual';
   config.projectSortMode = current === 'alpha' ? 'manual' : 'alpha';
@@ -3778,6 +4593,67 @@ function showEmptyState() {
 // DOM helpers
 // ============================================================
 
+var codexBadgeTooltipEl = null;
+var codexBadgeTooltipOwner = null;
+
+function showCodexBadgeDetails(eventOrBadge) {
+  var badge = eventOrBadge && eventOrBadge.currentTarget ? eventOrBadge.currentTarget : eventOrBadge;
+  if (!badge || !badge.dataset || !badge.dataset.details) return;
+  var tooltip = codexBadgeTooltipEl;
+  if (!tooltip) {
+    tooltip = document.createElement('div');
+    tooltip.className = 'codex-badge-tooltip';
+    tooltip.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(tooltip);
+    codexBadgeTooltipEl = tooltip;
+  }
+  codexBadgeTooltipOwner = badge;
+  tooltip.textContent = badge.dataset.details;
+  tooltip.classList.add('codex-badge-tooltip-shown');
+  tooltip.style.left = '0px';
+  tooltip.style.top = '0px';
+  var position = window.CodexBadgePlacement.placeBadgeTooltip(
+    badge.getBoundingClientRect(),
+    tooltip.getBoundingClientRect(),
+    { width: window.innerWidth, height: window.innerHeight }
+  );
+  tooltip.style.left = position.left + 'px';
+  tooltip.style.top = position.top + 'px';
+}
+
+function hideCodexBadgeDetails(eventOrBadge) {
+  var badge = eventOrBadge && eventOrBadge.currentTarget ? eventOrBadge.currentTarget : eventOrBadge;
+  if (!codexBadgeTooltipEl || (badge && codexBadgeTooltipOwner !== badge)) return;
+  if (badge && (document.activeElement === badge || badge.matches(':hover'))) return;
+  codexBadgeTooltipEl.classList.remove('codex-badge-tooltip-shown');
+  codexBadgeTooltipOwner = null;
+}
+
+function dismissCodexBadgeDetailsForColumn(columnElement) {
+  codexBadgeTooltipOwner = window.CodexBadgePlacement.dismissOwnedBadgeTooltip(
+    columnElement,
+    codexBadgeTooltipOwner,
+    codexBadgeTooltipEl
+  );
+}
+
+function updateCodexBadgeAccessibility(badge, settings, detail) {
+  if (!badge) return;
+  settings = settings || {};
+  var sandbox = settings.sandbox;
+  if (sandbox && typeof sandbox === 'object') sandbox = sandbox.type || 'configured';
+  var safety = [
+    'Launch preset: ' + (badge.dataset.launchSafety || 'Codex default'),
+    'Effective approval: ' + (settings.approvalPolicy || 'pending live state'),
+    'Effective sandbox: ' + (sandbox || 'pending live state')
+  ];
+  var description = ['Codex CLI'].concat(safety).concat(detail ? [detail] : []);
+  badge.title = description.join('\n');
+  badge.dataset.details = description.join('\n');
+  badge.setAttribute('aria-label', description.join('. '));
+  if (codexBadgeTooltipOwner === badge) showCodexBadgeDetails(badge);
+}
+
 function createColumnHeader(id, customTitle, opts) {
   opts = opts || {};
   var header = document.createElement('div');
@@ -3795,16 +4671,55 @@ function createColumnHeader(id, customTitle, opts) {
     var codexBadge = document.createElement('span');
     codexBadge.className = 'col-codex-badge';
     codexBadge.textContent = 'Codex';
-    codexBadge.title = opts.codexLabel
-      ? ('Codex CLI · ' + opts.codexLabel)
-      : 'This column runs the Codex CLI, not Claude';
-    title.appendChild(codexBadge);
+    codexBadge.dataset.launchSafety = opts.codexLabel || 'Codex default';
+    codexBadge.tabIndex = 0;
+    codexBadge.setAttribute('role', 'note');
+    updateCodexBadgeAccessibility(codexBadge);
+    codexBadge.addEventListener('mouseenter', showCodexBadgeDetails);
+    codexBadge.addEventListener('focus', showCodexBadgeDetails);
+    codexBadge.addEventListener('mouseleave', hideCodexBadgeDetails);
+    codexBadge.addEventListener('blur', hideCodexBadgeDetails);
   }
+
+  // Subscription chip — hidden by default (empty text, no background), toggled
+  // on by updateColumnProfileChip once the caller wires col.profileChipEl to
+  // this element. Stays invisible for anyone who has never created a
+  // non-Primary profile.
+  var profileChip = document.createElement('span');
+  profileChip.className = 'col-profile-chip';
+  title.appendChild(profileChip);
 
   var actions = document.createElement('span');
   actions.className = 'col-actions';
 
   var claudeChrome = window.CodexSpawn.columnUsesClaudeChrome({ cmd: opts.cmd });
+
+  // Codex-watch job-count badge — only meaningful on Claude-chrome columns
+  // (a raw `codex` cmd column already wears the .col-codex-badge above, and a
+  // diff column has no session at all). Named distinctly from that badge
+  // (col-codex-watch-badge, not col-codex-badge) even though both are
+  // "codex"-flavoured — they mean different things and reusing the class
+  // would collide in both CSS and any future querySelector. Hidden by
+  // default; updateCodexWatchBadge (wired via colData.codexWatchBadgeEl)
+  // shows it once codexWatchCounts has a running count for this column.
+  //
+  // Deliberately NOT appended inside `title` (the .col-title span): both
+  // startInlineRename and fetchAndSetSessionTitle overwrite title.textContent
+  // wholesale, which would destroy this node on every rename/title-sync and
+  // (worse) fold the badge's digits into the persisted customTitle string.
+  // It's appended to `header` as a sibling of `title` below instead, once
+  // `title` itself is in the DOM — the `.column-header .col-codex-watch-badge`
+  // CSS selector still matches unchanged.
+  if (!opts.isDiff && claudeChrome) {
+    var codexWatchBadge = document.createElement('span');
+    codexWatchBadge.className = 'col-codex-watch-badge';
+    codexWatchBadge.title = 'Codex jobs running in this session — click to open the watcher';
+    codexWatchBadge.addEventListener('click', function (e) {
+      e.stopPropagation();
+      openCodexWatchWindow(id);
+    });
+  }
+
   if (!opts.isDiff && claudeChrome) {
     var compactBtn = document.createElement('span');
     compactBtn.className = 'col-action';
@@ -3864,6 +4779,12 @@ function createColumnHeader(id, customTitle, opts) {
     ctxMeter.className = 'col-ctx-meter';
     ctxMeter.dataset.colCtx = '';
     ctxMeter.setAttribute('hidden', '');
+    ctxMeter.setAttribute('tabindex', '0');
+    ctxMeter.setAttribute('role', 'progressbar');
+    ctxMeter.setAttribute('aria-label', 'Context window usage');
+    ctxMeter.setAttribute('aria-valuemin', '0');
+    ctxMeter.setAttribute('aria-valuemax', '100');
+    ctxMeter.setAttribute('aria-valuetext', 'Context usage unavailable');
     ctxMeter.title = 'Context window usage';
     var ctxFill = document.createElement('div');
     ctxFill.className = 'col-ctx-fill';
@@ -3918,6 +4839,8 @@ function createColumnHeader(id, customTitle, opts) {
   actions.appendChild(closeBtn);
 
   header.appendChild(title);
+  if (codexBadge) header.appendChild(codexBadge);
+  if (codexWatchBadge) header.appendChild(codexWatchBadge);
   header.appendChild(actions);
 
   if (!popoutMode && !opts.isDiff) {
@@ -4104,7 +5027,10 @@ function startTitleEdit(id, titleEl) {
       col.customTitle = text;
       persistSessions(col.projectKey, col.workspaceId);
     },
-    onEmpty: function () { return 'Claude #' + id; }
+    onEmpty: function () {
+      var col = allColumns.get(id);
+      return ((col && col.cmd === 'codex') ? 'Codex #' : 'Claude #') + id;
+    }
   });
 }
 
@@ -4122,6 +5048,10 @@ function createExitOverlay(id, exitCode, col) {
 
   restartBtn.addEventListener('click', function () {
     overlay.remove();
+    if (col.cmd === 'codex') {
+      restartColumn(id);
+      return;
+    }
     fitTerminal(col.terminal, col.fitAddon);
     var sendMsg = { type: 'create', id: id, cols: col.terminal.cols, rows: col.terminal.rows, cwd: window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey) };
     if (col.cmd) {
@@ -4133,7 +5063,7 @@ function createExitOverlay(id, exitCode, col) {
     if (col.env) sendMsg.env = col.env;
     // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
     // Re-derived from the live global flag; passthrough for endpoint/arbitrary cmd.
-    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp) });
+    bindColumnBaseUrl(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp), oneMModel: col.model });
     gatedWsSend(sendMsg);
     col.terminal.clear();
     setColumnActivity(id, 'working');
@@ -4208,7 +5138,7 @@ function addColumn(args, targetRow, opts) {
   col.id = 'col-' + id;
 
   var codexLabel = (opts.cmd === 'codex' && window.CodexSpawn)
-    ? window.CodexSpawn.codexApprovalLabelFromArgs(args || [])
+    ? window.CodexSpawn.codexApprovalLabelFromArgs(opts.persistedCmdArgs || args || [])
     : null;
   var header = createColumnHeader(id, opts.title, { cmd: opts.cmd || null, codexLabel: codexLabel });
 
@@ -4258,7 +5188,7 @@ function addColumn(args, targetRow, opts) {
   if (endpointBanner) {
     var __hrTag = endpointBanner.querySelector('.endpoint-banner-tag--headroom');
     if (__hrTag) __hrTag.addEventListener('click', function () {
-      if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard');
+      if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:' + headroomServicePort + '/dashboard');
     });
   }
 
@@ -4565,14 +5495,18 @@ function addColumn(args, targetRow, opts) {
   // cmdArgs stays ORIGINAL so respawn rebuilds as original + --resume <id>
   // (never --session-id <existing-id>, which the CLI rejects) and popout
   // transfer / saved-layout never see an orphan --session-id flag.
-  var __origArgs = claudeArgs;
+  // Managed Codex columns launch with transient app-server coordinates, but
+  // retain only their semantic approval/model intent for respawn/persistence.
+  // This is also the boundary that keeps the loopback URL and auth-env name
+  // out of repository-controlled sessions.json.
+  var __origArgs = Array.isArray(opts.persistedCmdArgs) ? opts.persistedCmdArgs.slice() : claudeArgs;
   var __plan = window.SpawnSession.planFreshSessionId(
-    { args: claudeArgs, cmd: cmd, hasEndpoint: !!(opts.endpointId || opts.env) },
+    { args: claudeArgs, cmd: cmd, hasEndpoint: !!(opts.endpointId || (opts.env && opts.env.ANTHROPIC_BASE_URL)) },
     window.SpawnSession.randomUuidV4);
   claudeArgs = __plan.args;
 
   var preSpawnSessionsPromise = (!cmd && window.electronAPI)
-    ? window.electronAPI.getRecentSessions(cwd)
+    ? window.electronAPI.getRecentSessions(cwd, opts.profileId)
     : Promise.resolve([]);
 
   requestAnimationFrame(async function () {
@@ -4598,20 +5532,22 @@ function addColumn(args, targetRow, opts) {
       wsSend({ type: 'reattach', id: id, cols: terminal.cols, rows: terminal.rows });
       return;
     }
-    // Bind this column to the app-managed Headroom proxy by env var (no fragile
-    // `headroom wrap` subprocess). maybeBindHeadroom no-ops unless the global
-    // toggle is on AND this is a plain default-Claude spawn (no endpoint, no
-    // arbitrary cmd). We keep `cmd`/`claudeArgs`/session-id pinning intact — the
-    // detectSession guard below relies on `cmd` staying falsy for default cols.
+    // Bind this column's base URL — to the app-managed Headroom proxy when the
+    // global toggle is on, to direct Anthropic otherwise — for any plain
+    // default-Claude spawn (no endpoint, no arbitrary cmd; bindColumnBaseUrl
+    // no-ops for those, which own their own base URL or none at all). We keep
+    // `cmd`/`claudeArgs`/session-id pinning intact — the detectSession guard
+    // below relies on `cmd` staying falsy for default cols.
     var sendMsg = { type: 'create', id: id, cols: terminal.cols, rows: terminal.rows, cwd: cwd, args: claudeArgs };
     if (cmd) sendMsg.cmd = cmd;
     if (opts.env) sendMsg.env = opts.env;
+    if (cmd === 'codex' && typeof opts.spawnTicket === 'string') sendMsg.spawnTicket = opts.spawnTicket;
 
     // Project-scoped MCP: for claude columns, resolve the project's inherited-server
     // selection and append --mcp-config/--strict-mcp-config. No-op when inheriting
     // all (returns {inherit:true}) or when "Strip MCPs" already put --mcp-config in
     // args (appendProjectMcpArgs guards that). Never blocks the spawn on failure.
-    // Resolved BEFORE maybeBindHeadroom so hasMcp is known when we decide whether
+    // Resolved BEFORE bindColumnBaseUrl so hasMcp is known when we decide whether
     // to enable Headroom's tool-search deferral (it would otherwise swallow mcp__*
     // tool schemas out of reach — see lib/headroom-env.js).
     var mcpRes = null;
@@ -4627,7 +5563,7 @@ function addColumn(args, targetRow, opts) {
     // Persist so respawn/reattach paths keep MCP inlined (Headroom tool-search off) without re-resolving.
     var __col = allColumns.get(id);
     if (__col) __col.hasMcp = __hasMcp;
-    maybeBindHeadroom(sendMsg, { hasEndpoint: !!(opts.endpointId || opts.env), isClaude: !cmd, hasMcp: __hasMcp });
+    bindColumnBaseUrl(sendMsg, { hasEndpoint: !!(opts.endpointId || (opts.env && opts.env.ANTHROPIC_BASE_URL)), isClaude: !cmd, hasMcp: __hasMcp, oneMModel: opts.model });
     if (mcpRes) sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
 
     vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
@@ -4850,19 +5786,26 @@ function addColumn(args, targetRow, opts) {
   }
   // Detect the model from --model flag or ANTHROPIC_MODEL env, so the ctx meter
   // can pick the correct limit (200k vs 1M). Falls back to 'sonnet' (200k).
-  var detectedModel = null;
-  for (var mi = 0; mi < claudeArgs.length - 1; mi++) {
-    if (claudeArgs[mi] === '--model') { detectedModel = claudeArgs[mi + 1]; break; }
-  }
+  // Last-wins across BOTH `--model x` and `--model=x` — see detectFlagValue for
+  // why (argv legitimately repeats the flag, and a mis-read gets persisted and
+  // then replayed over the user's own choice on respawn).
+  var detectedModel = window.SpawnSession.detectFlagValue(claudeArgs, '--model');
   if (!detectedModel && opts.env && opts.env.ANTHROPIC_MODEL) {
     detectedModel = opts.env.ANTHROPIC_MODEL;
   }
+  // Headroom-bound spawns intentionally skip pushing --model (see buildSpawnArgs)
+  // so ANTHROPIC_MODEL is the only selector — fall back to the dropdown pick
+  // passed through opts.model so the ctx meter still sees the right model.
+  if (!detectedModel && opts.model) {
+    detectedModel = opts.model;
+  }
   // Detect the effort this column was launched with, so the header badge and
   // every later respawn (buildResumeArgs) reflect/preserve it.
-  var detectedEffort = null;
-  for (var efi = 0; efi < claudeArgs.length - 1; efi++) {
-    if (claudeArgs[efi] === '--effort') { detectedEffort = claudeArgs[efi + 1]; break; }
-  }
+  // Same first-wins bug as --model had, and NOT cosmetic: col.effort is the
+  // source of truth for the header badge and buildResumeArgs rebuilds --effort
+  // from it, so a user who typed `--effort max` in Custom args was silently
+  // downgraded to the spawn-option default on their first respawn.
+  var detectedEffort = window.SpawnSession.detectFlagValue(claudeArgs, '--effort');
 
   var colData = {
     element: col,
@@ -4890,6 +5833,10 @@ function addColumn(args, targetRow, opts) {
     customTitle: opts.title || null,
     cmd: cmd,
     cmdArgs: __origArgs,     // ORIGINAL args (no injected --session-id; see __plan above)
+    codexThreadId: window.CodexSpawn.isCodexThreadId(opts.codexThreadId) ? opts.codexThreadId : null,
+    codexClaimId: window.CodexSpawn.isCodexClaimId(opts.codexClaimId) ? opts.codexClaimId : null,
+    codexClaimCwd: window.CodexSpawn.isCodexClaimId(opts.codexClaimId) && opts.codexClaimCwd === cwd ? cwd : null,
+    codexManaged: !!opts.codexManaged,
     model: detectedModel,    // for ctx meter limit (200k vs 1M)
     effort: detectedEffort,  // current effort; source of truth for the header badge + respawns
     env: opts.env || null,
@@ -4920,12 +5867,30 @@ function addColumn(args, targetRow, opts) {
     ctxPollTimer: null,
     snippetBuffer: '',  // accumulates printable chars to detect "\\trigger" patterns
     endpointId: opts.endpointId || (typeof currentEndpointId !== 'undefined' ? currentEndpointId : null) || null,
+    // The Claude subscription this column runs on. Resolved (not just
+    // opts.profileId) so a restored/resumed column keeps whatever
+    // project/workspace/global cascade produced it at spawn time — see
+    // spawnOpts, which sets opts.profileId from currentProfileId.
+    profileId: opts.profileId || null,
     failedOver: false  // set true after one failover so we don't ping-pong
   };
 
   row.columnIds.push(id);
   state.columns.set(id, colData);
   allColumns.set(id, colData);
+
+  // Wire the header's subscription chip to this column's data object and set
+  // its initial visibility — no-op (chip stays empty/hidden) for anyone who
+  // has never created a non-Primary profile.
+  colData.profileChipEl = header.querySelector('.col-profile-chip');
+  updateColumnProfileChip(colData);
+
+  // Wire the codex-watch header badge the same way, and (re)assess whether
+  // the job-count poll needs to be running now that this column exists — a
+  // restored/resumed column may already carry a sessionId at this point.
+  colData.codexWatchBadgeEl = header.querySelector('.col-codex-watch-badge');
+  updateCodexWatchBadge(id);
+  codexWatchMaybeStart();
 
   // Re-fit when the wrapper settles to its final flex height. The create-time
   // fit() (above) runs before the column header + endpoint banner finish
@@ -4962,7 +5927,10 @@ function addColumn(args, targetRow, opts) {
   var effortBadgeEl = header.querySelector('.col-effort');
   if (effortBadgeEl && colData.effort && isValidEffort(colData.effort)) effortBadgeEl.value = colData.effort;
   updateColumnTargetBadge(id);
-  startContextMeterPoll(id);
+  if (cmd === 'codex' && colData.codexThreadId) startCodexThreadState(id);
+  else if (cmd === 'codex' && colData.codexManaged && colData.codexClaimId) showCtxMeterPlaceholder(colData, '…');
+  else if (cmd === 'codex') markCodexFallback(colData);
+  else startContextMeterPoll(id);
   setFocusedColumn(id);
   if (lastPlanLimitsResult && lastPlanLimitsResult.ok && lastPlanLimitsResult.data) {
     var d0 = lastPlanLimitsResult.data;
@@ -5004,6 +5972,7 @@ function addColumn(args, targetRow, opts) {
     persistSessions(colData.projectKey, colData.workspaceId);
     fetchAndSetSessionTitle(id, cwd, __plan.sessionId);
     ensureClawdTail(id);
+    codexWatchMaybeStart();
   }
 }
 
@@ -5011,9 +5980,9 @@ function addRow() {
   if (!activeProjectKey) return;
   var state = getActiveState();
   if (!state) return;
-
-  var row = addRowToProject(state);
-  addColumn(null, row, spawnOpts());
+  spawnFromOptions(function () { return addRowToProject(state); }).catch(function (e) {
+    console.error('addRow: spawn failed', e);
+  });
 }
 
 // ============================================================
@@ -5628,10 +6597,10 @@ if (window.electronAPI && window.electronAPI.onClawdEvent) {
 // Mirror main's live automation/headless session ids so interactive columns
 // never adopt one (see getClaimedSessionIds). Fetch once, then stay in sync.
 if (window.electronAPI && window.electronAPI.getBackgroundSessionIds) {
-  window.electronAPI.getBackgroundSessionIds().then(function (ids) { backgroundSessionIdsCache = new Set(ids || []); }).catch(function () {});
+  window.electronAPI.getBackgroundSessionIds().then(function (ids) { backgroundSessionIdsCache = toBackgroundMap(ids); }).catch(function () {});
 }
 if (window.electronAPI && window.electronAPI.onBackgroundSessionIds) {
-  window.electronAPI.onBackgroundSessionIds(function (ids) { backgroundSessionIdsCache = new Set(ids || []); });
+  window.electronAPI.onBackgroundSessionIds(function (ids) { backgroundSessionIdsCache = toBackgroundMap(ids); });
 }
 
 // Idempotent: start the tail for a column's current sessionId. If we already
@@ -5643,14 +6612,14 @@ function ensureClawdTail(columnId) {
   if (!col || !col.sessionId || !col.projectKey) return;
   if (col.clawdTailSessionId === col.sessionId) return;
   col.clawdTailSessionId = col.sessionId;
-  window.electronAPI.clawdStartTail(columnId, col.projectKey, col.sessionId);
+  window.electronAPI.clawdStartTail(columnId, col.projectKey, col.sessionId, col.profileId);
 }
 
 function fetchAndSetSessionTitle(columnId, projectPath, sessionId) {
   if (!window.electronAPI || !window.electronAPI.getSessionTitle) return;
   var col = allColumns.get(columnId);
   if (!col || col.customTitle) return; // don't override manual rename
-  window.electronAPI.getSessionTitle(projectPath, sessionId).then(function (title) {
+  window.electronAPI.getSessionTitle(projectPath, sessionId, col.profileId).then(function (title) {
     if (!title) return;
     var col2 = allColumns.get(columnId);
     if (!col2 || col2.customTitle) return;
@@ -5662,7 +6631,7 @@ function fetchAndSetSessionTitle(columnId, projectPath, sessionId) {
 }
 
 // Collect session IDs already claimed by other columns in the same project
-function getClaimedSessionIds(excludeColumnId) {
+function getClaimedSessionIds(excludeColumnId, profileId) {
   var claimed = {};
   allColumns.forEach(function (col, colId) {
     if (colId !== excludeColumnId && col.sessionId) {
@@ -5670,10 +6639,22 @@ function getClaimedSessionIds(excludeColumnId) {
     }
   });
   // Background/automation sessions (live `claude --print` runs) must NEVER be
-  // adopted by an interactive column — detectSession and the hook-rebind both
-  // consult this map, so marking them claimed blocks both adoption paths and
-  // keeps a column from latching onto an automation's transcript in the same dir.
-  try { backgroundSessionIdsCache.forEach(function (sid) { if (sid) claimed[sid] = true; }); } catch (e) {}
+  // adopted by an interactive column running under the SAME profile —
+  // detectSession and the hook-rebind both consult this map, so marking them
+  // claimed blocks both adoption paths and keeps a column from latching onto
+  // an automation's transcript in the same dir. A background id under a
+  // DIFFERENT profile lands under that profile's own projects/ dir and is no
+  // threat to this column's scan, so it's left unclaimed here.
+  // main always stores a concrete id, defaulting unset runs to 'primary';
+  // columns instead leave Primary as null/undefined — normalise both sides so
+  // a Primary background run compares equal to a Primary interactive column.
+  var normProfileId = (profileId && profileId !== 'primary') ? profileId : null;
+  try {
+    backgroundSessionIdsCache.forEach(function (bgProfileId, sid) {
+      var normBg = (bgProfileId && bgProfileId !== 'primary') ? bgProfileId : null;
+      if (sid && normBg === normProfileId) claimed[sid] = true;
+    });
+  } catch (e) {}
   return claimed;
 }
 
@@ -5684,8 +6665,9 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
     return;
   }
   setTimeout(function () {
-    window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
-      var claimed = getClaimedSessionIds(columnId);
+    var preCol = allColumns.get(columnId);
+    window.electronAPI.getRecentSessions(projectPath, preCol && preCol.profileId).then(function (sessions) {
+      var claimed = getClaimedSessionIds(columnId, preCol && preCol.profileId);
       console.log('[detectSession] col=' + columnId + ' attempt=' + attempt + ' projectPath=' + projectPath + ' got ' + sessions.length + ' sessions, ' + Object.keys(preExistingIds).length + ' preIds, ' + Object.keys(claimed).length + ' claimed');
       for (var i = 0; i < sessions.length; i++) {
         var sid = sessions[i].sessionId;
@@ -5700,6 +6682,7 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
             persistSessions(col.projectKey, col.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
             ensureClawdTail(columnId);
+            codexWatchMaybeStart();
             // Sync the header effort badge to the column's actual effort (set
             // at spawn via --effort and tracked as col.effort, the source of
             // truth). Backfill from the kind-appropriate default only if it
@@ -5739,7 +6722,7 @@ function startSessionSync(columnId, projectPath) {
     var col = allColumns.get(columnId);
     if (!col) { stopSessionSync(columnId); return; }
 
-    window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+    window.electronAPI.getRecentSessions(projectPath, col.profileId).then(function (sessions) {
       var col2 = allColumns.get(columnId);
       if (!col2 || !sessions.length) return;
 
@@ -5856,21 +6839,44 @@ function persistSessions(projectKey, workspaceId) {
       var rowEntries = [];
       for (var c2 = 0; c2 < row.columnIds.length; c2++) {
         var col2 = state.columns.get(row.columnIds[c2]);
-        if (!col2 || !col2.sessionId) continue;
+        // Claude columns need a sessionId to be resumable; cmd columns
+        // (Codex, custom run configs) have no transcript but persist on
+        // having a cmd to replay instead — see isPersistableColumn.
+        if (!col2 || !window.SpawnSession.isPersistableColumn(col2)) continue;
         var widthRatio = colWidths[c2] / totalColWidth;
         if (!hidden) col2.lastWidthRatio = widthRatio;
-        var entry = {
-          sessionId: col2.sessionId,
-          title: col2.customTitle || null,
-          rowIdx: compactRowIdx,
-          widthRatio: widthRatio
-        };
+        // Key order matches the pre-cmd-support shape exactly for the
+        // sessionId case (sessionId first) so a legacy Claude-only
+        // sessions.json round-trips byte-identically; cmd-only entries (no
+        // sessionId) simply omit the key rather than writing it null.
+        var entry = col2.sessionId
+          ? { sessionId: col2.sessionId, title: col2.customTitle || null, rowIdx: compactRowIdx, widthRatio: widthRatio }
+          : { title: col2.customTitle || null, rowIdx: compactRowIdx, widthRatio: widthRatio };
         if (col2.cwd && col2.cwd !== projectKey) entry.cwd = col2.cwd;
         if (col2.cwd && col2.cwd !== projectKey && col2.cwdSource) entry.cwdSource = col2.cwdSource;
         // Persist endpoint association so restored columns come back on the
         // same local endpoint (LM Studio, Ollama, etc.) instead of defaulting
         // to whatever the global Spawn dropdown is currently pointing at.
         if (col2.endpointId) entry.endpointId = col2.endpointId;
+        // Persist which Claude subscription this column ran on, omitted (like
+        // cwd) when it equals the resolved default so existing sessions.json
+        // files without the key keep restoring unchanged.
+        if (col2.profileId) entry.profileId = col2.profileId;
+        // Persist the model the user picked so a restore doesn't fall back to
+        // the 1M default — omitted (not written null/undefined) when unset so
+        // existing session files without the key keep restoring unchanged.
+        if (col2.model) entry.model = col2.model;
+        // cmd columns (Codex, custom run configs) carry no sessionId — persist
+        // the literal cmd + original args instead so restore can replay the
+        // exact spawn (model/effort/tier are already baked into cmdArgs).
+        if (col2.cmd) {
+          // SECURITY: never persist the program name or free-form argv.
+          // sessions.json lives INSIDE the repo, so it is attacker-controlled;
+          // storing a `cmd` there turns a data file into an execution vector on
+          // project open. Store validated intent and rebuild the command from
+          // our own catalogue on restore instead.
+          Object.assign(entry, window.CodexSpawn.codexPersistShape(col2.cmdArgs || [], col2.codexThreadId, col2.codexManaged));
+        }
         rowEntries.push(entry);
       }
 
@@ -5888,15 +6894,21 @@ function persistSessions(projectKey, workspaceId) {
     for (var mi = 0; mi < state.minimized.length; mi++) {
       var mid = state.minimized[mi];
       var mcol = state.columns.get(mid);
-      if (!mcol || !mcol.sessionId) continue;
-      var ment = {
-        sessionId: mcol.sessionId,
-        title: mcol.customTitle || null,
-        minimized: true
-      };
+      if (!mcol || !window.SpawnSession.isPersistableColumn(mcol)) continue;
+      // Key order matches the pre-cmd-support shape (sessionId first) when
+      // present, so legacy minimised Claude entries round-trip byte-identically.
+      var ment = mcol.sessionId
+        ? { sessionId: mcol.sessionId, title: mcol.customTitle || null, minimized: true }
+        : { title: mcol.customTitle || null, minimized: true };
       if (mcol.cwd && mcol.cwd !== projectKey) ment.cwd = mcol.cwd;
       if (mcol.cwd && mcol.cwd !== projectKey && mcol.cwdSource) ment.cwdSource = mcol.cwdSource;
       if (mcol.endpointId) ment.endpointId = mcol.endpointId;
+      if (mcol.profileId) ment.profileId = mcol.profileId;
+      if (mcol.model) ment.model = mcol.model;
+      if (mcol.cmd) {
+        // See the security note in the grid loop above.
+        Object.assign(ment, window.CodexSpawn.codexPersistShape(mcol.cmdArgs || [], mcol.codexThreadId, mcol.codexManaged));
+      }
       sessionData.push(ment);
     }
   }
@@ -5933,6 +6945,7 @@ function persistSessions(projectKey, workspaceId) {
 function removeColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
+  dismissCodexBadgeDetailsForColumn(col.element);
 
   // Clean up diffSlotIndex entries pointing at this id (Critical fix: addDiffColumn
   // registered it, but only the inline close-button handler was deleting it —
@@ -5973,6 +6986,7 @@ function removeColumn(id) {
   releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
+  codexWatchCounts.delete(id);
 
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
   if (state) {
@@ -6137,9 +7151,7 @@ async function restartColumn(id) {
   var col = allColumns.get(id);
   if (!col) return;
   if (col.isDiff) return;
-
-  // Kill the current process
-  wsSend({ type: 'kill', id: id });
+  var hadExitOverlay = !!col.element.querySelector('.exit-overlay');
 
   // Reset the per-column delta baseline so the Δ pill measures from this respawn,
   // not from the original spawn. The next ctx poll repopulates spawnSessionTokens.
@@ -6164,8 +7176,12 @@ async function restartColumn(id) {
   // Claude columns (not custom `cmd` columns), and only when we have a checker.
   if (!col.cmd && col.sessionId && window.electronAPI && window.electronAPI.sessionExists) {
     try {
-      var stillExists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey), col.sessionId);
-      if (!stillExists) col.sessionId = null;
+      var stillExists = await window.electronAPI.sessionExists(window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey), col.sessionId, col.profileId || null);
+      if (!stillExists) {
+        col.sessionId = null;
+        codexWatchCounts.delete(id);
+        updateCodexWatchBadge(id);
+      }
     } catch (e) { /* if the check fails, fall through and resume as before */ }
   }
 
@@ -6173,6 +7189,43 @@ async function restartColumn(id) {
   if (col.cmd) {
     sendMsg.cmd = col.cmd;
     sendMsg.args = col.cmdArgs || [];
+    var codexRestartManaged = false;
+    if (col.cmd === 'codex' && window.electronAPI && window.electronAPI.codexPrepareThread) {
+      try {
+        var preparedThread = await window.electronAPI.codexPrepareThread({
+          cwd: sendMsg.cwd,
+          threadId: window.CodexSpawn.isCodexThreadId(col.codexThreadId) ? col.codexThreadId : undefined
+        });
+        var remoteResumeArgs = preparedThread && preparedThread.ok && /^[0-9a-f]{64}$/i.test(preparedThread.spawnTicket || '')
+          ? window.CodexSpawn.buildCodexRemoteAttach(col.cmdArgs || [], preparedThread)
+          : null;
+        if (remoteResumeArgs) {
+          sendMsg.args = remoteResumeArgs;
+          sendMsg.spawnTicket = preparedThread.spawnTicket;
+          col.codexManaged = true;
+          codexRestartManaged = true;
+          if (preparedThread.mode === 'resume') {
+            col.codexThreadId = preparedThread.threadId;
+            col.codexClaimId = null;
+            col.codexClaimCwd = null;
+            startCodexThreadState(id);
+          } else if (preparedThread.mode === 'fresh') {
+            col.codexThreadId = null;
+            col.codexClaimId = preparedThread.claimId;
+            col.codexClaimCwd = sendMsg.cwd;
+            showCtxMeterPlaceholder(col, '…');
+          }
+        }
+      } catch (e) { /* retain the direct CLI fallback argv */ }
+    }
+    if (col.cmd === 'codex' && !codexRestartManaged) {
+      col.codexThreadId = null;
+      col.codexClaimId = null;
+      col.codexClaimCwd = null;
+      col.codexManaged = false;
+      markCodexFallback(col);
+    }
+    if (col.cmd === 'codex') persistSessions(col.projectKey, col.workspaceId);
   } else {
     sendMsg.args = buildResumeArgs(col);
   }
@@ -6197,7 +7250,14 @@ async function restartColumn(id) {
   }
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
   // Passthrough for arbitrary-cmd/endpoint columns; hasMcp from the fresh resolve.
-  maybeBindHeadroom(sendMsg, { hasEndpoint: !!(col.endpointId || col.env), isClaude: !col.cmd, hasMcp: __rHasMcp });
+  bindColumnBaseUrl(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: __rHasMcp, oneMModel: col.model });
+  // Prepare/authorize managed Codex before killing the old PTY. pty-server
+  // removes that exact PTY generation from its map before its async exit
+  // callback runs, so the killed generation cannot emit an exit message here.
+  // Do not suppress the next renderer exit: it would belong to the replacement.
+  if (!hadExitOverlay) {
+    wsSend({ type: 'kill', id: id });
+  }
   gatedWsSend(sendMsg);
   // Re-evaluate stale-hook health from a clean slate for the new session: if
   // hooks now reach the column it will never re-flag; if they still don't, the
@@ -6744,11 +7804,14 @@ function showColumnSessionPicker(colId, clientX, clientY) {
   function outside(ev) { if (!menu.contains(ev.target)) close(); }
   setTimeout(function () { document.addEventListener('mousedown', outside, true); }, 0);
 
-  // Resolve the column's project path from activeProjectKey on the colData.
-  var projectPath = col.projectKey || activeProjectKey;
+  // The Claude CLI keys its transcript dir by the cwd the process actually ran
+  // in, so this must resolve the same way restartColumn/sessionExists and the
+  // ctx meter do — otherwise a column with a non-root cwd lists/resumes
+  // sessions from the wrong directory.
+  var projectPath = window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey || activeProjectKey);
   if (!projectPath) { loading.textContent = 'No project for this column.'; return; }
 
-  window.electronAPI.getRecentSessions(projectPath).then(function (sessions) {
+  window.electronAPI.getRecentSessions(projectPath, col.profileId).then(function (sessions) {
     while (menu.firstChild) menu.removeChild(menu.firstChild);
     var others = (sessions || []).filter(function (s) { return s.sessionId !== col.sessionId; });
     if (others.length === 0) {
@@ -6768,13 +7831,25 @@ function showColumnSessionPicker(colId, clientX, clientY) {
       item.addEventListener('click', function () {
         // Swap to the chosen session and restart in place.
         col.sessionId = s.sessionId;
+        // The `since` filter belongs to the session the column was previously
+        // bound to; every entry in the resumed transcript predates it, so
+        // leaving it set makes the ctx meter read 0.
+        col.contextEnabled = true;
+        col.contextSinceMs = null;
+        // Stale pointers into the previous session's transcript — mirror the
+        // reset done wherever else col.sessionId is reassigned.
+        col.voiceTranscriptPath = null;
+        col.voicePreTurnUuid = undefined;
+        col.lastSpokenUuid = undefined;
+        col.lastSpokenText = undefined;
+        codexWatchMaybeStart();
         restartColumn(colId);
         close();
       });
       menu.appendChild(item);
       // Title fetch is best-effort — the short id + date is informative enough
       // on first paint; refine asynchronously when available.
-      window.electronAPI.getSessionTitle(projectPath, s.sessionId).then(function (title) {
+      window.electronAPI.getSessionTitle(projectPath, s.sessionId, col.profileId).then(function (title) {
         if (title) item.textContent = (title.length > 60 ? title.slice(0, 60) + '…' : title) + '  ·  ' + when.toLocaleString();
       }).catch(function () { /* keep id-based label */ });
     });
@@ -6782,6 +7857,97 @@ function showColumnSessionPicker(colId, clientX, clientY) {
   }).catch(function () {
     loading.textContent = 'Failed to load sessions.';
   });
+}
+
+// Codex-watch job-count poll — backs the "Watch Codex" overflow row (below)
+// and the header badge (createColumnHeader). Deliberately its own poll,
+// independent of the codex-watch popout window's own tick in main.js: that
+// one only runs once a watcher window is open, but this is what tells the
+// user a watcher is worth opening in the first place.
+//
+// codexWatchListJobs is keyed on the CLAUDE session (not the codex CLI, and
+// not any "is codex installed" probe) — the row/badge appear only once a
+// session has at least one known job. That single condition already covers
+// every "codex isn't here" case (no CLI, no companion plugin, plugin never
+// used, or no session detected yet), so there is no separate presence gate
+// to wire up, and none should be added here later.
+var codexWatchCounts = new Map(); // columnId -> { total, running }
+var CODEX_WATCH_POLL_MS = 3000;
+var codexWatchPollTimer = null;
+
+function codexWatchAnySessionColumn() {
+  var any = false;
+  allColumns.forEach(function (col) { if (col && col.sessionId && !col.isDiff) any = true; });
+  return any;
+}
+
+function codexWatchPollTick() {
+  if (!codexWatchAnySessionColumn()) {
+    if (codexWatchPollTimer) { clearInterval(codexWatchPollTimer); codexWatchPollTimer = null; }
+    return;
+  }
+  allColumns.forEach(function (col, id) {
+    if (!col || !col.sessionId || col.isDiff) return;
+    window.electronAPI.codexWatchListJobs({ sessionId: col.sessionId, columnProfileId: col.profileId || null })
+      .then(function (res) {
+        // The column can be killed (or reassigned to a different session)
+        // while this call is in flight — re-fetch it fresh rather than
+        // trusting the closed-over `col`, and drop the result entirely if
+        // it's gone.
+        var live = allColumns.get(id);
+        if (!live) return;
+        var jobs = (res && res.ok && Array.isArray(res.jobs)) ? res.jobs : [];
+        var counts = window.CodexWatchJobs.summariseCounts(jobs);
+        var prior = codexWatchCounts.get(id);
+        if (prior && prior.total === counts.total && prior.running === counts.running) return;
+        codexWatchCounts.set(id, counts);
+        updateCodexWatchBadge(id);
+      })
+      .catch(function () { /* transient IPC failure — try again next tick */ });
+  });
+}
+
+// Called from every site that assigns col.sessionId (fresh spawn, detectSession,
+// the session picker, the hook-driven /clear rebind) plus once at column
+// creation, since a restored column may already carry a sessionId. No-op if
+// already running; self-stops (above) once no column has a session.
+function codexWatchMaybeStart() {
+  if (codexWatchPollTimer) return;
+  if (!codexWatchAnySessionColumn()) return;
+  codexWatchPollTimer = setInterval(codexWatchPollTick, CODEX_WATCH_POLL_MS);
+}
+
+function updateCodexWatchBadge(id) {
+  var col = allColumns.get(id);
+  if (!col || !col.codexWatchBadgeEl) return;
+  var counts = codexWatchCounts.get(id);
+  var running = counts ? counts.running : 0;
+  col.codexWatchBadgeEl.textContent = String(running);
+  col.codexWatchBadgeEl.classList.toggle('col-codex-watch-badge-shown', running > 0);
+}
+
+// Opens (or refocuses) the read-only Codex job-log watcher window for a
+// column. Reachable both from the header badge and the overflow row.
+async function openCodexWatchWindow(id) {
+  var col = allColumns.get(id);
+  if (!col) return;
+  var title = col.customTitle || ((col.cmd === 'codex' ? 'Codex #' : 'Claude #') + id);
+  var res;
+  try {
+    res = await window.electronAPI.codexWatchOpen({
+      columnId: id,
+      sessionId: col.sessionId,
+      title: title,
+      columnProfileId: col.profileId || null,
+      theme: currentTheme
+    });
+  } catch (e) {
+    showToast('Watch Codex failed to open' + (e && e.message ? (': ' + e.message) : ''), { kind: 'error' });
+    return;
+  }
+  if (!res || !res.ok) {
+    showToast('Watch Codex failed to open' + (res && res.error ? (': ' + res.error) : ''), { kind: 'error' });
+  }
 }
 
 // Column header overflow (⋯) menu — collapses the rarely-used per-column
@@ -6800,6 +7966,65 @@ function showColumnSessionPicker(colId, clientX, clientY) {
 // (which does a document-wide querySelectorAll for those classes on every
 // play/pause/end event) keeps finding and highlighting them while the menu
 // is open, exactly like the old inline buttons did.
+async function spawnCodexColumn(cwd, targetRow, semanticSpec, options) {
+  options = options || {};
+  var effectiveCwd = cwd || activeProjectKey;
+  var spec = semanticSpec || window.CodexSpawn.buildCodexSpawn(effectiveCwd);
+  var semanticArgs = Array.isArray(spec.args) ? spec.args.slice() : [];
+  var columnOpts = Object.assign({}, spec.opts || {}, options.columnOpts || {}, {
+    cmd: 'codex',
+    cwd: effectiveCwd,
+    persistedCmdArgs: semanticArgs
+  });
+  var requestedThreadId = options.threadId || columnOpts.codexThreadId || null;
+  var prepared = null;
+  if (window.electronAPI && window.electronAPI.codexPrepareThread) {
+    try {
+      prepared = await window.electronAPI.codexPrepareThread({
+        cwd: effectiveCwd,
+        threadId: window.CodexSpawn.isCodexThreadId(requestedThreadId) ? requestedThreadId : undefined
+      });
+    } catch (e) { prepared = null; }
+  }
+  var managedArgs = prepared && prepared.ok && /^[0-9a-f]{64}$/i.test(prepared.spawnTicket || '')
+    ? window.CodexSpawn.buildCodexRemoteAttach(semanticArgs, prepared, options.prompt)
+    : null;
+  if (managedArgs) {
+    columnOpts.codexManaged = true;
+    columnOpts.spawnTicket = prepared.spawnTicket;
+    if (prepared.mode === 'resume') {
+      columnOpts.codexThreadId = prepared.threadId;
+      delete columnOpts.codexClaimId;
+      delete columnOpts.codexClaimCwd;
+    } else {
+      delete columnOpts.codexThreadId;
+      columnOpts.codexClaimId = prepared.claimId;
+      columnOpts.codexClaimCwd = effectiveCwd;
+    }
+    addColumn(managedArgs, targetRow, columnOpts);
+    var managedColumn = allColumns.get(globalColumnId);
+    if (managedColumn) persistSessions(managedColumn.projectKey, managedColumn.workspaceId);
+    return { managed: true,
+      threadId: prepared.mode === 'resume' ? prepared.threadId : null,
+      claimId: prepared.mode === 'fresh' ? prepared.claimId : null
+    };
+  }
+
+  // App-server is intentionally a progressive enhancement. If it cannot be
+  // started, keep the shipped direct CLI path fully usable.
+  var directArgs = semanticArgs.slice();
+  if (typeof options.prompt === 'string' && options.prompt.trim()) directArgs.push(options.prompt.trim());
+  // A direct TUI starts a different conversation. Carrying the old managed
+  // id would make the next app launch jump backwards to the pre-fallback
+  // thread, so deliberately sever that association.
+  delete columnOpts.codexThreadId;
+  columnOpts.codexManaged = false;
+  addColumn(directArgs, targetRow, columnOpts);
+  var directColumn = allColumns.get(globalColumnId);
+  if (directColumn) persistSessions(directColumn.projectKey, directColumn.workspaceId);
+  return { managed: false, threadId: null };
+}
+
 function showColumnOverflowMenu(id, x, y) {
   var col = allColumns.get(id);
   if (!col) return;
@@ -6846,10 +8071,29 @@ function showColumnOverflowMenu(id, x, y) {
   }
 
   // Teleport isn't created for Codex (or other non-Claude-chrome cmd) columns.
-  if (window.CodexSpawn.columnUsesClaudeChrome({ cmd: col.cmd })) {
+  var usesClaudeChrome = window.CodexSpawn.columnUsesClaudeChrome({ cmd: col.cmd });
+  if (usesClaudeChrome) {
     addRow('↖', 'Teleport to claude.ai', function () {
       wsSend({ type: 'write', id: id, data: '/teleport\n' });
     });
+    // Handing off FROM Codex isn't this feature — only offer it on Claude columns,
+    // and only once main has confirmed the codex CLI is actually on PATH.
+    if (codexPresent) {
+      addRow('⇥', 'Hand off to Codex', function () {
+        handoffColumnToCodex(id);
+      });
+    }
+
+    // Only ever shown when this session has at least one known job — never
+    // rendered disabled. See the codex-watch poll comment above for why that
+    // single condition, and not a codex-CLI/plugin presence probe, is the
+    // right gate.
+    var codexJobs = codexWatchCounts.get(id);
+    if (codexJobs && codexJobs.total > 0) {
+      addRow('◉', 'Watch Codex (' + codexJobs.total + ')', function () {
+        openCodexWatchWindow(id);
+      });
+    }
   }
 
   addRow('↻', 'Restart', function () {
@@ -6861,19 +8105,21 @@ function showColumnOverflowMenu(id, x, y) {
     if (c && c.terminal) c.terminal.clear();
   });
 
-  addRow('⏳', 'Recent sessions', function () {
-    showColumnSessionPicker(id, x, y);
-  });
+  if (usesClaudeChrome) {
+    addRow('⏳', 'Recent sessions', function () {
+      showColumnSessionPicker(id, x, y);
+    });
 
-  var playFullRow = addRow('🔊', 'Play reply', function () {
-    playColumnReply(id, 'full');
-  });
-  playFullRow.classList.add('col-play-full');
+    var playFullRow = addRow('🔊', 'Play reply', function () {
+      playColumnReply(id, 'full');
+    });
+    playFullRow.classList.add('col-play-full');
 
-  var playSummaryRow = addRow('❝', 'Play summary', function () {
-    playColumnReply(id, 'summary');
-  });
-  playSummaryRow.classList.add('col-play-summary');
+    var playSummaryRow = addRow('❝', 'Play summary', function () {
+      playColumnReply(id, 'summary');
+    });
+    playSummaryRow.classList.add('col-play-summary');
+  }
 
   document.body.appendChild(menu);
   var overflowRect = menu.getBoundingClientRect();
@@ -6884,6 +8130,83 @@ function showColumnOverflowMenu(id, x, y) {
   refreshVoiceButtonStates();
 
   setTimeout(function () { document.addEventListener('mousedown', outside, true); }, 0);
+}
+
+// Hand off a Claude column's conversation to a fresh Codex column in the same
+// cwd: read the transcript, build a markdown handoff doc, write it under
+// <cwd>/.claudes/, then spawn Codex there seeded with a short pointer prompt.
+// Failure (missing/unreadable transcript, or one with no recoverable turns) is
+// surfaced via toast and nothing is spawned — a Codex column that silently
+// knows nothing is worse than no column at all.
+async function handoffColumnToCodex(id) {
+  var col = allColumns.get(id);
+  if (!col) return;
+  if (!col.sessionId || !col.projectKey) {
+    showToast('Hand off to Codex: this column has no Claude session yet', { kind: 'warn' });
+    return;
+  }
+  var cwd = col.cwd || col.projectKey;
+
+  var read = await window.electronAPI.readColumnTranscript({
+    projectKey: col.projectKey, cwd: cwd, sessionId: col.sessionId, profileId: col.profileId || null
+  });
+  if (!read || !read.ok) {
+    // 'no_transcript' is the COMMON case, not an error worth alarming about:
+    // a column gets its session id at spawn, but Claude Code writes nothing to
+    // ~/.claude/projects until a turn completes. Say what to do about it rather
+    // than leaking the error code.
+    if (!read || read.error === 'no_transcript') {
+      showToast('Nothing to hand off yet — this column has not completed a turn, so Claude has not written its conversation to disk. Send a message first, then hand off.', { kind: 'warn' });
+    } else {
+      showToast('Hand off to Codex failed — could not read the transcript (' + read.error + ')', { kind: 'error' });
+    }
+    return;
+  }
+
+  var turns = window.CodexHandoff.extractTurns(read.content);
+  if (!turns.length) {
+    showToast('Nothing to hand off yet — the transcript exists but has no conversation in it. Send a message in this column first.', { kind: 'warn' });
+    return;
+  }
+  var activity = window.CodexHandoff.extractActivity(read.content);
+
+  // Best-effort branch metadata — a handoff still succeeds without it.
+  var branch = null;
+  if (window.electronAPI.gitBranch) {
+    try { branch = await window.electronAPI.gitBranch(cwd); } catch (e) { /* optional */ }
+  }
+
+  var now = new Date();
+  var doc = window.CodexHandoff.buildHandoffDoc({
+    turns: turns,
+    activity: activity,
+    title: col.customTitle || ('Claude #' + id),
+    cwd: cwd,
+    branch: branch || null,
+    sessionId: col.sessionId,
+    generatedAt: now.toISOString()
+  });
+
+  var fileName = window.CodexHandoff.handoffFileName(now);
+  var relPath = '.claudes/' + fileName;
+  var fullPath = String(cwd).replace(/[\\/]+$/, '') + '/' + relPath;
+
+  var written = await window.electronAPI.writeFile(fullPath, doc);
+  if (!written || !written.success) {
+    showToast('Hand off to Codex failed: could not write ' + relPath + ' (' + ((written && written.error) || 'unknown') + ')', { kind: 'error' });
+    return;
+  }
+
+  var preset = optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
+  var spec = window.CodexSpawn.buildCodexSpawn(cwd, preset, {
+    model: optCodexModel ? optCodexModel.value : '',
+    effort: optCodexEffort ? optCodexEffort.value : '',
+    tier: optCodexTier ? optCodexTier.value : ''
+  });
+  await spawnCodexColumn(cwd, null, spec, {
+    prompt: window.CodexHandoff.buildHandoffPrompt(relPath)
+  });
+  showToast('Handed off to a new Codex column (' + turns.length + ' turn(s))', { kind: 'success' });
 }
 
 // ============================================================
@@ -7793,7 +9116,7 @@ function autoBindColumnTarget(colId) {
   // Phase 3: try worktree detection from JSONL evidence first. When found,
   // pin col.cwd to the worktree path so the Git tab targets it directly with
   // full read+write functionality (the worktree HAS that branch checked out).
-  return window.electronAPI.gitDetectSessionWorktree(col.projectKey, col.sessionId).then(function (worktree) {
+  return window.electronAPI.gitDetectSessionWorktree(col.projectKey, col.sessionId, col.profileId).then(function (worktree) {
     if (worktree && worktree.path) {
       var newCwd = worktree.path;
       var changed = false;
@@ -9966,6 +11289,11 @@ function applyVisualTheme(visual) {
       : { color: '#16213e', symbolColor: '#e0e0e0' };
     window.electronAPI.setTitleBarOverlay(overlayColors);
   }
+  // Any open Codex-watch popouts don't get their own theme toggle — they
+  // should just follow whatever the main window resolves to.
+  if (window.electronAPI && window.electronAPI.codexWatchThemeChanged) {
+    window.electronAPI.codexWatchThemeChanged(visual);
+  }
 }
 
 function setThemePreference(pref) {
@@ -10140,7 +11468,7 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
       isUserPromptSubmit: evtName === 'UserPromptSubmit',
       eventSessionId: sid,
       colSessionId: col.sessionId,
-      claimedBySibling: !!getClaimedSessionIds(colId)[sid],
+      claimedBySibling: !!getClaimedSessionIds(colId, col && col.profileId)[sid],
     })) {
       col.sessionId = sid;
       col.sessionMtime = 0;
@@ -10155,6 +11483,7 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
       persistSessions(col.projectKey, col.workspaceId);
       ensureClawdTail(colId);
       fetchAndSetSessionTitle(colId, col.projectKey, sid);
+      codexWatchMaybeStart();
     }
     var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
     if (sidMatchesColumn && sid && !clawdHookSeenBySession[sid]) {
@@ -10391,7 +11720,7 @@ async function streamSpeakColumn(col, readingMode, baselineUuid, colId) {
   if (!voiceSettings || !voiceSettings.voiceId) return;
   var sres = await window.electronAPI.extractColumnSentences({
     transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId,
-    baselineUuid: baselineUuid || '', readingMode: readingMode, maxChars: voiceSettings.maxChars
+    baselineUuid: baselineUuid || '', readingMode: readingMode, maxChars: voiceSettings.maxChars, profileId: col.profileId || null
   });
   vlog('extractSentences', { ok: sres && sres.ok, n: sres && sres.sentences && sres.sentences.length, error: sres && sres.error, uuid: sres && sres.uuid, diag: sres && sres.diag });
   if (!sres || !sres.ok || !sres.sentences || !sres.sentences.length) return;
@@ -10480,7 +11809,7 @@ async function playColumnReply(colId, readingMode) {
           // Advance the transcript baseline too, so a later auto Stop that falls
           // back to the transcript path doesn't re-speak this just-played reply.
           if (window.electronAPI.peekColumn) {
-            window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId })
+            window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId, profileId: col.profileId || null })
               .then(function (r) { if (r && r.ok && r.uuid) col.lastSpokenUuid = r.uuid; }).catch(function () {});
           }
         }
@@ -10496,7 +11825,8 @@ async function playColumnReply(colId, readingMode) {
   try {
     var result = await window.electronAPI.synthesizeVoiceColumn({
       projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId, transcriptPath: col.voiceTranscriptPath || '',
-      readingMode: readingMode, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, maxChars: voiceSettings.maxChars
+      readingMode: readingMode, voiceId: voiceSettings.voiceId, modelId: voiceSettings.modelId, maxChars: voiceSettings.maxChars,
+      profileId: col.profileId || null
     });
     vlog('manual synth', { ok: result && result.ok, error: result && result.error, status: result && result.status, hasB64: !!(result && result.base64), diag: result && result.diag });
     if (result && result.ok) { col.voiceUnspoken = false; playVoiceAudio(result, undefined, undefined, srcKey, colId); refreshVoiceButtonStates(); if (result.uuid) col.lastSpokenUuid = result.uuid; }
@@ -10784,7 +12114,7 @@ if (window.electronAPI && window.electronAPI.onVoiceHookEvent) {
     // Stop can poll for the FRESH reply (uuid !== baseline) instead of racing the
     // transcript flush and speaking the previous turn.
     if (evtName === 'UserPromptSubmit' && sidMatchesColumn && window.electronAPI.peekColumn) {
-      window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId })
+      window.electronAPI.peekColumn({ transcriptPath: col.voiceTranscriptPath || '', projectKey: col.projectKey, cwd: col.cwd || col.projectKey, sessionId: col.sessionId, profileId: col.profileId || null })
         .then(function (r) { if (r && r.ok) col.voicePreTurnUuid = r.uuid; }).catch(function () {});
     }
     vlog('hook decision', { evt: evtName, colId: colId, enabled: !!(voiceSettings && voiceSettings.enabled), mode: voiceSettings && voiceSettings.mode, voiceId: voiceSettings && voiceSettings.voiceId, focusedColumnId: state && state.focusedColumnId, winFocused: voiceWindowFocused, isActive: isActive, muted: isProjectVoiceMuted(col.projectKey), eligible: eligible, autoBusy: voiceAutoBusy, sidMatchesColumn: sidMatchesColumn, colSid: col && col.sessionId, evtSid: sid, unspoken: col && col.voiceUnspoken, bg: !!(event && event.__claudesBackground), attention: voiceAttentionColumnId, lastFocused: lastFocusedColumnId });
@@ -10903,6 +12233,37 @@ function clawdForceRefresh() {
 // Init
 // ============================================================
 
+// Shared by the Spawn button and Add Row: both must apply the dropdown's
+// options (permission mode, --bare, --model, worktree, ...) via
+// buildSpawnArgs(), and must go through the spawnOpts() *helper* (below) —
+// not a bare object literal — since that's what layers on the endpoint env,
+// the profile env and profileId. A local named `spawnOpts` would shadow the
+// helper and silently drop all of that.
+// `makeRow` is a lazy row-creation callback rather than an already-created
+// row so that an aborted spawn (project switched mid worktree-resolve)
+// doesn't leave a stray empty row behind.
+async function spawnFromOptions(makeRow) {
+  var projectAtClick = activeProjectKey;
+  var raw = optWorktree.value.trim();
+  var resolved = { kind: 'none' };
+  if (raw && projectAtClick) {
+    resolved = await window.electronAPI.resolveWorktree(projectAtClick, raw);
+  }
+  if (activeProjectKey !== projectAtClick) return;
+  var extra = {};
+  if (resolved.kind === 'cwd') {
+    extra.cwd = resolved.path;
+    extra.cwdSource = 'manual';
+  }
+  // Threaded through to bindColumnBaseUrl (via addColumn's opts.model) so a
+  // Headroom-bound spawn pins ANTHROPIC_MODEL to the dropdown pick even
+  // though buildSpawnArgs skips --model for that case (see below).
+  if (optModel.value) extra.model = optModel.value;
+  var args = buildSpawnArgs(resolved);
+  var targetRow = makeRow ? makeRow() : null;
+  addColumn(args.length > 0 ? args : null, targetRow, spawnOpts(extra));
+}
+
 btnAdd.addEventListener('click', async function () {
   if (optHeadless.checked) {
     // Consume the transient flag immediately — don't persist it.
@@ -10914,20 +12275,7 @@ btnAdd.addEventListener('click', async function () {
   if (btnAdd.disabled) return;
   btnAdd.disabled = true;
   try {
-    var projectAtClick = activeProjectKey;
-    var raw = optWorktree.value.trim();
-    var resolved = { kind: 'none' };
-    if (raw && projectAtClick) {
-      resolved = await window.electronAPI.resolveWorktree(projectAtClick, raw);
-    }
-    if (activeProjectKey !== projectAtClick) return;
-    var spawnOpts = {};
-    if (resolved.kind === 'cwd') {
-      spawnOpts.cwd = resolved.path;
-      spawnOpts.cwdSource = 'manual';
-    }
-    var args = buildSpawnArgs(resolved);
-    addColumn(args.length > 0 ? args : null, null, spawnOpts);
+    await spawnFromOptions(null);
   } finally {
     btnAdd.disabled = false;
   }
@@ -10937,11 +12285,15 @@ btnAdd.addEventListener('click', async function () {
 // is just a cmd column running `codex`, which the rest of the app already
 // treats as "not Claude" (no headroom/voice/session machinery attaches).
 if (btnSpawnCodex) {
-  btnSpawnCodex.addEventListener('click', function (e) {
+  btnSpawnCodex.addEventListener('click', async function (e) {
     e.stopPropagation();
     var preset = optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
-    var spec = window.CodexSpawn.buildCodexSpawn(null, preset);
-    addColumn(spec.args, null, spec.opts);
+    var spec = window.CodexSpawn.buildCodexSpawn(null, preset, {
+      model: optCodexModel ? optCodexModel.value : '',
+      effort: optCodexEffort ? optCodexEffort.value : '',
+      tier: optCodexTier ? optCodexTier.value : ''
+    });
+    await spawnCodexColumn(null, null, spec);
     closeSpawnDropdown();
   });
 }
@@ -11027,8 +12379,18 @@ function buildSpawnArgs(resolved) {
   }
   // The CLI's --model flag overrides ANTHROPIC_MODEL env, so when an endpoint
   // preset is active we skip it — the env block already pins every model tier
-  // to the preset's model and CLI flags would override that.
-  if (optModel.value && !currentEndpointId) {
+  // to the preset's model and CLI flags would override that. Same reasoning
+  // extends to Headroom's 1M binding: pushing --model here would override the
+  // ANTHROPIC_MODEL=<model>[1m] bindColumnBaseUrl is about to inject, silently
+  // dropping the 1M window — so let the env carry the choice instead (threaded
+  // through opts.model -> bindColumnBaseUrl's oneMModel).
+  var headroomOwnsModel = window.HeadroomEnv && window.HeadroomEnv.headroomOwnsModel({
+    headroomInstalled: headroomInstalled,
+    useHeadroom: config && config.useHeadroom,
+    useHeadroom1m: config && config.useHeadroom1m,
+    hasEndpoint: !!currentEndpointId
+  });
+  if (optModel.value && !currentEndpointId && !headroomOwnsModel) {
     args.push('--model', optModel.value);
   }
   var worktree = optWorktree.value.trim();
@@ -11103,7 +12465,10 @@ function saveSpawnOptions() {
     customArgs: optCustomArgs.value,
     endpointId: currentEndpointId || null,
     endpointModel: currentEndpointModel || null,
-    codexApprovalMode: optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL
+    codexApprovalMode: optCodexApproval ? optCodexApproval.value : window.CodexSpawn.DEFAULT_CODEX_APPROVAL,
+    codexModel: optCodexModel ? optCodexModel.value : '',
+    codexEffort: optCodexEffort ? optCodexEffort.value : '',
+    codexTier: optCodexTier ? optCodexTier.value : ''
   };
   saveConfig();
 }
@@ -11123,6 +12488,14 @@ function loadSpawnOptions() {
   if (optCodexApproval) {
     optCodexApproval.value = opts.codexApprovalMode || window.CodexSpawn.DEFAULT_CODEX_APPROVAL;
   }
+  codexPendingSelections = {
+    projectKey: activeProjectKey,
+    model: opts.codexModel || '',
+    effort: opts.codexEffort || '',
+    tier: opts.codexTier || ''
+  };
+  initCodexPickers();
+  refreshCodexCapabilityPickers();
 
   // First call on app boot always defaults to cloud (Anthropic), regardless of
   // what was saved. Subsequent calls (project switches within the session)
@@ -11143,6 +12516,13 @@ function loadSpawnOptions() {
   // populateEndpointModelDropdown can preselect it.
   currentEndpointModel = endpointId ? (opts.endpointModel || null) : null;
   applyEndpointSelection(endpointId, /* persist */ false);
+  // Reset the column-level override to Inherit on every project switch — it's
+  // an in-memory, per-spawn choice, not part of the persisted spawnOptions.
+  if (optProfile) optProfile.value = '';
+  loadProfilePicker();
+  // Resolve which profile a NEW column on this project/workspace would spawn
+  // on (column picker beats workspace beats project beats global default).
+  refreshProfileSelection();
   // Headroom is a GLOBAL toggle (not part of the per-project spawnOptions object).
   // Refresh the whole Headroom UI here — parent checkbox AND the sub-toggles
   // (1M/Memory/Output shaper) — so the subs never keep a stale enabled/disabled
@@ -11161,6 +12541,21 @@ function spawnOpts(extra) {
     }
   }
   if (currentEndpointEnv) o.env = currentEndpointEnv;
+  // Profile env (CLAUDE_CONFIG_DIR) layers on top of, and never replaces, the
+  // endpoint env: they bind different things (credentials vs base URL) and a
+  // column can legitimately have both. Never touches bindColumnBaseUrl, which
+  // is orthogonal (binds ANTHROPIC_BASE_URL, not credentials).
+  if (currentProfileEnv) o.env = Object.assign({}, o.env, currentProfileEnv);
+  if (!o.profileId && currentProfileId) o.profileId = currentProfileId;
+  // Every Claude spawn path must carry the dropdown pick, not just the Spawn
+  // button: buildSpawnArgs deliberately omits --model when Headroom owns the
+  // binding, so a caller that passes no opts.model silently falls back to the
+  // 1M default and the column runs a model the user did not choose. Callers
+  // that set their own `model` in `extra` win, since the spread above lands
+  // first. Non-Claude columns (Codex, arbitrary --cmd) have no use for a
+  // Claude model id — stamping one on anyway just persists junk into
+  // sessions.json that the CLI can never consume.
+  if (!o.model && !o.cmd && optModel && optModel.value) o.model = optModel.value;
   return o;
 }
 
@@ -11182,6 +12577,18 @@ optCustomArgs.addEventListener('input', onSpawnOptionChanged);
 // onSpawnOptionChanged) so the Claude "+ Spawn · …" tag summary is left untouched.
 if (optCodexApproval) {
   optCodexApproval.addEventListener('change', function () { saveSpawnOptions(); });
+  [optCodexModel, optCodexEffort, optCodexTier].forEach(function (sel) {
+    if (!sel) return;
+    sel.addEventListener('change', function () {
+      if (sel === optCodexModel) codexPendingSelections.model = sel.value;
+      else if (sel === optCodexEffort) codexPendingSelections.effort = sel.value;
+      else if (sel === optCodexTier) codexPendingSelections.tier = sel.value;
+      if (sel === optCodexModel) refreshCodexCapabilityPickers();
+      saveSpawnOptions();
+    });
+    sel.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+    sel.addEventListener('click', function (e) { e.stopPropagation(); });
+  });
   // Keep the dropdown open while the native select is used.
   optCodexApproval.addEventListener('mousedown', function (e) { e.stopPropagation(); });
   optCodexApproval.addEventListener('click', function (e) { e.stopPropagation(); });
@@ -11248,10 +12655,16 @@ function initHeadroomUI() {
 function initCodexUI() {
   if (!btnSpawnCodex || !window.electronAPI || !window.electronAPI.hasCodex) return;
   window.electronAPI.hasCodex().then(function (present) {
+    codexPresent = !!present;
     if (!present) return;
     btnSpawnCodex.classList.remove('codex-hidden');
     if (spawnCodexDivider) spawnCodexDivider.classList.remove('codex-hidden');
     if (codexApprovalRow) codexApprovalRow.classList.remove('codex-hidden');
+    initCodexPickers();
+    ensureCodexCatalog();
+    [codexModelRow, codexEffortRow, codexTierRow].forEach(function (r) {
+      if (r) r.classList.remove('codex-hidden');
+    });
   }).catch(function () { /* leave hidden on error */ });
 }
 
@@ -11360,7 +12773,7 @@ if (optHeadroomShaper) {
     }
   });
 }
-if (headroomDashboardLink) headroomDashboardLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard'); });
+if (headroomDashboardLink) headroomDashboardLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('http://127.0.0.1:' + headroomServicePort + '/dashboard'); });
 if (headroomInstallLink) headroomInstallLink.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('https://github.com/headroomlabs-ai/headroom'); });
 var headroomInstallDocs = document.getElementById('headroom-install-docs');
 if (headroomInstallDocs) headroomInstallDocs.addEventListener('click', function (e) { e.preventDefault(); window.electronAPI.openExternal('https://github.com/headroomlabs-ai/headroom'); });
@@ -11422,6 +12835,7 @@ function renderHeadroomService() {
 function refreshHeadroomService() {
   if (!window.electronAPI || !window.electronAPI.getHeadroomServiceStatus) return;
   window.electronAPI.getHeadroomServiceStatus().then(function (st) {
+    if (st && st.port && st.port > 0 && st.port <= 65535) headroomServicePort = st.port;
     if (st && st.ok) headroomServiceState.running = !!st.running;
     renderHeadroomService();
   }).catch(function () {});
@@ -11468,7 +12882,7 @@ function initHeadroomServiceUI() {
   }
   if (headroomServiceDash) headroomServiceDash.addEventListener('click', function (e) {
     e.preventDefault();
-    if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:8787/dashboard');
+    if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal('http://127.0.0.1:' + headroomServicePort + '/dashboard');
   });
   if (headroomServiceRestart) headroomServiceRestart.addEventListener('click', doHeadroomRestart);
   if (window.electronAPI && window.electronAPI.onHeadroomServiceLog) {
@@ -11699,6 +13113,30 @@ var endpointSelectOpen = false;
 optEndpoint.addEventListener('focus', function () { endpointSelectOpen = true; });
 optEndpoint.addEventListener('blur', function () { endpointSelectOpen = false; });
 
+// Spawn-options subscription picker — 'Inherit' (value '') beats nothing,
+// loses to an explicit choice. In-memory only: each spawn dropdown open
+// starts back at 'Inherit' (see loadProfilePicker); it's not part of the
+// persisted per-project spawnOptions object.
+if (optProfile) {
+  optProfile.addEventListener('change', function () {
+    refreshProfileSelection();
+    updateSpawnButtonLabel();
+  });
+  optProfile.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+  optProfile.addEventListener('click', function (e) { e.stopPropagation(); });
+  var profileSelectOpen = false;
+  optProfile.addEventListener('focus', function () { profileSelectOpen = true; });
+  optProfile.addEventListener('blur', function () { profileSelectOpen = false; });
+}
+
+function loadProfilePicker() {
+  if (!optProfile || !optProfileRow) return Promise.resolve();
+  return buildProfilePicker(optProfile, optProfile.value, 'Inherit').then(function () {
+    // A single-subscription user must see no new UI at all.
+    optProfileRow.classList.toggle('hidden', profilesCache.length <= 1);
+  });
+}
+
 // Per-project model override dropdown. Selecting a different model rebuilds
 // the env block and persists the choice in spawnOptions.endpointModel.
 optEndpointModel.addEventListener('change', function () {
@@ -11762,6 +13200,31 @@ function loadEndpointPresets() {
 if (window.electronAPI && window.electronAPI.onEndpointsUpdated) {
   window.electronAPI.onEndpointsUpdated(function () {
     loadEndpointPresets();
+  });
+}
+
+if (window.electronAPI && window.electronAPI.onProfilesUpdated) {
+  window.electronAPI.onProfilesUpdated(function () {
+    refreshProfileSelection();
+    loadProfilePicker();
+  });
+}
+
+// Initial load — popouts sometimes initialize the bridge late, same reasoning
+// as the endpointList kick-off above; a later loadSpawnOptions call covers it.
+if (window.electronAPI && window.electronAPI.profileList) {
+  loadProfilePicker();
+}
+
+// A mirror failure means a secondary profile's copy of settings.json/CLAUDE.md
+// just fell out of sync with Primary — silent divergence is exactly the "why
+// isn't my hook running on that column" bug the mirror exists to prevent, so
+// this must be visible rather than only logged.
+if (window.electronAPI && window.electronAPI.onProfilesMirrorFailed) {
+  window.electronAPI.onProfilesMirrorFailed(function (info) {
+    var file = (info && info.file) || 'config';
+    var names = (info && info.profiles && info.profiles.length) ? info.profiles.join(', ') : 'a profile';
+    showToast('Could not sync ' + file + ' to profile(s): ' + names + '. Those columns may behave differently.', { kind: 'error', duration: 8000 });
   });
 }
 
@@ -12473,6 +13936,7 @@ settingsModal.querySelectorAll('.settings-tab').forEach(function (tab) {
     settingsModal.querySelectorAll('.settings-pane').forEach(function (p) {
       p.classList.toggle('active', p.getAttribute('data-settings-pane') === key);
     });
+    if (key === 'subscriptions') renderProfilesPanel();
   });
 });
 
@@ -13622,85 +15086,131 @@ function renderPlanLimits(result) {
   }
 }
 
-// Most recent plan-limits result (used by both the Usage modal panel and the
-// persistent sidebar mini-bar). Refreshed by loadPlanLimits().
-var lastPlanLimitsResult = null;
-var prevPlanLimitsData = null;  // last successful data, used for crossing detection
-// Stickiness: hold on to the last *successful* render so transient API failures
-// during background polls don't make the sidebar bar vanish. Persisted to
-// localStorage so a cold start during a server-issued cooldown still shows
-// data (greyed) instead of an empty sidebar.
-var lastGoodPlanLimitsData = null;
-var lastGoodPlanLimitsAtMs = 0;
+// Most recent plan-limits results (used by both the Usage modal panel and the
+// persistent sidebar mini-bar). Refreshed by loadPlanLimits(). The modal still
+// reflects Primary only (see loadPlanLimits) — lastPlanLimitsEntries carries
+// every profile's result for the sidebar bar, which renders one group each.
+var PLAN_LIMITS_PRIMARY_ID = 'primary';
+var lastPlanLimitsResult = null;      // Primary's result — feeds the modal, unchanged shape
+var lastPlanLimitsEntries = null;     // [{ profile, result }, ...] — feeds the sidebar bar
+var prevByProfile = Object.create(null);  // profile id -> last successful data, for crossing detection
+// Stickiness: hold on to each profile's last *successful* render so transient
+// API failures during background polls don't make its group vanish. Persisted
+// to localStorage (keyed per profile) so a cold start during a server-issued
+// cooldown still shows data (greyed) instead of an empty sidebar.
+var lastGoodByProfile = Object.create(null);    // profile id -> data
+var lastGoodAtByProfile = Object.create(null);  // profile id -> fetchedAt ms
 var PLAN_LIMITS_LASTGOOD_KEY = 'claudes.planLimitsLastGood';
 var PLAN_LIMITS_LASTGOOD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 (function restoreLastGoodPlanLimits() {
   try {
-    var raw = window.localStorage && window.localStorage.getItem(PLAN_LIMITS_LASTGOOD_KEY);
+    // New key is per-profile ('<key>.<id>'). Fall back to the old unprefixed
+    // key for Primary so an upgrade doesn't lose an existing snapshot.
+    var raw = window.localStorage && (
+      window.localStorage.getItem(PLAN_LIMITS_LASTGOOD_KEY + '.' + PLAN_LIMITS_PRIMARY_ID) ||
+      window.localStorage.getItem(PLAN_LIMITS_LASTGOOD_KEY)
+    );
     if (!raw) return;
     var saved = JSON.parse(raw);
     if (!saved || !saved.data || !saved.fetchedAt) return;
     if (Date.now() - saved.fetchedAt > PLAN_LIMITS_LASTGOOD_MAX_AGE_MS) return;
-    lastGoodPlanLimitsData = saved.data;
-    lastGoodPlanLimitsAtMs = saved.fetchedAt;
+    lastGoodByProfile[PLAN_LIMITS_PRIMARY_ID] = saved.data;
+    lastGoodAtByProfile[PLAN_LIMITS_PRIMARY_ID] = saved.fetchedAt;
   } catch { /* corrupt entry — ignore */ }
 })();
 
-function persistLastGoodPlanLimits(data, fetchedAt) {
+function persistLastGoodPlanLimits(profileId, data, fetchedAt) {
   try {
     if (window.localStorage) {
-      window.localStorage.setItem(PLAN_LIMITS_LASTGOOD_KEY, JSON.stringify({ data, fetchedAt }));
+      window.localStorage.setItem(PLAN_LIMITS_LASTGOOD_KEY + '.' + profileId, JSON.stringify({ data, fetchedAt }));
     }
   } catch { /* quota / privacy mode — ignore */ }
 }
 
-function renderPlanLimitsMini(result) {
-  var el = document.getElementById('plan-limits-mini');
-  if (!el) return;
-  var ok = result && result.ok && result.data;
-  if (!ok) {
-    // No live data this poll. If we have a last-good snapshot (in-memory from
-    // a prior poll, or restored from localStorage at startup), keep showing
-    // it — flagged stale when the failure was a server cooldown — instead of
-    // hiding the bar silently.
-    if (lastGoodPlanLimitsData) {
-      var stale = result && result.error === 'rate-limited';
-      renderPlanLimitsMiniFrom(el, lastGoodPlanLimitsData, stale);
-    } else {
-      el.classList.add('hidden');
-    }
-    return;
-  }
-  var d = result.data;
-  lastGoodPlanLimitsData = d;
-  lastGoodPlanLimitsAtMs = result.fetchedAt || Date.now();
-  persistLastGoodPlanLimits(d, lastGoodPlanLimitsAtMs);
-  // Hide if the API returned nothing useful (e.g. API-key user).
-  if (!d.five_hour && !d.seven_day) {
-    el.classList.add('hidden');
-    return;
-  }
-  renderPlanLimitsMiniFrom(el, d, false);
+// Called after a profile is deleted so its usage-tracking state doesn't
+// outlive the profile: the persisted localStorage snapshot, and the
+// in-memory stickiness/crossing-detection maps keyed by profile id.
+function clearProfileUsageState(profileId) {
+  if (!profileId) return;
+  try {
+    if (window.localStorage) window.localStorage.removeItem(PLAN_LIMITS_LASTGOOD_KEY + '.' + profileId);
+  } catch { /* quota / privacy mode — ignore */ }
+  delete lastGoodByProfile[profileId];
+  delete lastGoodAtByProfile[profileId];
+  delete prevByProfile[profileId];
 }
 
-function renderPlanLimitsMiniFrom(el, d, stale) {
-  if (!d.five_hour && !d.seven_day) {
-    el.classList.add('hidden');
-    return;
-  }
-  el.classList.remove('hidden');
-  el.classList.toggle('stale', !!stale);
+// Renders the wrapper #plan-limits-mini: one usage group per profile entry,
+// plus the wrapper's own hidden/stale classes and each group's caption/
+// sign-in state.
+function renderPlanLimitsMiniAll(entries) {
+  var el = document.getElementById('plan-limits-mini');
+  if (!el) return;
   el.innerHTML = '';
+  var list = entries || [];
+  if (!list.length) { el.classList.add('hidden'); return; }
 
-  // Brand the Claude bar only when the Codex bar is stacked above it, so the two
-  // identical Session/Week bars are distinguishable. Solo, it stays uncaptioned.
-  if (codexBarVisible) {
-    var title = document.createElement('div');
-    title.className = 'plan-limits-mini-title';
-    title.textContent = 'Claude';
-    el.appendChild(title);
-  }
+  var anyStale = false;
+  var rendered = 0;
+  list.forEach(function (e) {
+    var r = e.result;
+    var data = (r && r.ok && r.data) ? r.data : lastGoodByProfile[e.profile.id];
+    if (r && r.ok && r.data) {
+      lastGoodByProfile[e.profile.id] = r.data;
+      lastGoodAtByProfile[e.profile.id] = r.fetchedAt || Date.now();
+      persistLastGoodPlanLimits(e.profile.id, r.data, lastGoodAtByProfile[e.profile.id]);
+    }
+    var stale = !!(r && !r.ok && r.error === 'rate-limited' && data);
+    var showSignIn = !data && r && !r.ok &&
+      (r.error === 'no-creds' || r.error === 'no-creds-macos' || r.error === 'no-oauth' || r.error === 'unauthorized');
+    var hasRows = data && (data.five_hour || data.seven_day);
+    if (!hasRows && !showSignIn) return;   // nothing to show for this profile this poll
+
+    if (stale) anyStale = true;
+    rendered++;
+
+    var group = document.createElement('div');
+    group.className = 'plan-limits-mini-group';
+
+    // The brand caption is shown whenever more than one Claude group is on
+    // screen, not only when the Codex bar is stacked above — with a single
+    // profile the caption logic (and the whole bar) stays byte-identical to
+    // the pre-profiles behaviour.
+    if (list.length > 1 || codexBarVisible) {
+      var title = document.createElement('div');
+      title.className = 'plan-limits-mini-title';
+      if (list.length > 1) {
+        var chip = document.createElement('span');
+        chip.className = 'plan-limits-mini-chip';
+        chip.style.background = e.profile.colour || '#5b8def';
+        title.appendChild(chip);
+      }
+      title.appendChild(document.createTextNode(
+        list.length > 1 ? 'Claude · ' + (e.profile.name || e.profile.id) : 'Claude'
+      ));
+      group.appendChild(title);
+    }
+
+    if (hasRows) {
+      renderPlanLimitsMiniFrom(group, data);
+    } else {
+      var msg = document.createElement('div');
+      msg.className = 'plan-limits-mini-signin';
+      msg.textContent = 'Sign in';
+      group.appendChild(msg);
+    }
+    el.appendChild(group);
+  });
+
+  if (!rendered) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  el.classList.toggle('stale', anyStale);
+  if (typeof updatePlanLimitsPopover === 'function') updatePlanLimitsPopover();
+}
+
+function renderPlanLimitsMiniFrom(el, d) {
+  if (!d || (!d.five_hour && !d.seven_day)) return;
 
   function row(label, slot) {
     if (!slot) return null;
@@ -13731,8 +15241,6 @@ function renderPlanLimitsMiniFrom(el, d, stale) {
   var weekRow = row('Week', d.seven_day);
   if (sessionRow) el.appendChild(sessionRow);
   if (weekRow) el.appendChild(weekRow);
-  // Re-attach the hover popover after innerHTML wipe.
-  if (typeof updatePlanLimitsPopover === 'function') updatePlanLimitsPopover();
 }
 
 // --- Codex usage mini-bar ---
@@ -13749,11 +15257,11 @@ var codexBarVisible = false;
 function setCodexBarVisible(v) {
   if (codexBarVisible === v) return;
   codexBarVisible = v;
-  // The Claude bar's caption depends on this flag — re-render it from last-good
-  // so the "CLAUDE" label appears/disappears in lockstep with the Codex bar.
-  var claudeEl = document.getElementById('plan-limits-mini');
-  if (claudeEl && lastGoodPlanLimitsData) {
-    renderPlanLimitsMiniFrom(claudeEl, lastGoodPlanLimitsData, claudeEl.classList.contains('stale'));
+  // The Claude bar's caption depends on this flag — re-render every group from
+  // the cached entries so the "CLAUDE" label appears/disappears in lockstep
+  // with the Codex bar.
+  if (lastPlanLimitsEntries) {
+    renderPlanLimitsMiniAll(lastPlanLimitsEntries);
   }
 }
 
@@ -13881,43 +15389,73 @@ function loadPlanLimits(force) {
   if (!window.electronAPI || !window.electronAPI.getPlanLimits) {
     var miss = { ok: false, message: 'Plan limits API not available.' };
     lastPlanLimitsResult = miss;
+    lastPlanLimitsEntries = [{ profile: { id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }, result: miss }];
     renderPlanLimits(miss);
-    renderPlanLimitsMini(miss);
+    renderPlanLimitsMiniAll(lastPlanLimitsEntries);
     return Promise.resolve(miss);
   }
-  return window.electronAPI.getPlanLimits(!!force).then(function (r) {
+
+  var listProfiles = window.electronAPI.profileList
+    ? window.electronAPI.profileList().then(function (store) {
+        return (store && store.profiles) || [{ id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }];
+      }).catch(function () { return [{ id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }]; })
+    : Promise.resolve([{ id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }]);
+
+  return listProfiles.then(function (profiles) {
+    // Stagger so N profiles don't burst the endpoint simultaneously.
+    return Promise.all(profiles.map(function (p, i) {
+      return new Promise(function (res) { setTimeout(res, i * 250); })
+        .then(function () { return window.electronAPI.getPlanLimits(!!force, p.id); })
+        .then(function (r) { return { profile: p, result: r }; })
+        .catch(function (e) { return { profile: p, result: { ok: false, message: String(e) } }; });
+    }));
+  }).then(function (entries) {
+    lastPlanLimitsEntries = entries;
+    // The modal keeps showing Primary only, exactly as before this feature.
+    var primaryEntry = entries.filter(function (e) { return e.profile.id === PLAN_LIMITS_PRIMARY_ID; })[0] || entries[0] || null;
+    var r = primaryEntry ? primaryEntry.result : null;
     lastPlanLimitsResult = r;
+
     if (!usageModal.classList.contains('hidden')) renderPlanLimits(r);
-    renderPlanLimitsMini(r);
-    if (r && r.ok && r.data) {
-      if (prevPlanLimitsData) {
-        window.electronAPI.detectThresholdCrossings(prevPlanLimitsData, r.data).then(function (crossings) {
-          if (crossings && crossings.length) handleThresholdCrossings(crossings);
-        });
-      }
-      prevPlanLimitsData = r.data;
-      updateColumnDeltaPills(r.data);
-    }
+    renderPlanLimitsMiniAll(entries);
+    entries.forEach(handleCrossingsForProfile);
     return r;
   }).catch(function (e) {
     var err = { ok: false, message: e && e.message ? e.message : String(e) };
     lastPlanLimitsResult = err;
+    lastPlanLimitsEntries = [{ profile: { id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }, result: err }];
     if (!usageModal.classList.contains('hidden')) renderPlanLimits(err);
-    renderPlanLimitsMini(err);
+    renderPlanLimitsMiniAll(lastPlanLimitsEntries);
     return err;
   });
 }
 
-function handleThresholdCrossings(crossings) {
+// Per-profile threshold-crossing detection and notification, called once per
+// entry after each poll. Keeps one subscription's crossing from being
+// compared against another's previous snapshot.
+function handleCrossingsForProfile(entry) {
+  var r = entry.result, id = entry.profile.id;
+  if (!r || !r.ok || !r.data) return;
+  var prev = prevByProfile[id];
+  if (prev) {
+    window.electronAPI.detectThresholdCrossings(prev, r.data).then(function (crossings) {
+      if (crossings && crossings.length) handleThresholdCrossings(crossings, entry.profile);
+    });
+  }
+  prevByProfile[id] = r.data;
+  updateColumnDeltaPills(r.data, id);
+}
+
+function handleThresholdCrossings(crossings, profile) {
   for (var i = 0; i < crossings.length; i++) {
     var c = crossings[i];
     var enabled70 = !notifSettings || notifSettings.limits70 !== false;
     var enabled90 = !notifSettings || notifSettings.limits90 !== false;
     if (c.threshold === 70 && !enabled70) continue;
     if (c.threshold === 90 && !enabled90) continue;
-    showThresholdNotification(c);
+    showThresholdNotification(c, profile);
     if (c.threshold === 90 && c.window === 'seven_day' && (!notifSettings || notifSettings.limitsPause !== false)) {
-      promptPauseAutomations(c);
+      promptPauseAutomations(c, profile);
     }
   }
 }
@@ -13943,6 +15481,8 @@ function showCtxMeterPlaceholder(col, label) {
   if (col.ctxFillEl) col.ctxFillEl.style.width = '0%';
   if (col.ctxTextEl) col.ctxTextEl.textContent = label;
   col.ctxMeterEl.title = label;
+  col.ctxMeterEl.removeAttribute('aria-valuenow');
+  col.ctxMeterEl.setAttribute('aria-valuetext', label === '…' ? 'Context usage loading' : 'Context usage unavailable');
 }
 
 function showDeltaPillPlaceholder(col) {
@@ -13950,6 +15490,137 @@ function showDeltaPillPlaceholder(col) {
   col.deltaSessionEl.removeAttribute('hidden');
   col.deltaSessionEl.textContent = 'Δ —';
   col.deltaSessionEl.title = 'Waiting for first assistant turn…';
+}
+
+function markCodexFallback(col) {
+  if (!col || col.cmd !== 'codex') return;
+  showCtxMeterPlaceholder(col, '—');
+  col.ctxMeterEl.title = 'Live Codex context unavailable · direct CLI fallback\nNative thread resume is disabled for this column.';
+  col.ctxMeterEl.setAttribute('aria-valuetext', 'Live Codex context unavailable in direct CLI fallback');
+  var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
+  if (badge) {
+    badge.textContent = 'Direct fallback';
+    badge.classList.add('col-codex-badge-fallback');
+    updateCodexBadgeAccessibility(badge, null, 'Direct fallback · Live context and native resume unavailable');
+  }
+  if (!codexFallbackWarningShown) {
+    codexFallbackWarningShown = true;
+    showToast('Codex started in direct fallback mode — live context and native resume are unavailable.', { kind: 'warn', duration: 7000 });
+  }
+}
+
+function applyCodexThreadState(col, threadState) {
+  if (!col || !threadState || threadState.threadId !== col.codexThreadId) return;
+  col.codexThreadState = threadState;
+  var settings = threadState.settings || {};
+  var detail = [settings.model, settings.reasoningEffort, settings.serviceTier, threadState.status]
+    .filter(function (value) { return !!value; }).join(' · ');
+  var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
+  if (badge) {
+    badge.textContent = 'Codex';
+    badge.classList.remove('col-codex-badge-fallback');
+    updateCodexBadgeAccessibility(badge, settings, detail);
+  }
+
+  var display = window.CodexSpawn.codexContextDisplay(threadState);
+  if (!display) {
+    showCtxMeterPlaceholder(col, threadState.status === 'running' ? '…' : '—');
+    if (col.ctxMeterEl && detail) col.ctxMeterEl.title = 'Codex · ' + detail + '\nWaiting for token usage…';
+    return;
+  }
+  col.ctxMeterEl.removeAttribute('hidden');
+  col.ctxFillEl.style.width = display.percent + '%';
+  col.ctxFillEl.classList.toggle('warning', display.percent >= 70 && display.percent < 90);
+  col.ctxFillEl.classList.toggle('critical', display.percent >= 90);
+  col.ctxTextEl.textContent = display.text;
+  col.ctxMeterEl.title = display.title;
+  col.ctxMeterEl.setAttribute('aria-valuenow', String(Math.max(0, Math.min(100, display.percent))));
+  col.ctxMeterEl.setAttribute('aria-valuetext', display.text + ' · ' + Math.round(display.percent) + '% of Codex context used');
+}
+
+function handleCodexThreadState(threadState) {
+  if (!threadState || !window.CodexSpawn.isCodexThreadId(threadState.threadId)) return;
+  allColumns.forEach(function (col) {
+    if (col && col.cmd === 'codex' && col.codexThreadId === threadState.threadId) {
+      applyCodexThreadState(col, threadState);
+    }
+  });
+}
+
+function markCodexClaimExpired(col, reason) {
+  if (!col || col.cmd !== 'codex') return;
+  showCtxMeterPlaceholder(col, '—');
+  var label = reason === 'unavailable' ? 'Attach unavailable' : 'Attach timed out';
+  col.ctxMeterEl.title = label + ' · live context and native resume are unavailable.\nRelaunch Claudes to retry the managed connection safely.';
+  col.ctxMeterEl.setAttribute('aria-valuetext', label + '; live Codex context unavailable');
+  var badge = col.headerEl && col.headerEl.querySelector('.col-codex-badge');
+  if (badge) {
+    badge.textContent = label;
+    badge.classList.add('col-codex-badge-fallback');
+    updateCodexBadgeAccessibility(badge, null, label + ' · Relaunch Claudes to retry');
+  }
+  if (!codexAttachWarningShown) {
+    codexAttachWarningShown = true;
+    showToast(label + ' — relaunch Claudes to retry live context and native resume.', { kind: 'warn', duration: 7000 });
+  }
+}
+
+function handleCodexThreadClaimed(claim) {
+  if (!claim || !window.CodexSpawn.isCodexClaimId(claim.claimId) || !window.CodexSpawn.isCodexThreadId(claim.threadId)) return;
+  var matches = [];
+  allColumns.forEach(function (col, id) {
+    if (col && col.cmd === 'codex' && col.codexManaged && !col.codexThreadId &&
+        col.codexClaimId === claim.claimId && col.codexClaimCwd && col.codexClaimCwd === col.cwd) {
+      matches.push({ id: id, col: col });
+    }
+  });
+  // A claim is a one-column capability. Reject ambiguity instead of letting a
+  // duplicated transient value cross a project/cwd boundary.
+  if (matches.length !== 1) return;
+  var match = matches[0];
+  match.col.codexThreadId = claim.threadId;
+  match.col.codexClaimId = null;
+  match.col.codexClaimCwd = null;
+  persistSessions(match.col.projectKey, match.col.workspaceId);
+  startCodexThreadState(match.id);
+}
+
+function handleCodexClaimExpired(claim) {
+  if (!claim || !window.CodexSpawn.isCodexClaimId(claim.claimId) ||
+      (claim.reason !== 'timeout' && claim.reason !== 'unavailable')) return;
+  var matches = [];
+  allColumns.forEach(function (col) {
+    if (col && col.cmd === 'codex' && col.codexManaged && !col.codexThreadId &&
+        col.codexClaimId === claim.claimId) matches.push(col);
+  });
+  if (matches.length !== 1) return;
+  var col = matches[0];
+  col.codexClaimId = null;
+  col.codexClaimCwd = null;
+  col.codexManaged = false;
+  persistSessions(col.projectKey, col.workspaceId);
+  markCodexClaimExpired(col, claim.reason);
+}
+
+function startCodexThreadState(colId) {
+  var col = allColumns.get(colId);
+  if (!col || col.cmd !== 'codex' || !col.codexThreadId) return;
+  showCtxMeterPlaceholder(col, '…');
+  if (!window.electronAPI || !window.electronAPI.codexGetThreadState) return;
+  window.electronAPI.codexGetThreadState(col.codexThreadId).then(function (threadState) {
+    var live = allColumns.get(colId);
+    if (live) applyCodexThreadState(live, threadState);
+  }).catch(function () { /* pushed updates will retry naturally */ });
+}
+
+if (window.electronAPI && window.electronAPI.onCodexThreadState) {
+  window.electronAPI.onCodexThreadState(handleCodexThreadState);
+}
+if (window.electronAPI && window.electronAPI.onCodexThreadClaimed) {
+  window.electronAPI.onCodexThreadClaimed(handleCodexThreadClaimed);
+}
+if (window.electronAPI && window.electronAPI.onCodexClaimExpired) {
+  window.electronAPI.onCodexClaimExpired(handleCodexClaimExpired);
 }
 
 function startContextMeterPoll(colId) {
@@ -13962,7 +15633,8 @@ function startContextMeterPoll(colId) {
     var ts = new Date().toISOString().slice(11, 19);
     var col = allColumns.get(colId);
     if (!col || !col.ctxMeterEl) return;
-    console.log('[ctx-meter ' + ts + '] tick col=' + colId + ' sessionId=' + col.sessionId + ' projectKey=' + col.projectKey + ' cmd=' + col.cmd);
+    var lookupCwd = window.SessionTarget.resolveSessionLookupCwd(col, col.projectKey);
+    console.log('[ctx-meter ' + ts + '] tick col=' + colId + ' sessionId=' + col.sessionId + ' projectKey=' + col.projectKey + ' lookupCwd=' + lookupCwd + ' cmd=' + col.cmd);
     if (!col.sessionId) {
       showCtxMeterPlaceholder(col, '…');
       return;
@@ -13977,7 +15649,7 @@ function startContextMeterPoll(colId) {
       console.log('[ctx-meter] electronAPI.getSessionContextTokens missing');
       return;
     }
-    window.electronAPI.getSessionContextTokens(col.projectKey, col.sessionId, col.contextSinceMs).then(function (tokens) {
+    window.electronAPI.getSessionContextTokens(lookupCwd, col.sessionId, col.contextSinceMs, col.profileId).then(function (tokens) {
       console.log('[ctx-meter ' + ts + '] col=' + colId + ' → tokens=' + tokens);
       if (tokens == null) {
         showCtxMeterPlaceholder(col, '0');
@@ -14011,15 +15683,22 @@ function startContextMeterPoll(colId) {
       // denominator can never disagree with what the column actually got.
       if (!col.effectiveLimit && window.HeadroomEnv) {
         try {
-          var hrEnv = window.HeadroomEnv.buildHeadroomEnv({
+          var hrInput = {
             enabled: !!(headroomInstalled && config && config.useHeadroom),
-            hasEndpoint: !!(col.endpointId || col.env),
+            hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)),
             isClaude: !col.cmd,
             oneM: !!(config && config.useHeadroom1m !== false),
-            oneMModel: (config && config.headroom1mModel) || 'claude-opus-4-8'
-          });
-          if (hrEnv && hrEnv.ANTHROPIC_MODEL && /\[1m\]/i.test(hrEnv.ANTHROPIC_MODEL)) {
-            col.effectiveLimit = 1000000;
+            oneMModel: col.model || (config && config.headroom1mModel) ||
+              (window.ClaudeModels && window.ClaudeModels.DEFAULT_1M_MODEL),
+            port: headroomServicePort
+          };
+          var hrEnv = window.HeadroomEnv.buildHeadroomEnv(hrInput);
+          // Only pin the denominator when Headroom actually pinned a model
+          // (ANTHROPIC_MODEL is set only when the 1M binding applies). Assigning
+          // unconditionally would shadow the user's own Settings context pref
+          // on every Headroom column, including ones with 1M turned off.
+          if (hrEnv && hrEnv.ANTHROPIC_MODEL) {
+            col.effectiveLimit = window.HeadroomEnv.headroomModelWindow(hrInput);
           }
         } catch (e) { /* fall through to pref/heuristic */ }
       }
@@ -14052,6 +15731,8 @@ function startContextMeterPoll(colId) {
         col.ctxMeterEl.title =
           'Context window: ' + tokens.toLocaleString() + ' / ' + effLim.toLocaleString() + ' tokens (' + Math.round(pct) + '%)\n' +
           'Cumulative tokens currently held in this session\'s context.';
+        col.ctxMeterEl.setAttribute('aria-valuenow', String(pct));
+        col.ctxMeterEl.setAttribute('aria-valuetext', tokens.toLocaleString() + ' of ' + effLim.toLocaleString() + ' context tokens used (' + Math.round(pct) + '%)');
       }
       if (limit) { draw(); return; }
       window.electronAPI.getModelContextLimit(modelKey).then(function (lim) {
@@ -14098,27 +15779,36 @@ function updateColumnDeltaFromTokens(col, tokens) {
 
 // Kept as a no-op shim for the old global-plan-limits trigger sites.
 // Per-column delta is now driven by updateColumnDeltaFromTokens via the ctx poll.
-function updateColumnDeltaPills(_data) { /* no-op */ }
+function updateColumnDeltaPills(_data, _profileId) { /* no-op */ }
 
-function promptPauseAutomations(c) {
-  if (!window.electronAPI || !window.electronAPI.getAutomationSettings || !window.electronAPI.toggleAutomationsGlobal) return;
+function promptPauseAutomations(c, profile) {
+  if (!window.electronAPI || !window.electronAPI.pauseAutomationsForProfile) return;
+  var profileId = (profile && profile.id) || PLAN_LIMITS_PRIMARY_ID;
+  // Only offer to pause automations on the SUBSCRIPTION that actually crossed
+  // the threshold — pausing every automation across every profile over one
+  // subscription's limit would needlessly stop work on subscriptions that
+  // still have headroom.
+  var subject = (profile && profile.id !== PLAN_LIMITS_PRIMARY_ID && profile.name)
+    ? 'your automations on ' + profile.name
+    : 'your automations on Primary';
   // Non-blocking inline confirm (replaces the renderer-blocking window.confirm).
   confirmDialog(
     'You\'ve crossed 90% of your weekly limit (' + Math.round(c.value) + '%).\n\n' +
-    'Pause all your automations? You can re-enable them any time from the Automations panel.',
-    { okLabel: 'Pause all', cancelLabel: 'Not now' }
+    'Pause ' + subject + '? This stops every scheduled run on that subscription until you re-enable it individually.',
+    { okLabel: 'Pause', cancelLabel: 'Not now' }
   ).then(function (ok) {
     if (!ok) return;
-    // toggleAutomationsGlobal flips state; only call if currently enabled, otherwise we'd re-enable.
-    window.electronAPI.getAutomationSettings().then(function (settings) {
-      if (settings && settings.globalEnabled) {
-        window.electronAPI.toggleAutomationsGlobal();
-      }
+    var profileName = (profile && profile.id !== PLAN_LIMITS_PRIMARY_ID && profile.name) ? profile.name : 'Primary';
+    window.electronAPI.pauseAutomationsForProfile(profileId).then(function (result) {
+      var pausedCount = (result && result.pausedCount) || 0;
+      showToast('Paused ' + pausedCount + ' automation' + (pausedCount === 1 ? '' : 's') + ' on ' + profileName + '.', { kind: 'info' });
+      refreshAutomations();
+      refreshAutomationsFlyout();
     }).catch(function () { /* ignore — silent failure is acceptable here */ });
   });
 }
 
-function showThresholdNotification(c) {
+function showThresholdNotification(c, profile) {
   var label = ({
     five_hour: 'Current session',
     seven_day: 'Weekly (all models)',
@@ -14126,7 +15816,10 @@ function showThresholdNotification(c) {
     seven_day_opus: 'Weekly (Opus)',
     seven_day_omelette: 'Weekly (Claude Design)'
   })[c.window] || c.window;
-  var msg = label + ' just crossed ' + c.threshold + '% (' + Math.round(c.value) + '% used).';
+  // Prefix with the subscription name once more than one profile is in play,
+  // so "your usage limit" notifications don't read as ambiguous.
+  var prefix = (profile && profile.id !== PLAN_LIMITS_PRIMARY_ID && profile.name) ? profile.name + ': ' : '';
+  var msg = prefix + label + ' just crossed ' + c.threshold + '% (' + Math.round(c.value) + '% used).';
   if (!document.hasFocus() && window.electronAPI && window.electronAPI.flashFrame) {
     window.electronAPI.flashFrame();
   }
@@ -14210,9 +15903,13 @@ document.addEventListener('focusin', function (e) {
 // Show the restored last-good snapshot (if any) right away so the bar isn't
 // blank during the initial IPC roundtrip — especially important when the
 // endpoint is under a multi-minute server cooldown.
-if (lastGoodPlanLimitsData) {
+if (lastGoodByProfile[PLAN_LIMITS_PRIMARY_ID]) {
+  renderPlanLimitsMiniAll([{
+    profile: { id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' },
+    result: null   // no live result yet — renderPlanLimitsMiniAll falls back to lastGoodByProfile
+  }]);
   var miniEl0 = document.getElementById('plan-limits-mini');
-  if (miniEl0) renderPlanLimitsMiniFrom(miniEl0, lastGoodPlanLimitsData, true);
+  if (miniEl0) miniEl0.classList.add('stale');   // not live yet — dim until the first poll lands
 }
 
 // Initial fetch on app start. Previously gated behind document.hasFocus(),
@@ -14259,24 +15956,30 @@ function updatePlanLimitsPopover() {
     html += '</div>';
     return html;
   }
-  var d = lastGoodPlanLimitsData;
+  // One or more profiles. With a single profile (the pre-profiles case) this
+  // renders byte-identical to before: no name header, just the two slots and
+  // an optional rate-limited note.
+  var entries = lastPlanLimitsEntries || [{ profile: { id: PLAN_LIMITS_PRIMARY_ID, name: 'Primary' }, result: lastPlanLimitsResult }];
+  var multi = entries.length > 1;
   var slots = '';
-  if (d) {
+  entries.forEach(function (e) {
+    var d = lastGoodByProfile[e.profile.id];
+    if (!d) return;
+    if (multi) slots += '<div class="plan-limits-popover-sub">' + (e.profile.name || e.profile.id) + '</div>';
     slots += fmtSlot('Session', d.five_hour);
     slots += fmtSlot('Week', d.seven_day);
-  }
+    // Surface why the bar might look frozen — rate-limited polls keep the
+    // last-good values on screen with a `.stale` class on the mini bar.
+    var r = e.result;
+    if (r && !r.ok && r.error === 'rate-limited') {
+      var ageMin = lastGoodAtByProfile[e.profile.id] ? Math.round((Date.now() - lastGoodAtByProfile[e.profile.id]) / 60000) : null;
+      var ageLabel = ageMin == null ? '' : (ageMin < 1 ? 'just now' : ageMin + ' min ago');
+      slots += '<div class="plan-limits-popover-sub">Rate-limited' +
+        (ageLabel ? ' — last good ' + ageLabel : '') + '</div>';
+    }
+  });
   if (!slots) slots = '<div class="plan-limits-popover-sub">Loading usage…</div>';
-  var inner = slots;
-  // Surface why the bar might look frozen — rate-limited polls keep the
-  // last-good values on screen with a `.stale` class on the mini bar.
-  var lr = lastPlanLimitsResult;
-  if (lr && !lr.ok && lr.error === 'rate-limited' && d) {
-    var ageMin = lastGoodPlanLimitsAtMs ? Math.round((Date.now() - lastGoodPlanLimitsAtMs) / 60000) : null;
-    var ageLabel = ageMin == null ? '' : (ageMin < 1 ? 'just now' : ageMin + ' min ago');
-    inner += '<div class="plan-limits-popover-sub">Rate-limited' +
-      (ageLabel ? ' — last good ' + ageLabel : '') + '</div>';
-  }
-  inner += '<div class="plan-limits-popover-hint">Click for full usage</div>';
+  var inner = slots + '<div class="plan-limits-popover-hint">Click for full usage</div>';
   pop.innerHTML = inner;
 }
 
@@ -14353,7 +16056,7 @@ function renderUsageSummary(data) {
   var earliestTs = Infinity, latestTs = 0;
 
   function emptyModelTokens() {
-    return { opus: {input:0,output:0,cache:0}, sonnet: {input:0,output:0,cache:0}, haiku: {input:0,output:0,cache:0}, unknown: {input:0,output:0,cache:0} };
+    return { fable: {input:0,output:0,cache:0}, opus: {input:0,output:0,cache:0}, sonnet: {input:0,output:0,cache:0}, haiku: {input:0,output:0,cache:0}, unknown: {input:0,output:0,cache:0} };
   }
   var allModelTokens = emptyModelTokens();
   var week7ModelTokens = emptyModelTokens();
@@ -14481,6 +16184,12 @@ function renderUsageSummary(data) {
 // Cache reads skip most model computation — estimated at ~10% of input energy.
 // PUE (Power Usage Effectiveness) of 1.1 included to account for cooling/networking overhead.
 var MODEL_ENERGY_PROFILES = {
+  // NOTE: these ratios were derived when Opus listed at $15/$75. Opus is now
+  // $5/$25, so the whole table is stale as a compute proxy and wants
+  // re-deriving — tracked separately, deliberately not re-guessed here. Fable
+  // is placed at 2x Opus, which is its price ratio on the same (stale) basis,
+  // so the table stays internally consistent rather than mixing methodologies.
+  fable:   { input: 120, output: 600, cache: 12  },
   opus:    { input: 60,  output: 300, cache: 6   },
   sonnet:  { input: 12,  output: 60,  cache: 1.2 },
   haiku:   { input: 4,   output: 20,  cache: 0.4 },
@@ -14489,7 +16198,15 @@ var MODEL_ENERGY_PROFILES = {
 
 function classifyModel(modelStr) {
   if (!modelStr) return 'unknown';
+  // Delegate to the catalogue so this can't drift from main.js's cost rollup
+  // (which already classifies fable-first via the same helper). Every key it
+  // can return must exist in MODEL_ENERGY_PROFILES and modelNames above, or
+  // renderEnvironmentalImpact throws on the profile lookup.
+  if (window.ClaudeModels) {
+    return window.ClaudeModels.familyOf(modelStr) || 'unknown';
+  }
   var m = modelStr.toLowerCase();
+  if (m.indexOf('fable') !== -1) return 'fable';
   if (m.indexOf('opus') !== -1) return 'opus';
   if (m.indexOf('sonnet') !== -1) return 'sonnet';
   if (m.indexOf('haiku') !== -1) return 'haiku';
@@ -14705,7 +16422,7 @@ function renderEnvironmentalImpact(modelTokens, periodLabel) {
 
   var energyWh = 0;
   var modelBreakdown = [];
-  var modelNames = ['opus', 'sonnet', 'haiku', 'unknown'];
+  var modelNames = ['fable', 'opus', 'sonnet', 'haiku', 'unknown'];
   for (var mi = 0; mi < modelNames.length; mi++) {
     var name = modelNames[mi];
     var tokens = modelTokens[name];
@@ -15046,6 +16763,8 @@ function renderCostTab(c) {
   if (!c) return;
   var totalEl = document.getElementById('cost-total');
   if (totalEl) totalEl.textContent = fmtUsd(c.total);
+  var fableEl = document.getElementById('cost-fable');
+  if (fableEl) fableEl.textContent = fmtUsd(c.byModel && c.byModel.fable);
   var opusEl = document.getElementById('cost-opus');
   if (opusEl) opusEl.textContent = fmtUsd(c.byModel && c.byModel.opus);
   var sonnetEl = document.getElementById('cost-sonnet');
@@ -15298,6 +17017,20 @@ function runWindowBadgeHtml(auto) {
 // Automations Tab
 // ============================================================
 
+function applyGlobalPausedBannerUi(settings) {
+  var banner = document.getElementById('automations-global-paused-banner');
+  var ui = window.AutomationsPauseUi.resolveGlobalPauseUi({ globalEnabled: settings && settings.globalEnabled });
+  if (banner) banner.classList.toggle('hidden', !ui.showBanner);
+  var textEl = document.getElementById('automations-global-paused-banner-text');
+  if (textEl) textEl.textContent = ui.bannerText;
+  return ui.paused;
+}
+
+function refreshGlobalPausedBanner() {
+  if (!window.electronAPI || !window.electronAPI.getAutomationSettings) return Promise.resolve(false);
+  return window.electronAPI.getAutomationSettings().then(applyGlobalPausedBannerUi);
+}
+
 function refreshAutomations() {
   if (importInProgress) return; // Don't overwrite import progress panel
   var listEl = document.getElementById('automations-list');
@@ -15309,13 +17042,24 @@ function refreshAutomations() {
     listEl.innerHTML = '';
     if (noProjectEl) noProjectEl.style.display = '';
     if (searchBar) searchBar.style.display = 'none';
+    // A global scheduler pause is true regardless of which project is
+    // selected, so the banner is settings-driven here too, not force-hidden.
+    refreshGlobalPausedBanner();
     document.getElementById('btn-pause-all-automations').style.display = 'none';
     document.getElementById('btn-resume-all-automations').style.display = 'none';
     return;
   }
   if (noProjectEl) noProjectEl.style.display = 'none';
 
-  window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
+  Promise.all([
+    window.electronAPI.getAutomationSettings(),
+    window.electronAPI.getAutomationsForProject(activeProjectKey)
+  ]).then(function (results) {
+    var settings = results[0];
+    var automations = results[1];
+    var globalEnabled = settings && settings.globalEnabled;
+    applyGlobalPausedBannerUi(settings);
+
     automationsForProject = automations;
     if (searchBar) searchBar.style.display = automations.length > 0 ? '' : 'none';
 
@@ -15341,7 +17085,7 @@ function refreshAutomations() {
         return nameMatch || agentMatch;
       });
     }
-    renderAutomationCards(automations, listEl);
+    renderAutomationCards(automations, listEl, globalEnabled);
   });
   updateAutomationsTabIndicator();
 }
@@ -15377,7 +17121,7 @@ function isManualAutomation(automation) {
   return independentAgents.every(function (ag) { return ag.schedule && ag.schedule.type === 'manual'; });
 }
 
-function renderAutomationCards(automations, container) {
+function renderAutomationCards(automations, container, globalEnabled) {
   container.innerHTML = '';
   if (automations.length === 0) {
     container.innerHTML = '<p style="opacity:0.5;text-align:center;padding:2rem 1rem;font-size:12px;">No automations configured.<br>Click + to create one.</p>';
@@ -15411,21 +17155,12 @@ function renderAutomationCards(automations, container) {
     card.className = 'automation-card';
     var isSimple = automation.agents.length === 1;
 
-    var anyRunning = automation.agents.some(function (ag) { return !!ag.currentRunStartedAt; });
-    var anyError = automation.agents.some(function (ag) { return ag.lastRunStatus === 'error'; });
-
-    var statusClass = 'automation-idle';
-    var badgeClass = 'badge-idle';
-    var badgeText = 'idle';
-
-    if (!automation.enabled) {
-      statusClass = 'automation-disabled'; badgeClass = 'badge-disabled'; badgeText = 'disabled';
-    } else if (anyRunning) {
-      statusClass = 'automation-running'; badgeClass = 'badge-running'; badgeText = 'running...';
-    } else if (anyError) {
-      statusClass = 'automation-error'; badgeClass = 'badge-error'; badgeText = 'error';
-    }
+    var cardStatus = window.AutomationsPauseUi.resolveAutomationCardStatus({ globalEnabled: globalEnabled, automation: automation });
+    var statusClass = cardStatus.statusClass;
+    var badgeClass = cardStatus.badgeClass;
+    var badgeText = cardStatus.badgeText;
     card.classList.add(statusClass);
+    if (cardStatus.dimmed) card.classList.add('automation-globally-paused');
 
     if (isSimple) {
       var agent = automation.agents[0];
@@ -16158,6 +17893,10 @@ function openAutomationModal(existingAutomation) {
   document.getElementById('automation-name-group').style.display = isMulti ? '' : 'none';
   document.getElementById('automation-name').value = existingAutomation ? existingAutomation.name : '';
 
+  // Subscription picker — same shared builder as the project/workspace/spawn
+  // pickers, so "inherit" can't drift between surfaces.
+  buildProfilePicker(document.getElementById('automation-profile'), existingAutomation ? existingAutomation.profileId : null, 'Inherit from project');
+
   renderModalAgentCards();
 
   // Discover the project's MCP servers for the per-agent allowlist checkboxes,
@@ -16278,15 +18017,7 @@ function renderAgentConnectionSection(agent) {
   var modelOpts;
   var refreshBtn = '';
   if (!selectedId) {
-    var cloudModels = [
-      { v: '', t: 'Default' },
-      { v: 'sonnet', t: 'Sonnet (latest)' },
-      { v: 'opus', t: 'Opus (latest)' },
-      { v: 'haiku', t: 'Haiku (latest)' }
-    ];
-    modelOpts = cloudModels.map(function (m) {
-      return '<option value="' + m.v + '"' + (selectedModel === m.v ? ' selected' : '') + '>' + m.t + '</option>';
-    }).join('');
+    modelOpts = buildModelOptionsHtml(selectedModel);
   } else {
     var cached = endpointModelsCache[selectedId];
     var preset = endpointPresets.find(function (p) { return p.id === selectedId; });
@@ -17013,6 +18744,11 @@ function saveAutomation() {
     };
   }
 
+  // '' means inherit from project — persist null, never '' (same convention
+  // as the other three pickers; see buildProfilePicker).
+  var automationProfileEl = document.getElementById('automation-profile');
+  var automationProfileId = automationProfileEl ? (automationProfileEl.value || null) : null;
+
   if (automationEditingId) {
     // Get current automation to find agents that were removed
     window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
@@ -17027,7 +18763,7 @@ function saveAutomation() {
 
       return Promise.all(removePromises);
     }).then(function () {
-      return window.electronAPI.updateAutomation(automationEditingId, { name: automationName, manager: managerConfig, runWindow: automationRunWindow });
+      return window.electronAPI.updateAutomation(automationEditingId, { name: automationName, manager: managerConfig, runWindow: automationRunWindow, profileId: automationProfileId });
     }).then(function () {
       var promises = agents.map(function (ag) {
         if (ag.id && ag.id.indexOf('temp_') !== 0) {
@@ -17052,7 +18788,8 @@ function saveAutomation() {
       projectPath: activeProjectKey,
       agents: agents,
       manager: managerConfig,
-      runWindow: automationRunWindow
+      runWindow: automationRunWindow,
+      profileId: automationProfileId
     };
     window.electronAPI.createAutomation(config).then(function (automation) {
       if (needsCloneSetup) {
@@ -17210,6 +18947,18 @@ document.getElementById('btn-resume-all-automations').addEventListener('click', 
   if (!activeProjectKey) { alert('Select a project first.'); return; }
   if (automationsForProject.length === 0) return;
   window.electronAPI.setAllAutomationsEnabled(activeProjectKey, true).then(function () { refreshAutomations(); });
+});
+
+document.getElementById('btn-automations-global-paused-resume').addEventListener('click', function () {
+  window.electronAPI.getAutomationSettings().then(function (settings) {
+    if (!settings || settings.globalEnabled === false) {
+      return window.electronAPI.toggleAutomationsGlobal();
+    }
+  }).catch(function () { /* ignore — refresh below reflects real state either way */ }).then(function () {
+    refreshGlobalPausedBanner();
+    refreshAutomations();
+    refreshAutomationsFlyout();
+  });
 });
 
 document.getElementById('btn-export-automations').addEventListener('click', function () {
@@ -17494,9 +19243,13 @@ function refreshAutomationsFlyout() {
     var listEl = document.getElementById('automations-flyout-list');
     var countsEl = document.getElementById('automations-flyout-counts');
 
+    var globalUi = window.AutomationsPauseUi.resolveGlobalPauseUi({ globalEnabled: data.globalEnabled });
     var globalBtn = document.getElementById('btn-automations-global-toggle');
-    globalBtn.innerHTML = data.globalEnabled ? '&#10074;&#10074;' : '&#9654;';
-    globalBtn.title = data.globalEnabled ? 'Pause all automations' : 'Resume all automations';
+    var globalGlyphEl = document.getElementById('automations-global-toggle-glyph');
+    var globalLabelEl = document.getElementById('automations-global-toggle-label');
+    if (globalGlyphEl) globalGlyphEl.textContent = globalUi.toggleGlyph;
+    if (globalLabelEl) globalLabelEl.textContent = globalUi.toggleTitle;
+    globalBtn.title = globalUi.toggleTitle;
 
     var activeCount = 0;
     var attentionCount = 0;
@@ -17776,6 +19529,9 @@ document.getElementById('btn-automations-flyout-close').addEventListener('click'
 document.getElementById('btn-automations-global-toggle').addEventListener('click', function () {
   window.electronAPI.toggleAutomationsGlobal().then(function () {
     refreshAutomationsFlyout();
+    // refreshAutomations() re-renders the cards (dimmed/paused) and always
+    // refreshes the banner too, project-active or not.
+    refreshAutomations();
   });
 });
 

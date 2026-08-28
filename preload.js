@@ -11,8 +11,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   popoutSetTransfer: (projectKey, list) => ipcRenderer.invoke('popout:setTransfer', projectKey, list),
   popoutTakeTransfer: (projectKey) => ipcRenderer.invoke('popout:takeTransfer', projectKey),
   onConfigUpdated: (callback) => ipcRenderer.on('config:updated', (_, cfg) => callback(cfg)),
-  getRecentSessions: (projectPath) => ipcRenderer.invoke('sessions:getRecent', projectPath),
-  sessionExists: (projectPath, sessionId) => ipcRenderer.invoke('sessions:exists', projectPath, sessionId),
+  getRecentSessions: (projectPath, profileId) => ipcRenderer.invoke('sessions:getRecent', projectPath, profileId),
+  sessionExists: (projectPath, sessionId, profileId) => ipcRenderer.invoke('sessions:exists', projectPath, sessionId, profileId),
   getBackgroundSessionIds: () => ipcRenderer.invoke('sessions:getBackgroundIds'),
   onBackgroundSessionIds: (cb) => ipcRenderer.on('sessions:backgroundIds', (_e, ids) => cb(ids)),
   saveSessions: (projectPath, sessionIds) => ipcRenderer.invoke('sessions:save', projectPath, sessionIds),
@@ -20,7 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadStickyNotes: (projectPath, workspaceId) => ipcRenderer.invoke('sticky-notes:load', projectPath, workspaceId),
   saveStickyNotes: (projectPath, workspaceId, notes) => ipcRenderer.invoke('sticky-notes:save', projectPath, workspaceId, notes),
   scrubWorkspaceArtifacts: (projectPath, wsId) => ipcRenderer.invoke('workspace:scrubArtifacts', projectPath, wsId),
-  getSessionTitle: (projectPath, sessionId) => ipcRenderer.invoke('sessions:getTitle', projectPath, sessionId),
+  getSessionTitle: (projectPath, sessionId, profileId) => ipcRenderer.invoke('sessions:getTitle', projectPath, sessionId, profileId),
   readClaudeMd: (projectPath) => ipcRenderer.invoke('claudemd:read', projectPath),
   saveClaudeMd: (projectPath, content) => ipcRenderer.invoke('claudemd:save', projectPath, content),
   setExploreAgent: (projectPath, enabled) => ipcRenderer.invoke('agents:setExplore', projectPath, enabled),
@@ -48,7 +48,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gitDiffCommit: (projectPath, hash, filePath) => ipcRenderer.invoke('git:diffCommit', projectPath, hash, filePath),
   gitDiffStat: (projectPath, staged, branch) => ipcRenderer.invoke('git:diffStat', projectPath, staged, branch),
   gitDiffStatVsBase: (projectPath, branch, baseRef) => ipcRenderer.invoke('git:diffStatVsBase', projectPath, branch, baseRef),
-  gitDetectSessionWorktree: (projectPath, sessionId) => ipcRenderer.invoke('git:detectSessionWorktree', projectPath, sessionId),
+  gitDetectSessionWorktree: (projectPath, sessionId, profileId) => ipcRenderer.invoke('git:detectSessionWorktree', projectPath, sessionId, profileId),
   gitIsInsideWorkTree: (cwd) => ipcRenderer.invoke('git:isInsideWorkTree', cwd),
   resolveWorktree: (projectPath, value) => ipcRenderer.invoke('paths:resolveWorktree', projectPath, value),
   pathExists: (p) => ipcRenderer.invoke('paths:exists', p),
@@ -69,10 +69,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listSnippets: () => ipcRenderer.invoke('snippets:list'),
   saveSnippet: (snippet) => ipcRenderer.invoke('snippets:save', snippet),
   deleteSnippet: (id) => ipcRenderer.invoke('snippets:delete', id),
-  getPlanLimits: (force) => ipcRenderer.invoke('usage:getPlanLimits', force),
+  getPlanLimits: (force, profileId) => ipcRenderer.invoke('usage:getPlanLimits', force, profileId),
   getCodexLimits: (force) => ipcRenderer.invoke('usage:getCodexLimits', force),
   detectThresholdCrossings: (prev, next) => ipcRenderer.invoke('usage:detectThresholdCrossings', prev, next),
-  getSessionContextTokens: (projectKey, sessionId, sinceMs) => ipcRenderer.invoke('session:contextTokens', projectKey, sessionId, sinceMs),
+  getSessionContextTokens: (projectKey, sessionId, sinceMs, profileId) => ipcRenderer.invoke('session:contextTokens', projectKey, sessionId, sinceMs, profileId),
   getModelContextLimit: (model) => ipcRenderer.invoke('session:modelContextLimit', model),
   showSystemNotification: (opts) => ipcRenderer.invoke('notify:show', opts),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
@@ -115,6 +115,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTerminalSettings: () => ipcRenderer.invoke('config:getTerminalSettings'),
   setTerminalSettings: (settings) => ipcRenderer.invoke('config:setTerminalSettings', settings),
   hasCodex: () => ipcRenderer.invoke('config:hasCodex'),
+  codexGetCatalog: () => ipcRenderer.invoke('codex:getCatalog'),
+  codexPrepareThread: (opts) => ipcRenderer.invoke('codex:prepareThread', opts),
+  codexGetThreadState: (threadId) => ipcRenderer.invoke('codex:getThreadState', threadId),
+  onCodexThreadState: (cb) => ipcRenderer.on('codex:threadState', (_e, state) => cb(state)),
+  onCodexThreadClaimed: (cb) => {
+    const listener = (_e, claim) => {
+      if (!claim || typeof claim.claimId !== 'string' || !/^[0-9a-f]{32}$/.test(claim.claimId)) return;
+      if (typeof claim.threadId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(claim.threadId)) return;
+      cb({ claimId: claim.claimId, threadId: claim.threadId });
+    };
+    ipcRenderer.on('codex:threadClaimed', listener);
+    return () => ipcRenderer.removeListener('codex:threadClaimed', listener);
+  },
+  onCodexClaimExpired: (cb) => {
+    const listener = (_e, claim) => {
+      if (!claim || typeof claim.claimId !== 'string' || !/^[0-9a-f]{32}$/.test(claim.claimId)) return;
+      if (claim.reason !== 'timeout' && claim.reason !== 'unavailable') return;
+      cb({ claimId: claim.claimId, reason: claim.reason });
+    };
+    ipcRenderer.on('codex:claimExpired', listener);
+    return () => ipcRenderer.removeListener('codex:claimExpired', listener);
+  },
+  codexWatchListJobs: (sel) => ipcRenderer.invoke('codexwatch:listJobs', sel),
+  codexWatchOpen: (o) => ipcRenderer.invoke('codexwatch:open', o),
+  codexWatchOpenStream: (o) => ipcRenderer.invoke('codexwatch:openStream', o),
+  codexWatchCloseStream: (o) => ipcRenderer.invoke('codexwatch:closeStream', o),
+  onCodexWatchJobs: (cb) => ipcRenderer.on('codexwatch:jobs', (_e, v) => cb(v)),
+  onCodexWatchDelta: (cb) => ipcRenderer.on('codexwatch:delta', (_e, v) => cb(v)),
+  codexWatchThemeChanged: (theme) => ipcRenderer.send('codexwatch:themeChanged', theme),
+  onCodexWatchTheme: (cb) => ipcRenderer.on('codexwatch:theme', (_e, theme) => cb(theme)),
   getHeadroomStatus: () => ipcRenderer.invoke('headroom:status'),
   onHeadroomStatus: (cb) => ipcRenderer.on('headroom:status-changed', (_e, st) => cb(st)),
   getHeadroomServiceStatus: () => ipcRenderer.invoke('headroom:serviceStatus'),
@@ -130,6 +160,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   synthesizeVoiceFromTranscript: (opts) => ipcRenderer.invoke('voice:synthesizeFromTranscript', opts),
   synthesizeVoiceColumn: (opts) => ipcRenderer.invoke('voice:synthesizeColumn', opts),
   peekColumn: (o) => ipcRenderer.invoke('voice:peekColumn', o),
+  readColumnTranscript: (o) => ipcRenderer.invoke('handoff:readTranscript', o),
   synthesizeVoiceFreshFromColumn: (o) => ipcRenderer.invoke('voice:synthesizeFreshFromColumn', o),
   extractColumnSentences: (o) => ipcRenderer.invoke('voice:extractColumnSentences', o),
   getPersonality: () => ipcRenderer.invoke('voice:getPersonality'),
@@ -178,6 +209,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   toggleAgent: (automationId, agentId) => ipcRenderer.invoke('automations:toggleAgent', automationId, agentId),
   setAllAutomationsEnabled: (projectPath, enabled) => ipcRenderer.invoke('automations:setAllEnabled', projectPath, enabled),
   toggleAutomationsGlobal: () => ipcRenderer.invoke('automations:toggleGlobal'),
+  pauseAutomationsForProfile: (profileId) => ipcRenderer.invoke('automations:pauseForProfile', profileId),
   runAgentNow: (automationId, agentId) => ipcRenderer.invoke('automations:runAgentNow', automationId, agentId),
   runAutomationNow: (automationId) => ipcRenderer.invoke('automations:runAutomationNow', automationId),
   getAgentHistory: (automationId, agentId, count) => ipcRenderer.invoke('automations:getAgentHistory', automationId, agentId, count),
@@ -229,6 +261,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   endpointFetchModels: (args) => ipcRenderer.invoke('endpoint:fetchModels', args),
   onEndpointsUpdated: (callback) => ipcRenderer.on('endpoints:updated', () => callback()),
 
+  // Profiles (multi-subscription)
+  profileList: () => ipcRenderer.invoke('profile:list'),
+  profileCreate: (input) => ipcRenderer.invoke('profile:create', input),
+  profileUpdate: (input) => ipcRenderer.invoke('profile:update', input),
+  profileDelete: (id) => ipcRenderer.invoke('profile:delete', id),
+  profileSetDefault: (id) => ipcRenderer.invoke('profile:setDefault', id),
+  profileResolve: (sel) => ipcRenderer.invoke('profile:resolve', sel),
+  profileReseed: (id) => ipcRenderer.invoke('profile:reseed', id),
+  onProfilesUpdated: (callback) => ipcRenderer.on('profiles:updated', () => callback()),
+  onProfilesMirrorFailed: (callback) => ipcRenderer.on('profiles:mirrorFailed', (_, info) => callback(info)),
+
   paletteRank: (items, query) => ipcRenderer.invoke('palette:rank', items, query),
 
   // Cross-device session sync
@@ -246,7 +289,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onUpdateNone: (callback) => ipcRenderer.on('update:none', (_, info) => callback(info)),
 
   // Clawd widget — per-column JSONL tail driving the animation
-  clawdStartTail: (columnId, projectPath, sessionId) => ipcRenderer.invoke('clawd:startTail', { columnId, projectPath, sessionId }),
+  clawdStartTail: (columnId, projectPath, sessionId, profileId) => ipcRenderer.invoke('clawd:startTail', { columnId, projectPath, sessionId, profileId }),
   clawdStopTail: (columnId) => ipcRenderer.invoke('clawd:stopTail', { columnId }),
   onClawdEvent: (callback) => ipcRenderer.on('clawd:event', (_, data) => callback(data))
 });

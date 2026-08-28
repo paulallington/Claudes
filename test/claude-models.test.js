@@ -1,0 +1,177 @@
+'use strict';
+const { test } = require('node:test');
+const assert = require('node:assert');
+const {
+  MODELS,
+  ALIASES,
+  DEFAULT_1M_MODEL,
+  lookup,
+  familyOf,
+  resolveModelId,
+  stripWindowMarker,
+  contextWindowFor,
+  pricesFor,
+  supportsOneM,
+} = require('../lib/claude-models');
+
+test('DEFAULT_1M_MODEL is claude-opus-5', () => {
+  assert.strictEqual(DEFAULT_1M_MODEL, 'claude-opus-5');
+});
+
+test('exact-id lookup returns the catalogue entry', () => {
+  const entry = lookup('claude-sonnet-5');
+  assert.strictEqual(entry.label, 'Sonnet 5');
+  assert.strictEqual(entry.family, 'sonnet');
+  assert.strictEqual(entry.isAlias, false);
+});
+
+test('lookup returns null for unknown/null/undefined ids', () => {
+  assert.strictEqual(lookup('nonexistent-model'), null);
+  assert.strictEqual(lookup(null), null);
+  assert.strictEqual(lookup(undefined), null);
+});
+
+test('alias handling: opus/sonnet/haiku resolve to "(latest)" alias entries', () => {
+  const opus = lookup('opus');
+  assert.strictEqual(opus.label, 'Opus (latest)');
+  assert.strictEqual(opus.isAlias, true);
+  assert.strictEqual(opus.family, 'opus');
+
+  const sonnet = lookup('sonnet');
+  assert.strictEqual(sonnet.label, 'Sonnet (latest)');
+  assert.strictEqual(sonnet.isAlias, true);
+
+  const haiku = lookup('haiku');
+  assert.strictEqual(haiku.label, 'Haiku (latest)');
+  assert.strictEqual(haiku.isAlias, true);
+});
+
+test('ALIASES is an ordered array of the CLI aliases', () => {
+  // `claude --model` documents these as the "latest" shorthands.
+  assert.deepStrictEqual(ALIASES.map((a) => a.id), ['fable', 'opus', 'sonnet', 'haiku']);
+  for (const a of ALIASES) assert.strictEqual(a.isAlias, true);
+});
+
+test('claude-opus-5 prices are 5/25, NOT the legacy 15/75', () => {
+  const prices = pricesFor('claude-opus-5');
+  assert.strictEqual(prices.input, 5);
+  assert.strictEqual(prices.output, 25);
+});
+
+test('claude-fable-5 classifies as fable, not opus or sonnet', () => {
+  assert.strictEqual(familyOf('claude-fable-5'), 'fable');
+});
+
+test('contextWindowFor: haiku-4-5 is 200000, opus-5 is 1000000', () => {
+  assert.strictEqual(contextWindowFor('claude-haiku-4-5'), 200000);
+  assert.strictEqual(contextWindowFor('claude-opus-5'), 1000000);
+});
+
+test('supportsOneM: true for opus-5/sonnet-5/fable-5, false for haiku-4-5', () => {
+  assert.strictEqual(supportsOneM('claude-opus-5'), true);
+  assert.strictEqual(supportsOneM('claude-sonnet-5'), true);
+  assert.strictEqual(supportsOneM('claude-fable-5'), true);
+  assert.strictEqual(supportsOneM('claude-haiku-4-5'), false);
+});
+
+test('unknown/null/undefined ids return safe defaults without throwing', () => {
+  assert.strictEqual(contextWindowFor('totally-unknown-model'), 200000);
+  assert.strictEqual(contextWindowFor(null), 200000);
+  assert.strictEqual(contextWindowFor(undefined), 200000);
+  assert.strictEqual(pricesFor('totally-unknown-model'), null);
+  assert.strictEqual(pricesFor(null), null);
+  assert.strictEqual(familyOf('totally-unknown-model'), null);
+  assert.strictEqual(familyOf(null), null);
+  assert.strictEqual(supportsOneM(null), false);
+});
+
+test('family fallback: an unpinned opus id tracks the current generation', () => {
+  // An unpinned id is almost always NEWER than this catalogue (every older
+  // model is pinned), so guessing legacy rates overstated cost 3x.
+  const prices = pricesFor('claude-opus-9-9-unpinned');
+  assert.strictEqual(prices.input, 5);
+  assert.strictEqual(prices.output, 25);
+  // Context stays conservative on purpose: an over-large window means the
+  // meter never warns, which is worse than warning early.
+  assert.strictEqual(contextWindowFor('claude-opus-9-9-unpinned'), 200000);
+});
+
+test('derived cache prices are correct for opus-5 (cacheRead 0.5, cacheCreation 6.25)', () => {
+  const prices = pricesFor('claude-opus-5');
+  assert.strictEqual(prices.cacheRead, 0.5);
+  assert.strictEqual(prices.cacheCreation, 6.25);
+});
+
+test('MODELS is the ordered array of pinned entries', () => {
+  assert.deepStrictEqual(MODELS.map((m) => m.id), [
+    'claude-fable-5',
+    'claude-opus-5',
+    'claude-opus-4-8',
+    'claude-opus-4-7',
+    'claude-opus-4-6',
+    'claude-opus-4-5',
+    'claude-opus-4-1',
+    'claude-sonnet-5',
+    'claude-sonnet-4-6',
+    'claude-haiku-4-5',
+  ]);
+  for (const m of MODELS) assert.strictEqual(m.isAlias, false);
+});
+
+// --- alias resolution -------------------------------------------------------
+// An alias carries no version, so it has no known context window. Anything
+// that needs a concrete id (Headroom's [1m] pin above all) must resolve first,
+// or the most obvious dropdown picks silently lose the 1M window.
+
+test('resolveModelId: aliases resolve to the newest pinned id in their family', () => {
+  assert.strictEqual(resolveModelId('opus'), 'claude-opus-5');
+  assert.strictEqual(resolveModelId('sonnet'), 'claude-sonnet-5');
+  assert.strictEqual(resolveModelId('haiku'), 'claude-haiku-4-5');
+});
+
+test('resolveModelId: concrete ids and unknown ids pass through unchanged', () => {
+  assert.strictEqual(resolveModelId('claude-opus-4-8'), 'claude-opus-4-8');
+  assert.strictEqual(resolveModelId('claude-made-up-9'), 'claude-made-up-9');
+  assert.strictEqual(resolveModelId(''), '');
+  assert.strictEqual(resolveModelId(null), null);
+});
+
+test('supportsOneM resolves aliases before deciding (regression: alias lost 1M)', () => {
+  assert.strictEqual(supportsOneM('opus'), true);
+  assert.strictEqual(supportsOneM('sonnet'), true);
+  assert.strictEqual(supportsOneM('haiku'), false);
+});
+
+test('fable alias resolves and is 1M-capable (CLI accepts `fable` as a latest alias)', () => {
+  assert.strictEqual(resolveModelId('fable'), 'claude-fable-5');
+  assert.strictEqual(supportsOneM('fable'), true);
+  assert.strictEqual(familyOf('fable'), 'fable');
+});
+
+// --- Headroom's [1m] window marker -----------------------------------------
+// The app injects ANTHROPIC_MODEL=<id>[1m], so that suffixed string is what
+// the CLI is told its model is and can come back to us in a session digest.
+// Left unnormalised it misses the exact-id lookup and silently reinstates the
+// legacy 200k / $15-$75 defaults this catalogue exists to kill.
+
+test('[1m] marker does not defeat the exact-id lookup', () => {
+  assert.strictEqual(contextWindowFor('claude-opus-5[1m]'), 1000000);
+  assert.deepStrictEqual(pricesFor('claude-opus-5[1m]'), pricesFor('claude-opus-5'));
+  assert.strictEqual(supportsOneM('claude-opus-5[1m]'), true);
+  assert.strictEqual(familyOf('claude-opus-5[1m]'), 'opus');
+});
+
+test('stripWindowMarker is exact and does not maul ordinary ids', () => {
+  assert.strictEqual(stripWindowMarker('claude-opus-5[1m]'), 'claude-opus-5');
+  assert.strictEqual(stripWindowMarker('claude-opus-5[1M]'), 'claude-opus-5');
+  assert.strictEqual(stripWindowMarker('claude-opus-5'), 'claude-opus-5');
+  assert.strictEqual(stripWindowMarker('claude-fable-5'), 'claude-fable-5');
+});
+
+test('resolving an already-suffixed id does not double-suffix it', () => {
+  const { buildHeadroomEnv } = require('../lib/headroom-env');
+  const env = buildHeadroomEnv({
+    enabled: true, oneM: true, oneMModel: 'claude-opus-5[1m]',
+  });
+  assert.strictEqual(env.ANTHROPIC_MODEL, 'claude-opus-5[1m]');
+});

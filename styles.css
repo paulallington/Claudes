@@ -1195,7 +1195,8 @@ html[data-platform="darwin"] #toolbar {
 .spawn-effort-row select,
 .spawn-model-row select,
 .spawn-perm-row select,
-.spawn-endpoint-row select {
+.spawn-endpoint-row select,
+.spawn-profile-row select {
   background: var(--bg-button);
   color: var(--text-primary);
   border: 1px solid var(--border-dim);
@@ -1207,7 +1208,8 @@ html[data-platform="darwin"] #toolbar {
 }
 
 .spawn-endpoint-model-row.hidden,
-.spawn-model-row.hidden {
+.spawn-model-row.hidden,
+.spawn-profile-row.hidden {
   display: none;
 }
 
@@ -1649,6 +1651,109 @@ html[data-platform="darwin"] #toolbar {
   background: rgba(120, 170, 255, 0.18);
   color: #a9c7ff;
   vertical-align: middle;
+  cursor: help;
+}
+
+.codex-badge-tooltip {
+  position: fixed;
+  z-index: 900;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 7px 9px;
+  border: 1px solid var(--border-primary);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  box-shadow: 0 5px 14px var(--shadow);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  white-space: pre-line;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms ease;
+}
+
+.codex-badge-tooltip.codex-badge-tooltip-shown {
+  visibility: visible;
+  opacity: 1;
+}
+
+.column-header .col-codex-badge:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 2px;
+}
+
+.column-header .col-codex-badge.col-codex-badge-fallback {
+  background: rgba(255, 214, 10, 0.15);
+  color: var(--color-yellow);
+}
+
+/* The dark-theme blue is too pale against the light header. Keep the blue
+   identity, but use the theme's dark cyan-blue text on a restrained wash. */
+[data-theme="light"] .column-header .col-codex-badge {
+  background: rgba(9, 105, 218, 0.12);
+  color: #0550ae;
+}
+
+[data-theme="light"] .column-header .col-codex-badge.col-codex-badge-fallback {
+  background: rgba(154, 103, 0, 0.12);
+  color: #6e4b00;
+}
+
+/* Codex-watch running-job count badge (see updateCodexWatchBadge in
+   renderer.js). Distinct from .col-codex-badge above — that one marks a
+   column as running the Codex CLI, this one shows Codex jobs the Codex
+   Claude Code plugin is running inside a Claude session — so it's hidden by
+   default (no `-shown` modifier) rather than reusing that class, and only
+   toggled visible once there's a running count to report. */
+.column-header .col-codex-watch-badge {
+  display: none;
+  margin-left: 6px;
+  margin-right: auto;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  border-radius: 3px;
+  background: rgba(120, 255, 170, 0.18);
+  color: #a9ffcf;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.column-header .col-codex-watch-badge.col-codex-watch-badge-shown {
+  display: inline-block;
+}
+
+/* Light theme: the dark-theme mint (#a9ffcf on translucent green) is
+   near-invisible against the near-white header, so swap to a green wash
+   (background uses --color-green's rgb) with #116329, a darker green than
+   the --color-green token, for enough text contrast on the light header. */
+[data-theme="light"] .column-header .col-codex-watch-badge {
+  background: rgba(26, 127, 55, 0.12);
+  color: #116329;
+}
+
+/* Subscription chip — only visible when col.profileId names a non-Primary
+   profile (see updateColumnProfileChip); empty/no-background otherwise, so a
+   single-subscription user sees nothing here at all. */
+.column-header .col-profile-chip {
+  display: none;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  border-radius: 3px;
+  color: #1a1a2e;
+  vertical-align: middle;
+}
+
+.column-header .col-profile-chip.column-profile-chip-shown {
+  display: inline-block;
 }
 
 /* Ambient badge for columns bound to a non-root cwd (worktree auto-bind or
@@ -5081,6 +5186,18 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 .plan-limits-mini.stale { opacity: 0.55; }
 .plan-limits-mini.stale:hover { opacity: 1; }
 
+/* One group per subscription, stacked inside #plan-limits-mini. With a single
+   profile there is exactly one group and no visible separation from before. */
+.plan-limits-mini-group { margin-bottom: 6px; }
+.plan-limits-mini-group:last-child { margin-bottom: 0; }
+.plan-limits-mini-chip {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  margin-right: 5px; vertical-align: middle;
+}
+.plan-limits-mini-signin {
+  font-size: 11px; opacity: .65; padding: 2px 0; cursor: pointer;
+}
+
 .plan-limits-mini-row {
   display: grid;
   grid-template-columns: 48px 1fr 32px;
@@ -5238,7 +5355,7 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 
 .cost-summary {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
   margin-bottom: 20px;
 }
@@ -5766,6 +5883,8 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 .automation-card.automation-attention { border-left-color: #f5a623; }
 .automation-card.automation-error { border-left-color: #ef4444; }
 .automation-card.automation-disabled { opacity: 0.5; }
+.automation-card.automation-paused { border-left-color: var(--color-yellow); }
+.automation-card.automation-globally-paused { opacity: 0.6; }
 
 .automation-section-separator {
   display: flex;
@@ -5836,6 +5955,7 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 .automation-status-badge.badge-error { background: rgba(239,68,68,0.2); color: #ef4444; }
 .automation-status-badge.badge-scheduled { background: rgba(99,102,241,0.2); color: #6366f1; }
 .automation-status-badge.badge-disabled { background: rgba(128,128,128,0.2); color: #888; }
+.automation-status-badge.badge-paused { background: rgba(255,214,10,0.15); color: var(--color-yellow); }
 
 .automation-card-next {
   font-size: 10px;
@@ -6170,7 +6290,19 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 }
 
 .automations-global-toggle {
+  display: flex !important;
+  align-items: center;
+  gap: 5px;
   font-size: 12px !important;
+}
+
+.automations-global-toggle-glyph {
+  font-size: 12px;
+}
+
+.automations-global-toggle-label {
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .automations-flyout-list {
@@ -6950,6 +7082,107 @@ textarea.settings-input { resize: vertical; font-family: inherit; }
   display: block;
 }
 
+/* --- Subscriptions panel (global settings) --- */
+
+.profiles-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 10px 0;
+}
+
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-deep);
+}
+
+.profile-row-chip {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border-dim);
+  border-radius: 50%;
+  cursor: pointer;
+  background: none;
+  flex: 0 0 auto;
+}
+.profile-row-chip::-webkit-color-swatch-wrapper { padding: 0; border-radius: 50%; }
+.profile-row-chip::-webkit-color-swatch { border: none; border-radius: 50%; }
+
+.profile-row-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-row-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 1px 5px;
+  flex: 0 0 auto;
+}
+
+.profile-row-signedin {
+  font-size: 11px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.profile-row-signedin-yes { color: var(--accent-success, #4ade80); }
+.profile-row-signedin-no { color: var(--text-dim); }
+
+.profile-row-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.profile-row-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.profile-row-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.profile-row-btn-danger:hover {
+  border-color: #f87171;
+  color: #f87171;
+}
+
+.profiles-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.profiles-add-row .settings-input {
+  flex: 1;
+}
+
+.profiles-add-status.error {
+  color: #f87171;
+  opacity: 1;
+}
+
 .project-context-menu {
   position: fixed;
   background: var(--bg-panel);
@@ -7201,6 +7434,53 @@ body.mode-popout #btn-add-project {
 }
 .automations-runwindow-strip.active .automations-runwindow-strip-dot { background: var(--color-green); }
 .automations-runwindow-strip.paused .automations-runwindow-strip-dot { background: var(--color-yellow); }
+
+.automations-global-paused-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  background: rgba(255, 214, 10, 0.1);
+  border-bottom: 1px solid rgba(255, 214, 10, 0.3);
+  color: var(--color-yellow);
+}
+.automations-global-paused-banner.hidden { display: none; }
+.automations-global-paused-banner-icon {
+  flex: 0 0 auto;
+}
+.automations-global-paused-banner-text {
+  flex: 1;
+}
+.automations-global-paused-banner-resume {
+  flex: 0 0 auto;
+  background: rgba(255, 214, 10, 0.15);
+  border: 1px solid rgba(255, 214, 10, 0.4);
+  color: var(--color-yellow);
+  border-radius: 3px;
+  padding: 3px 8px;
+  font-size: 10px;
+  cursor: pointer;
+}
+.automations-global-paused-banner-resume:hover {
+  background: rgba(255, 214, 10, 0.25);
+}
+/* --color-yellow flips to a dark olive (#9a6700) in light theme (see
+   [data-theme="light"] block above) so the fixed bright-yellow wash used
+   here would leave dark-olive text on bright yellow — barely legible.
+   Retint the wash to match, same pattern as .diff-line-add/-del below. */
+[data-theme="light"] .automations-global-paused-banner {
+  background: rgba(154, 103, 0, 0.1);
+  border-bottom-color: rgba(154, 103, 0, 0.3);
+}
+[data-theme="light"] .automations-global-paused-banner-resume {
+  background: rgba(154, 103, 0, 0.15);
+  border-color: rgba(154, 103, 0, 0.4);
+}
+[data-theme="light"] .automations-global-paused-banner-resume:hover {
+  background: rgba(154, 103, 0, 0.25);
+}
 
 /* === Run Window Modal Section === */
 .automation-runwindow-section {
@@ -8017,6 +8297,10 @@ body.mode-popout #btn-add-project {
 .snippet-prompt-cancel:hover { border-color: #4f8cff; }
 
 /* === Shortcuts Reference Modal === */
+.profile-assign-dialog { width: 360px; }
+.profile-assign-body { padding: 16px; }
+.profile-assign-body select { width: 100%; }
+
 .shortcuts-dialog { width: 760px; max-height: 85vh; }
 .shortcuts-dialog .modal-body {
   flex-direction: column;
@@ -8768,4 +9052,207 @@ body.light-theme .clawd-debug-log .ts { color: #8a8aa0; }
   font-variant-numeric: tabular-nums;
   min-width: 32px;
   text-align: center;
+}
+
+/* === Codex Watch — read-only Codex job-log viewer window === */
+/* A calm, dense log viewer that sits beside a terminal column, not a
+   dashboard: a narrow job list down the side, a scrolling event stream. */
+
+.cw-body {
+  margin: 0;
+  background: var(--bg-main);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.cw-root {
+  display: flex;
+  height: 100vh;
+  background: var(--bg-main);
+}
+
+.cw-jobs {
+  flex: 0 0 220px;
+  overflow: hidden;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-primary);
+  display: flex;
+  flex-direction: column;
+}
+
+.cw-jobs-source {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.cw-jobs-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cw-job {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.cw-job:hover {
+  background: var(--hover-medium);
+}
+
+.cw-job-selected {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--text-bright);
+}
+
+.cw-job-ended {
+  opacity: 0.65;
+}
+
+.cw-job-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+.cw-job-dot-active {
+  background: var(--color-green);
+}
+
+.cw-job-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cw-job-elapsed {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.cw-stream {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--bg-main);
+  padding: 10px 14px;
+}
+
+.cw-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 12px 4px;
+}
+
+.cw-events {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cw-event {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cw-event-main {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.cw-event-prefix {
+  color: var(--text-dim);
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.cw-event-mono {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  color: var(--text-body);
+  white-space: pre-wrap;
+}
+
+.cw-event-prose {
+  color: var(--text-primary);
+  white-space: pre-wrap;
+}
+
+.cw-event-status-text {
+  color: var(--text-dim);
+}
+
+.cw-event-ok .cw-event-mono {
+  color: var(--color-green);
+}
+
+.cw-event-fail .cw-event-mono {
+  color: var(--accent);
+}
+
+.cw-event-preview {
+  opacity: 0.75;
+}
+
+.cw-event-truncated {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  cursor: help;
+}
+
+.cw-jump {
+  position: sticky;
+  bottom: 10px;
+  left: 100%;
+  display: block;
+  background: var(--bg-button);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--text-bright);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 6px 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+.cw-jump:hover {
+  background: var(--hover-strong);
+}
+
+/* Scoped hidden state — NOT a global .hidden. */
+.cw-hidden {
+  display: none;
 }
