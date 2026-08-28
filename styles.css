@@ -2658,6 +2658,224 @@ html[data-platform="darwin"] #toolbar {
   text-overflow: ellipsis;
 }
 
+/* --- Attachment strip (files Claude sent via SendUserFile, under the column header) --- */
+/* Quiet chrome, not a message bubble — same "thin bar under the header" role as the
+   endpoint banner above, so it shares its spacing and low-contrast border language. */
+
+.attachment-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.attachment-strip.hidden {
+  display: none;
+}
+
+.attachment-strip-items {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex: 1;
+  min-width: 0;
+}
+
+.attachment-strip-items::-webkit-scrollbar {
+  height: 4px;
+}
+
+.attachment-item {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.attachment-item--image {
+  width: 60px;
+  height: 44px;
+}
+
+.attachment-thumb {
+  width: 60px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  display: block;
+}
+
+.attachment-item--loading .attachment-thumb {
+  opacity: 0.35;
+}
+
+.attachment-item--broken {
+  width: 60px;
+  height: 44px;
+  justify-content: center;
+  border: 1px dashed var(--border-primary);
+}
+
+.attachment-item--file {
+  gap: 4px;
+  padding: 4px 8px;
+  height: 44px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-toolbar);
+}
+
+.attachment-chip-ext {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  background: var(--bg-button);
+  border-radius: 3px;
+  padding: 1px 4px;
+  flex-shrink: 0;
+}
+
+.attachment-chip-name {
+  font-size: 11px;
+  color: var(--text-secondary);
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-strip-dismiss {
+  flex-shrink: 0;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: transparent;
+  border: none;
+}
+
+.attachment-strip-dismiss:hover {
+  background: var(--hover-medium);
+  color: var(--text-secondary);
+}
+
+/* --- Attachment lightbox (click an entry to view full-size) --- */
+
+.attachment-lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.attachment-lightbox-overlay.hidden {
+  display: none;
+}
+
+.attachment-lightbox-dialog {
+  position: relative;
+  background: var(--bg-toolbar);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 16px;
+  max-width: 85vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 16px 48px var(--shadow-heavy);
+}
+
+.attachment-lightbox-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 16px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: transparent;
+  border: none;
+  line-height: 1;
+}
+
+.attachment-lightbox-close:hover {
+  background: var(--accent);
+  color: var(--text-bright);
+}
+
+.attachment-lightbox-imgwrap {
+  display: flex;
+  max-width: 100%;
+  max-height: 65vh;
+  overflow: hidden;
+  border-radius: 4px;
+}
+
+.attachment-lightbox-imgwrap.hidden {
+  display: none;
+}
+
+.attachment-lightbox-img {
+  max-width: 100%;
+  max-height: 65vh;
+  object-fit: contain;
+  border-radius: 4px;
+  display: block;
+}
+
+.attachment-lightbox-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.attachment-lightbox-caption {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+  max-width: 60vw;
+  text-align: center;
+}
+
+.attachment-lightbox-caption.hidden {
+  display: none;
+}
+
+.attachment-lightbox-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.attachment-lightbox-actions button {
+  padding: 5px 16px;
+  background: var(--bg-button);
+  color: var(--text-primary);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.attachment-lightbox-actions button:hover {
+  background: var(--accent);
+  color: var(--text-bright);
+}
+
 /* --- Endpoint Presets Modal --- */
 
 .endpoints-dialog {

@@ -5192,6 +5192,18 @@ function addColumn(args, targetRow, opts) {
     });
   }
 
+  // Attachment strip: files Claude has handed the user via SendUserFile,
+  // pinned between the endpoint banner and the terminal. Hidden (zero
+  // height) until the first attachment arrives — see renderAttachmentStrip.
+  var attachmentStrip = document.createElement('div');
+  attachmentStrip.className = 'attachment-strip hidden';
+  attachmentStrip.innerHTML =
+    '<div class="attachment-strip-items"></div>' +
+    '<button type="button" class="attachment-strip-dismiss" title="Clear attachments">✕</button>';
+  attachmentStrip.querySelector('.attachment-strip-dismiss').addEventListener('click', function () {
+    dismissAttachmentStrip(id);
+  });
+
   var termWrapper = document.createElement('div');
   termWrapper.className = 'terminal-wrapper';
 
@@ -5243,6 +5255,7 @@ function addColumn(args, targetRow, opts) {
 
   col.appendChild(header);
   if (endpointBanner) col.appendChild(endpointBanner);
+  col.appendChild(attachmentStrip);
   col.appendChild(termWrapper);
   col.appendChild(scrollBtn);
 
@@ -5815,6 +5828,8 @@ function addColumn(args, targetRow, opts) {
     searchAddon: searchAddon,
     searchOverlay: searchOverlay,
     headerEl: header,
+    attachmentStripEl: attachmentStrip,
+    attachments: [],  // files Claude has sent via SendUserFile; see renderAttachmentStrip
     cwd: cwd,
     cwdSource: opts.cwdSource || null,
     projectKey: activeProjectKey,
@@ -11411,6 +11426,207 @@ function clawdResolveHookColumn(event) {
   return clawdResolveHookColumnEx(event).colId;
 }
 
+// --- Attachment strip: files Claude has handed the user via SendUserFile ---
+//
+// lib/attachment-strip.js owns the pure list/view-model logic (fed by
+// lib/user-file-attachments.js parsing the raw hook event); this section is
+// just DOM wiring — build each entry, lazily load image thumbnails via
+// electronAPI.readAttachmentImage, and drive the click-to-enlarge lightbox.
+// Thumbnail data URIs are cached directly on the (renderer-owned) attachment
+// entry objects so re-renders and the lightbox never re-read the same file.
+
+function renderAttachmentStrip(colId) {
+  var col = allColumns.get(colId);
+  if (!col || !col.attachmentStripEl) return;
+  var AS = window.AttachmentStrip;
+  var attachments = col.attachments || [];
+  var visible = AS ? AS.isVisible(attachments) : attachments.length > 0;
+  col.attachmentStripEl.classList.toggle('hidden', !visible);
+  var itemsEl = col.attachmentStripEl.querySelector('.attachment-strip-items');
+  if (!itemsEl) return;
+  itemsEl.innerHTML = '';
+  if (!visible) return;
+  var ordered = AS ? AS.displayOrder(attachments) : attachments.slice().reverse();
+  ordered.forEach(function (entry) {
+    itemsEl.appendChild(buildAttachmentItemEl(colId, entry));
+  });
+}
+
+function buildAttachmentItemEl(colId, entry) {
+  var AS = window.AttachmentStrip;
+  var vm = AS ? AS.entryViewModel(entry) : {
+    name: entry.name, isImage: entry.kind === 'image',
+    chipLabel: entry.kind === 'image' ? null : ((entry.ext || '').toUpperCase() || 'FILE'),
+    title: entry.name,
+  };
+  var item = document.createElement('div');
+  item.className = 'attachment-item ' + (vm.isImage ? 'attachment-item--image' : 'attachment-item--file');
+  item.title = vm.title;
+  if (vm.isImage) {
+    if (entry._imgState === 'error') {
+      renderAttachmentImageFallback(item, entry, vm);
+    } else {
+      var img = document.createElement('img');
+      img.className = 'attachment-thumb';
+      img.alt = vm.name;
+      item.appendChild(img);
+      if (entry._dataUri) {
+        img.src = entry._dataUri;
+      } else {
+        item.classList.add('attachment-item--loading');
+        loadAttachmentThumbnail(colId, entry, item, img);
+      }
+    }
+  } else {
+    var chip = document.createElement('span');
+    chip.className = 'attachment-chip-ext';
+    chip.textContent = vm.chipLabel;
+    var nameEl = document.createElement('span');
+    nameEl.className = 'attachment-chip-name';
+    nameEl.textContent = vm.name;
+    item.appendChild(chip);
+    item.appendChild(nameEl);
+  }
+  item.addEventListener('click', function () { openAttachmentLightbox(entry); });
+  return item;
+}
+
+// Refusals (deleted file, >8MB cap, non-image, etc.) are normal — never a
+// crash or a broken-image icon, just the same quiet extension chip a
+// non-image attachment gets.
+function renderAttachmentImageFallback(item, entry, vm) {
+  item.classList.remove('attachment-item--loading');
+  item.classList.add('attachment-item--broken');
+  var chip = document.createElement('span');
+  chip.className = 'attachment-chip-ext';
+  chip.textContent = (entry.ext || '').toUpperCase() || 'IMG';
+  item.appendChild(chip);
+}
+
+function loadAttachmentThumbnail(colId, entry, itemEl, imgEl) {
+  if (!window.electronAPI || !window.electronAPI.readAttachmentImage) {
+    entry._imgState = 'error';
+    itemEl.innerHTML = '';
+    renderAttachmentImageFallback(itemEl, entry, null);
+    return;
+  }
+  window.electronAPI.readAttachmentImage(entry.path).then(function (res) {
+    // Column may have been killed, or the strip re-rendered onto a fresh
+    // element, while this read was in flight — never touch a stale node.
+    var col = allColumns.get(colId);
+    if (!col || !col.attachmentStripEl || !col.attachmentStripEl.contains(itemEl)) return;
+    if (res && res.ok && res.dataUri) {
+      entry._dataUri = res.dataUri;
+      itemEl.classList.remove('attachment-item--loading');
+      imgEl.src = res.dataUri;
+    } else {
+      entry._imgState = 'error';
+      itemEl.innerHTML = '';
+      renderAttachmentImageFallback(itemEl, entry, null);
+    }
+  }).catch(function () {
+    entry._imgState = 'error';
+    var col = allColumns.get(colId);
+    if (!col || !col.attachmentStripEl || !col.attachmentStripEl.contains(itemEl)) return;
+    itemEl.innerHTML = '';
+    renderAttachmentImageFallback(itemEl, entry, null);
+  });
+}
+
+function dismissAttachmentStrip(colId) {
+  var col = allColumns.get(colId);
+  if (!col) return;
+  col.attachments = window.AttachmentStrip ? window.AttachmentStrip.clearAttachments() : [];
+  renderAttachmentStrip(colId);
+}
+
+// Single overlay shared by every column — built lazily on first use.
+var attachmentLightboxEl = null;
+var attachmentLightboxEntry = null;
+
+function ensureAttachmentLightbox() {
+  if (attachmentLightboxEl) return attachmentLightboxEl;
+  var overlay = document.createElement('div');
+  overlay.className = 'attachment-lightbox-overlay hidden';
+  overlay.innerHTML =
+    '<div class="attachment-lightbox-dialog">' +
+      '<button type="button" class="attachment-lightbox-close" title="Close (Esc)">✕</button>' +
+      '<div class="attachment-lightbox-imgwrap"><img class="attachment-lightbox-img" alt=""></div>' +
+      '<div class="attachment-lightbox-name"></div>' +
+      '<div class="attachment-lightbox-caption"></div>' +
+      '<div class="attachment-lightbox-actions">' +
+        '<button type="button" class="attachment-lightbox-open">Open</button>' +
+        '<button type="button" class="attachment-lightbox-reveal">Reveal in folder</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) closeAttachmentLightbox();
+  });
+  overlay.querySelector('.attachment-lightbox-close').addEventListener('click', closeAttachmentLightbox);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && attachmentLightboxEl && !attachmentLightboxEl.classList.contains('hidden')) {
+      closeAttachmentLightbox();
+    }
+  });
+  attachmentLightboxEl = overlay;
+  return overlay;
+}
+
+function openAttachmentLightbox(entry) {
+  var overlay = ensureAttachmentLightbox();
+  var state = window.AttachmentStrip ? window.AttachmentStrip.openLightbox(entry) : { open: true, entry: entry };
+  attachmentLightboxEntry = state.entry;
+  var vm = window.AttachmentStrip ? window.AttachmentStrip.entryViewModel(entry) : {
+    name: entry.name, isImage: entry.kind === 'image', caption: entry.caption || '',
+  };
+
+  var imgWrap = overlay.querySelector('.attachment-lightbox-imgwrap');
+  var imgEl = overlay.querySelector('.attachment-lightbox-img');
+  imgWrap.classList.toggle('hidden', !vm.isImage);
+  if (vm.isImage) {
+    imgEl.alt = vm.name;
+    if (entry._dataUri) {
+      imgEl.src = entry._dataUri;
+    } else {
+      imgEl.removeAttribute('src');
+      if (window.electronAPI && window.electronAPI.readAttachmentImage) {
+        window.electronAPI.readAttachmentImage(entry.path).then(function (res) {
+          if (attachmentLightboxEntry !== entry) return; // closed, or switched to another entry
+          if (res && res.ok && res.dataUri) {
+            entry._dataUri = res.dataUri;
+            imgEl.src = res.dataUri;
+          }
+        }).catch(function () {});
+      }
+    }
+  }
+
+  overlay.querySelector('.attachment-lightbox-name').textContent = vm.name;
+  var captionEl = overlay.querySelector('.attachment-lightbox-caption');
+  captionEl.textContent = vm.caption || '';
+  captionEl.classList.toggle('hidden', !vm.caption);
+
+  // shell:openExternal only allows http(s)/mailto (Follina-class guard), so
+  // "Open" for a local file goes through openPath — the existing API for
+  // launching a file with its OS default handler.
+  overlay.querySelector('.attachment-lightbox-open').onclick = function () {
+    if (window.electronAPI && window.electronAPI.openPath) window.electronAPI.openPath(entry.path);
+  };
+  overlay.querySelector('.attachment-lightbox-reveal').onclick = function () {
+    if (window.electronAPI && window.electronAPI.showItemInFolder) window.electronAPI.showItemInFolder(entry.path);
+  };
+
+  overlay.classList.remove('hidden');
+}
+
+function closeAttachmentLightbox() {
+  if (!attachmentLightboxEl) return;
+  attachmentLightboxEl.classList.add('hidden');
+  var state = window.AttachmentStrip ? window.AttachmentStrip.closeLightbox() : { open: false, entry: null };
+  attachmentLightboxEntry = state.entry;
+}
+
 if (window.electronAPI && window.electronAPI.onHookEvent) {
   window.electronAPI.onHookEvent(function (event) {
     var sid = event && event.session_id;
@@ -11457,6 +11673,16 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
     // Genuine column hook (not a dropped automation): record receipt so the
     // stale-hook sweep knows live hooks ARE reaching this column.
     if (col) { col.lastHookAt = Date.now(); col.hookEverSeen = true; }
+    // SendUserFile: the terminal only prints `[image] <path> (41.4KB)` for
+    // these, so surface the real files in the attachment strip. A no-op
+    // (same array reference back) for every other event/tool.
+    if (col && window.AttachmentStrip) {
+      var __nextAttachments = window.AttachmentStrip.nextAttachments(col.attachments, event);
+      if (__nextAttachments !== col.attachments) {
+        col.attachments = __nextAttachments;
+        renderAttachmentStrip(colId);
+      }
+    }
     // Self-heal a /clear fork: a UserPromptSubmit that resolved by unambiguous
     // cwd OR by dominant-recent-input (ambiguous cwd) carries the column's TRUE
     // new session_id while col.sessionId is stuck on the pre-/clear id. Rebind
