@@ -2430,6 +2430,48 @@ ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId, profileId) =
   }
 });
 
+const { extractSendUserFileRecords } = require('./lib/user-file-attachments');
+const SCAN_SESSION_MAX_ATTACHMENTS = 24;
+
+// Backfill a restored/resumed column's attachment strip with SendUserFile
+// records already sitting in the transcript — the live PreToolUse hook only
+// fires for NEW events, so anything Claude sent earlier in the session has
+// to be recovered from disk. Streams the transcript line by line and
+// cheap-rejects lines that don't mention SendUserFile before JSON.parse:
+// these files can be tens of MB, most of it unrelated base64 in tool
+// results, so parsing every line would stall the main process.
+ipcMain.handle('attachments:scanSession', (event, projectPath, sessionId, profileId) => {
+  if (!projectPath || typeof sessionId !== 'string' || !/^[A-Za-z0-9-]+$/.test(sessionId)) {
+    return Promise.resolve({ ok: false, error: 'invalid session' });
+  }
+  const claudeKey = projectPathToClaudeKey(projectPath);
+  const jsonlPath = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
+  return new Promise((resolve) => {
+    let stream;
+    try {
+      stream = fs.createReadStream(jsonlPath, { encoding: 'utf8' });
+    } catch {
+      resolve({ ok: false, error: 'read failed' });
+      return;
+    }
+    stream.on('error', () => resolve({ ok: false, error: 'read failed' }));
+    const readline = require('readline');
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    const records = [];
+    rl.on('line', (line) => {
+      if (line.indexOf('SendUserFile') === -1) return;
+      const found = extractSendUserFileRecords(line);
+      if (found.length) records.push(...found);
+    });
+    rl.on('close', () => {
+      const capped = records.length > SCAN_SESSION_MAX_ATTACHMENTS
+        ? records.slice(records.length - SCAN_SESSION_MAX_ATTACHMENTS)
+        : records;
+      resolve({ ok: true, records: capped });
+    });
+  });
+});
+
 // Phase 3: detect which worktree the session is actively working in by
 // scanning the JSONL tail for `cd <path>` commands and `"file_path":"..."`
 // entries. The Claude CLI's recorded gitBranch reflects ITS own cwd (project

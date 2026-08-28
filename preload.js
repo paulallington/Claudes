@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   searchFiles: (rootDir, query) => ipcRenderer.invoke('fs:searchFiles', rootDir, query),
   readFile: (filePath) => ipcRenderer.invoke('fs:readFile', filePath),
   readAttachmentImage: (filePath) => ipcRenderer.invoke('attachments:readImage', filePath),
+  scanSessionAttachments: (projectPath, sessionId, profileId) => ipcRenderer.invoke('attachments:scanSession', projectPath, sessionId, profileId),
   writeFile: (filePath, content) => ipcRenderer.invoke('fs:writeFile', filePath, content),
   gitStatus: (projectPath, branch) => ipcRenderer.invoke('git:status', projectPath, branch),
   gitBranch: (projectPath, branch) => ipcRenderer.invoke('git:branch', projectPath, branch),
