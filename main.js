@@ -53,6 +53,7 @@ const CodexWatchLog = require('./lib/codex-watch-log');
 const CodexWatchTail = require('./lib/codex-watch-tail');
 const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-app-server');
 const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
+const { checkAttachmentPath, checkAttachmentOpenPath, checkAttachmentContainment } = require('./lib/attachment-file-guard');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -2429,6 +2430,75 @@ ipcMain.handle('sessions:getTitle', (event, projectPath, sessionId, profileId) =
   }
 });
 
+const { extractSendUserFileRecords } = require('./lib/user-file-attachments');
+const SCAN_SESSION_MAX_ATTACHMENTS = 24;
+
+// Restoring N columns fires N of these at once; without a limit, N concurrent
+// streams over tens-of-MB transcripts stall the main process. A single-flight
+// queue runs them one at a time — later requests wait rather than reject.
+const SCAN_SESSION_TIMEOUT_MS = 30000;
+let scanSessionQueueTail = Promise.resolve();
+function queueScanSession(run) {
+  // A stream that never emits 'close' or 'error' (a FIFO, a hung network
+  // mount) would otherwise wedge the tail forever — every attachment
+  // backfill for the rest of the app's lifetime would silently never
+  // resolve. Race against a timeout so the chain always advances; the
+  // orphaned scan is left to finish (or not) on its own.
+  const withTimeout = () => Promise.race([
+    run(),
+    new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: 'timeout' }), SCAN_SESSION_TIMEOUT_MS)),
+  ]);
+  const result = scanSessionQueueTail.then(withTimeout, withTimeout);
+  scanSessionQueueTail = result.then(() => {}, () => {});
+  return result;
+}
+
+function scanSessionForAttachments(projectPath, sessionId, profileId) {
+  const claudeKey = projectPathToClaudeKey(projectPath);
+  const jsonlPath = path.join(claudeRootFor(profileId), 'projects', claudeKey, sessionId + '.jsonl');
+  return new Promise((resolve) => {
+    let stream;
+    try {
+      stream = fs.createReadStream(jsonlPath, { encoding: 'utf8' });
+    } catch {
+      resolve({ ok: false, error: 'read failed' });
+      return;
+    }
+    stream.on('error', () => resolve({ ok: false, error: 'read failed' }));
+    const readline = require('readline');
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    // Cap as we go rather than accumulating the whole file then slicing at
+    // close — a pathological transcript would otherwise buffer every match
+    // in memory before we ever get to trim it down.
+    const records = [];
+    rl.on('line', (line) => {
+      if (line.indexOf('SendUserFile') === -1) return;
+      const found = extractSendUserFileRecords(line);
+      for (const rec of found) {
+        records.push(rec);
+        if (records.length > SCAN_SESSION_MAX_ATTACHMENTS) records.shift();
+      }
+    });
+    rl.on('close', () => {
+      resolve({ ok: true, records });
+    });
+  });
+}
+
+// Backfill a restored/resumed column's attachment strip with SendUserFile
+// records already sitting in the transcript — the live PreToolUse hook only
+// fires for NEW events, so anything Claude sent earlier in the session has
+// to be recovered from disk. Streams the transcript line by line and
+// cheap-rejects lines that don't mention SendUserFile before JSON.parse:
+// these files can be tens of MB, most of it unrelated base64 in tool
+// results, so parsing every line would stall the main process.
+ipcMain.handle('attachments:scanSession', (event, projectPath, sessionId, profileId) => {
+  if (!projectPath || typeof sessionId !== 'string' || !/^[A-Za-z0-9-]+$/.test(sessionId)) {
+    return Promise.resolve({ ok: false, error: 'invalid session' });
+  }
+  return queueScanSession(() => scanSessionForAttachments(projectPath, sessionId, profileId));
+});
+
 // Phase 3: detect which worktree the session is actively working in by
 // scanning the JSONL tail for `cd <path>` commands and `"file_path":"..."`
 // entries. The Claude CLI's recorded gitBranch reflects ITS own cwd (project
@@ -2886,6 +2956,78 @@ ipcMain.handle('fs:readFile', (event, filePath) => {
     return { content: buf.toString('utf8') };
   } catch (err) {
     return { error: err.message };
+  }
+});
+
+// Shared inputs for the attachment guard's containment policy — attachments
+// live OUTSIDE the normal allowed roots (under <os.tmpdir()>/claude/), so
+// both attachments:readImage and attachments:reveal widen listAllowedRoots()
+// with just that one extra directory rather than using assertInsideAllowedRoots.
+function attachmentGuardRoots() {
+  return listAllowedRoots().concat([path.join(os.tmpdir(), 'claude')]);
+}
+function attachmentGuardDeps() {
+  return {
+    realpath: (p) => (fs.realpathSync.native ? fs.realpathSync.native(p) : fs.realpathSync(p)),
+    stat: (p) => fs.statSync(p),
+  };
+}
+
+// Reads an image Claude handed to the user via SendUserFile and returns it as
+// a data: URI so the renderer can display it despite the page CSP forbidding
+// file: URIs. These attachments live OUTSIDE the normal allowed roots (under
+// <os.tmpdir()>/claude/), so this is deliberately narrower than
+// assertInsideAllowedRoots in every other respect — see lib/attachment-file-guard.js.
+ipcMain.handle('attachments:readImage', (event, filePath) => {
+  try {
+    const result = checkAttachmentPath(filePath, attachmentGuardRoots(), process.platform, attachmentGuardDeps());
+    if (!result.ok) return { ok: false, error: result.error };
+    const buf = fs.readFileSync(result.path);
+    const dataUri = `data:${result.mediaType};base64,${buf.toString('base64')}`;
+    return { ok: true, dataUri, mediaType: result.mediaType, size: result.size };
+  } catch (err) {
+    return { ok: false, error: 'read failed' };
+  }
+});
+
+// Reveals an attachment in the OS file manager. Same containment policy as
+// attachments:readImage (checkAttachmentContainment — the same guard minus
+// the image-extension allowlist, since this reveals whatever file it is, not
+// just images) via lib/attachment-file-guard.js. Never throws across the IPC
+// boundary; refusals are short and path-free.
+ipcMain.handle('attachments:reveal', (event, filePath) => {
+  try {
+    const result = checkAttachmentContainment(filePath, attachmentGuardRoots(), process.platform, attachmentGuardDeps());
+    if (!result.ok) return { ok: false, error: result.error };
+    shell.showItemInFolder(result.path);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: 'reveal failed' };
+  }
+});
+
+// Launches an attachment with its OS default handler. Unlike the general
+// shell:openPath (extension blocklist only, no containment), attachments
+// live OUTSIDE the normal allowed roots (under <os.tmpdir()>/claude/) and can
+// originate from a prompt-injected tool call or a crafted transcript, so this
+// applies the same containment policy as attachments:reveal PLUS an
+// allowlist of openable document/image types (checkAttachmentOpenPath) — an
+// attacker who could plant an executable under an attachment root must not
+// be able to get it launched. Never throws across the IPC boundary; refusals
+// are short and path-free.
+ipcMain.handle('attachments:openPath', async (event, filePath) => {
+  try {
+    const result = checkAttachmentOpenPath(filePath, attachmentGuardRoots(), process.platform, attachmentGuardDeps());
+    if (!result.ok) return { ok: false, error: result.error };
+    // shell.openPath() resolves '' on success or a non-empty error message
+    // on failure (e.g. no handler registered for the extension) — it does
+    // NOT reject, so the result must be awaited and checked or a failed
+    // launch (no app for .md, etc.) silently reports ok: true.
+    const openErr = await shell.openPath(result.path);
+    if (openErr) return { ok: false, error: 'no handler' };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: 'open failed' };
   }
 });
 

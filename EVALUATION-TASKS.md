@@ -27,6 +27,14 @@ not listed here (pty-server token auth, Electron sandbox/CSP, path containment, 
 
 ## Medium
 
+- [ ] **Widened root for attachment IPC.** `attachments:readImage` (`main.js:2971`) and
+  `attachments:reveal` (`main.js:2988`) add `<os.tmpdir()>/claude` — outside `listAllowedRoots()` —
+  as a readable/revealable root (`lib/attachment-file-guard.js`), since SendUserFile attachments
+  live there. Per-user on Windows, world-writable on POSIX. Realpath containment blocks path
+  escapes, and the renderer only ever requests paths it observed in a `SendUserFile` hook or
+  transcript record, so the residual risk is another local user who owns `/tmp/claude` planting
+  readable images there for the app to pick up. Hardening for later: constrain these handlers to
+  paths actually seen in a `SendUserFile` record instead of trusting any path under the directory.
 - [ ] **Re-triage deferred security items** (open ~2 months): SSRF in `endpoint:fetchModels`
   (`main.js:1584`), plaintext `dbConnectionString` in automations.json (`main.js:5782`), pty
   `cmd`/`cwd` allow-list, per-connection `reattach` ownership, `hooks:configure` consent prompt.

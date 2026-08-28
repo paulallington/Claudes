@@ -5192,6 +5192,18 @@ function addColumn(args, targetRow, opts) {
     });
   }
 
+  // Attachment strip: files Claude has handed the user via SendUserFile,
+  // pinned between the endpoint banner and the terminal. Hidden (zero
+  // height) until the first attachment arrives — see renderAttachmentStrip.
+  var attachmentStrip = document.createElement('div');
+  attachmentStrip.className = 'attachment-strip hidden';
+  attachmentStrip.innerHTML =
+    '<div class="attachment-strip-items"></div>' +
+    '<button type="button" class="attachment-strip-dismiss" title="Clear attachments">✕</button>';
+  attachmentStrip.querySelector('.attachment-strip-dismiss').addEventListener('click', function () {
+    dismissAttachmentStrip(id);
+  });
+
   var termWrapper = document.createElement('div');
   termWrapper.className = 'terminal-wrapper';
 
@@ -5243,6 +5255,7 @@ function addColumn(args, targetRow, opts) {
 
   col.appendChild(header);
   if (endpointBanner) col.appendChild(endpointBanner);
+  col.appendChild(attachmentStrip);
   col.appendChild(termWrapper);
   col.appendChild(scrollBtn);
 
@@ -5815,6 +5828,8 @@ function addColumn(args, targetRow, opts) {
     searchAddon: searchAddon,
     searchOverlay: searchOverlay,
     headerEl: header,
+    attachmentStripEl: attachmentStrip,
+    attachments: [],  // files Claude has sent via SendUserFile; see renderAttachmentStrip
     cwd: cwd,
     cwdSource: opts.cwdSource || null,
     projectKey: activeProjectKey,
@@ -5955,6 +5970,12 @@ function addColumn(args, targetRow, opts) {
   // kicks in once detectSession discovers the new sessionId.
   if (resumeSessionId && !cmd) {
     ensureClawdTail(id);
+  }
+
+  // Backfill the attachment strip from this session's transcript — a
+  // restored column has no live hook history yet. See maybeBackfillAttachments.
+  if (resumeSessionId && !cmd) {
+    maybeBackfillAttachments(id, cwd, resumeSessionId);
   }
 
   // Start periodic session sync for Claude columns (not custom commands)
@@ -6630,6 +6651,28 @@ function fetchAndSetSessionTitle(columnId, projectPath, sessionId) {
   });
 }
 
+// Backfill the attachment strip from the session transcript for a resumed
+// or restored column — the live-hook path (see the SendUserFile handling in
+// onClawdEvent) only sees files sent while the app is running, so a column
+// carrying earlier history shows nothing until this fills in. Scans at most
+// once per column per sessionId (see AttachmentStrip.shouldScanSession);
+// backfilled entries merge in as OLDER than any live entries already on the
+// column (AttachmentStrip.backfillAttachments). A failed or empty scan
+// (new session, deleted transcript) is normal — leaves the strip as-is.
+function maybeBackfillAttachments(columnId, projectPath, sessionId) {
+  if (!window.electronAPI || !window.electronAPI.scanSessionAttachments || !window.AttachmentStrip) return;
+  var col = allColumns.get(columnId);
+  if (!window.AttachmentStrip.shouldScanSession(col, sessionId)) return;
+  col.attachmentsScannedFor = sessionId;
+  window.electronAPI.scanSessionAttachments(projectPath, sessionId, col.profileId).then(function (res) {
+    if (!res || !res.ok || !Array.isArray(res.records) || !res.records.length) return;
+    var col2 = allColumns.get(columnId);
+    if (!col2) return;
+    col2.attachments = window.AttachmentStrip.backfillAttachments(col2.attachments, res.records);
+    renderAttachmentStrip(columnId);
+  }).catch(function () {});
+}
+
 // Collect session IDs already claimed by other columns in the same project
 function getClaimedSessionIds(excludeColumnId, profileId) {
   var claimed = {};
@@ -6681,6 +6724,7 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
             col.sessionMtime = sessions[i].modified || 0;
             persistSessions(col.projectKey, col.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
+            maybeBackfillAttachments(columnId, projectPath, sid);
             ensureClawdTail(columnId);
             codexWatchMaybeStart();
             // Sync the header effort badge to the column's actual effort (set
@@ -11411,6 +11455,386 @@ function clawdResolveHookColumn(event) {
   return clawdResolveHookColumnEx(event).colId;
 }
 
+// --- Attachment strip: files Claude has handed the user via SendUserFile ---
+//
+// lib/attachment-strip.js owns the pure list/view-model logic (fed by
+// lib/user-file-attachments.js parsing the raw hook event); this section is
+// just DOM wiring — build each entry, lazily load image thumbnails via
+// electronAPI.readAttachmentImage, and drive the click-to-enlarge lightbox.
+// Only a downscaled JPEG thumbnail (entry._thumbDataUri, ~2x the rendered
+// 60x44 box) is cached on the entry so re-renders don't re-read the file —
+// the full-size data URI is never retained: at the read guard's 8MB cap,
+// caching that on up to 24 entries per column, across every column, would
+// hold ~256MB indefinitely. The lightbox re-reads the full-size image fresh
+// each time it opens and releases it on close.
+var ATTACHMENT_THUMB_W = 120; // 2x the .attachment-thumb CSS box (60x44)
+var ATTACHMENT_THUMB_H = 88;
+
+// Downscale a full-size data URI into a small JPEG thumbnail via an
+// offscreen canvas, cropped to the strip's aspect ratio like object-fit:
+// cover. Resolves null (never rejects) on any decode/draw failure so the
+// caller can fall back to the extension chip.
+function makeAttachmentThumbnail(dataUri) {
+  return new Promise(function (resolve) {
+    var img = new Image();
+    img.onload = function () {
+      try {
+        var canvas = document.createElement('canvas');
+        canvas.width = ATTACHMENT_THUMB_W;
+        canvas.height = ATTACHMENT_THUMB_H;
+        var ctx = canvas.getContext('2d');
+        var srcRatio = img.naturalWidth / img.naturalHeight;
+        var dstRatio = ATTACHMENT_THUMB_W / ATTACHMENT_THUMB_H;
+        var sx, sy, sw, sh;
+        if (srcRatio > dstRatio) {
+          sh = img.naturalHeight;
+          sw = sh * dstRatio;
+          sx = (img.naturalWidth - sw) / 2;
+          sy = 0;
+        } else {
+          sw = img.naturalWidth;
+          sh = sw / dstRatio;
+          sx = 0;
+          sy = (img.naturalHeight - sh) / 2;
+        }
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, ATTACHMENT_THUMB_W, ATTACHMENT_THUMB_H);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      } catch (e) {
+        resolve(null);
+      }
+    };
+    img.onerror = function () { resolve(null); };
+    img.src = dataUri;
+  });
+}
+
+function renderAttachmentStrip(colId) {
+  var col = allColumns.get(colId);
+  if (!col || !col.attachmentStripEl) return;
+  var AS = window.AttachmentStrip;
+  var attachments = col.attachments || [];
+  var visible = AS ? AS.isVisible(attachments) : attachments.length > 0;
+  col.attachmentStripEl.classList.toggle('hidden', !visible);
+  var itemsEl = col.attachmentStripEl.querySelector('.attachment-strip-items');
+  if (!itemsEl) return;
+  itemsEl.innerHTML = '';
+  if (!visible) return;
+  var ordered = AS ? AS.displayOrder(attachments) : attachments.slice().reverse();
+  ordered.forEach(function (entry) {
+    itemsEl.appendChild(buildAttachmentItemEl(colId, entry));
+  });
+}
+
+function buildAttachmentItemEl(colId, entry) {
+  var AS = window.AttachmentStrip;
+  var vm = AS ? AS.entryViewModel(entry) : {
+    name: entry.name, isImage: entry.kind === 'image',
+    chipLabel: entry.kind === 'image' ? null : ((entry.ext || '').toUpperCase() || 'FILE'),
+    title: entry.name,
+  };
+  var item = document.createElement('div');
+  item.className = 'attachment-item ' + (vm.isImage ? 'attachment-item--image' : 'attachment-item--file');
+  item.title = vm.title;
+  if (vm.isImage) {
+    if (entry._imgState === 'error') {
+      renderAttachmentImageFallback(item, entry, vm);
+    } else {
+      var img = document.createElement('img');
+      img.className = 'attachment-thumb';
+      img.alt = vm.name;
+      item.appendChild(img);
+      if (entry._thumbDataUri) {
+        img.src = entry._thumbDataUri;
+      } else {
+        item.classList.add('attachment-item--loading');
+        loadAttachmentThumbnail(colId, entry, item, img);
+      }
+    }
+  } else {
+    var chip = document.createElement('span');
+    chip.className = 'attachment-chip-ext';
+    chip.textContent = vm.chipLabel;
+    var nameEl = document.createElement('span');
+    nameEl.className = 'attachment-chip-name';
+    nameEl.textContent = vm.name;
+    item.appendChild(chip);
+    item.appendChild(nameEl);
+  }
+  item.addEventListener('click', function () { openAttachmentLightbox(entry); });
+  return item;
+}
+
+// Refusals (deleted file, >8MB cap, non-image, etc.) are normal — never a
+// crash or a broken-image icon, just the same quiet extension chip a
+// non-image attachment gets.
+function renderAttachmentImageFallback(item, entry, vm) {
+  item.classList.remove('attachment-item--loading');
+  item.classList.add('attachment-item--broken');
+  var chip = document.createElement('span');
+  chip.className = 'attachment-chip-ext';
+  chip.textContent = (entry.ext || '').toUpperCase() || 'IMG';
+  item.appendChild(chip);
+}
+
+// Caps concurrent attachments:readImage IPC calls and de-dupes repeat reads
+// of the same path — without this, a restored column with 24 image
+// attachments fires 24 concurrent reads at once (~190MB of base64 built in
+// main and structured-cloned across IPC, per column, at the guard's 8MB
+// cap), and renderAttachmentStrip's innerHTML rebuild-on-every-render
+// abandons and restarts any still-in-flight reads for entries that haven't
+// cached a thumbnail yet, compounding it further.
+var ATTACHMENT_READ_CONCURRENCY = 3;
+var attachmentImageReadInFlight = new Map(); // path -> Promise<result>
+var attachmentImageReadActive = 0;
+var attachmentImageReadQueue = []; // { path, resolve, reject }
+
+function pumpAttachmentImageReadQueue() {
+  while (attachmentImageReadActive < ATTACHMENT_READ_CONCURRENCY && attachmentImageReadQueue.length) {
+    var job = attachmentImageReadQueue.shift();
+    attachmentImageReadActive++;
+    window.electronAPI.readAttachmentImage(job.path).then(job.resolve, job.reject).then(function () {
+      attachmentImageReadActive--;
+      pumpAttachmentImageReadQueue();
+    });
+  }
+}
+
+function readAttachmentImageLimited(path) {
+  var existing = attachmentImageReadInFlight.get(path);
+  if (existing) return existing;
+  var promise = new Promise(function (resolve, reject) {
+    attachmentImageReadQueue.push({ path: path, resolve: resolve, reject: reject });
+    pumpAttachmentImageReadQueue();
+  });
+  var tracked = promise.then(function (res) {
+    attachmentImageReadInFlight.delete(path);
+    return res;
+  }, function (err) {
+    attachmentImageReadInFlight.delete(path);
+    throw err;
+  });
+  attachmentImageReadInFlight.set(path, tracked);
+  return tracked;
+}
+
+function loadAttachmentThumbnail(colId, entry, itemEl, imgEl) {
+  if (!window.electronAPI || !window.electronAPI.readAttachmentImage) {
+    entry._imgState = 'error';
+    itemEl.innerHTML = '';
+    renderAttachmentImageFallback(itemEl, entry, null);
+    return;
+  }
+  readAttachmentImageLimited(entry.path).then(function (res) {
+    // Column may have been killed, or the strip re-rendered onto a fresh
+    // element, while this read was in flight — never touch a stale node.
+    var col = allColumns.get(colId);
+    if (!col || !col.attachmentStripEl || !col.attachmentStripEl.contains(itemEl)) return;
+    if (res && res.ok && res.dataUri) {
+      // Downscale to a small thumbnail before caching — the full-size data
+      // URI is intentionally never retained (see comment above).
+      return makeAttachmentThumbnail(res.dataUri).then(function (thumbDataUri) {
+        var col2 = allColumns.get(colId);
+        if (!col2 || !col2.attachmentStripEl || !col2.attachmentStripEl.contains(itemEl)) return;
+        if (thumbDataUri) {
+          entry._thumbDataUri = thumbDataUri;
+          itemEl.classList.remove('attachment-item--loading');
+          imgEl.src = thumbDataUri;
+        } else {
+          entry._imgState = 'error';
+          itemEl.innerHTML = '';
+          renderAttachmentImageFallback(itemEl, entry, null);
+        }
+      });
+    } else {
+      entry._imgState = 'error';
+      itemEl.innerHTML = '';
+      renderAttachmentImageFallback(itemEl, entry, null);
+    }
+  }).catch(function () {
+    entry._imgState = 'error';
+    var col = allColumns.get(colId);
+    if (!col || !col.attachmentStripEl || !col.attachmentStripEl.contains(itemEl)) return;
+    itemEl.innerHTML = '';
+    renderAttachmentImageFallback(itemEl, entry, null);
+  });
+}
+
+function dismissAttachmentStrip(colId) {
+  var col = allColumns.get(colId);
+  if (!col) return;
+  col.attachments = window.AttachmentStrip ? window.AttachmentStrip.clearAttachments() : [];
+  renderAttachmentStrip(colId);
+}
+
+// Single overlay shared by every column — built lazily on first use.
+var attachmentLightboxEl = null;
+var attachmentLightboxEntry = null;
+var attachmentLightboxPreviouslyFocused = null;
+
+// Focusable elements inside the lightbox dialog, in DOM (tab) order.
+function attachmentLightboxFocusable() {
+  if (!attachmentLightboxEl) return [];
+  var nodes = attachmentLightboxEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+  return Array.prototype.filter.call(nodes, function (el) { return !el.disabled && el.offsetParent !== null; });
+}
+
+// Capture-phase so this runs before xterm's own listeners: with the
+// lightbox open, Tab cycles within the dialog instead of escaping it, and
+// every other key (besides Escape, handled below) is stopped from reaching
+// the terminal underneath.
+function attachmentLightboxKeydown(e) {
+  if (!attachmentLightboxEl || attachmentLightboxEl.classList.contains('hidden')) return;
+  if (e.key === 'Escape') {
+    closeAttachmentLightbox();
+    e.stopPropagation();
+    return;
+  }
+  if (e.key === 'Tab') {
+    var focusable = attachmentLightboxFocusable();
+    if (!focusable.length) { e.preventDefault(); return; }
+    var first = focusable[0];
+    var last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    } else if (!attachmentLightboxEl.contains(document.activeElement)) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+  e.stopPropagation();
+}
+
+function ensureAttachmentLightbox() {
+  if (attachmentLightboxEl) return attachmentLightboxEl;
+  var overlay = document.createElement('div');
+  overlay.className = 'attachment-lightbox-overlay hidden';
+  overlay.innerHTML =
+    '<div class="attachment-lightbox-dialog">' +
+      '<button type="button" class="attachment-lightbox-close" title="Close (Esc)">✕</button>' +
+      '<div class="attachment-lightbox-imgwrap"><img class="attachment-lightbox-img" alt=""></div>' +
+      '<div class="attachment-lightbox-name"></div>' +
+      '<div class="attachment-lightbox-caption"></div>' +
+      '<div class="attachment-lightbox-actions">' +
+        '<button type="button" class="attachment-lightbox-open">Open</button>' +
+        '<button type="button" class="attachment-lightbox-reveal">Reveal in folder</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) closeAttachmentLightbox();
+  });
+  overlay.querySelector('.attachment-lightbox-close').addEventListener('click', closeAttachmentLightbox);
+  document.addEventListener('keydown', attachmentLightboxKeydown, true);
+  attachmentLightboxEl = overlay;
+  return overlay;
+}
+
+function openAttachmentLightbox(entry) {
+  var overlay = ensureAttachmentLightbox();
+  attachmentLightboxPreviouslyFocused = document.activeElement;
+  var state = window.AttachmentStrip ? window.AttachmentStrip.openLightbox(entry) : { open: true, entry: entry };
+  attachmentLightboxEntry = state.entry;
+  var vm = window.AttachmentStrip ? window.AttachmentStrip.entryViewModel(entry) : {
+    name: entry.name, isImage: entry.kind === 'image', caption: entry.caption || '',
+  };
+
+  var imgWrap = overlay.querySelector('.attachment-lightbox-imgwrap');
+  var imgEl = overlay.querySelector('.attachment-lightbox-img');
+  imgWrap.classList.toggle('hidden', !vm.isImage);
+  if (vm.isImage) {
+    imgEl.alt = vm.name;
+    // Always read the full-size image fresh — it is never cached on the
+    // entry (see FIX 2 note above buildAttachmentItemEl) — and released via
+    // closeAttachmentLightbox.
+    imgEl.removeAttribute('src');
+    if (window.electronAPI && window.electronAPI.readAttachmentImage) {
+      window.electronAPI.readAttachmentImage(entry.path).then(function (res) {
+        if (attachmentLightboxEntry !== entry) return; // closed, or switched to another entry
+        if (res && res.ok && res.dataUri) {
+          imgEl.src = res.dataUri;
+        }
+      }).catch(function () {});
+    }
+  }
+
+  overlay.querySelector('.attachment-lightbox-name').textContent = vm.name;
+  var captionEl = overlay.querySelector('.attachment-lightbox-caption');
+  captionEl.textContent = vm.caption || '';
+  captionEl.classList.toggle('hidden', !vm.caption);
+
+  // shell:openExternal only allows http(s)/mailto (Follina-class guard), and
+  // the general shell:openPath has no containment check — an attachment path
+  // can originate from a prompt-injected tool call or a crafted transcript,
+  // so "Open" goes through openAttachment instead, which applies the same
+  // containment policy as revealAttachment plus an extension allowlist.
+  // Quiet toast on failure rather than a silently dead button.
+  overlay.querySelector('.attachment-lightbox-open').onclick = function () {
+    if (window.electronAPI && window.electronAPI.openAttachment) {
+      window.electronAPI.openAttachment(entry.path).then(function (res) {
+        if (!res || !res.ok) {
+          if (typeof showToast === 'function') {
+            showToast('Could not open file' + (res && res.error ? ': ' + res.error : ''), { kind: 'error' });
+          }
+        }
+      }).catch(function () {
+        if (typeof showToast === 'function') showToast('Could not open file', { kind: 'error' });
+      });
+    } else if (typeof showToast === 'function') {
+      showToast('Could not open file', { kind: 'error' });
+    }
+  };
+  overlay.querySelector('.attachment-lightbox-reveal').onclick = function () {
+    // showItemInFolder runs assertInsideAllowedRoots, and attachments live
+    // under the OS temp dir (not an allowed root) — revealAttachment applies
+    // the attachment containment policy instead. Quiet toast on failure
+    // rather than a silently dead button. No fallback to the old
+    // showItemInFolder IPC here: it would run assertInsideAllowedRoots
+    // against an attachment path outside every allowed root and reject with
+    // no return value or toast — reintroducing the exact dead-button bug
+    // this handler exists to fix.
+    if (window.electronAPI && window.electronAPI.revealAttachment) {
+      window.electronAPI.revealAttachment(entry.path).then(function (res) {
+        if (!res || !res.ok) {
+          if (typeof showToast === 'function') {
+            showToast('Could not reveal file' + (res && res.error ? ': ' + res.error : ''), { kind: 'error' });
+          }
+        }
+      }).catch(function () {
+        if (typeof showToast === 'function') showToast('Could not reveal file', { kind: 'error' });
+      });
+    } else if (typeof showToast === 'function') {
+      showToast('Could not reveal file', { kind: 'error' });
+    }
+  };
+
+  overlay.classList.remove('hidden');
+  // Move DOM focus into the dialog so keystrokes stop reaching the xterm
+  // instance underneath — attachmentLightboxKeydown then traps Tab within it.
+  var closeBtn = overlay.querySelector('.attachment-lightbox-close');
+  if (closeBtn) closeBtn.focus();
+}
+
+function closeAttachmentLightbox() {
+  if (!attachmentLightboxEl) return;
+  attachmentLightboxEl.classList.add('hidden');
+  // Release the full-size image — it was never cached on the entry, just
+  // held by this <img> while the lightbox was open.
+  var imgEl = attachmentLightboxEl.querySelector('.attachment-lightbox-img');
+  if (imgEl) imgEl.removeAttribute('src');
+  var state = window.AttachmentStrip ? window.AttachmentStrip.closeLightbox() : { open: false, entry: null };
+  attachmentLightboxEntry = state.entry;
+  // Restore focus to whatever had it before the lightbox opened (typically
+  // the terminal) rather than leaving it stranded on a hidden button.
+  if (attachmentLightboxPreviouslyFocused && typeof attachmentLightboxPreviouslyFocused.focus === 'function') {
+    attachmentLightboxPreviouslyFocused.focus();
+  }
+  attachmentLightboxPreviouslyFocused = null;
+}
+
 if (window.electronAPI && window.electronAPI.onHookEvent) {
   window.electronAPI.onHookEvent(function (event) {
     var sid = event && event.session_id;
@@ -11457,6 +11881,23 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
     // Genuine column hook (not a dropped automation): record receipt so the
     // stale-hook sweep knows live hooks ARE reaching this column.
     if (col) { col.lastHookAt = Date.now(); col.hookEverSeen = true; }
+    // SendUserFile: the terminal only prints `[image] <path> (41.4KB)` for
+    // these, so surface the real files in the attachment strip. A no-op
+    // (same array reference back) for every other event/tool. Wrapped —
+    // preload invokes this callback bare, so an uncaught throw here would
+    // abort the rest of the handler, including the /clear session rebind
+    // below.
+    try {
+      if (col && window.AttachmentStrip) {
+        var __nextAttachments = window.AttachmentStrip.nextAttachments(col.attachments, event);
+        if (__nextAttachments !== col.attachments) {
+          col.attachments = __nextAttachments;
+          renderAttachmentStrip(colId);
+        }
+      }
+    } catch (e) {
+      console.error('[attachments] onHookEvent handler failed', e);
+    }
     // Self-heal a /clear fork: a UserPromptSubmit that resolved by unambiguous
     // cwd OR by dominant-recent-input (ambiguous cwd) carries the column's TRUE
     // new session_id while col.sessionId is stuck on the pre-/clear id. Rebind
@@ -11483,6 +11924,7 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
       persistSessions(col.projectKey, col.workspaceId);
       ensureClawdTail(colId);
       fetchAndSetSessionTitle(colId, col.projectKey, sid);
+      maybeBackfillAttachments(colId, col.cwd || col.projectKey, sid);
       codexWatchMaybeStart();
     }
     var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
