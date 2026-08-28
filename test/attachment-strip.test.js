@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { recordToEntries, nextAttachments, displayOrder, isVisible, entryViewModel, openLightbox, closeLightbox, clearAttachments } = require('../lib/attachment-strip');
+const { recordToEntries, nextAttachments, displayOrder, isVisible, entryViewModel, openLightbox, closeLightbox, clearAttachments, shouldScanSession, backfillAttachments } = require('../lib/attachment-strip');
 
 test('recordToEntries flattens a record\'s files into per-file entries carrying the shared toolUseId/caption', () => {
   const record = {
@@ -83,4 +83,54 @@ test('clearAttachments returns an empty list without touching the source array',
   const existing = [{ path: '/1' }];
   assert.deepEqual(clearAttachments(existing), []);
   assert.deepEqual(existing, [{ path: '/1' }]);
+});
+
+test('shouldScanSession is true for a Claude column with a session id not yet scanned', () => {
+  assert.equal(shouldScanSession({ cmd: null, attachmentsScannedFor: null }, 'sess-1'), true);
+});
+
+test('shouldScanSession is false once already scanned for that exact session id', () => {
+  assert.equal(shouldScanSession({ cmd: null, attachmentsScannedFor: 'sess-1' }, 'sess-1'), false);
+});
+
+test('shouldScanSession allows exactly one more scan when the session id changes (a /clear fork)', () => {
+  assert.equal(shouldScanSession({ cmd: null, attachmentsScannedFor: 'sess-1' }, 'sess-2'), true);
+});
+
+test('shouldScanSession is false for codex/arbitrary-cmd columns, which have no Claude transcript', () => {
+  assert.equal(shouldScanSession({ cmd: 'codex', attachmentsScannedFor: null }, 'sess-1'), false);
+  assert.equal(shouldScanSession({ cmd: 'some-other-cmd', attachmentsScannedFor: null }, 'sess-1'), false);
+});
+
+test('shouldScanSession is false without a usable session id or column', () => {
+  assert.equal(shouldScanSession({ cmd: null }, null), false);
+  assert.equal(shouldScanSession({ cmd: null }, undefined), false);
+  assert.equal(shouldScanSession(null, 'sess-1'), false);
+});
+
+test('backfillAttachments merges scanned transcript records in as OLDER than the existing (live) attachments', () => {
+  const existing = [{ toolUseId: 'live1', path: '/x/live.png', name: 'live.png', ext: 'png', kind: 'image', caption: null, addedAt: 5000 }];
+  const records = [
+    { toolUseId: 'toolu_a', caption: 'old batch', files: [{ path: '/x/old1.png', name: 'old1.png', ext: 'png', kind: 'image' }] },
+  ];
+  const result = backfillAttachments(existing, records, { now: 1000 });
+  assert.deepEqual(result, [
+    { toolUseId: 'toolu_a', path: '/x/old1.png', name: 'old1.png', ext: 'png', kind: 'image', caption: 'old batch', addedAt: 1000 },
+    { toolUseId: 'live1', path: '/x/live.png', name: 'live.png', ext: 'png', kind: 'image', caption: null, addedAt: 5000 },
+  ]);
+});
+
+test('backfillAttachments is idempotent — scanning the same session twice adds nothing new', () => {
+  const records = [
+    { toolUseId: 'toolu_a', caption: null, files: [{ path: '/x/old1.png', name: 'old1.png', ext: 'png', kind: 'image' }] },
+  ];
+  const first = backfillAttachments([], records, { now: 1000 });
+  const second = backfillAttachments(first, records, { now: 2000 });
+  assert.deepEqual(second, first);
+});
+
+test('backfillAttachments returns the same existing reference when there are no records to backfill', () => {
+  const existing = [{ path: '/1' }];
+  assert.equal(backfillAttachments(existing, []), existing);
+  assert.equal(backfillAttachments(existing, null), existing);
 });

@@ -5972,6 +5972,12 @@ function addColumn(args, targetRow, opts) {
     ensureClawdTail(id);
   }
 
+  // Backfill the attachment strip from this session's transcript — a
+  // restored column has no live hook history yet. See maybeBackfillAttachments.
+  if (resumeSessionId && !cmd) {
+    maybeBackfillAttachments(id, cwd, resumeSessionId);
+  }
+
   // Start periodic session sync for Claude columns (not custom commands)
   if (!cmd) {
     startSessionSync(id, cwd);
@@ -6645,6 +6651,28 @@ function fetchAndSetSessionTitle(columnId, projectPath, sessionId) {
   });
 }
 
+// Backfill the attachment strip from the session transcript for a resumed
+// or restored column — the live-hook path (see the SendUserFile handling in
+// onClawdEvent) only sees files sent while the app is running, so a column
+// carrying earlier history shows nothing until this fills in. Scans at most
+// once per column per sessionId (see AttachmentStrip.shouldScanSession);
+// backfilled entries merge in as OLDER than any live entries already on the
+// column (AttachmentStrip.backfillAttachments). A failed or empty scan
+// (new session, deleted transcript) is normal — leaves the strip as-is.
+function maybeBackfillAttachments(columnId, projectPath, sessionId) {
+  if (!window.electronAPI || !window.electronAPI.scanSessionAttachments || !window.AttachmentStrip) return;
+  var col = allColumns.get(columnId);
+  if (!window.AttachmentStrip.shouldScanSession(col, sessionId)) return;
+  col.attachmentsScannedFor = sessionId;
+  window.electronAPI.scanSessionAttachments(projectPath, sessionId, col.profileId).then(function (res) {
+    if (!res || !res.ok || !Array.isArray(res.records) || !res.records.length) return;
+    var col2 = allColumns.get(columnId);
+    if (!col2) return;
+    col2.attachments = window.AttachmentStrip.backfillAttachments(col2.attachments, res.records);
+    renderAttachmentStrip(columnId);
+  }).catch(function () {});
+}
+
 // Collect session IDs already claimed by other columns in the same project
 function getClaimedSessionIds(excludeColumnId, profileId) {
   var claimed = {};
@@ -6696,6 +6724,7 @@ function detectSession(columnId, projectPath, preExistingIds, attempt) {
             col.sessionMtime = sessions[i].modified || 0;
             persistSessions(col.projectKey, col.workspaceId);
             fetchAndSetSessionTitle(columnId, projectPath, sid);
+            maybeBackfillAttachments(columnId, projectPath, sid);
             ensureClawdTail(columnId);
             codexWatchMaybeStart();
             // Sync the header effort badge to the column's actual effort (set
