@@ -11738,6 +11738,7 @@ if (window.electronAPI && window.electronAPI.onHookEvent) {
       persistSessions(col.projectKey, col.workspaceId);
       ensureClawdTail(colId);
       fetchAndSetSessionTitle(colId, col.projectKey, sid);
+      maybeBackfillAttachments(colId, col.projectKey, sid);
       codexWatchMaybeStart();
     }
     var sidMatchesColumn = !!(col && col.sessionId && col.sessionId === sid);
