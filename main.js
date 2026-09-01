@@ -6841,7 +6841,7 @@ ipcMain.handle('automations:create', (event, config) => {
     createdAt: new Date().toISOString(),
     runWindow: config.runWindow || null,
     profileId: config.profileId || null,
-    alertOnFindings: true
+    alertOnFindings: config.alertOnFindings !== false
   };
 
   data.automations.push(automation);
