@@ -25,6 +25,55 @@ test('upsertFindings collapses a recurring "N days" finding into one entry, bump
   assert.equal(r2.newFindings.length, 0);
 });
 
+test('digit folding is narrowed to time/quantity expressions: a countdown still collapses, but distinct ports do not', () => {
+  // Countdown direction: "N days" folds to the same fingerprint regardless of N.
+  var fpDays12 = fingerprintFinding('auto_1', 'agent_1', { summary: 'Certificate expiring in 12 days' });
+  var fpDays11 = fingerprintFinding('auto_1', 'agent_1', { summary: 'Certificate expiring in 11 days' });
+  assert.equal(fpDays12, fpDays11, 'a countdown in full-word days should still collapse to one fingerprint');
+
+  // Abbreviated units fold the same way ("12d" / "5d"), but a 4+ digit token
+  // directly touching a unit letter (no genuine time expression) must not.
+  var fp12d = fingerprintFinding('auto_1', 'agent_1', { summary: 'Cache expires in 12d' });
+  var fp5d = fingerprintFinding('auto_1', 'agent_1', { summary: 'Cache expires in 5d' });
+  assert.equal(fp12d, fp5d, 'abbreviated day counts should still collapse to one fingerprint');
+
+  // Distinct-outage direction: different port numbers must stay distinct —
+  // this is the real bug: they used to fold to "port n is unreachable" and
+  // silently swallow the second outage.
+  var fpPort8080 = fingerprintFinding('auto_1', 'agent_1', { summary: 'Port 8080 is unreachable' });
+  var fpPort9090 = fingerprintFinding('auto_1', 'agent_1', { summary: 'Port 9090 is unreachable' });
+  assert.notEqual(fpPort8080, fpPort9090, 'different port numbers must produce distinct fingerprints');
+
+  // A bare 4-digit token immediately followed by a unit letter (e.g. "8080s")
+  // must not be mistaken for an abbreviated time expression.
+  var fp8080s = fingerprintFinding('auto_1', 'agent_1', { summary: 'Saw error 8080s during rollout' });
+  var fp9090s = fingerprintFinding('auto_1', 'agent_1', { summary: 'Saw error 9090s during rollout' });
+  assert.notEqual(fp8080s, fp9090s, 'a bare 4+ digit token touching a unit letter must not fold');
+
+  // Same class of bug: PR numbers must stay distinct.
+  var fpPr1234 = fingerprintFinding('auto_1', 'agent_1', { summary: 'PR #1234 needs review' });
+  var fpPr5678 = fingerprintFinding('auto_1', 'agent_1', { summary: 'PR #5678 needs review' });
+  assert.notEqual(fpPr1234, fpPr5678, 'different PR numbers must produce distinct fingerprints');
+
+  // An ISO date must still fold, unaffected by the narrowing.
+  var fpIso1 = fingerprintFinding('auto_1', 'agent_1', { summary: 'Certificate expires on 2026-09-15' });
+  var fpIso2 = fingerprintFinding('auto_1', 'agent_1', { summary: 'Certificate expires on 2026-10-20' });
+  assert.equal(fpIso1, fpIso2, 'an ISO date should still fold to one fingerprint');
+});
+
+test('upsertFindings treats a second, different port outage as a genuinely new finding', () => {
+  var r1 = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'Port 8080 is unreachable' } },
+  ], '2026-08-01T00:00:00.000Z');
+  assert.equal(r1.newFindings.length, 1);
+
+  var r2 = upsertFindings(r1.store, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'Port 9090 is unreachable' } },
+  ], '2026-08-02T00:00:00.000Z');
+  assert.equal(r2.store.findings.length, 2, 'both ports should be recorded as separate findings');
+  assert.equal(r2.newFindings.length, 1, 'the second port outage must fire as a new finding, not a silent recurrence');
+});
+
 test('an explicit item.key wins over the summary hash, so two totally different summaries with the same key collapse', () => {
   var entryA = {
     automationId: 'auto_1', agentId: 'agent_1',

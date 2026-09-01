@@ -1003,6 +1003,21 @@ function writeFindings(data) {
 // can't grow unbounded across a long-lived install.
 const FINDINGS_CAPS = { perAutomation: 100, global: 500, ackMaxAgeDays: 30 };
 
+// Broadcasts the current unacknowledged count to both findings surfaces —
+// the inbox in mainWindow and the always-on-top sticky note — from a single
+// place, so the two never drift out of sync. `store` is the *already
+// persisted* store to recount from; `newFindings` defaults to [] for the ack
+// paths (acknowledging never creates a finding). Same payload shape as the
+// existing send in finalizeAgentRun's findings write hook.
+function broadcastFindingsUpdated(store, newFindings) {
+  const count = FindingsStore.listFindings(store, { unacknowledgedOnly: true }).length;
+  const payload = { count, newFindings: newFindings || [] };
+  if (mainWindow) mainWindow.webContents.send('findings:updated', payload);
+  if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) {
+    findingsStickyWindow.webContents.send('findings:updated', payload);
+  }
+}
+
 // Prompt snippet library — persists to ~/.claudes/snippets.json. Each snippet
 // has { id, trigger, label, body }. Triggered in the renderer by typing
 // "\trigger" in a column terminal.
@@ -7843,7 +7858,7 @@ const runningManagers = new Map(); // automationId -> child process
 const managerRetryCounters = new Map(); // automationId -> number of retries this cycle
 const managerLiveOutputBuffers = new Map(); // automationId -> string[] chunks
 
-const AGENT_PROMPT_SUFFIX = '\n\nEnd your response with a JSON block wrapped in :::loop-result markers like this:\n:::loop-result\n{"summary": "Brief one-line summary", "attentionItems": [{"summary": "Short description", "detail": "Full context"}]}\n:::loop-result\nIf there are no issues, use an empty attentionItems array.';
+const AGENT_PROMPT_SUFFIX = '\n\nEnd your response with a JSON block wrapped in :::loop-result markers like this:\n:::loop-result\n{"summary": "Brief one-line summary", "attentionItems": [{"summary": "Short description", "detail": "Full context", "key": "optional-stable-slug"}]}\n:::loop-result\nIf there are no issues, use an empty attentionItems array. Include "key" on an attentionItem when the same underlying condition may recur across runs (e.g. "cert-expiry-api.example.com"), so it tracks as one finding instead of duplicates.';
 
 const MANAGER_PROMPT_TEMPLATE = `You are the Automation Manager for "{name}".
 
@@ -8158,6 +8173,10 @@ ipcMain.handle('findings:acknowledge', (event, id) => {
     const store = readFindings();
     const updated = FindingsStore.acknowledgeFinding(store, id, new Date().toISOString());
     writeFindings(updated);
+    // Reconcile both surfaces — without this, acknowledging in the inbox
+    // never clears the row on the always-on-top sticky (it only refreshes on
+    // a findings:updated push), and the reverse leaves the tab badge stale.
+    broadcastFindingsUpdated(updated);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
@@ -8172,6 +8191,7 @@ ipcMain.handle('findings:acknowledgeAll', (event, filter) => {
     const store = readFindings();
     const updated = FindingsStore.acknowledgeAll(store, safeFilter, new Date().toISOString());
     writeFindings(updated);
+    broadcastFindingsUpdated(updated);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
@@ -9110,11 +9130,7 @@ function finalizeAgentRun(automationId, agentId, key, o) {
           const pruned = FindingsStore.pruneFindings(upserted.store, completedAt, FINDINGS_CAPS);
           writeFindings(pruned);
           if (upserted.newFindings.length) {
-            const unacknowledgedTotal = FindingsStore.listFindings(pruned, { unacknowledgedOnly: true }).length;
-            if (mainWindow) mainWindow.webContents.send('findings:updated', { count: unacknowledgedTotal, newFindings: upserted.newFindings });
-            if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) {
-              findingsStickyWindow.webContents.send('findings:updated', { count: unacknowledgedTotal, newFindings: upserted.newFindings });
-            }
+            broadcastFindingsUpdated(pruned, upserted.newFindings);
             if (!mainWindow || !mainWindow.isFocused()) sendFindingsNotification(freshAuto, upserted.newFindings);
           }
         }

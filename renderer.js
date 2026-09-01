@@ -3580,6 +3580,11 @@ function renderProjectList() {
 // clear the stale id). Clicking the project card directly calls
 // setActiveWorkspace(index, null) explicitly \u2014 this wrapper is the startup /
 // restore-index path.
+// Returns whatever setActiveWorkspace returns (a promise that settles once
+// the project/workspace switch's profile-selection refresh has landed, or
+// undefined for the popout/no-op paths) — callers that need ambient state
+// (currentProfileEnv, currentProfileId, ...) to be correct before acting can
+// await it; fire-and-forget callers are unaffected.
 function setActiveProject(index, isStartup) {
   var project = config.projects[index];
   if (!project) return;
@@ -3592,7 +3597,7 @@ function setActiveProject(index, isStartup) {
       wsId = null;
     }
   }
-  setActiveWorkspace(index, wsId, isStartup);
+  return setActiveWorkspace(index, wsId, isStartup);
 }
 
 function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
@@ -3678,7 +3683,7 @@ function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
   refreshExplorer();
   if (activeAutomationDetailId) closeAutomationDetail();
   refreshAutomations();
-  loadSpawnOptions();
+  var spawnOptionsPromise = loadSpawnOptions();
 
   if (state.columns.size === 0) {
     if (state.suppressAutoSpawn) {
@@ -3708,6 +3713,10 @@ function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
   if (typeof window.__repositionStickyNotesForActiveProject === 'function') {
     window.__repositionStickyNotesForActiveProject();
   }
+  // Resolves once profile selection (currentProfileEnv/currentProfileId) for
+  // the NEW project/workspace has landed — see loadSpawnOptions. Callers that
+  // read that ambient state right after a programmatic switch can await it.
+  return spawnOptionsPromise;
 }
 
 // Popout windows display exactly one project's Primary columns. The normal
@@ -12964,13 +12973,17 @@ function loadSpawnOptions() {
   loadProfilePicker();
   // Resolve which profile a NEW column on this project/workspace would spawn
   // on (column picker beats workspace beats project beats global default).
-  refreshProfileSelection();
+  // Returned (not just fired) so a caller that needs the ambient
+  // currentProfileEnv/currentProfileId to reflect the new project/workspace
+  // before acting (e.g. setActiveWorkspace's callers) can await it.
+  var profileSelectionPromise = refreshProfileSelection();
   // Headroom is a GLOBAL toggle (not part of the per-project spawnOptions object).
   // Refresh the whole Headroom UI here — parent checkbox AND the sub-toggles
   // (1M/Memory/Output shaper) — so the subs never keep a stale enabled/disabled
   // state from an earlier boot pass when the async `headroom` probe hadn't resolved.
   applyHeadroomUiState();
   updateSpawnButtonLabel();
+  return profileSelectionPromise;
 }
 
 // Returns an opts object for addColumn, including the endpoint env if a preset
@@ -20335,17 +20348,33 @@ function findingsInboxWithProject(finding, then) {
     var projectPath = auto ? auto.projectPath : finding.cwd;
     var idx = findingsInboxProjectIndex(projectPath);
     if (idx < 0) {
-      alert('That finding\'s project is not in your project list.');
+      alertDialog('That finding\'s project is not in your project list.');
       return;
     }
-    if (idx !== config.activeProjectIndex) setActiveProject(idx);
-    then(auto);
+    // Await the switch (project/workspace + profile-selection refresh)
+    // before invoking `then` — setActiveProject used to be fire-and-forget
+    // here, so ambient state (currentProfileEnv/currentProfileId, etc.)
+    // could still belong to the PREVIOUS project when `then` ran.
+    var switched = (idx !== config.activeProjectIndex) ? setActiveProject(idx) : null;
+    Promise.resolve(switched).then(function () { then(auto); });
+  });
+}
+
+// Resolves the env block for a specific subscription profile id, ignoring
+// ambient currentProfileEnv — a finding can belong to a different
+// subscription than whatever project/workspace happens to be active in the
+// UI (e.g. an automation on a secondary profile while Primary is active), so
+// spawnOpts' ambient-profile merge is the wrong source of truth here.
+function findingsInboxResolveProfileEnv(profileId) {
+  if (!window.electronAPI || !window.electronAPI.profileResolve) return Promise.resolve(undefined);
+  return window.electronAPI.profileResolve({ columnProfileId: profileId || null }).then(function (r) {
+    return (r && r.env && Object.keys(r.env).length) ? r.env : undefined;
   });
 }
 
 function findingsInboxOpenRun(finding) {
   findingsInboxWithProject(finding, function (auto) {
-    if (!auto) { alert('That automation no longer exists.'); return; }
+    if (!auto) { alertDialog('That automation no longer exists.'); return; }
     var tab = document.querySelector('.explorer-tab[data-tab="automations"]');
     if (tab) tab.click();
     openAutomationDetail(auto);
@@ -20358,12 +20387,16 @@ function findingsInboxOpenConversation(finding) {
   window.electronAPI.findingsOpenConversation(finding.id).then(function (res) {
     if (!res || !res.ok || !res.sessionId) { findingsInboxDiscuss(finding); return; }
     findingsInboxWithProject(finding, function () {
-      addColumn(['--resume', res.sessionId], null, spawnOpts({
+      var o = spawnOpts({
         sessionId: res.sessionId,
         cwd: res.cwd || undefined,
         profileId: res.profileId || undefined,
         title: res.agentName || finding.agentName || undefined
-      }));
+      });
+      findingsInboxResolveProfileEnv(res.profileId).then(function (env) {
+        o.env = env;
+        addColumn(['--resume', res.sessionId], null, o);
+      });
     });
   });
 }
@@ -20380,7 +20413,11 @@ function findingsInboxDiscuss(finding) {
       '--- FINDING ---\n' + output + '\n--- END FINDING ---';
     var spawnArgs = buildSpawnArgs();
     spawnArgs.push('--append-system-prompt', context);
-    addColumn(spawnArgs, null, spawnOpts({ title: agentName, cwd: finding.cwd || undefined, profileId: finding.profileId || undefined }));
+    var o = spawnOpts({ title: agentName, cwd: finding.cwd || undefined, profileId: finding.profileId || undefined });
+    findingsInboxResolveProfileEnv(finding.profileId).then(function (env) {
+      o.env = env;
+      addColumn(spawnArgs, null, o);
+    });
   });
 }
 

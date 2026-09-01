@@ -6445,8 +6445,28 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
   50% { opacity: 0.6; box-shadow: 0 0 6px 2px rgba(34, 197, 94, 0.3); }
 }
 
+/* Both dots above sit at top:8px, right:calc(50% - 12px), a 6x6 box entirely
+   inside the count badge below (top:4px, right:calc(50% - 20px), ~14x14).
+   ::after paints after the badge (a real DOM child), so it would otherwise
+   render on top of the badge's digits. The badge already conveys "there's
+   something" plus an exact count, so the dot is redundant once it's shown —
+   suppress it via :has() rather than repositioning the badge, since the
+   badge's width (and therefore its footprint) varies with digit count
+   ("5" vs "99+") and a fixed pixel offset can't guarantee clearance for
+   every width the way "just don't paint it" can. */
+.explorer-tab[data-tab="automations"]:has(.explorer-tab-count-badge:not(.hidden))::after {
+  display: none;
+}
+
 /* Automations tab count badge: number of unacknowledged findings. Calm, not
-   alarming — a neutral pill, not the amber/red vocabulary used for errors. */
+   alarming — a neutral pill, not the amber/red vocabulary used for errors.
+   background/color are --text-secondary on --bg-main rather than the
+   previous --text-faint on --bg-main (~1.6:1, illegible) — --text-secondary
+   inverts appropriately per theme already (dark theme: #aaa on #1a1a2e ≈
+   7.3:1; light theme: #555 on #ffffff ≈ 7.5:1), both comfortably above the
+   4.5:1 target, so unlike the codex-watch badge precedent above (a fixed
+   accent hue that goes near-invisible in light mode) no separate
+   [data-theme="light"] override is needed here. */
 .explorer-tab-count-badge {
   position: absolute;
   top: 4px;
@@ -6455,7 +6475,7 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
   height: 14px;
   padding: 0 3px;
   border-radius: 7px;
-  background: var(--text-faint);
+  background: var(--text-secondary);
   color: var(--bg-main);
   font-size: 9px;
   font-weight: 600;
