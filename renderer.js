@@ -20384,6 +20384,13 @@ function findingsInboxDiscuss(finding) {
   });
 }
 
+var findingsStickyBtn = document.getElementById('btn-findings-open-sticky');
+if (findingsStickyBtn) {
+  findingsStickyBtn.addEventListener('click', function () {
+    if (window.electronAPI && window.electronAPI.findingsOpenSticky) window.electronAPI.findingsOpenSticky();
+  });
+}
+
 if (window.electronAPI && window.electronAPI.onFindingsUpdated) {
   window.electronAPI.onFindingsUpdated(function (data) {
     updateFindingsInboxBadge(data && typeof data.count === 'number' ? data.count : 0);

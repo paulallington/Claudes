@@ -1001,7 +1001,7 @@ function writeFindings(data) {
 
 // Caps passed to FindingsStore.pruneFindings after every write, so the store
 // can't grow unbounded across a long-lived install.
-const FINDINGS_CAPS = { perAutomation: 200, global: 2000, ackMaxAgeDays: 30 };
+const FINDINGS_CAPS = { perAutomation: 100, global: 500, ackMaxAgeDays: 30 };
 
 // Prompt snippet library — persists to ~/.claudes/snippets.json. Each snippet
 // has { id, trigger, label, body }. Triggered in the renderer by typing
