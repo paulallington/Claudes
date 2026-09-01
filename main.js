@@ -54,6 +54,7 @@ const CodexWatchTail = require('./lib/codex-watch-tail');
 const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-app-server');
 const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
 const { checkAttachmentPath, checkAttachmentOpenPath, checkAttachmentContainment } = require('./lib/attachment-file-guard');
+const FindingsStore = require('./lib/findings-store');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -388,6 +389,7 @@ const LOOPS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'loops.json' : 'loops-
 const LOOPS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'loop-runs' : 'loop-runs-dev');
 const AUTOMATIONS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'automations.json' : 'automations-dev.json');
 const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-runs' : 'automation-runs-dev');
+const FINDINGS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'findings.json' : 'findings-dev.json');
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
 const PROFILES_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'profiles.json' : 'profiles-dev.json');
@@ -975,6 +977,31 @@ function writeAutomations(data) {
   if (data && data._recovered) { try { delete data._recovered; } catch (e) {} } // never persist the transient flag
   atomicWriteJson(AUTOMATIONS_FILE, data);
 }
+
+// --- Findings Persistence ---
+// Durable cross-automation store of `attentionItems` emitted by agent runs
+// (see finalizeAgentRun's findings write hook). Same recovery/atomic-write
+// convention as automations.json.
+function readFindings() {
+  ensureConfigDir();
+  const defaults = { version: 1, findings: [] };
+  const { data, recovered } = readJsonWithRecovery(FINDINGS_FILE);
+  const result = (data && typeof data === 'object') ? data : defaults;
+  if (!Array.isArray(result.findings)) result.findings = [];
+  if (typeof result.version !== 'number') result.version = 1;
+  if (recovered) result._recovered = true;
+  return result;
+}
+
+function writeFindings(data) {
+  ensureConfigDir();
+  if (data && data._recovered) { try { delete data._recovered; } catch (e) {} } // never persist the transient flag
+  atomicWriteJson(FINDINGS_FILE, data);
+}
+
+// Caps passed to FindingsStore.pruneFindings after every write, so the store
+// can't grow unbounded across a long-lived install.
+const FINDINGS_CAPS = { perAutomation: 200, global: 2000, ackMaxAgeDays: 30 };
 
 // Prompt snippet library — persists to ~/.claudes/snippets.json. Each snippet
 // has { id, trigger, label, body }. Triggered in the renderer by typing
@@ -6694,7 +6721,8 @@ ipcMain.handle('automations:create', (event, config) => {
     enabled: true,
     createdAt: new Date().toISOString(),
     runWindow: config.runWindow || null,
-    profileId: config.profileId || null
+    profileId: config.profileId || null,
+    alertOnFindings: true
   };
 
   data.automations.push(automation);
@@ -6742,7 +6770,7 @@ ipcMain.handle('automations:update', (event, automationId, updates) => {
   const data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
   if (!automation) return null;
-  const safeFields = ['name', 'enabled', 'runWindow', 'profileId'];
+  const safeFields = ['name', 'enabled', 'runWindow', 'profileId', 'alertOnFindings'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) automation[field] = updates[field];
   });
@@ -7988,6 +8016,67 @@ ipcMain.handle('codex:getThreadState', (event, threadId) => {
   return codexAppServer ? codexAppServer.getThreadState(threadId) : null;
 });
 
+// --- Findings inbox --------------------------------------------------------
+// Read/ack surface over the durable findings store (see readFindings/
+// writeFindings + finalizeAgentRun's write hook). main never spawns a column
+// from here — findings:openConversation only returns the lookup info the
+// renderer needs so IT drives the spawn, same division as everywhere else in
+// this file. `id` is always used as an opaque lookup key, never a path.
+
+ipcMain.handle('findings:list', (event, opts) => {
+  try {
+    const store = readFindings();
+    const unacknowledgedOnly = !!(opts && opts.unacknowledgedOnly);
+    return { ok: true, findings: FindingsStore.listFindings(store, { unacknowledgedOnly }) };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('findings:acknowledge', (event, id) => {
+  try {
+    if (typeof id !== 'string' || !id) return { ok: false, error: 'invalid id' };
+    const store = readFindings();
+    const updated = FindingsStore.acknowledgeFinding(store, id, new Date().toISOString());
+    writeFindings(updated);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('findings:acknowledgeAll', (event, filter) => {
+  try {
+    const safeFilter = (filter && typeof filter === 'object' && typeof filter.automationId === 'string')
+      ? { automationId: filter.automationId }
+      : null;
+    const store = readFindings();
+    const updated = FindingsStore.acknowledgeAll(store, safeFilter, new Date().toISOString());
+    writeFindings(updated);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('findings:openConversation', (event, id) => {
+  try {
+    if (typeof id !== 'string' || !id) return { ok: false, error: 'invalid id' };
+    const store = readFindings();
+    const finding = FindingsStore.listFindings(store, {}).find(f => f.id === id);
+    if (!finding) return { ok: false, error: 'finding not found' };
+    return {
+      ok: true,
+      sessionId: finding.sessionId || null,
+      cwd: finding.cwd || null,
+      profileId: finding.profileId || null,
+      agentName: finding.agentName || null
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
 // --- Codex watcher -------------------------------------------------------
 //
 // The codex plugin resolves its state root from CLAUDE_PLUGIN_DATA, which
@@ -8334,6 +8423,29 @@ function sendManagerNotification(automation, summary) {
   notif.show();
 }
 
+// One OS notification per run (not per finding) — called only when
+// upsertFindings reported at least one genuinely new finding, so a recurring
+// finding that merely bumps `occurrences` stays silent. Clicking focuses the
+// window and tells the renderer which finding to jump to.
+function sendFindingsNotification(automation, newFindings) {
+  try {
+    if (!Notification.isSupported() || !newFindings || !newFindings.length) return;
+    const first = newFindings[0];
+    const title = automation.name + ' — ' + newFindings.length + ' finding' + (newFindings.length === 1 ? '' : 's');
+    const body = (first.summary || (first.item && first.item.summary) || '').substring(0, 150);
+    const notif = new Notification({ title, body, icon: path.join(__dirname, 'icon.png') });
+    notif.on('click', () => {
+      if (mainWindow) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+        mainWindow.webContents.send('findings:focus', { id: first.id });
+      }
+    });
+    notif.show();
+  } catch (err) { console.error('[findings] notification failed:', err && err.message); }
+}
+
 // Returns true if `now` falls within the configured run window.
 // window: { enabled, startHour, startMinute, endHour, endMinute, days[] } or null/undefined
 // A null/undefined window, or one with enabled=false, imposes no restriction.
@@ -8443,6 +8555,7 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
   if (opts.skipPermissions) args.push('--dangerously-skip-permissions');
   if (opts.bare) args.push('--bare');
   if (opts.model) args.push('--model', opts.model);
+  if (opts.sessionId) args.push('--session-id', opts.sessionId);
   if (Array.isArray(opts.extraArgs)) {
     for (const a of opts.extraArgs) args.push(a);
   }
@@ -8786,7 +8899,10 @@ function finalizeAgentRun(automationId, agentId, key, o) {
       summary: parsed.summary,
       output: displayOutput,
       attentionItems: parsed.attentionItems,
-      costUsd: null
+      costUsd: null,
+      cwd: o.cwd || null,
+      profileId: o.profileId || null,
+      sessionId: o.sessionId || null
     });
   } catch { /* don't let save failure prevent state cleanup below */ }
 
@@ -8808,6 +8924,36 @@ function finalizeAgentRun(automationId, agentId, key, o) {
       }
       triggerDependentAgents(automationId, agentId, runStatus, freshData);
       checkPipelineComplete(automationId);
+
+      // Findings write hook — own try/catch so a store failure can never skip
+      // the dependent-agent fan-out / pipeline check above (which already ran
+      // by this point). Reuses freshAuto/freshAgent rather than re-reading
+      // automations.json. alertOnFindings !== false means undefined defaults ON.
+      try {
+        if (freshAuto.alertOnFindings !== false && parsed.attentionItems && parsed.attentionItems.length) {
+          const runAgentName = (freshAuto.agents.find(ag => ag.id === agentId) || {}).name || agentId;
+          const entries = parsed.attentionItems.map(item => ({
+            automationId,
+            automationName: freshAuto.name,
+            agentId,
+            agentName: runAgentName,
+            item,
+            runStartedAt: o.startedAt,
+            sessionId: o.sessionId || null,
+            cwd: o.cwd || null,
+            profileId: o.profileId || null
+          }));
+          const findingsData = readFindings();
+          const upserted = FindingsStore.upsertFindings(findingsData, entries, completedAt);
+          const pruned = FindingsStore.pruneFindings(upserted.store, completedAt, FINDINGS_CAPS);
+          writeFindings(pruned);
+          if (upserted.newFindings.length) {
+            const unacknowledgedTotal = FindingsStore.listFindings(pruned, { unacknowledgedOnly: true }).length;
+            if (mainWindow) mainWindow.webContents.send('findings:updated', { count: unacknowledgedTotal, newFindings: upserted.newFindings });
+            if (!mainWindow || !mainWindow.isFocused()) sendFindingsNotification(freshAuto, upserted.newFindings);
+          }
+        }
+      } catch (findingsErr) { console.error('[findings] write hook failed:', findingsErr && findingsErr.message); }
     }
   } catch { /* avoid crashing the finalizer */ }
 
@@ -9239,6 +9385,12 @@ async function runAgent(automationId, agentId, opts) {
     : resolveProfileFor({ columnProfileId: automation.profileId, projectProfileId: getProjectProfileIdByPath(automation.projectPath) });
   const agentEnv = Object.assign({}, getAgentEndpointEnv(agent, automation.projectPath), profile.env);
 
+  // Minted up front (not scraped from the event stream) so the run's
+  // conversation is resumable even if it dies before emitting any event, and
+  // so it's already in scope for finalizeAgentRun regardless of which branch
+  // runs or how it terminates.
+  const runSessionId = crypto.randomUUID();
+
   // --- Interactive scheduled run (opt-in) ---
   if (agent.sessionMode === 'interactive') {
     interactiveRunActive = true;
@@ -9246,7 +9398,7 @@ async function runAgent(automationId, agentId, opts) {
     try { fs.unlinkSync(sentinelPath); } catch { /* not there yet — fine */ }
     const interactivePrompt = fullPrompt + interactiveSuffix(sentinelPath);
     const handle = spawnInteractiveScheduled(interactivePrompt, cwd, {
-      sessionId: crypto.randomUUID(),
+      sessionId: runSessionId,
       skipPermissions: !!agent.skipPermissions,
       model: agent.endpointModel || null,
       env: agentEnv,
@@ -9274,7 +9426,10 @@ async function runAgent(automationId, agentId, opts) {
           output: result.output || capTail(denoiseInteractive(textChunks.join('\n')), 8000),
           parsed: result.parsed || null,
           startedAt,
-          lastError: result.lastError
+          lastError: result.lastError,
+          cwd,
+          profileId: profile.id,
+          sessionId: runSessionId
         });
       }
     });
@@ -9293,6 +9448,7 @@ async function runAgent(automationId, agentId, opts) {
     extraArgs: Array.isArray(agent.extraArgs) ? agent.extraArgs : null,
     env: agentEnv,
     profileId: profile.id,
+    sessionId: runSessionId,
     onRaw: (raw) => { outputChunks.push(raw); },
     onText: (text) => {
       textChunks.push(text);
@@ -9311,7 +9467,10 @@ async function runAgent(automationId, agentId, opts) {
       status: exitCode === 0 ? 'completed' : 'error',
       exitCode,
       output: textChunks.join(''),
-      startedAt
+      startedAt,
+      cwd,
+      profileId: profile.id,
+      sessionId: runSessionId
     });
   });
 
@@ -9323,6 +9482,9 @@ async function runAgent(automationId, agentId, opts) {
       exitCode: null,
       output: textChunks.join(''),
       startedAt,
+      cwd,
+      profileId: profile.id,
+      sessionId: runSessionId,
       lastError: err.message
     });
   });
