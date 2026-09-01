@@ -57,6 +57,8 @@
       "index.html",
       "codex-watch.html",
       "codex-watch.js",
+      "findings-sticky.html",
+      "findings-sticky.js",
       "styles.css",
       "pty-server.js",
       "lib/**/*",

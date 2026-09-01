@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray, Menu, nativeImage, Notification, powerMonitor, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray, Menu, nativeImage, Notification, powerMonitor, safeStorage, screen } = require('electron');
 // Allow programmatic audio playback (voice feature) without a user gesture.
 // Chromium's default autoplay policy blocks Audio.play() invoked from hook
 // events, silently rejecting the play() promise. Must run at require-time,
@@ -1748,6 +1748,125 @@ function debounceCodexWatchBounds(win) {
       // Intentionally no broadcastConfigUpdated here — same reasoning as
       // debouncePopoutBounds: this is internal bookkeeping, not something the
       // renderer needs to react to.
+    }, POPOUT_BOUNDS_DEBOUNCE_MS);
+  };
+}
+
+// --- Findings sticky window ------------------------------------------------
+// Always-on-top "sticky note" showing unacknowledged findings (see the
+// findings inbox IPC below). Single instance, frameless, never steals focus.
+
+let findingsStickyWindow = null;
+// Mirrors codexWatchLastTheme's role: the theme this window last painted, so
+// a re-open without a fresh 'codexwatch:themeChanged' broadcast (main window
+// theme resolved before this window ever opened) still gets it right.
+let findingsStickyLastTheme = 'dark';
+
+const FINDINGS_STICKY_DEFAULT_WIDTH = 320;
+const FINDINGS_STICKY_DEFAULT_HEIGHT = 420;
+
+// A frameless, skipTaskbar window has no title bar to drag back on-screen and
+// no taskbar entry to reset from, so a saved position that's no longer on any
+// display (monitor unplugged, resolution changed) must never be trusted as-is
+// — fall back to centring on the primary display instead.
+function clampFindingsStickyBounds(saved) {
+  const width = (saved && typeof saved.width === 'number' && saved.width > 0) ? saved.width : FINDINGS_STICKY_DEFAULT_WIDTH;
+  const height = (saved && typeof saved.height === 'number' && saved.height > 0) ? saved.height : FINDINGS_STICKY_DEFAULT_HEIGHT;
+  const hasOrigin = saved && typeof saved.x === 'number' && typeof saved.y === 'number';
+  if (hasOrigin) {
+    const onADisplay = screen.getAllDisplays().some((d) => {
+      const a = d.workArea;
+      return saved.x >= a.x && saved.y >= a.y && saved.x < a.x + a.width && saved.y < a.y + a.height;
+    });
+    if (onADisplay) return { x: saved.x, y: saved.y, width, height };
+  }
+  const primary = screen.getPrimaryDisplay().workArea;
+  return {
+    x: primary.x + Math.round((primary.width - width) / 2),
+    y: primary.y + Math.round((primary.height - height) / 2),
+    width,
+    height
+  };
+}
+
+function createFindingsStickyWindow() {
+  if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) {
+    findingsStickyWindow.showInactive();
+    return findingsStickyWindow;
+  }
+
+  const config = readConfig();
+  const bounds = clampFindingsStickyBounds(config.findingsStickyBounds || null);
+  const isLight = config.theme === 'auto' ? !nativeTheme.shouldUseDarkColors : config.theme === 'light';
+  const theme = isLight ? 'light' : 'dark';
+  findingsStickyLastTheme = theme;
+
+  const win = new BrowserWindow({
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
+    minWidth: 240,
+    minHeight: 160,
+    frame: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false, // never steal focus on arrival — revealed via showInactive() once ready
+    backgroundColor: theme === 'light' ? '#ffffff' : '#1a1a2e',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+      webviewTag: false
+    }
+  });
+
+  // 'floating' (not the bare default level) so it stays above full-screen
+  // apps too; findings-sticky.js exposes a pin/unpin toggle over this.
+  win.setAlwaysOnTop(true, 'floating');
+
+  lockdownWebContents(win.webContents);
+  win.loadFile('findings-sticky.html', { query: { theme } });
+
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed()) win.showInactive();
+  });
+
+  // Same did-finish-load race as the codex watcher: a theme broadcast landing
+  // between loadFile and the page registering its listener would be dropped.
+  win.webContents.on('did-finish-load', () => {
+    if (!win.isDestroyed()) win.webContents.send('findingssticky:theme', findingsStickyLastTheme);
+  });
+
+  const saveBoundsDebounced = debounceFindingsStickyBounds(win);
+  win.on('move', saveBoundsDebounced);
+  win.on('resize', saveBoundsDebounced);
+
+  // Close destroys outright — no close-to-tray hide here. A hidden
+  // always-on-top window with no taskbar entry and no reopen affordance
+  // (tray menu recreates it fresh) would be a ghost process.
+  win.on('closed', () => {
+    findingsStickyWindow = null;
+  });
+
+  findingsStickyWindow = win;
+  return win;
+}
+
+function debounceFindingsStickyBounds(win) {
+  let timer = null;
+  return function () {
+    if (win.isDestroyed()) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (win.isDestroyed()) return;
+      const b = win.getBounds();
+      const cfg = readConfig();
+      cfg.findingsStickyBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+      scheduleWriteConfig(cfg);
     }, POPOUT_BOUNDS_DEBOUNCE_MS);
   };
 }
@@ -8077,6 +8196,42 @@ ipcMain.handle('findings:openConversation', (event, id) => {
   }
 });
 
+// findings-sticky.html/js — the always-on-top sticky note over the same
+// findings store. Its own window lifecycle lives with the other
+// window-creation functions above (createFindingsStickyWindow); these three
+// handlers are the surface findings-sticky.js drives it through.
+ipcMain.handle('findings:openSticky', () => {
+  try {
+    createFindingsStickyWindow();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('findings:closeSticky', () => {
+  try {
+    if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) findingsStickyWindow.close();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+// Toggle is server-authoritative (reads the window's actual alwaysOnTop
+// state rather than trusting a renderer-tracked boolean) so it can't drift.
+ipcMain.handle('findings:stickyTogglePin', (event) => {
+  try {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) return { ok: false, error: 'window unavailable' };
+    const next = !win.isAlwaysOnTop();
+    win.setAlwaysOnTop(next, 'floating');
+    return { ok: true, pinned: next };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
 // --- Codex watcher -------------------------------------------------------
 //
 // The codex plugin resolves its state root from CLAUDE_PLUGIN_DATA, which
@@ -8177,11 +8332,18 @@ ipcMain.handle('codexwatch:open', (event, opts) => {
 // Fire-and-forget notification from the main window's applyVisualTheme so
 // any already-open watcher windows follow a live light/dark toggle instead
 // of staying stuck at whatever theme they were opened with.
+// Also the findings sticky window's only source of live theme changes — it
+// has no theme selector of its own (same as the codex watcher), and adding a
+// second renderer.js -> main send just for it would duplicate this one.
 ipcMain.on('codexwatch:themeChanged', (event, theme) => {
   if (theme !== 'light' && theme !== 'dark') return;
   codexWatchLastTheme = theme;
   for (const win of codexWatchWindows.keys()) {
     if (!win.isDestroyed()) win.webContents.send('codexwatch:theme', theme);
+  }
+  findingsStickyLastTheme = theme;
+  if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) {
+    findingsStickyWindow.webContents.send('findingssticky:theme', theme);
   }
 });
 
@@ -8950,6 +9112,9 @@ function finalizeAgentRun(automationId, agentId, key, o) {
           if (upserted.newFindings.length) {
             const unacknowledgedTotal = FindingsStore.listFindings(pruned, { unacknowledgedOnly: true }).length;
             if (mainWindow) mainWindow.webContents.send('findings:updated', { count: unacknowledgedTotal, newFindings: upserted.newFindings });
+            if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) {
+              findingsStickyWindow.webContents.send('findings:updated', { count: unacknowledgedTotal, newFindings: upserted.newFindings });
+            }
             if (!mainWindow || !mainWindow.isFocused()) sendFindingsNotification(freshAuto, upserted.newFindings);
           }
         }
@@ -10027,6 +10192,12 @@ function createTray() {
         if (mainWindow) {
           revealWindow(mainWindow);
         }
+      }
+    },
+    {
+      label: 'Open Findings',
+      click: () => {
+        createFindingsStickyWindow();
       }
     },
     { type: 'separator' },
