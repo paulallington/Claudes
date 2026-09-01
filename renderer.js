@@ -20260,7 +20260,10 @@ function renderFindingsInbox() {
     headerEl.className = 'findings-inbox-group-header';
     headerEl.innerHTML =
       '<span class="findings-inbox-group-name">' + escapeHtml(group.automationName || 'Automation') + '</span>' +
-      '<button type="button" class="findings-inbox-ack-all" data-automation-id="' + escapeHtml(group.automationId || '') + '">Acknowledge all</button>';
+      // Legacy findings recorded before automationId existed can't be
+      // group-acknowledged (there's no automation to scope the action to) —
+      // omit the button rather than render one that's a permanent no-op.
+      (group.automationId ? '<button type="button" class="findings-inbox-ack-all" data-automation-id="' + escapeHtml(group.automationId) + '">Acknowledge all</button>' : '');
     groupEl.appendChild(headerEl);
 
     group.findings.forEach(function (finding) {
@@ -20367,7 +20370,9 @@ function findingsInboxWithProject(finding, then) {
     // here, so ambient state (currentProfileEnv/currentProfileId, etc.)
     // could still belong to the PREVIOUS project when `then` ran.
     var switched = (idx !== config.activeProjectIndex) ? setActiveProject(idx) : null;
-    Promise.resolve(switched).then(function () { then(auto); });
+    Promise.resolve(switched).then(function () { then(auto); }).catch(function () {
+      if (typeof showToast === 'function') showToast('Could not open finding', { kind: 'error' });
+    });
   });
 }
 
@@ -20417,6 +20422,8 @@ function findingsInboxOpenConversation(finding) {
         var base = currentEndpointEnv ? Object.assign({}, currentEndpointEnv) : null;
         o.env = env ? Object.assign({}, base, env) : base;
         addColumn(['--resume', res.sessionId], null, o);
+      }).catch(function () {
+        if (typeof showToast === 'function') showToast('Could not open conversation', { kind: 'error' });
       });
     });
   }).catch(function () {
@@ -20446,6 +20453,8 @@ function findingsInboxDiscuss(finding) {
       var base = currentEndpointEnv ? Object.assign({}, currentEndpointEnv) : null;
       o.env = env ? Object.assign({}, base, env) : base;
       addColumn(spawnArgs, null, o);
+    }).catch(function () {
+      if (typeof showToast === 'function') showToast('Could not open conversation', { kind: 'error' });
     });
   });
 }

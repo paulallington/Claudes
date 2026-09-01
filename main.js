@@ -1040,7 +1040,11 @@ function queueFindingsNotification(automation, newFindings) {
   entry.findings = entry.findings.concat(newFindings);
   entry.timer = setTimeout(() => {
     pendingFindingsNotifications.delete(key);
-    sendFindingsNotification(entry.automation, entry.findings);
+    // Focus check happens here, at fire time, not when queued — the window's
+    // focus state can flip either way in the debounce window above.
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isFocused()) {
+      sendFindingsNotification(entry.automation, entry.findings);
+    }
   }, FINDINGS_NOTIFY_DEBOUNCE_MS);
 }
 
@@ -8660,7 +8664,7 @@ function sendFindingsNotification(automation, newFindings) {
     const body = (first.summary || (first.item && first.item.summary) || '').substring(0, 150);
     const notif = new Notification({ title, body, icon: path.join(__dirname, 'icon.png') });
     notif.on('click', () => {
-      if (mainWindow) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
         if (mainWindow.isMinimized()) mainWindow.restore();
         mainWindow.show();
         mainWindow.focus();
@@ -9193,8 +9197,11 @@ function finalizeAgentRun(automationId, agentId, key, o) {
             writeFindings(pruned);
             if (upserted.newFindings.length) {
               broadcastFindingsUpdated(pruned, upserted.newFindings);
-              // alertOnFindings !== false means undefined defaults ON.
-              if (freshAuto.alertOnFindings !== false && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isFocused())) {
+              // alertOnFindings !== false means undefined defaults ON. The
+              // focus check happens at fire time (see queueFindingsNotification's
+              // debounce timer), not here — the notification fires 5s after
+              // this point and focus can change in the meantime.
+              if (freshAuto.alertOnFindings !== false) {
                 queueFindingsNotification(freshAuto, upserted.newFindings);
               }
             }
