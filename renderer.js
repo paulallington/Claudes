@@ -20401,11 +20401,21 @@ function findingsInboxOpenConversation(finding) {
       var o = spawnOpts({
         sessionId: res.sessionId,
         cwd: res.cwd || undefined,
-        profileId: res.profileId || undefined,
         title: res.agentName || finding.agentName || undefined
       });
+      // A finding's profile is explicit (or explicitly Primary — null, not
+      // undefined), never the ambient project/workspace default spawnOpts
+      // would otherwise stamp on. Set after spawnOpts returns so that
+      // ambient-default branch can't apply.
+      o.profileId = res.profileId || null;
       findingsInboxResolveProfileEnv(res.profileId).then(function (env) {
-        o.env = env;
+        // Preserve the endpoint-preset layer spawnOpts already put in o.env;
+        // the resolved profile env (CLAUDE_CONFIG_DIR) layers on top of it,
+        // never replacing it outright — otherwise a Primary finding would
+        // leave the ambient CLAUDE_CONFIG_DIR from a secondary profile in
+        // place instead of clearing it.
+        var base = currentEndpointEnv ? Object.assign({}, currentEndpointEnv) : null;
+        o.env = env ? Object.assign({}, base, env) : base;
         addColumn(['--resume', res.sessionId], null, o);
       });
     });
@@ -20426,9 +20436,15 @@ function findingsInboxDiscuss(finding) {
       '--- FINDING ---\n' + output + '\n--- END FINDING ---';
     var spawnArgs = buildSpawnArgs();
     spawnArgs.push('--append-system-prompt', context);
-    var o = spawnOpts({ title: agentName, cwd: finding.cwd || undefined, profileId: finding.profileId || undefined });
+    var o = spawnOpts({ title: agentName, cwd: finding.cwd || undefined });
+    // See findingsInboxOpenConversation: the finding's profile is explicit
+    // (or explicitly Primary — null), never the ambient default.
+    o.profileId = finding.profileId || null;
     findingsInboxResolveProfileEnv(finding.profileId).then(function (env) {
-      o.env = env;
+      // Preserve the endpoint-preset layer spawnOpts already put in o.env;
+      // resolved profile env layers on top, never replacing it.
+      var base = currentEndpointEnv ? Object.assign({}, currentEndpointEnv) : null;
+      o.env = env ? Object.assign({}, base, env) : base;
       addColumn(spawnArgs, null, o);
     });
   });

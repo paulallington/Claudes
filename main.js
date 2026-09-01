@@ -9637,6 +9637,16 @@ async function runAgent(automationId, agentId, opts) {
   // so it's already in scope for finalizeAgentRun regardless of which branch
   // runs or how it terminates.
   const runSessionId = crypto.randomUUID();
+  // Mirrors the guard inside spawnHeadlessClaude / buildInteractiveArgs: when
+  // the agent's own extraArgs already carry --resume or --session-id, neither
+  // spawn path actually pushes our minted id onto the CLI invocation (the
+  // flags are mutually exclusive), so the run never happens under
+  // runSessionId. Computed once here so every finalizeAgentRun call below
+  // records the id that was actually used — never a phantom id that would
+  // render a dead "Open conversation" button in the findings inbox.
+  const agentExtraArgs = Array.isArray(agent.extraArgs) ? agent.extraArgs : [];
+  const hasConflictingSessionFlag = agentExtraArgs.includes('--resume') || agentExtraArgs.includes('--session-id');
+  const finalizedSessionId = hasConflictingSessionFlag ? null : runSessionId;
 
   // --- Interactive scheduled run (opt-in) ---
   if (agent.sessionMode === 'interactive') {
@@ -9676,7 +9686,7 @@ async function runAgent(automationId, agentId, opts) {
           lastError: result.lastError,
           cwd,
           profileId: profile.id,
-          sessionId: runSessionId
+          sessionId: finalizedSessionId
         });
       }
     });
@@ -9717,7 +9727,7 @@ async function runAgent(automationId, agentId, opts) {
       startedAt,
       cwd,
       profileId: profile.id,
-      sessionId: runSessionId
+      sessionId: finalizedSessionId
     });
   });
 
@@ -9731,7 +9741,7 @@ async function runAgent(automationId, agentId, opts) {
       startedAt,
       cwd,
       profileId: profile.id,
-      sessionId: runSessionId,
+      sessionId: finalizedSessionId,
       lastError: err.message
     });
   });
