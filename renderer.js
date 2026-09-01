@@ -20220,7 +20220,9 @@ function refreshFindingsInbox() {
   return window.electronAPI.findingsList({ unacknowledgedOnly: true }).then(function (res) {
     findingsInboxData = (res && res.ok && res.findings) || [];
     renderFindingsInbox();
-    updateFindingsInboxBadge(findingsInboxData.length);
+    updateFindingsInboxBadge(window.FindingsInboxView.unacknowledgedBadgeCount(findingsInboxData));
+  }).catch(function () {
+    if (typeof showToast === 'function') showToast('Could not load findings', { kind: 'error' });
   });
 }
 
@@ -20317,16 +20319,25 @@ function renderFindingInboxItem(finding, now) {
     var btn = e.target.closest('.findings-inbox-ack-all');
     if (!btn) return;
     var automationId = btn.getAttribute('data-automation-id') || null;
+    // A group button always carries its automation's id — a missing/empty
+    // one means the group itself is malformed (e.g. a legacy finding with no
+    // automationId), never "acknowledge every automation". Treat it as a
+    // no-op rather than falling through to the global acknowledge below.
+    if (!automationId) return;
     findingsInboxAcknowledgeAll(automationId);
   });
 })();
 
 function findingsInboxAcknowledge(id) {
-  window.electronAPI.findingsAcknowledge(id).then(function () { refreshFindingsInbox(); });
+  window.electronAPI.findingsAcknowledge(id).then(function () { refreshFindingsInbox(); }).catch(function () {
+    if (typeof showToast === 'function') showToast('Could not acknowledge finding', { kind: 'error' });
+  });
 }
 
 function findingsInboxAcknowledgeAll(automationId) {
-  window.electronAPI.findingsAcknowledgeAll(automationId ? { automationId: automationId } : null).then(function () { refreshFindingsInbox(); });
+  window.electronAPI.findingsAcknowledgeAll(automationId ? { automationId: automationId } : null).then(function () { refreshFindingsInbox(); }).catch(function () {
+    if (typeof showToast === 'function') showToast('Could not acknowledge findings', { kind: 'error' });
+  });
 }
 
 function findingsInboxProjectIndex(projectPath) {
@@ -20398,6 +20409,8 @@ function findingsInboxOpenConversation(finding) {
         addColumn(['--resume', res.sessionId], null, o);
       });
     });
+  }).catch(function () {
+    if (typeof showToast === 'function') showToast('Could not open conversation', { kind: 'error' });
   });
 }
 

@@ -4,32 +4,13 @@
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self' blob:;">
   <title>Findings</title>
+  <link rel="stylesheet" href="./styles.css">
   <style>
-    /* Self-contained palette (not styles.css, which is out of scope for this
-       window) — values mirror styles.css's :root / [data-theme="light"] so
-       the sticky note stays visually consistent with the rest of the app. */
-    :root {
-      --bg-main: #1a1a2e;
-      --bg-panel: #1e293b;
-      --bg-row: #16213e;
-      --border-primary: #0f3460;
-      --border-subtle: #1e293b;
-      --accent: #e94560;
-      --text-primary: #e0e0e0;
-      --text-secondary: #aaa;
-      --text-muted: #888;
-    }
-    [data-theme="light"] {
-      --bg-main: #ffffff;
-      --bg-panel: #e1e4e8;
-      --bg-row: #f0f2f5;
-      --border-primary: #d0d7de;
-      --border-subtle: #d8dee4;
-      --accent: #d1304a;
-      --text-primary: #1f2328;
-      --text-secondary: #555;
-      --text-muted: #656d76;
-    }
+    /* Genuinely sticky-specific layout only — the palette (:root /
+       [data-theme="light"] custom properties) comes from the shared
+       styles.css link above, like codex-watch.html, so a future theme
+       change reaches this window automatically instead of silently
+       diverging from a locally-copied palette. */
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; height: 100%; }
     body {
@@ -86,7 +67,7 @@
       user-select: text;
     }
     .fs-row {
-      background: var(--bg-row);
+      background: var(--bg-toolbar);
       border: 1px solid var(--border-subtle);
       border-radius: 6px;
       padding: 8px 9px;

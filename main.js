@@ -1012,10 +1012,36 @@ const FINDINGS_CAPS = { perAutomation: 100, global: 500, ackMaxAgeDays: 30 };
 function broadcastFindingsUpdated(store, newFindings) {
   const count = FindingsStore.listFindings(store, { unacknowledgedOnly: true }).length;
   const payload = { count, newFindings: newFindings || [] };
-  if (mainWindow) mainWindow.webContents.send('findings:updated', payload);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('findings:updated', payload);
   if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) {
     findingsStickyWindow.webContents.send('findings:updated', payload);
   }
+}
+
+// Coalesces OS notifications per automation so a multi-agent pipeline (several
+// agents each reporting findings within moments of each other) fires ONE
+// notification, not one per agent. Keyed by automationId; findings:updated
+// (broadcastFindingsUpdated, above) stays immediate on every write — only the
+// OS notification is debounced here.
+const FINDINGS_NOTIFY_DEBOUNCE_MS = 5000;
+const pendingFindingsNotifications = new Map(); // automationId -> { timer, automation, findings }
+
+function queueFindingsNotification(automation, newFindings) {
+  if (!automation || !automation.id || !newFindings || !newFindings.length) return;
+  const key = automation.id;
+  let entry = pendingFindingsNotifications.get(key);
+  if (!entry) {
+    entry = { timer: null, automation, findings: [] };
+    pendingFindingsNotifications.set(key, entry);
+  } else {
+    entry.automation = automation; // keep the freshest name/settings
+    clearTimeout(entry.timer);
+  }
+  entry.findings = entry.findings.concat(newFindings);
+  entry.timer = setTimeout(() => {
+    pendingFindingsNotifications.delete(key);
+    sendFindingsNotification(entry.automation, entry.findings);
+  }, FINDINGS_NOTIFY_DEBOUNCE_MS);
 }
 
 // Prompt snippet library — persists to ~/.claudes/snippets.json. Each snippet
@@ -1784,18 +1810,32 @@ const FINDINGS_STICKY_DEFAULT_HEIGHT = 420;
 // no taskbar entry to reset from, so a saved position that's no longer on any
 // display (monitor unplugged, resolution changed) must never be trusted as-is
 // — fall back to centring on the primary display instead.
+// Matches the BrowserWindow's own minWidth/minHeight (see createFindingsStickyWindow).
+const FINDINGS_STICKY_MIN_WIDTH = 240;
+const FINDINGS_STICKY_MIN_HEIGHT = 160;
+
 function clampFindingsStickyBounds(saved) {
-  const width = (saved && typeof saved.width === 'number' && saved.width > 0) ? saved.width : FINDINGS_STICKY_DEFAULT_WIDTH;
-  const height = (saved && typeof saved.height === 'number' && saved.height > 0) ? saved.height : FINDINGS_STICKY_DEFAULT_HEIGHT;
+  let width = (saved && typeof saved.width === 'number' && saved.width > 0) ? saved.width : FINDINGS_STICKY_DEFAULT_WIDTH;
+  let height = (saved && typeof saved.height === 'number' && saved.height > 0) ? saved.height : FINDINGS_STICKY_DEFAULT_HEIGHT;
   const hasOrigin = saved && typeof saved.x === 'number' && typeof saved.y === 'number';
   if (hasOrigin) {
-    const onADisplay = screen.getAllDisplays().some((d) => {
+    const onDisplay = screen.getAllDisplays().find((d) => {
       const a = d.workArea;
       return saved.x >= a.x && saved.y >= a.y && saved.x < a.x + a.width && saved.y < a.y + a.height;
     });
-    if (onADisplay) return { x: saved.x, y: saved.y, width, height };
+    if (onDisplay) {
+      // Position is on a live display, but the saved size may not be — e.g.
+      // it was sized on a large monitor that's since been unplugged. Clamp
+      // to that display's work area too, not just the origin.
+      const a = onDisplay.workArea;
+      width = Math.max(FINDINGS_STICKY_MIN_WIDTH, Math.min(width, a.width));
+      height = Math.max(FINDINGS_STICKY_MIN_HEIGHT, Math.min(height, a.height));
+      return { x: saved.x, y: saved.y, width, height };
+    }
   }
   const primary = screen.getPrimaryDisplay().workArea;
+  width = Math.max(FINDINGS_STICKY_MIN_WIDTH, Math.min(width, primary.width));
+  height = Math.max(FINDINGS_STICKY_MIN_HEIGHT, Math.min(height, primary.height));
   return {
     x: primary.x + Math.round((primary.width - width) / 2),
     y: primary.y + Math.round((primary.height - height) / 2),
@@ -8242,8 +8282,11 @@ ipcMain.handle('findings:closeSticky', () => {
 // state rather than trusting a renderer-tracked boolean) so it can't drift.
 ipcMain.handle('findings:stickyTogglePin', (event) => {
   try {
+    // Only the sticky window itself may toggle its own pin — otherwise any
+    // window (including mainWindow) could pin itself always-on-top with no
+    // way back through the UI.
     const win = BrowserWindow.fromWebContents(event.sender);
-    if (!win || win.isDestroyed()) return { ok: false, error: 'window unavailable' };
+    if (!win || win.isDestroyed() || win !== findingsStickyWindow) return { ok: false, error: 'window unavailable' };
     const next = !win.isAlwaysOnTop();
     win.setAlwaysOnTop(next, 'floating');
     return { ok: true, pinned: next };
@@ -8737,10 +8780,16 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
   if (opts.skipPermissions) args.push('--dangerously-skip-permissions');
   if (opts.bare) args.push('--bare');
   if (opts.model) args.push('--model', opts.model);
-  if (opts.sessionId) args.push('--session-id', opts.sessionId);
-  if (Array.isArray(opts.extraArgs)) {
-    for (const a of opts.extraArgs) args.push(a);
-  }
+  const extraArgs = Array.isArray(opts.extraArgs) ? opts.extraArgs : [];
+  // An automation's own extraArgs may already carry --resume or --session-id
+  // (e.g. resuming a specific prior conversation) — the CLI treats
+  // --session-id + --resume as mutually exclusive, so a working automation
+  // must not have our app-minted --session-id pushed alongside it. When
+  // skipped, the run simply has no app-minted id (findings get
+  // sessionId: null and the UI degrades to "Discuss finding").
+  const hasConflictingSessionFlag = extraArgs.includes('--resume') || extraArgs.includes('--session-id');
+  if (opts.sessionId && !hasConflictingSessionFlag) args.push('--session-id', opts.sessionId);
+  for (const a of extraArgs) args.push(a);
 
   let mcpConfigPath = null;
   if (opts.mcpConfig) {
@@ -9110,28 +9159,45 @@ function finalizeAgentRun(automationId, agentId, key, o) {
       // Findings write hook — own try/catch so a store failure can never skip
       // the dependent-agent fan-out / pipeline check above (which already ran
       // by this point). Reuses freshAuto/freshAgent rather than re-reading
-      // automations.json. alertOnFindings !== false means undefined defaults ON.
+      // automations.json. Findings are always recorded regardless of
+      // alertOnFindings — that toggle only gates the OS notification below
+      // (queueFindingsNotification), not whether the inbox/badge reflect
+      // reality.
       try {
-        if (freshAuto.alertOnFindings !== false && parsed.attentionItems && parsed.attentionItems.length) {
+        if (parsed.attentionItems && parsed.attentionItems.length) {
           const runAgentName = (freshAuto.agents.find(ag => ag.id === agentId) || {}).name || agentId;
-          const entries = parsed.attentionItems.map(item => ({
-            automationId,
-            automationName: freshAuto.name,
-            agentId,
-            agentName: runAgentName,
-            item,
-            runStartedAt: o.startedAt,
-            sessionId: o.sessionId || null,
-            cwd: o.cwd || null,
-            profileId: o.profileId || null
-          }));
-          const findingsData = readFindings();
-          const upserted = FindingsStore.upsertFindings(findingsData, entries, completedAt);
-          const pruned = FindingsStore.pruneFindings(upserted.store, completedAt, FINDINGS_CAPS);
-          writeFindings(pruned);
-          if (upserted.newFindings.length) {
-            broadcastFindingsUpdated(pruned, upserted.newFindings);
-            if (!mainWindow || !mainWindow.isFocused()) sendFindingsNotification(freshAuto, upserted.newFindings);
+          // parseAgentResult doesn't validate attentionItems' shape — a
+          // model can drift to a string-shaped item ("Certificate
+          // expiring") instead of { summary }, and any item can carry a
+          // missing/blank summary. Coerce/filter here so that never
+          // collapses distinct findings into one blank inbox row (see
+          // FindingsStore.upsertFindings' matching empty-summary guard).
+          const entries = parsed.attentionItems
+            .map(item => (typeof item === 'string' ? { summary: item } : item))
+            .filter(item => item && typeof item === 'object' && typeof item.summary === 'string' && item.summary.trim() !== '')
+            .map(item => ({
+              automationId,
+              automationName: freshAuto.name,
+              agentId,
+              agentName: runAgentName,
+              item,
+              runStartedAt: o.startedAt,
+              sessionId: o.sessionId || null,
+              cwd: o.cwd || null,
+              profileId: o.profileId || null
+            }));
+          if (entries.length) {
+            const findingsData = readFindings();
+            const upserted = FindingsStore.upsertFindings(findingsData, entries, completedAt);
+            const pruned = FindingsStore.pruneFindings(upserted.store, completedAt, FINDINGS_CAPS);
+            writeFindings(pruned);
+            if (upserted.newFindings.length) {
+              broadcastFindingsUpdated(pruned, upserted.newFindings);
+              // alertOnFindings !== false means undefined defaults ON.
+              if (freshAuto.alertOnFindings !== false && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isFocused())) {
+                queueFindingsNotification(freshAuto, upserted.newFindings);
+              }
+            }
           }
         }
       } catch (findingsErr) { console.error('[findings] write hook failed:', findingsErr && findingsErr.message); }

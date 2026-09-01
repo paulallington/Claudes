@@ -240,3 +240,20 @@ test('acknowledgeAll acknowledges only the given automation when a filter is pas
   // already-acknowledged 'finding a' keeps its original acknowledgedAt
   assert.equal(all.findings.find(f => f.summary === 'finding a').acknowledgedAt, '2026-08-02T00:00:00.000Z');
 });
+
+test('upsertFindings never creates a finding from an empty or whitespace-only summary', () => {
+  // Defends against callers that pass through malformed items (e.g. a
+  // string-shaped attentionItems array coerced upstream, or a missing
+  // summary field) without validating shape first — an empty summary must
+  // never reach the store as a blank, unreadable inbox row.
+  var store = { version: 1, findings: [] };
+  var r = upsertFindings(store, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: '' } },
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: '   ' } },
+    { automationId: 'auto_1', agentId: 'agent_1', item: {} },
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'a real finding' } },
+  ], '2026-08-01T00:00:00.000Z');
+  assert.equal(r.store.findings.length, 1);
+  assert.equal(r.store.findings[0].summary, 'a real finding');
+  assert.equal(r.newFindings.length, 1);
+});
