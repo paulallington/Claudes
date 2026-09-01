@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray, Menu, nativeImage, Notification, powerMonitor, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, shell, Tray, Menu, nativeImage, Notification, powerMonitor, safeStorage, screen } = require('electron');
 // Allow programmatic audio playback (voice feature) without a user gesture.
 // Chromium's default autoplay policy blocks Audio.play() invoked from hook
 // events, silently rejecting the play() promise. Must run at require-time,
@@ -54,6 +54,7 @@ const CodexWatchTail = require('./lib/codex-watch-tail');
 const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-app-server');
 const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
 const { checkAttachmentPath, checkAttachmentOpenPath, checkAttachmentContainment } = require('./lib/attachment-file-guard');
+const FindingsStore = require('./lib/findings-store');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -388,6 +389,7 @@ const LOOPS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'loops.json' : 'loops-
 const LOOPS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'loop-runs' : 'loop-runs-dev');
 const AUTOMATIONS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'automations.json' : 'automations-dev.json');
 const AUTOMATIONS_RUNS_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'automation-runs' : 'automation-runs-dev');
+const FINDINGS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'findings.json' : 'findings-dev.json');
 const AGENTS_DIR_DEFAULT = path.join(CONFIG_DIR, app.isPackaged ? 'agents' : 'agents-dev');
 const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' : 'endpoints-dev.json');
 const PROFILES_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'profiles.json' : 'profiles-dev.json');
@@ -974,6 +976,76 @@ function writeAutomations(data) {
   ensureConfigDir();
   if (data && data._recovered) { try { delete data._recovered; } catch (e) {} } // never persist the transient flag
   atomicWriteJson(AUTOMATIONS_FILE, data);
+}
+
+// --- Findings Persistence ---
+// Durable cross-automation store of `attentionItems` emitted by agent runs
+// (see finalizeAgentRun's findings write hook). Same recovery/atomic-write
+// convention as automations.json.
+function readFindings() {
+  ensureConfigDir();
+  const defaults = { version: 1, findings: [] };
+  const { data, recovered } = readJsonWithRecovery(FINDINGS_FILE);
+  const result = (data && typeof data === 'object') ? data : defaults;
+  if (!Array.isArray(result.findings)) result.findings = [];
+  if (typeof result.version !== 'number') result.version = 1;
+  if (recovered) result._recovered = true;
+  return result;
+}
+
+function writeFindings(data) {
+  ensureConfigDir();
+  if (data && data._recovered) { try { delete data._recovered; } catch (e) {} } // never persist the transient flag
+  atomicWriteJson(FINDINGS_FILE, data);
+}
+
+// Caps passed to FindingsStore.pruneFindings after every write, so the store
+// can't grow unbounded across a long-lived install.
+const FINDINGS_CAPS = { perAutomation: 100, global: 500, ackMaxAgeDays: 30 };
+
+// Broadcasts the current unacknowledged count to both findings surfaces —
+// the inbox in mainWindow and the always-on-top sticky note — from a single
+// place, so the two never drift out of sync. `store` is the *already
+// persisted* store to recount from; `newFindings` defaults to [] for the ack
+// paths (acknowledging never creates a finding). Same payload shape as the
+// existing send in finalizeAgentRun's findings write hook.
+function broadcastFindingsUpdated(store, newFindings) {
+  const count = FindingsStore.listFindings(store, { unacknowledgedOnly: true }).length;
+  const payload = { count, newFindings: newFindings || [] };
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('findings:updated', payload);
+  if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) {
+    findingsStickyWindow.webContents.send('findings:updated', payload);
+  }
+}
+
+// Coalesces OS notifications per automation so a multi-agent pipeline (several
+// agents each reporting findings within moments of each other) fires ONE
+// notification, not one per agent. Keyed by automationId; findings:updated
+// (broadcastFindingsUpdated, above) stays immediate on every write — only the
+// OS notification is debounced here.
+const FINDINGS_NOTIFY_DEBOUNCE_MS = 5000;
+const pendingFindingsNotifications = new Map(); // automationId -> { timer, automation, findings }
+
+function queueFindingsNotification(automation, newFindings) {
+  if (!automation || !automation.id || !newFindings || !newFindings.length) return;
+  const key = automation.id;
+  let entry = pendingFindingsNotifications.get(key);
+  if (!entry) {
+    entry = { timer: null, automation, findings: [] };
+    pendingFindingsNotifications.set(key, entry);
+  } else {
+    entry.automation = automation; // keep the freshest name/settings
+    clearTimeout(entry.timer);
+  }
+  entry.findings = entry.findings.concat(newFindings);
+  entry.timer = setTimeout(() => {
+    pendingFindingsNotifications.delete(key);
+    // Focus check happens here, at fire time, not when queued — the window's
+    // focus state can flip either way in the debounce window above.
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isFocused()) {
+      sendFindingsNotification(entry.automation, entry.findings);
+    }
+  }, FINDINGS_NOTIFY_DEBOUNCE_MS);
 }
 
 // Prompt snippet library — persists to ~/.claudes/snippets.json. Each snippet
@@ -1721,6 +1793,139 @@ function debounceCodexWatchBounds(win) {
       // Intentionally no broadcastConfigUpdated here — same reasoning as
       // debouncePopoutBounds: this is internal bookkeeping, not something the
       // renderer needs to react to.
+    }, POPOUT_BOUNDS_DEBOUNCE_MS);
+  };
+}
+
+// --- Findings sticky window ------------------------------------------------
+// Always-on-top "sticky note" showing unacknowledged findings (see the
+// findings inbox IPC below). Single instance, frameless, never steals focus.
+
+let findingsStickyWindow = null;
+// Mirrors codexWatchLastTheme's role: the theme this window last painted, so
+// a re-open without a fresh 'codexwatch:themeChanged' broadcast (main window
+// theme resolved before this window ever opened) still gets it right.
+let findingsStickyLastTheme = 'dark';
+
+const FINDINGS_STICKY_DEFAULT_WIDTH = 320;
+const FINDINGS_STICKY_DEFAULT_HEIGHT = 420;
+
+// A frameless, skipTaskbar window has no title bar to drag back on-screen and
+// no taskbar entry to reset from, so a saved position that's no longer on any
+// display (monitor unplugged, resolution changed) must never be trusted as-is
+// — fall back to centring on the primary display instead.
+// Matches the BrowserWindow's own minWidth/minHeight (see createFindingsStickyWindow).
+const FINDINGS_STICKY_MIN_WIDTH = 240;
+const FINDINGS_STICKY_MIN_HEIGHT = 160;
+
+function clampFindingsStickyBounds(saved) {
+  let width = (saved && typeof saved.width === 'number' && saved.width > 0) ? saved.width : FINDINGS_STICKY_DEFAULT_WIDTH;
+  let height = (saved && typeof saved.height === 'number' && saved.height > 0) ? saved.height : FINDINGS_STICKY_DEFAULT_HEIGHT;
+  const hasOrigin = saved && typeof saved.x === 'number' && typeof saved.y === 'number';
+  if (hasOrigin) {
+    const onDisplay = screen.getAllDisplays().find((d) => {
+      const a = d.workArea;
+      return saved.x >= a.x && saved.y >= a.y && saved.x < a.x + a.width && saved.y < a.y + a.height;
+    });
+    if (onDisplay) {
+      // Position is on a live display, but the saved size may not be — e.g.
+      // it was sized on a large monitor that's since been unplugged. Clamp
+      // to that display's work area too, not just the origin.
+      const a = onDisplay.workArea;
+      width = Math.max(FINDINGS_STICKY_MIN_WIDTH, Math.min(width, a.width));
+      height = Math.max(FINDINGS_STICKY_MIN_HEIGHT, Math.min(height, a.height));
+      return { x: saved.x, y: saved.y, width, height };
+    }
+  }
+  const primary = screen.getPrimaryDisplay().workArea;
+  width = Math.max(FINDINGS_STICKY_MIN_WIDTH, Math.min(width, primary.width));
+  height = Math.max(FINDINGS_STICKY_MIN_HEIGHT, Math.min(height, primary.height));
+  return {
+    x: primary.x + Math.round((primary.width - width) / 2),
+    y: primary.y + Math.round((primary.height - height) / 2),
+    width,
+    height
+  };
+}
+
+function createFindingsStickyWindow() {
+  if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) {
+    findingsStickyWindow.showInactive();
+    return findingsStickyWindow;
+  }
+
+  const config = readConfig();
+  const bounds = clampFindingsStickyBounds(config.findingsStickyBounds || null);
+  const isLight = config.theme === 'auto' ? !nativeTheme.shouldUseDarkColors : config.theme === 'light';
+  const theme = isLight ? 'light' : 'dark';
+  findingsStickyLastTheme = theme;
+
+  const win = new BrowserWindow({
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
+    minWidth: 240,
+    minHeight: 160,
+    frame: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false, // never steal focus on arrival — revealed via showInactive() once ready
+    backgroundColor: theme === 'light' ? '#ffffff' : '#1a1a2e',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+      webviewTag: false
+    }
+  });
+
+  // 'floating' (not the bare default level) so it stays above full-screen
+  // apps too; findings-sticky.js exposes a pin/unpin toggle over this.
+  win.setAlwaysOnTop(true, 'floating');
+
+  lockdownWebContents(win.webContents);
+  win.loadFile('findings-sticky.html', { query: { theme } });
+
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed()) win.showInactive();
+  });
+
+  // Same did-finish-load race as the codex watcher: a theme broadcast landing
+  // between loadFile and the page registering its listener would be dropped.
+  win.webContents.on('did-finish-load', () => {
+    if (!win.isDestroyed()) win.webContents.send('findingssticky:theme', findingsStickyLastTheme);
+  });
+
+  const saveBoundsDebounced = debounceFindingsStickyBounds(win);
+  win.on('move', saveBoundsDebounced);
+  win.on('resize', saveBoundsDebounced);
+
+  // Close destroys outright — no close-to-tray hide here. A hidden
+  // always-on-top window with no taskbar entry and no reopen affordance
+  // (tray menu recreates it fresh) would be a ghost process.
+  win.on('closed', () => {
+    findingsStickyWindow = null;
+  });
+
+  findingsStickyWindow = win;
+  return win;
+}
+
+function debounceFindingsStickyBounds(win) {
+  let timer = null;
+  return function () {
+    if (win.isDestroyed()) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (win.isDestroyed()) return;
+      const b = win.getBounds();
+      const cfg = readConfig();
+      cfg.findingsStickyBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+      scheduleWriteConfig(cfg);
     }, POPOUT_BOUNDS_DEBOUNCE_MS);
   };
 }
@@ -6694,7 +6899,8 @@ ipcMain.handle('automations:create', (event, config) => {
     enabled: true,
     createdAt: new Date().toISOString(),
     runWindow: config.runWindow || null,
-    profileId: config.profileId || null
+    profileId: config.profileId || null,
+    alertOnFindings: config.alertOnFindings !== false
   };
 
   data.automations.push(automation);
@@ -6742,7 +6948,7 @@ ipcMain.handle('automations:update', (event, automationId, updates) => {
   const data = readAutomations();
   const automation = data.automations.find(a => a.id === automationId);
   if (!automation) return null;
-  const safeFields = ['name', 'enabled', 'runWindow', 'profileId'];
+  const safeFields = ['name', 'enabled', 'runWindow', 'profileId', 'alertOnFindings'];
   safeFields.forEach(field => {
     if (updates[field] !== undefined) automation[field] = updates[field];
   });
@@ -7696,7 +7902,7 @@ const runningManagers = new Map(); // automationId -> child process
 const managerRetryCounters = new Map(); // automationId -> number of retries this cycle
 const managerLiveOutputBuffers = new Map(); // automationId -> string[] chunks
 
-const AGENT_PROMPT_SUFFIX = '\n\nEnd your response with a JSON block wrapped in :::loop-result markers like this:\n:::loop-result\n{"summary": "Brief one-line summary", "attentionItems": [{"summary": "Short description", "detail": "Full context"}]}\n:::loop-result\nIf there are no issues, use an empty attentionItems array.';
+const AGENT_PROMPT_SUFFIX = '\n\nEnd your response with a JSON block wrapped in :::loop-result markers like this:\n:::loop-result\n{"summary": "Brief one-line summary", "attentionItems": [{"summary": "Short description", "detail": "Full context", "key": "optional-stable-slug"}]}\n:::loop-result\nIf there are no issues, use an empty attentionItems array. Include "key" on an attentionItem when the same underlying condition may recur across runs (e.g. "cert-expiry-api.example.com"), so it tracks as one finding instead of duplicates.';
 
 const MANAGER_PROMPT_TEMPLATE = `You are the Automation Manager for "{name}".
 
@@ -7988,6 +8194,111 @@ ipcMain.handle('codex:getThreadState', (event, threadId) => {
   return codexAppServer ? codexAppServer.getThreadState(threadId) : null;
 });
 
+// --- Findings inbox --------------------------------------------------------
+// Read/ack surface over the durable findings store (see readFindings/
+// writeFindings + finalizeAgentRun's write hook). main never spawns a column
+// from here — findings:openConversation only returns the lookup info the
+// renderer needs so IT drives the spawn, same division as everywhere else in
+// this file. `id` is always used as an opaque lookup key, never a path.
+
+ipcMain.handle('findings:list', (event, opts) => {
+  try {
+    const store = readFindings();
+    const unacknowledgedOnly = !!(opts && opts.unacknowledgedOnly);
+    return { ok: true, findings: FindingsStore.listFindings(store, { unacknowledgedOnly }) };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('findings:acknowledge', (event, id) => {
+  try {
+    if (typeof id !== 'string' || !id) return { ok: false, error: 'invalid id' };
+    const store = readFindings();
+    const updated = FindingsStore.acknowledgeFinding(store, id, new Date().toISOString());
+    writeFindings(updated);
+    // Reconcile both surfaces — without this, acknowledging in the inbox
+    // never clears the row on the always-on-top sticky (it only refreshes on
+    // a findings:updated push), and the reverse leaves the tab badge stale.
+    broadcastFindingsUpdated(updated);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('findings:acknowledgeAll', (event, filter) => {
+  try {
+    const safeFilter = (filter && typeof filter === 'object' && typeof filter.automationId === 'string')
+      ? { automationId: filter.automationId }
+      : null;
+    const store = readFindings();
+    const updated = FindingsStore.acknowledgeAll(store, safeFilter, new Date().toISOString());
+    writeFindings(updated);
+    broadcastFindingsUpdated(updated);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('findings:openConversation', (event, id) => {
+  try {
+    if (typeof id !== 'string' || !id) return { ok: false, error: 'invalid id' };
+    const store = readFindings();
+    const finding = FindingsStore.listFindings(store, {}).find(f => f.id === id);
+    if (!finding) return { ok: false, error: 'finding not found' };
+    return {
+      ok: true,
+      sessionId: finding.sessionId || null,
+      cwd: finding.cwd || null,
+      profileId: finding.profileId || null,
+      agentName: finding.agentName || null
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+// findings-sticky.html/js — the always-on-top sticky note over the same
+// findings store. Its own window lifecycle lives with the other
+// window-creation functions above (createFindingsStickyWindow); these three
+// handlers are the surface findings-sticky.js drives it through.
+ipcMain.handle('findings:openSticky', () => {
+  try {
+    createFindingsStickyWindow();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('findings:closeSticky', () => {
+  try {
+    if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) findingsStickyWindow.close();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+// Toggle is server-authoritative (reads the window's actual alwaysOnTop
+// state rather than trusting a renderer-tracked boolean) so it can't drift.
+ipcMain.handle('findings:stickyTogglePin', (event) => {
+  try {
+    // Only the sticky window itself may toggle its own pin — otherwise any
+    // window (including mainWindow) could pin itself always-on-top with no
+    // way back through the UI.
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed() || win !== findingsStickyWindow) return { ok: false, error: 'window unavailable' };
+    const next = !win.isAlwaysOnTop();
+    win.setAlwaysOnTop(next, 'floating');
+    return { ok: true, pinned: next };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
 // --- Codex watcher -------------------------------------------------------
 //
 // The codex plugin resolves its state root from CLAUDE_PLUGIN_DATA, which
@@ -8088,11 +8399,18 @@ ipcMain.handle('codexwatch:open', (event, opts) => {
 // Fire-and-forget notification from the main window's applyVisualTheme so
 // any already-open watcher windows follow a live light/dark toggle instead
 // of staying stuck at whatever theme they were opened with.
+// Also the findings sticky window's only source of live theme changes — it
+// has no theme selector of its own (same as the codex watcher), and adding a
+// second renderer.js -> main send just for it would duplicate this one.
 ipcMain.on('codexwatch:themeChanged', (event, theme) => {
   if (theme !== 'light' && theme !== 'dark') return;
   codexWatchLastTheme = theme;
   for (const win of codexWatchWindows.keys()) {
     if (!win.isDestroyed()) win.webContents.send('codexwatch:theme', theme);
+  }
+  findingsStickyLastTheme = theme;
+  if (findingsStickyWindow && !findingsStickyWindow.isDestroyed()) {
+    findingsStickyWindow.webContents.send('findingssticky:theme', theme);
   }
 });
 
@@ -8334,6 +8652,29 @@ function sendManagerNotification(automation, summary) {
   notif.show();
 }
 
+// One OS notification per run (not per finding) — called only when
+// upsertFindings reported at least one genuinely new finding, so a recurring
+// finding that merely bumps `occurrences` stays silent. Clicking focuses the
+// window and tells the renderer which finding to jump to.
+function sendFindingsNotification(automation, newFindings) {
+  try {
+    if (!Notification.isSupported() || !newFindings || !newFindings.length) return;
+    const first = newFindings[0];
+    const title = automation.name + ' — ' + newFindings.length + ' finding' + (newFindings.length === 1 ? '' : 's');
+    const body = (first.summary || (first.item && first.item.summary) || '').substring(0, 150);
+    const notif = new Notification({ title, body, icon: path.join(__dirname, 'icon.png') });
+    notif.on('click', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+        mainWindow.webContents.send('findings:focus', { id: first.id });
+      }
+    });
+    notif.show();
+  } catch (err) { console.error('[findings] notification failed:', err && err.message); }
+}
+
 // Returns true if `now` falls within the configured run window.
 // window: { enabled, startHour, startMinute, endHour, endMinute, days[] } or null/undefined
 // A null/undefined window, or one with enabled=false, imposes no restriction.
@@ -8443,9 +8784,16 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
   if (opts.skipPermissions) args.push('--dangerously-skip-permissions');
   if (opts.bare) args.push('--bare');
   if (opts.model) args.push('--model', opts.model);
-  if (Array.isArray(opts.extraArgs)) {
-    for (const a of opts.extraArgs) args.push(a);
-  }
+  const extraArgs = Array.isArray(opts.extraArgs) ? opts.extraArgs : [];
+  // An automation's own extraArgs may already carry --resume or --session-id
+  // (e.g. resuming a specific prior conversation) — the CLI treats
+  // --session-id + --resume as mutually exclusive, so a working automation
+  // must not have our app-minted --session-id pushed alongside it. When
+  // skipped, the run simply has no app-minted id (findings get
+  // sessionId: null and the UI degrades to "Discuss finding").
+  const hasConflictingSessionFlag = extraArgs.includes('--resume') || extraArgs.includes('--session-id');
+  if (opts.sessionId && !hasConflictingSessionFlag) args.push('--session-id', opts.sessionId);
+  for (const a of extraArgs) args.push(a);
 
   let mcpConfigPath = null;
   if (opts.mcpConfig) {
@@ -8786,7 +9134,10 @@ function finalizeAgentRun(automationId, agentId, key, o) {
       summary: parsed.summary,
       output: displayOutput,
       attentionItems: parsed.attentionItems,
-      costUsd: null
+      costUsd: null,
+      cwd: o.cwd || null,
+      profileId: o.profileId || null,
+      sessionId: o.sessionId || null
     });
   } catch { /* don't let save failure prevent state cleanup below */ }
 
@@ -8808,6 +9159,55 @@ function finalizeAgentRun(automationId, agentId, key, o) {
       }
       triggerDependentAgents(automationId, agentId, runStatus, freshData);
       checkPipelineComplete(automationId);
+
+      // Findings write hook — own try/catch so a store failure can never skip
+      // the dependent-agent fan-out / pipeline check above (which already ran
+      // by this point). Reuses freshAuto/freshAgent rather than re-reading
+      // automations.json. Findings are always recorded regardless of
+      // alertOnFindings — that toggle only gates the OS notification below
+      // (queueFindingsNotification), not whether the inbox/badge reflect
+      // reality.
+      try {
+        if (parsed.attentionItems && parsed.attentionItems.length) {
+          const runAgentName = (freshAuto.agents.find(ag => ag.id === agentId) || {}).name || agentId;
+          // parseAgentResult doesn't validate attentionItems' shape — a
+          // model can drift to a string-shaped item ("Certificate
+          // expiring") instead of { summary }, and any item can carry a
+          // missing/blank summary. Coerce/filter here so that never
+          // collapses distinct findings into one blank inbox row (see
+          // FindingsStore.upsertFindings' matching empty-summary guard).
+          const entries = parsed.attentionItems
+            .map(item => (typeof item === 'string' ? { summary: item } : item))
+            .filter(item => item && typeof item === 'object' && typeof item.summary === 'string' && item.summary.trim() !== '')
+            .map(item => ({
+              automationId,
+              automationName: freshAuto.name,
+              agentId,
+              agentName: runAgentName,
+              item,
+              runStartedAt: o.startedAt,
+              sessionId: o.sessionId || null,
+              cwd: o.cwd || null,
+              profileId: o.profileId || null
+            }));
+          if (entries.length) {
+            const findingsData = readFindings();
+            const upserted = FindingsStore.upsertFindings(findingsData, entries, completedAt);
+            const pruned = FindingsStore.pruneFindings(upserted.store, completedAt, FINDINGS_CAPS);
+            writeFindings(pruned);
+            if (upserted.newFindings.length) {
+              broadcastFindingsUpdated(pruned, upserted.newFindings);
+              // alertOnFindings !== false means undefined defaults ON. The
+              // focus check happens at fire time (see queueFindingsNotification's
+              // debounce timer), not here — the notification fires 5s after
+              // this point and focus can change in the meantime.
+              if (freshAuto.alertOnFindings !== false) {
+                queueFindingsNotification(freshAuto, upserted.newFindings);
+              }
+            }
+          }
+        }
+      } catch (findingsErr) { console.error('[findings] write hook failed:', findingsErr && findingsErr.message); }
     }
   } catch { /* avoid crashing the finalizer */ }
 
@@ -9239,6 +9639,22 @@ async function runAgent(automationId, agentId, opts) {
     : resolveProfileFor({ columnProfileId: automation.profileId, projectProfileId: getProjectProfileIdByPath(automation.projectPath) });
   const agentEnv = Object.assign({}, getAgentEndpointEnv(agent, automation.projectPath), profile.env);
 
+  // Minted up front (not scraped from the event stream) so the run's
+  // conversation is resumable even if it dies before emitting any event, and
+  // so it's already in scope for finalizeAgentRun regardless of which branch
+  // runs or how it terminates.
+  const runSessionId = crypto.randomUUID();
+  // Mirrors the guard inside spawnHeadlessClaude / buildInteractiveArgs: when
+  // the agent's own extraArgs already carry --resume or --session-id, neither
+  // spawn path actually pushes our minted id onto the CLI invocation (the
+  // flags are mutually exclusive), so the run never happens under
+  // runSessionId. Computed once here so every finalizeAgentRun call below
+  // records the id that was actually used — never a phantom id that would
+  // render a dead "Open conversation" button in the findings inbox.
+  const agentExtraArgs = Array.isArray(agent.extraArgs) ? agent.extraArgs : [];
+  const hasConflictingSessionFlag = agentExtraArgs.includes('--resume') || agentExtraArgs.includes('--session-id');
+  const finalizedSessionId = hasConflictingSessionFlag ? null : runSessionId;
+
   // --- Interactive scheduled run (opt-in) ---
   if (agent.sessionMode === 'interactive') {
     interactiveRunActive = true;
@@ -9246,7 +9662,7 @@ async function runAgent(automationId, agentId, opts) {
     try { fs.unlinkSync(sentinelPath); } catch { /* not there yet — fine */ }
     const interactivePrompt = fullPrompt + interactiveSuffix(sentinelPath);
     const handle = spawnInteractiveScheduled(interactivePrompt, cwd, {
-      sessionId: crypto.randomUUID(),
+      sessionId: runSessionId,
       skipPermissions: !!agent.skipPermissions,
       model: agent.endpointModel || null,
       env: agentEnv,
@@ -9274,7 +9690,10 @@ async function runAgent(automationId, agentId, opts) {
           output: result.output || capTail(denoiseInteractive(textChunks.join('\n')), 8000),
           parsed: result.parsed || null,
           startedAt,
-          lastError: result.lastError
+          lastError: result.lastError,
+          cwd,
+          profileId: profile.id,
+          sessionId: finalizedSessionId
         });
       }
     });
@@ -9293,6 +9712,7 @@ async function runAgent(automationId, agentId, opts) {
     extraArgs: Array.isArray(agent.extraArgs) ? agent.extraArgs : null,
     env: agentEnv,
     profileId: profile.id,
+    sessionId: runSessionId,
     onRaw: (raw) => { outputChunks.push(raw); },
     onText: (text) => {
       textChunks.push(text);
@@ -9311,7 +9731,10 @@ async function runAgent(automationId, agentId, opts) {
       status: exitCode === 0 ? 'completed' : 'error',
       exitCode,
       output: textChunks.join(''),
-      startedAt
+      startedAt,
+      cwd,
+      profileId: profile.id,
+      sessionId: finalizedSessionId
     });
   });
 
@@ -9323,6 +9746,9 @@ async function runAgent(automationId, agentId, opts) {
       exitCode: null,
       output: textChunks.join(''),
       startedAt,
+      cwd,
+      profileId: profile.id,
+      sessionId: finalizedSessionId,
       lastError: err.message
     });
   });
@@ -9865,6 +10291,12 @@ function createTray() {
         if (mainWindow) {
           revealWindow(mainWindow);
         }
+      }
+    },
+    {
+      label: 'Open Findings',
+      click: () => {
+        createFindingsStickyWindow();
       }
     },
     { type: 'separator' },

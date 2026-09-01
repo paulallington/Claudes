@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'; worker-src 'self' blob:;">
+  <title>Findings</title>
+  <link rel="stylesheet" href="./styles.css">
+  <style>
+    /* Genuinely sticky-specific layout only — the palette (:root /
+       [data-theme="light"] custom properties) comes from the shared
+       styles.css link above, like codex-watch.html, so a future theme
+       change reaches this window automatically instead of silently
+       diverging from a locally-copied palette. */
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      background: var(--bg-main);
+      color: var(--text-primary);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+      border: 1px solid var(--border-primary);
+      user-select: none;
+    }
+    #fs-header {
+      -webkit-app-region: drag;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 8px 8px 8px 12px;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border-primary);
+      flex-shrink: 0;
+    }
+    #fs-title {
+      flex: 1;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .fs-header-btn {
+      -webkit-app-region: no-drag;
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      line-height: 1;
+      padding: 0;
+    }
+    .fs-header-btn:hover { background: var(--border-subtle); color: var(--text-primary); }
+    .fs-header-btn.fs-pinned { color: var(--accent); }
+    #fs-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px;
+      user-select: text;
+    }
+    .fs-row {
+      background: var(--bg-toolbar);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 8px 9px;
+      margin-bottom: 6px;
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    .fs-row-body { flex: 1; min-width: 0; }
+    .fs-summary {
+      color: var(--text-primary);
+      line-height: 1.35;
+      word-wrap: break-word;
+    }
+    .fs-meta {
+      margin-top: 4px;
+      color: var(--text-muted);
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .fs-ack-btn {
+      -webkit-app-region: no-drag;
+      flex-shrink: 0;
+      background: transparent;
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+      cursor: pointer;
+      border-radius: 4px;
+      width: 22px;
+      height: 22px;
+      font-size: 13px;
+      line-height: 1;
+      padding: 0;
+    }
+    .fs-ack-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+    #fs-empty {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 4px;
+      color: var(--text-muted);
+      text-align: center;
+      padding: 20px;
+    }
+    #fs-empty-title { color: var(--text-secondary); font-weight: 600; }
+    .fs-hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="fs-header">
+    <span id="fs-title">Findings</span>
+    <button type="button" class="fs-header-btn" id="fs-pin" title="Pinned on top">&#128204;</button>
+    <button type="button" class="fs-header-btn" id="fs-close" title="Close">&times;</button>
+  </div>
+  <div id="fs-list"></div>
+  <div id="fs-empty" class="fs-hidden">
+    <div id="fs-empty-title">Nothing needs attention</div>
+    <div>All findings are acknowledged.</div>
+  </div>
+  <script src="./findings-sticky.js"></script>
+</body>
+</html>
