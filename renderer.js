@@ -8863,7 +8863,7 @@ document.querySelectorAll('.explorer-tab').forEach(function (tab) {
     if (tabName === 'files') { stopGitPolling(); refreshFileTree(); }
     else if (tabName === 'git') { refreshGitStatus(true); startGitPolling(); }
     else if (tabName === 'run') { stopGitPolling(); showRunListView(); refreshRunConfigs(); }
-    else if (tabName === 'automations') { stopGitPolling(); refreshAutomations(); }
+    else if (tabName === 'automations') { stopGitPolling(); refreshAutomations(); refreshFindingsInbox(); }
     refocusActiveTerminal();
   });
 });
@@ -18339,6 +18339,10 @@ function openAutomationModal(existingAutomation) {
   // pickers, so "inherit" can't drift between surfaces.
   buildProfilePicker(document.getElementById('automation-profile'), existingAutomation ? existingAutomation.profileId : null, 'Inherit from project');
 
+  // undefined (never-set, or pre-findings automations) means ON — only an
+  // explicit `false` opts an automation out of the inbox/badge/notification.
+  document.getElementById('automation-alert-on-findings').checked = !existingAutomation || existingAutomation.alertOnFindings !== false;
+
   renderModalAgentCards();
 
   // Discover the project's MCP servers for the per-agent allowlist checkboxes,
@@ -19190,6 +19194,7 @@ function saveAutomation() {
   // as the other three pickers; see buildProfilePicker).
   var automationProfileEl = document.getElementById('automation-profile');
   var automationProfileId = automationProfileEl ? (automationProfileEl.value || null) : null;
+  var automationAlertOnFindings = document.getElementById('automation-alert-on-findings').checked;
 
   if (automationEditingId) {
     // Get current automation to find agents that were removed
@@ -19205,7 +19210,7 @@ function saveAutomation() {
 
       return Promise.all(removePromises);
     }).then(function () {
-      return window.electronAPI.updateAutomation(automationEditingId, { name: automationName, manager: managerConfig, runWindow: automationRunWindow, profileId: automationProfileId });
+      return window.electronAPI.updateAutomation(automationEditingId, { name: automationName, manager: managerConfig, runWindow: automationRunWindow, profileId: automationProfileId, alertOnFindings: automationAlertOnFindings });
     }).then(function () {
       var promises = agents.map(function (ag) {
         if (ag.id && ag.id.indexOf('temp_') !== 0) {
@@ -19231,7 +19236,8 @@ function saveAutomation() {
       agents: agents,
       manager: managerConfig,
       runWindow: automationRunWindow,
-      profileId: automationProfileId
+      profileId: automationProfileId,
+      alertOnFindings: automationAlertOnFindings
     };
     window.electronAPI.createAutomation(config).then(function (automation) {
       if (needsCloneSetup) {
@@ -20183,6 +20189,224 @@ function updateAutomationSidebarBadges() {
     }
   });
 }
+
+// ============================================================
+// Findings Inbox
+// ============================================================
+// Read/ack surface over lib/findings-store.js's durable store (via the
+// findings: IPC family) rendered through the pure view-model in
+// lib/findings-inbox-view.js. Findings are global (not scoped to
+// activeProjectKey), so every action here that navigates somewhere first
+// resolves — and if needed switches to — the project that owns the
+// finding's automation.
+
+var findingsInboxData = [];
+
+function refreshFindingsInbox() {
+  if (!window.electronAPI || !window.electronAPI.findingsList) return Promise.resolve();
+  return window.electronAPI.findingsList({ unacknowledgedOnly: true }).then(function (res) {
+    findingsInboxData = (res && res.ok && res.findings) || [];
+    renderFindingsInbox();
+    updateFindingsInboxBadge(findingsInboxData.length);
+  });
+}
+
+function updateFindingsInboxBadge(count) {
+  var badge = document.getElementById('automations-findings-badge');
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count > 99 ? '99+' : String(count);
+    badge.classList.remove('hidden');
+  } else {
+    badge.textContent = '';
+    badge.classList.add('hidden');
+  }
+}
+
+function renderFindingsInbox() {
+  var listEl = document.getElementById('findings-inbox-list');
+  var emptyEl = document.getElementById('findings-inbox-empty');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  var groups = window.FindingsInboxView.groupFindingsByAutomation(findingsInboxData);
+  if (groups.length === 0) {
+    if (emptyEl) emptyEl.style.display = '';
+    listEl.style.display = 'none';
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = 'none';
+  listEl.style.display = '';
+  var now = new Date();
+  groups.forEach(function (group) {
+    var groupEl = document.createElement('div');
+    groupEl.className = 'findings-inbox-group';
+
+    var headerEl = document.createElement('div');
+    headerEl.className = 'findings-inbox-group-header';
+    headerEl.innerHTML =
+      '<span class="findings-inbox-group-name">' + escapeHtml(group.automationName || 'Automation') + '</span>' +
+      '<button type="button" class="findings-inbox-ack-all" data-automation-id="' + escapeHtml(group.automationId || '') + '">Acknowledge all</button>';
+    groupEl.appendChild(headerEl);
+
+    group.findings.forEach(function (finding) {
+      groupEl.appendChild(renderFindingInboxItem(finding, now));
+    });
+
+    listEl.appendChild(groupEl);
+  });
+}
+
+function renderFindingInboxItem(finding, now) {
+  var row = document.createElement('div');
+  row.className = 'findings-inbox-item';
+  row.dataset.findingId = finding.id;
+
+  var occLabel = window.FindingsInboxView.occurrenceLabel(finding.occurrences);
+  var relTime = window.FindingsInboxView.formatFindingRelativeTime(finding.lastSeenAt, now);
+  var action = window.FindingsInboxView.findingConversationAction(finding);
+
+  var metaParts = [];
+  if (finding.agentName) metaParts.push(escapeHtml(finding.agentName));
+  if (relTime) metaParts.push(escapeHtml(relTime));
+  var metaHtml = metaParts.join(' &middot; ');
+  if (occLabel) metaHtml += ' <span class="findings-inbox-occurrence">&middot; ' + escapeHtml(occLabel) + '</span>';
+
+  row.innerHTML =
+    '<div class="findings-inbox-summary">' + escapeHtml(finding.summary || '') + '</div>' +
+    '<div class="findings-inbox-meta">' + metaHtml + '</div>' +
+    (finding.detail ? '<div class="findings-inbox-detail hidden">' + escapeHtml(finding.detail) + '</div>' : '') +
+    '<div class="findings-inbox-actions">' +
+      '<button type="button" class="findings-inbox-btn findings-inbox-btn-ack">Acknowledge</button>' +
+      '<button type="button" class="findings-inbox-btn findings-inbox-btn-open-run">Open run</button>' +
+      '<button type="button" class="findings-inbox-btn findings-inbox-btn-open-convo">' + escapeHtml(action.label) + '</button>' +
+    '</div>';
+
+  var summaryEl = row.querySelector('.findings-inbox-summary');
+  if (finding.detail) {
+    summaryEl.classList.add('findings-inbox-summary-expandable');
+    summaryEl.addEventListener('click', function () {
+      row.querySelector('.findings-inbox-detail').classList.toggle('hidden');
+    });
+  }
+  row.querySelector('.findings-inbox-btn-ack').addEventListener('click', function () { findingsInboxAcknowledge(finding.id); });
+  row.querySelector('.findings-inbox-btn-open-run').addEventListener('click', function () { findingsInboxOpenRun(finding); });
+  row.querySelector('.findings-inbox-btn-open-convo').addEventListener('click', function () { findingsInboxOpenConversation(finding); });
+
+  return row;
+}
+
+// Delegated: group headers (and their Acknowledge-all buttons) are rebuilt
+// on every render, so a direct listener would leak/duplicate.
+(function () {
+  var listEl = document.getElementById('findings-inbox-list');
+  if (!listEl) return;
+  listEl.addEventListener('click', function (e) {
+    var btn = e.target.closest('.findings-inbox-ack-all');
+    if (!btn) return;
+    var automationId = btn.getAttribute('data-automation-id') || null;
+    findingsInboxAcknowledgeAll(automationId);
+  });
+})();
+
+function findingsInboxAcknowledge(id) {
+  window.electronAPI.findingsAcknowledge(id).then(function () { refreshFindingsInbox(); });
+}
+
+function findingsInboxAcknowledgeAll(automationId) {
+  window.electronAPI.findingsAcknowledgeAll(automationId ? { automationId: automationId } : null).then(function () { refreshFindingsInbox(); });
+}
+
+function findingsInboxProjectIndex(projectPath) {
+  if (!config || !config.projects || !projectPath) return -1;
+  var norm = String(projectPath).replace(/\\/g, '/');
+  for (var i = 0; i < config.projects.length; i++) {
+    if (String(config.projects[i].path || '').replace(/\\/g, '/') === norm) return i;
+  }
+  return -1;
+}
+
+// Resolves the automation a finding belongs to, switches to its project if
+// it isn't already active (findings are global, so this can be any project),
+// then invokes `then(automation)` — `automation` is null if it was deleted
+// since the finding was recorded.
+function findingsInboxWithProject(finding, then) {
+  window.electronAPI.getAutomations().then(function (data) {
+    var auto = (data.automations || []).find(function (a) { return a.id === finding.automationId; });
+    var projectPath = auto ? auto.projectPath : finding.cwd;
+    var idx = findingsInboxProjectIndex(projectPath);
+    if (idx < 0) {
+      alert('That finding\'s project is not in your project list.');
+      return;
+    }
+    if (idx !== config.activeProjectIndex) setActiveProject(idx);
+    then(auto);
+  });
+}
+
+function findingsInboxOpenRun(finding) {
+  findingsInboxWithProject(finding, function (auto) {
+    if (!auto) { alert('That automation no longer exists.'); return; }
+    var tab = document.querySelector('.explorer-tab[data-tab="automations"]');
+    if (tab) tab.click();
+    openAutomationDetail(auto);
+  });
+}
+
+function findingsInboxOpenConversation(finding) {
+  var action = window.FindingsInboxView.findingConversationAction(finding);
+  if (action.type === 'discuss') { findingsInboxDiscuss(finding); return; }
+  window.electronAPI.findingsOpenConversation(finding.id).then(function (res) {
+    if (!res || !res.ok || !res.sessionId) { findingsInboxDiscuss(finding); return; }
+    findingsInboxWithProject(finding, function () {
+      addColumn(['--resume', res.sessionId], null, spawnOpts({
+        sessionId: res.sessionId,
+        cwd: res.cwd || undefined,
+        profileId: res.profileId || undefined,
+        title: res.agentName || finding.agentName || undefined
+      }));
+    });
+  });
+}
+
+// Fallback for findings from older runs with no persisted sessionId — same
+// append-system-prompt pattern as the pipeline "Open in Claude" action.
+function findingsInboxDiscuss(finding) {
+  findingsInboxWithProject(finding, function () {
+    var agentName = finding.agentName || 'Automation';
+    var output = finding.summary || '';
+    if (finding.detail) output += '\n' + finding.detail;
+    var context = 'You are continuing work from a background agent called "' + agentName + '". ' +
+      'Below is a finding it raised. The user wants to discuss, investigate, or action it.\n\n' +
+      '--- FINDING ---\n' + output + '\n--- END FINDING ---';
+    var spawnArgs = buildSpawnArgs();
+    spawnArgs.push('--append-system-prompt', context);
+    addColumn(spawnArgs, null, spawnOpts({ title: agentName, cwd: finding.cwd || undefined, profileId: finding.profileId || undefined }));
+  });
+}
+
+if (window.electronAPI && window.electronAPI.onFindingsUpdated) {
+  window.electronAPI.onFindingsUpdated(function (data) {
+    updateFindingsInboxBadge(data && typeof data.count === 'number' ? data.count : 0);
+    refreshFindingsInbox();
+  });
+}
+
+if (window.electronAPI && window.electronAPI.onFindingsFocus) {
+  window.electronAPI.onFindingsFocus(function (data) {
+    var tab = document.querySelector('.explorer-tab[data-tab="automations"]');
+    if (tab) tab.click();
+    refreshFindingsInbox().then(function () {
+      if (!data || !data.id) return;
+      var el = document.querySelector('.findings-inbox-item[data-finding-id="' + CSS.escape(data.id) + '"]');
+      if (!el) return;
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.classList.add('findings-inbox-item-highlight');
+      setTimeout(function () { el.classList.remove('findings-inbox-item-highlight'); }, 2000);
+    });
+  });
+}
+
+refreshFindingsInbox();
 
 // ============================================================
 // Conversational Automation Setup

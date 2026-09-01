@@ -6445,6 +6445,153 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
   50% { opacity: 0.6; box-shadow: 0 0 6px 2px rgba(34, 197, 94, 0.3); }
 }
 
+/* Automations tab count badge: number of unacknowledged findings. Calm, not
+   alarming — a neutral pill, not the amber/red vocabulary used for errors. */
+.explorer-tab-count-badge {
+  position: absolute;
+  top: 4px;
+  right: calc(50% - 20px);
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--text-faint);
+  color: var(--bg-main);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+}
+
+.explorer-tab-count-badge.hidden { display: none; }
+
+/* Findings inbox: a calm, read-most-mornings panel above the automation
+   list. Reports, doesn't alarm — no accent colours, same chrome as the rest
+   of the Automations tab. */
+.findings-inbox-section {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.findings-inbox-header {
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+
+.findings-inbox-empty {
+  padding: 10px 12px 14px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.findings-inbox-list {
+  padding: 0 10px 8px;
+}
+
+.findings-inbox-group {
+  margin-bottom: 8px;
+}
+
+.findings-inbox-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2px 4px;
+}
+
+.findings-inbox-group-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.findings-inbox-ack-all {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.findings-inbox-ack-all:hover {
+  color: var(--text-secondary);
+  text-decoration: underline;
+}
+
+.findings-inbox-item {
+  background: var(--bg-panel);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.findings-inbox-summary {
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.findings-inbox-summary-expandable {
+  cursor: pointer;
+}
+
+.findings-inbox-summary-expandable:hover {
+  color: var(--text-primary);
+  text-decoration: underline dotted;
+}
+
+.findings-inbox-meta {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.findings-inbox-occurrence {
+  color: var(--text-faint);
+}
+
+.findings-inbox-detail {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: var(--bg-main);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.findings-inbox-detail.hidden { display: none; }
+
+.findings-inbox-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.findings-inbox-btn {
+  background: none;
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.findings-inbox-btn:hover {
+  background: var(--hover-strong);
+  color: var(--text-primary);
+}
+
+.findings-inbox-item.findings-inbox-item-highlight {
+  outline: 1px solid var(--text-faint);
+}
+
 /* Flyout Dashboard */
 .automations-flyout {
   position: fixed;

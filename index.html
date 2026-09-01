@@ -83,6 +83,7 @@
         </button>
         <button class="explorer-tab" data-tab="automations" title="Automations" aria-label="Automations">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M9 1L2.5 9.2a.5.5 0 0 0 .4.8H7l-1.5 5.2a.4.4 0 0 0 .7.36L13.5 6.8a.5.5 0 0 0-.4-.8H9.4l1.3-4.55A.4.4 0 0 0 9 1z"/></svg>
+          <span id="automations-findings-badge" class="explorer-tab-count-badge hidden"></span>
         </button>
         <button class="explorer-tab" data-tab="hooks" title="Hooks" aria-label="Hooks">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 8.5l-2 2a2.5 2.5 0 1 1-3.5-3.5l2.5-2.5a2.5 2.5 0 0 1 3.5 0"/><path d="M9.5 7.5l2-2a2.5 2.5 0 1 1 3.5 3.5l-2.5 2.5a2.5 2.5 0 0 1-3.5 0"/><path d="M6 10l4-4"/></svg>
@@ -178,6 +179,13 @@
           </div>
           <div id="automations-search-bar" style="display:none;">
             <input type="text" id="automations-search-input" class="automations-search-input" placeholder="Search automations..." spellcheck="false">
+          </div>
+          <div id="findings-inbox-section" class="findings-inbox-section">
+            <div class="findings-inbox-header">
+              <span>FINDINGS</span>
+            </div>
+            <div id="findings-inbox-empty" class="findings-inbox-empty">All caught up — no findings need attention.</div>
+            <div id="findings-inbox-list" class="findings-inbox-list"></div>
           </div>
           <div id="automations-no-project" class="automations-placeholder" style="display:none;">
             <p style="opacity:0.5;text-align:center;padding:2rem 1rem;font-size:12px;">Select a project to see its automations</p>
@@ -1128,6 +1136,14 @@
             <select id="automation-profile" class="automation-input"></select>
           </div>
 
+          <!-- Findings inbox opt-out -->
+          <div class="automation-form-group">
+            <label class="automation-permission-option">
+              <input type="checkbox" id="automation-alert-on-findings" checked>
+              <span>Alert me about findings</span>
+            </label>
+          </div>
+
           <!-- Run window (optional) -->
           <div id="automation-runwindow-section" class="automation-runwindow-section">
             <button type="button" id="automation-runwindow-toggle" class="automation-runwindow-toggle">
@@ -1633,6 +1649,8 @@
   <script src="./lib/codex-watch-jobs.js"></script>
   <script src="./lib/user-file-attachments.js"></script>
   <script src="./lib/attachment-strip.js"></script>
+  <script src="./lib/findings-store.js"></script>
+  <script src="./lib/findings-inbox-view.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>
