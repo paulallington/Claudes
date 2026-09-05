@@ -105,6 +105,65 @@
       padding: 0;
     }
     .fs-ack-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .fs-decision {
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px solid var(--border-subtle);
+    }
+    .fs-decision-prompt {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+    .fs-decision-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .fs-decision-option-btn {
+      -webkit-app-region: no-drag;
+      background: none;
+      border: 1px solid var(--border-primary);
+      color: var(--text-secondary);
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .fs-decision-option-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .fs-decision-freetext {
+      -webkit-app-region: no-drag;
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+    }
+    .fs-decision-freetext input {
+      flex: 1;
+      min-width: 0;
+      background: var(--bg-main);
+      border: 1px solid var(--border-primary);
+      color: var(--text-primary);
+      font-size: 11px;
+      padding: 3px 6px;
+      border-radius: 4px;
+    }
+    .fs-decision-freetext button {
+      background: none;
+      border: 1px solid var(--border-primary);
+      color: var(--text-secondary);
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .fs-decision-freetext button:hover { background: var(--border-subtle); color: var(--text-primary); }
+    .fs-resolution {
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px solid var(--border-subtle);
+      font-size: 11px;
+      color: var(--text-muted);
+    }
     #fs-empty {
       flex: 1;
       display: flex;
@@ -131,6 +190,7 @@
     <div id="fs-empty-title">Nothing needs attention</div>
     <div>All findings are acknowledged.</div>
   </div>
+  <script src="./lib/findings-inbox-view.js"></script>
   <script src="./findings-sticky.js"></script>
 </body>
 </html>
