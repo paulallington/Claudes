@@ -11,7 +11,7 @@ test('checkAttachmentPath accepts a path inside an allowed root with an allowed 
     stat: () => ({ isFile: () => true, size: 1000 }),
   });
   assert.equal(result.ok, true);
-  assert.equal(result.path, path.resolve(candidate));
+  assert.equal(result.path, path.win32.resolve(candidate));
 });
 
 test('checkAttachmentPath refuses a UNC path', () => {
