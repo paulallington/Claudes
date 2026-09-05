@@ -6,6 +6,8 @@ const {
   occurrenceLabel,
   findingConversationAction,
   unacknowledgedBadgeCount,
+  decisionViewModel,
+  resolutionSummaryLabel,
 } = require('../lib/findings-inbox-view');
 
 test('groupFindingsByAutomation buckets findings under their automation, preserving input (newest-first) order', () => {
@@ -53,4 +55,47 @@ test('unacknowledgedBadgeCount counts only findings without an acknowledgedAt', 
   ];
   assert.equal(unacknowledgedBadgeCount(findings), 2);
   assert.equal(unacknowledgedBadgeCount([]), 0);
+});
+
+test('decisionViewModel returns null for a finding with no decision, and the shape otherwise', () => {
+  assert.equal(decisionViewModel({ id: 'f1' }), null);
+  var finding = {
+    id: 'f2',
+    decision: { prompt: 'Approve?', options: [{ id: 'yes', label: 'Yes', hint: 'go ahead' }], freeText: true },
+    resolution: null,
+  };
+  assert.deepEqual(decisionViewModel(finding), {
+    prompt: 'Approve?',
+    options: [{ id: 'yes', label: 'Yes', hint: 'go ahead' }],
+    freeText: true,
+    resolved: false,
+  });
+});
+
+test('decisionViewModel reports resolved: true once a resolution is recorded', () => {
+  var finding = {
+    id: 'f3',
+    decision: { prompt: 'Approve?', options: [{ id: 'yes', label: 'Yes' }], freeText: false },
+    resolution: { choiceId: 'yes', text: null, resolvedAt: '2026-08-02T00:00:00.000Z' },
+  };
+  assert.equal(decisionViewModel(finding).resolved, true);
+});
+
+test('resolutionSummaryLabel returns null when there is no resolution', () => {
+  assert.equal(resolutionSummaryLabel({ id: 'f1', decision: { options: [] }, resolution: null }), null);
+});
+
+test('resolutionSummaryLabel prefers the matching option label over the raw choiceId', () => {
+  var finding = {
+    decision: { options: [{ id: 'chase', label: 'Chase them' }] },
+    resolution: { choiceId: 'chase', text: null, resolvedAt: '2026-08-01T00:09:00.000Z' },
+  };
+  var label = resolutionSummaryLabel(finding, '2026-08-01T00:10:00.000Z');
+  assert.equal(label, 'Resolved as: Chase them (1m ago)');
+});
+
+test('resolutionSummaryLabel falls back to the raw choiceId when no option matches', () => {
+  var finding = { decision: { options: [] }, resolution: { choiceId: 'custom', text: null, resolvedAt: '2026-08-01T00:00:00.000Z' } };
+  var label = resolutionSummaryLabel(finding, '2026-08-01T00:00:30.000Z');
+  assert.equal(label, 'Resolved as: custom (30s ago)');
 });
