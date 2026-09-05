@@ -7903,7 +7903,23 @@ const runningManagers = new Map(); // automationId -> child process
 const managerRetryCounters = new Map(); // automationId -> number of retries this cycle
 const managerLiveOutputBuffers = new Map(); // automationId -> string[] chunks
 
-const AGENT_PROMPT_SUFFIX = '\n\nEnd your response with a JSON block wrapped in :::loop-result markers like this:\n:::loop-result\n{"summary": "Brief one-line summary", "attentionItems": [{"summary": "Short description", "detail": "Full context", "key": "optional-stable-slug"}]}\n:::loop-result\nIf there are no issues, use an empty attentionItems array. Include "key" on an attentionItem when the same underlying condition may recur across runs (e.g. "cert-expiry-api.example.com"), so it tracks as one finding instead of duplicates.';
+// AGENT_PROMPT_SUFFIX — appended to every automation agent's prompt. Documents
+// the reporting contract for lib/findings-store.js's `attentionItems`:
+// - `key` (optional): a stable slug so a recurring condition (e.g.
+//   "cert-expiry-api.example.com") collapses into one finding instead of a
+//   fresh row every run.
+// - `decision` (optional): { prompt, options: [{id, label, hint?}], freeText? }
+//   — turns an attentionItem into a question the user can answer from the
+//   inbox/sticky window instead of just acknowledging. `key` is REQUIRED
+//   whenever `decision` is present (findings-store.js drops a keyless
+//   decision rather than risk orphaning the answer on a reworded summary).
+// - Resolutions from a *previous* run are injected above this suffix (see
+//   lib/findings-resolution-injection.js, called from runAgent) as:
+//     --- RESOLUTIONS SINCE YOUR LAST RUN ---
+//     key: choiceId — "free text answer"
+//     --- END RESOLUTIONS ---
+//   Only present when this automation has resolved decisions to report.
+const AGENT_PROMPT_SUFFIX = '\n\nEnd your response with a JSON block wrapped in :::loop-result markers like this:\n:::loop-result\n{"summary": "Brief one-line summary", "attentionItems": [{"summary": "Short description", "detail": "Full context", "key": "optional-stable-slug", "decision": {"prompt": "How should I handle this?", "options": [{"id": "chase", "label": "Chase them", "hint": "optional detail"}], "freeText": true}}]}\n:::loop-result\nIf there are no issues, use an empty attentionItems array. Include "key" on an attentionItem when the same underlying condition may recur across runs (e.g. "cert-expiry-api.example.com"), so it tracks as one finding instead of duplicates. Add "decision" (optional) when you want the user to choose between options rather than just acknowledge — "key" is REQUIRED whenever "decision" is present. If a "--- RESOLUTIONS SINCE YOUR LAST RUN ---" block appears above, it lists answers the user already gave to decisions you asked in a previous run.';
 
 const MANAGER_PROMPT_TEMPLATE = `You are the Automation Manager for "{name}".
 
