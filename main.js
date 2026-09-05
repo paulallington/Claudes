@@ -55,6 +55,7 @@ const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-ap
 const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
 const { checkAttachmentPath, checkAttachmentOpenPath, checkAttachmentContainment } = require('./lib/attachment-file-guard');
 const FindingsStore = require('./lib/findings-store');
+const { buildResolutionsBlock } = require('./lib/findings-resolution-injection');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -8227,6 +8228,21 @@ ipcMain.handle('findings:acknowledge', (event, id) => {
   }
 });
 
+ipcMain.handle('findings:resolve', (event, { id, choiceId, text } = {}) => {
+  try {
+    if (typeof id !== 'string' || !id) return { ok: false, error: 'invalid id' };
+    const store = readFindings();
+    const updated = FindingsStore.resolveFinding(store, id, { choiceId, text }, new Date().toISOString());
+    writeFindings(updated);
+    // Same reconciliation as findings:acknowledge — an answer given in one
+    // surface (inbox or sticky) must clear/update the question in the other.
+    broadcastFindingsUpdated(updated);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
 ipcMain.handle('findings:acknowledgeAll', (event, filter) => {
   try {
     const safeFilter = (filter && typeof filter === 'object' && typeof filter.automationId === 'string')
@@ -9564,6 +9580,16 @@ async function runAgent(automationId, agentId, opts) {
     promptPrefix = 'CRITICAL CONSTRAINT: This agent has READ-ONLY database access. You MUST NOT attempt to write, update, insert, delete, drop, rename, or modify any data in the database. This includes using $merge, $out, or any write stages in aggregation pipelines. Do NOT attempt to bypass this restriction by using shell commands (mongosh, mongo, etc.) or any other method. If the task requires writing to the database, report it as an attention item explaining what write would be needed, but do not perform it.\n\n';
   }
   let fullPrompt = promptPrefix + agent.prompt + AGENT_PROMPT_SUFFIX;
+
+  // Answers to decisions this automation asked in a previous run — see
+  // lib/findings-resolution-injection.js. Best-effort: a findings.json read
+  // failure must never block the run itself.
+  try {
+    const resolutionsBlock = buildResolutionsBlock(readFindings(), automationId);
+    if (resolutionsBlock) fullPrompt += resolutionsBlock;
+  } catch (err) {
+    console.error('[automations] failed to build resolutions block:', err);
+  }
 
   // If passUpstreamContext is enabled, prepend upstream agents' summaries
   if (agent.passUpstreamContext && agent.runMode === 'run_after' && agent.runAfter && agent.runAfter.length > 0) {
