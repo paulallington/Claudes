@@ -55,7 +55,7 @@ const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-ap
 const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
 const { checkAttachmentPath, checkAttachmentOpenPath, checkAttachmentContainment } = require('./lib/attachment-file-guard');
 const FindingsStore = require('./lib/findings-store');
-const { buildResolutionsBlock } = require('./lib/findings-resolution-injection');
+const { buildResolutionsBlock, pendingResolutionIds } = require('./lib/findings-resolution-injection');
 const https = require('https');
 
 // GUI launches don't inherit the user's shell PATH, so tools installed to
@@ -9598,11 +9598,19 @@ async function runAgent(automationId, agentId, opts) {
   let fullPrompt = promptPrefix + agent.prompt + AGENT_PROMPT_SUFFIX;
 
   // Answers to decisions this automation asked in a previous run — see
-  // lib/findings-resolution-injection.js. Best-effort: a findings.json read
-  // failure must never block the run itself.
+  // lib/findings-resolution-injection.js. Delivery is stamped immediately so
+  // the same answer is never replayed on a later run; the block's own header
+  // promises "since your last run", and an automation handed a two-month-old
+  // answer as if it were new will re-action it. Best-effort: a findings.json
+  // read/write failure must never block the run itself.
   try {
-    const resolutionsBlock = buildResolutionsBlock(readFindings(), automationId);
-    if (resolutionsBlock) fullPrompt += resolutionsBlock;
+    const findingsForRun = readFindings();
+    const resolutionsBlock = buildResolutionsBlock(findingsForRun, automationId);
+    if (resolutionsBlock) {
+      fullPrompt += resolutionsBlock;
+      const deliveredIds = pendingResolutionIds(findingsForRun, automationId);
+      writeFindings(FindingsStore.markResolutionsDelivered(findingsForRun, deliveredIds, new Date().toISOString()));
+    }
   } catch (err) {
     console.error('[automations] failed to build resolutions block:', err);
   }

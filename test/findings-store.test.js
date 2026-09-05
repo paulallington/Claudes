@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { fingerprintFinding, upsertFindings, acknowledgeFinding, resolveFinding, acknowledgeAll, pruneFindings, listFindings } = require('../lib/findings-store');
+const { fingerprintFinding, upsertFindings, acknowledgeFinding, resolveFinding, markResolutionsDelivered, acknowledgeAll, pruneFindings, listFindings } = require('../lib/findings-store');
 
 
 test('upsertFindings collapses a recurring "N days" finding into one entry, bumping occurrences', () => {
@@ -253,6 +253,7 @@ test('resolveFinding records a choiceId and text with a resolvedAt timestamp', (
     choiceId: 'yes',
     text: 'Approved by Paul',
     resolvedAt: '2026-08-02T00:00:00.000Z',
+    deliveredAt: null,
   });
 });
 
@@ -396,4 +397,69 @@ test('upsertFindings never creates a finding from an empty or whitespace-only su
   assert.equal(r.store.findings.length, 1);
   assert.equal(r.store.findings[0].summary, 'a real finding');
   assert.equal(r.newFindings.length, 1);
+});
+
+test('resolveFinding records the answer as not yet delivered', () => {
+  var r = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'k1', summary: 'Approve?', decision: { prompt: 'Approve?', options: [{ id: 'yes', label: 'Yes' }] } } },
+  ], '2026-08-01T00:00:00.000Z');
+  var id = r.store.findings[0].id;
+
+  var resolved = resolveFinding(r.store, id, { choiceId: 'yes' }, '2026-08-02T00:00:00.000Z');
+  assert.equal(resolved.findings[0].resolution.resolvedAt, '2026-08-02T00:00:00.000Z');
+  assert.equal(resolved.findings[0].resolution.deliveredAt, null);
+});
+
+test('markResolutionsDelivered stamps only the named, still-undelivered resolutions', () => {
+  var r = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'k1', summary: 'One?', decision: { prompt: 'One?', options: [{ id: 'a', label: 'A' }] } } },
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'k2', summary: 'Two?', decision: { prompt: 'Two?', options: [{ id: 'b', label: 'B' }] } } },
+  ], '2026-08-01T00:00:00.000Z');
+  var ids = r.store.findings.map(function (f) { return f.id; });
+  var resolved = resolveFinding(resolveFinding(r.store, ids[0], { choiceId: 'a' }, '2026-08-02T00:00:00.000Z'), ids[1], { choiceId: 'b' }, '2026-08-02T00:00:00.000Z');
+
+  var delivered = markResolutionsDelivered(resolved, [ids[0]], '2026-08-03T00:00:00.000Z');
+  assert.equal(delivered.findings[0].resolution.deliveredAt, '2026-08-03T00:00:00.000Z');
+  assert.equal(delivered.findings[1].resolution.deliveredAt, null, 'an id not named must not be stamped');
+
+  // Re-stamping must not move an existing deliveredAt.
+  var again = markResolutionsDelivered(delivered, [ids[0]], '2026-08-09T00:00:00.000Z');
+  assert.equal(again.findings[0].resolution.deliveredAt, '2026-08-03T00:00:00.000Z');
+});
+
+test('markResolutionsDelivered ignores ids with no resolution, and an empty id list', () => {
+  var r = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'Plain finding, never a question' } },
+  ], '2026-08-01T00:00:00.000Z');
+  var id = r.store.findings[0].id;
+
+  assert.equal(markResolutionsDelivered(r.store, [id], '2026-08-03T00:00:00.000Z').findings[0].resolution, null);
+  assert.equal(markResolutionsDelivered(r.store, [], '2026-08-03T00:00:00.000Z').findings.length, 1);
+});
+
+test('pruneFindings ages out a delivered answer but never one still awaiting delivery', () => {
+  var r = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'delivered', summary: 'Answered and handed over', decision: { prompt: 'Q?', options: [{ id: 'a', label: 'A' }] } } },
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'undelivered', summary: 'Answered but not yet handed over', decision: { prompt: 'Q?', options: [{ id: 'a', label: 'A' }] } } },
+  ], '2026-01-01T00:00:00.000Z');
+  var ids = r.store.findings.map(function (f) { return f.id; });
+  var resolved = resolveFinding(resolveFinding(r.store, ids[0], { choiceId: 'a' }, '2026-01-02T00:00:00.000Z'), ids[1], { choiceId: 'a' }, '2026-01-02T00:00:00.000Z');
+  var delivered = markResolutionsDelivered(resolved, [ids[0]], '2026-01-02T00:00:00.000Z');
+
+  // Well past ackMaxAgeDays for both.
+  var pruned = pruneFindings(delivered, '2026-08-01T00:00:00.000Z');
+  var keys = pruned.findings.map(function (f) { return f.fingerprint.split(':').pop(); });
+  assert.deepEqual(keys, ['undelivered'], 'a delivered answer is settled and ages out; an undelivered one must survive');
+});
+
+test('pruneFindings still protects an unanswered decision over cap', () => {
+  var entries = [];
+  for (var i = 0; i < 5; i++) {
+    entries.push({ automationId: 'auto_1', agentId: 'agent_1', item: { key: 'q' + i, summary: 'Question ' + i, decision: { prompt: 'Q?', options: [{ id: 'a', label: 'A' }] } } });
+  }
+  var r = upsertFindings({ version: 1, findings: [] }, entries, '2026-01-01T00:00:00.000Z');
+  var acked = acknowledgeAll(r.store, null, '2026-01-02T00:00:00.000Z');
+
+  var pruned = pruneFindings(acked, '2026-08-01T00:00:00.000Z', { perAutomation: 1, global: 1 });
+  assert.equal(pruned.findings.length, 5, 'acknowledging an unanswered question must not make it evictable');
 });

@@ -131,6 +131,24 @@ No new tool, no file reading, no MCP surface. The agent already knows how to
 read its own prompt. Mirrors `AGENT_PROMPT_SUFFIX` and `findingsInboxDiscuss`,
 both of which already work this way.
 
+**"Since your last run" is enforced by a delivery stamp, not a timestamp
+comparison.** Each resolution carries `deliveredAt`; only undelivered ones are
+injected, and they are stamped at spawn. A watermark based on the previous run
+time would need run-history lookup and would misbehave under clock skew;
+"deliver once" needs neither.
+
+The tradeoff is deliberate and worth stating: delivery is **at-most-once**. A
+run that dies between spawn and reading its prompt does not get the answer
+re-offered. The alternative — stamping only on successful completion — replays
+every answer after any crashed run, which is the worse failure, because the
+automation then re-actions decisions it already carried out. A lost answer is
+visible in the inbox and can be re-given; a silently repeated one is not.
+
+Delivery also settles the finding: once an answer has been handed over, the
+finding becomes prunable on the normal `ackMaxAgeDays` schedule. Without that,
+resolved findings would accumulate forever, because answering has never implied
+acknowledging.
+
 ### 4. UI
 
 The inbox and sticky window already render findings. Add, where `decision` is
