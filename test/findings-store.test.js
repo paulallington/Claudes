@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { fingerprintFinding, upsertFindings, acknowledgeFinding, acknowledgeAll, pruneFindings, listFindings } = require('../lib/findings-store');
+const { fingerprintFinding, upsertFindings, acknowledgeFinding, resolveFinding, acknowledgeAll, pruneFindings, listFindings } = require('../lib/findings-store');
 
 
 test('upsertFindings collapses a recurring "N days" finding into one entry, bumping occurrences', () => {
@@ -239,6 +239,146 @@ test('acknowledgeAll acknowledges only the given automation when a filter is pas
   assert.ok(all.findings.every(f => f.acknowledgedAt));
   // already-acknowledged 'finding a' keeps its original acknowledgedAt
   assert.equal(all.findings.find(f => f.summary === 'finding a').acknowledgedAt, '2026-08-02T00:00:00.000Z');
+});
+
+test('resolveFinding records a choiceId and text with a resolvedAt timestamp', () => {
+  var r1 = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'deploy-approval', summary: 'Approve deploy to prod?', decision: { prompt: 'Approve?', options: [{ id: 'yes', label: 'Yes' }, { id: 'no', label: 'No' }] } } },
+  ], '2026-08-01T00:00:00.000Z');
+  var id = r1.store.findings[0].id;
+  assert.equal(r1.store.findings[0].resolution, null);
+
+  var resolved = resolveFinding(r1.store, id, { choiceId: 'yes', text: 'Approved by Paul' }, '2026-08-02T00:00:00.000Z');
+  assert.deepEqual(resolved.findings[0].resolution, {
+    choiceId: 'yes',
+    text: 'Approved by Paul',
+    resolvedAt: '2026-08-02T00:00:00.000Z',
+  });
+});
+
+test('resolveFinding on a missing id leaves the store unchanged', () => {
+  var r1 = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'finding one' } },
+  ], '2026-08-01T00:00:00.000Z');
+  var resolved = resolveFinding(r1.store, 'fnd_does_not_exist', { choiceId: 'yes' }, '2026-08-02T00:00:00.000Z');
+  assert.deepEqual(resolved.findings, r1.store.findings);
+});
+
+test('upsertFindings stores decision on creation when item.key is present', () => {
+  var decision = { prompt: 'Restart the service?', options: [{ id: 'restart', label: 'Restart', hint: 'safe' }], freeText: true };
+  var r = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'svc-restart', summary: 'Service is unhealthy', decision: decision } },
+  ], '2026-08-01T00:00:00.000Z');
+  assert.deepEqual(r.store.findings[0].decision, {
+    prompt: 'Restart the service?',
+    options: [{ id: 'restart', label: 'Restart', hint: 'safe' }],
+    freeText: true,
+  });
+  assert.equal(r.store.findings[0].resolution, null);
+});
+
+test('upsertFindings preserves decision and resolution across a recurrence keyed by item.key', () => {
+  var decision = { prompt: 'Restart the service?', options: [{ id: 'restart', label: 'Restart' }] };
+  var r1 = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'svc-restart', summary: 'Service is unhealthy', decision: decision } },
+  ], '2026-08-01T00:00:00.000Z');
+  var id = r1.store.findings[0].id;
+  var resolved = resolveFinding(r1.store, id, { choiceId: 'restart' }, '2026-08-01T06:00:00.000Z');
+
+  var r2 = upsertFindings(resolved, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'svc-restart', summary: 'Service is unhealthy again', decision: decision } },
+  ], '2026-08-02T00:00:00.000Z');
+
+  assert.equal(r2.store.findings.length, 1);
+  assert.equal(r2.store.findings[0].occurrences, 2);
+  assert.deepEqual(r2.store.findings[0].decision, r1.store.findings[0].decision);
+  assert.equal(r2.store.findings[0].resolution.choiceId, 'restart');
+  assert.equal(r2.store.findings[0].resolution.resolvedAt, '2026-08-01T06:00:00.000Z');
+});
+
+test('upsertFindings with no decision on a recurring finding stays backwards compatible', () => {
+  var r1 = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'Certificate expiring in 12 days' } },
+  ], '2026-08-01T00:00:00.000Z');
+  assert.equal(r1.store.findings[0].decision, null);
+  assert.equal(r1.store.findings[0].resolution, null);
+
+  var r2 = upsertFindings(r1.store, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'Certificate expiring in 11 days' } },
+  ], '2026-08-02T00:00:00.000Z');
+  assert.equal(r2.store.findings[0].decision, null);
+  assert.equal(r2.store.findings[0].resolution, null);
+  assert.equal(r2.store.findings[0].occurrences, 2);
+});
+
+test('item.decision without item.key is dropped and logged, but the finding is still created', () => {
+  var warnCalls = [];
+  var originalWarn = console.warn;
+  console.warn = function (msg) { warnCalls.push(msg); };
+  try {
+    var r = upsertFindings({ version: 1, findings: [] }, [
+      { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'Approve deploy to prod?', decision: { prompt: 'Approve?', options: [] } } },
+    ], '2026-08-01T00:00:00.000Z');
+    assert.equal(r.store.findings.length, 1);
+    assert.equal(r.store.findings[0].decision, null);
+    assert.equal(warnCalls.length, 1);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('pruneFindings never evicts an unresolved decision, even acknowledged and over cap', () => {
+  var decision = { prompt: 'Approve?', options: [{ id: 'yes', label: 'Yes' }] };
+  var r = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'decision-1', summary: 'Decision one', decision: decision } },
+  ], '2026-08-01T00:00:00.000Z');
+  r = upsertFindings(r.store, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'finding two' } },
+  ], '2026-08-02T00:00:00.000Z');
+  var decisionId = r.store.findings.find(f => f.summary === 'Decision one').id;
+  var twoId = r.store.findings.find(f => f.summary === 'finding two').id;
+
+  // Acknowledge both, so both are otherwise eviction-eligible under a cap of 1.
+  var acked = acknowledgeFinding(r.store, decisionId, '2026-08-01T01:00:00.000Z');
+  acked = acknowledgeFinding(acked, twoId, '2026-08-02T01:00:00.000Z');
+
+  var pruned = pruneFindings(acked, '2026-08-04T00:00:00.000Z', { perAutomation: 1, ackMaxAgeDays: 3650 });
+  assert.ok(pruned.findings.some(f => f.summary === 'Decision one'), 'unresolved decision must survive the cap eviction');
+  assert.equal(pruned.findings.length, 1, 'the non-decision acknowledged finding is still evicted to respect the cap');
+  assert.equal(pruned.findings[0].summary, 'Decision one');
+});
+
+test('pruneFindings never age-drops an unresolved decision, but does drop it once resolved and stale', () => {
+  var decision = { prompt: 'Approve?', options: [{ id: 'yes', label: 'Yes' }] };
+  var r = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { key: 'decision-1', summary: 'Decision one', decision: decision } },
+  ], '2026-01-01T00:00:00.000Z');
+  var id = r.store.findings[0].id;
+  var acked = acknowledgeFinding(r.store, id, '2026-01-01T00:00:00.000Z');
+
+  var prunedUnresolved = pruneFindings(acked, '2026-08-01T00:00:00.000Z', { ackMaxAgeDays: 30 });
+  assert.equal(prunedUnresolved.findings.length, 1, 'unresolved decision survives age-based pruning');
+
+  var resolved = resolveFinding(acked, id, { choiceId: 'yes' }, '2026-01-01T00:00:00.000Z');
+  var prunedResolved = pruneFindings(resolved, '2026-08-01T00:00:00.000Z', { ackMaxAgeDays: 30 });
+  assert.equal(prunedResolved.findings.length, 0, 'a resolved decision is prunable like any other acknowledged finding');
+});
+
+test('pruneFindings still evicts acknowledged findings normally when no decision is involved', () => {
+  var r = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'finding one' } },
+  ], '2026-08-01T00:00:00.000Z');
+  r = upsertFindings(r.store, [
+    { automationId: 'auto_1', agentId: 'agent_1', item: { summary: 'finding two' } },
+  ], '2026-08-02T00:00:00.000Z');
+  var oneId = r.store.findings.find(f => f.summary === 'finding one').id;
+  var twoId = r.store.findings.find(f => f.summary === 'finding two').id;
+  var acked = acknowledgeFinding(r.store, oneId, '2026-08-01T01:00:00.000Z');
+  acked = acknowledgeFinding(acked, twoId, '2026-08-02T01:00:00.000Z');
+
+  var pruned = pruneFindings(acked, '2026-08-04T00:00:00.000Z', { perAutomation: 1, ackMaxAgeDays: 3650 });
+  assert.equal(pruned.findings.length, 1);
+  assert.equal(pruned.findings[0].summary, 'finding two');
 });
 
 test('upsertFindings never creates a finding from an empty or whitespace-only summary', () => {
