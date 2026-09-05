@@ -20310,7 +20310,79 @@ function renderFindingInboxItem(finding, now) {
   row.querySelector('.findings-inbox-btn-open-run').addEventListener('click', function () { findingsInboxOpenRun(finding); });
   row.querySelector('.findings-inbox-btn-open-convo').addEventListener('click', function () { findingsInboxOpenConversation(finding); });
 
+  var decisionEl = renderFindingDecision(finding, now);
+  if (decisionEl) row.appendChild(decisionEl);
+
   return row;
+}
+
+// Renders a finding's optional `decision`: option buttons + free-text box
+// while unresolved, a muted "Resolved as: X" line once answered. Returns
+// null when the finding carries no decision at all, so the caller can skip
+// appending anything.
+function renderFindingDecision(finding, now) {
+  var vm = window.FindingsInboxView.decisionViewModel(finding);
+  if (!vm) return null;
+
+  var wrap = document.createElement('div');
+  wrap.className = 'findings-inbox-decision';
+
+  if (vm.resolved) {
+    var resolvedEl = document.createElement('div');
+    resolvedEl.className = 'findings-inbox-resolution';
+    resolvedEl.textContent = window.FindingsInboxView.resolutionSummaryLabel(finding, now) || 'Resolved';
+    wrap.appendChild(resolvedEl);
+    return wrap;
+  }
+
+  if (vm.prompt) {
+    var promptEl = document.createElement('div');
+    promptEl.className = 'findings-inbox-decision-prompt';
+    promptEl.textContent = vm.prompt;
+    wrap.appendChild(promptEl);
+  }
+
+  var optionsEl = document.createElement('div');
+  optionsEl.className = 'findings-inbox-decision-options';
+  vm.options.forEach(function (opt) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'findings-inbox-decision-option-btn';
+    btn.textContent = opt.label || opt.id || '';
+    if (opt.hint) btn.title = opt.hint;
+    btn.addEventListener('click', function () { findingsInboxResolve(finding.id, opt.id, null); });
+    optionsEl.appendChild(btn);
+  });
+  wrap.appendChild(optionsEl);
+
+  if (vm.freeText) {
+    var freeTextEl = document.createElement('div');
+    freeTextEl.className = 'findings-inbox-decision-freetext';
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Type an answer…';
+    var submitBtn = document.createElement('button');
+    submitBtn.type = 'button';
+    submitBtn.textContent = 'Send';
+    var submit = function () {
+      var text = input.value.trim();
+      if (!text) return;
+      findingsInboxResolve(finding.id, null, text);
+    };
+    submitBtn.addEventListener('click', submit);
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+    freeTextEl.appendChild(input);
+    freeTextEl.appendChild(submitBtn);
+    wrap.appendChild(freeTextEl);
+  }
+
+  return wrap;
+}
+
+function findingsInboxResolve(id, choiceId, text) {
+  window.electronAPI.findingsResolve(id, { choiceId: choiceId, text: text }).then(function () { refreshFindingsInbox(); }).catch(function () {
+    if (typeof showToast === 'function') showToast('Could not record answer', { kind: 'error' });
+  });
 }
 
 // Delegated: group headers (and their Acknowledge-all buttons) are rebuilt

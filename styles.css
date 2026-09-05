@@ -6615,6 +6615,82 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
   outline: 1px solid var(--text-faint);
 }
 
+/* Decisions: an attentionItem's optional `decision` — options in, choice
+   out (see docs/superpowers/specs/2026-09-05-decisions-pane-design.md).
+   Same quiet chrome as the rest of the inbox item. */
+.findings-inbox-decision {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.findings-inbox-decision-prompt {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.findings-inbox-decision-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.findings-inbox-decision-option-btn {
+  background: none;
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.findings-inbox-decision-option-btn:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.findings-inbox-decision-freetext {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.findings-inbox-decision-freetext input {
+  flex: 1;
+  background: var(--bg-main);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.findings-inbox-decision-freetext button {
+  background: none;
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.findings-inbox-decision-freetext button:hover {
+  background: var(--hover-strong);
+  color: var(--text-primary);
+}
+
+.findings-inbox-resolution {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 /* Flyout Dashboard */
 .automations-flyout {
   position: fixed;
