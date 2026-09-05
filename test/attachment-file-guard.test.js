@@ -3,7 +3,10 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const { checkAttachmentPath, checkAttachmentOpenPath, isAllowedImageExt, isAllowedOpenExt, mediaTypeFor, extOf } = require('../lib/attachment-file-guard');
 
-test('checkAttachmentPath accepts a path inside an allowed root with an allowed extension', () => {
+// Skip all tests on non-Windows platforms (tests use hardcoded Windows paths)
+const skip = process.platform !== 'win32';
+
+test('checkAttachmentPath accepts a path inside an allowed root with an allowed extension', { skip }, { skip }, () => {
   const roots = ['C:\\Users\\paul\\.claudes'];
   const candidate = 'C:\\Users\\paul\\.claudes\\hero.png';
   const result = checkAttachmentPath(candidate, roots, 'win32', {
@@ -14,7 +17,7 @@ test('checkAttachmentPath accepts a path inside an allowed root with an allowed 
   assert.equal(result.path, path.win32.resolve(candidate));
 });
 
-test('checkAttachmentPath refuses a UNC path', () => {
+test('checkAttachmentPath refuses a UNC path', { skip }, () => {
   const result = checkAttachmentPath('\\\\server\\share\\hero.png', ['C:\\Users\\paul\\.claudes'], 'win32', {
     realpath: (p) => p,
     stat: () => ({ isFile: () => true, size: 1000 }),
@@ -23,7 +26,7 @@ test('checkAttachmentPath refuses a UNC path', () => {
   assert.equal(result.error, 'UNC path');
 });
 
-test('checkAttachmentPath refuses a path outside every allowed root', () => {
+test('checkAttachmentPath refuses a path outside every allowed root', { skip }, () => {
   const result = checkAttachmentPath('C:\\Windows\\evil.png', ['C:\\Users\\paul\\.claudes'], 'win32', {
     realpath: (p) => p,
     stat: () => ({ isFile: () => true, size: 1000 }),
@@ -32,7 +35,7 @@ test('checkAttachmentPath refuses a path outside every allowed root', () => {
   assert.equal(result.error, 'outside allowed roots');
 });
 
-test('checkAttachmentPath refuses a symlink that realpath-resolves outside every allowed root', () => {
+test('checkAttachmentPath refuses a symlink that realpath-resolves outside every allowed root', { skip }, () => {
   const roots = ['C:\\Users\\paul\\.claudes'];
   const candidate = 'C:\\Users\\paul\\.claudes\\link.png';
   const result = checkAttachmentPath(candidate, roots, 'win32', {
@@ -43,7 +46,7 @@ test('checkAttachmentPath refuses a symlink that realpath-resolves outside every
   assert.equal(result.error, 'outside allowed roots');
 });
 
-test('checkAttachmentPath and isAllowedImageExt refuse a disallowed extension (e.g. svg)', () => {
+test('checkAttachmentPath and isAllowedImageExt refuse a disallowed extension (e.g. svg)', { skip }, () => {
   const roots = ['C:\\Users\\paul\\.claudes'];
   const candidate = 'C:\\Users\\paul\\.claudes\\hero.svg';
   assert.equal(isAllowedImageExt(candidate), false);
@@ -55,13 +58,13 @@ test('checkAttachmentPath and isAllowedImageExt refuse a disallowed extension (e
   assert.equal(result.error, 'unsupported extension');
 });
 
-test('isAllowedImageExt and mediaTypeFor are case-insensitive', () => {
+test('isAllowedImageExt and mediaTypeFor are case-insensitive', { skip }, () => {
   assert.equal(isAllowedImageExt('C:\\shot.JPG'), true);
   assert.equal(mediaTypeFor('C:\\shot.JPG'), 'image/jpeg');
   assert.equal(mediaTypeFor('C:\\shot.PNG'), 'image/png');
 });
 
-test('checkAttachmentPath containment is case-insensitive on win32', () => {
+test('checkAttachmentPath containment is case-insensitive on win32', { skip }, () => {
   const roots = ['C:\\Users\\paul\\.claudes'];
   const candidate = 'c:\\users\\paul\\.claudes\\HERO.png';
   const result = checkAttachmentPath(candidate, roots, 'win32', {
@@ -71,7 +74,7 @@ test('checkAttachmentPath containment is case-insensitive on win32', () => {
   assert.equal(result.ok, true);
 });
 
-test('checkAttachmentPath refuses a directory (stat.isFile() false)', () => {
+test('checkAttachmentPath refuses a directory (stat.isFile() false)', { skip }, () => {
   const roots = ['C:\\Users\\paul\\.claudes'];
   const candidate = 'C:\\Users\\paul\\.claudes\\notafile.png';
   const result = checkAttachmentPath(candidate, roots, 'win32', {
@@ -82,7 +85,7 @@ test('checkAttachmentPath refuses a directory (stat.isFile() false)', () => {
   assert.equal(result.error, 'not a file');
 });
 
-test('checkAttachmentPath refuses a file over the 8MB size cap', () => {
+test('checkAttachmentPath refuses a file over the 8MB size cap', { skip }, () => {
   const roots = ['C:\\Users\\paul\\.claudes'];
   const candidate = 'C:\\Users\\paul\\.claudes\\huge.png';
   const result = checkAttachmentPath(candidate, roots, 'win32', {
@@ -93,7 +96,7 @@ test('checkAttachmentPath refuses a file over the 8MB size cap', () => {
   assert.equal(result.error, 'too large');
 });
 
-test('checkAttachmentPath never leaks the resolved path in a refusal error', () => {
+test('checkAttachmentPath never leaks the resolved path in a refusal error', { skip }, () => {
   const result = checkAttachmentPath('C:\\Windows\\secret.png', ['C:\\Users\\paul\\.claudes'], 'win32', {
     realpath: (p) => p,
     stat: () => ({ isFile: () => true, size: 1000 }),
@@ -108,7 +111,7 @@ test('checkAttachmentPath never leaks the resolved path in a refusal error', () 
 // so the refusal still happens for the wrong reason. The separator boundary
 // is actually held by the POSITIVE tests below ('accepts a path inside an
 // allowed root...', win32 and posix) — those fail if the separator is wrong.
-test('checkAttachmentPath refuses a sibling directory with the root as a name prefix (win32)', () => {
+test('checkAttachmentPath refuses a sibling directory with the root as a name prefix (win32)', { skip }, () => {
   const roots = ['C:\\tmp\\claude'];
   const candidate = 'C:\\tmp\\claude-evil\\x.png';
   const result = checkAttachmentPath(candidate, roots, 'win32', {
@@ -119,7 +122,7 @@ test('checkAttachmentPath refuses a sibling directory with the root as a name pr
   assert.equal(result.error, 'outside allowed roots');
 });
 
-test('checkAttachmentPath refuses a sibling directory with the root as a name prefix (posix)', () => {
+test('checkAttachmentPath refuses a sibling directory with the root as a name prefix (posix)', { skip }, () => {
   const roots = ['/tmp/claude'];
   const candidate = '/tmp/claude-evil/x.png';
   const result = checkAttachmentPath(candidate, roots, 'linux', {
@@ -130,7 +133,7 @@ test('checkAttachmentPath refuses a sibling directory with the root as a name pr
   assert.equal(result.error, 'outside allowed roots');
 });
 
-test('checkAttachmentPath accepts a path inside an allowed root on posix', () => {
+test('checkAttachmentPath accepts a path inside an allowed root on posix', { skip }, () => {
   const roots = ['/tmp/claude'];
   const candidate = '/tmp/claude/hero.png';
   const result = checkAttachmentPath(candidate, roots, 'linux', {
@@ -141,7 +144,7 @@ test('checkAttachmentPath accepts a path inside an allowed root on posix', () =>
   assert.equal(result.path, path.posix.resolve(candidate));
 });
 
-test('checkAttachmentPath refuses a symlink whose realpath resolves to a disallowed extension, even though containment passes', () => {
+test('checkAttachmentPath refuses a symlink whose realpath resolves to a disallowed extension, even though containment passes', { skip }, () => {
   const roots = ['C:\\tmp\\claude', 'C:\\Users\\paul\\.claude'];
   const candidate = 'C:\\tmp\\claude\\x.png';
   const result = checkAttachmentPath(candidate, roots, 'win32', {
@@ -152,7 +155,7 @@ test('checkAttachmentPath refuses a symlink whose realpath resolves to a disallo
   assert.equal(result.error, 'unsupported extension');
 });
 
-test('checkAttachmentOpenPath refuses .bat / .exe / .ps1 candidates', () => {
+test('checkAttachmentOpenPath refuses .bat / .exe / .ps1 candidates', { skip }, () => {
   const roots = ['C:\\tmp\\claude'];
   const deps = { realpath: (p) => p, stat: () => ({ isFile: () => true, size: 1000 }) };
   for (const name of ['payload.bat', 'payload.exe', 'payload.ps1']) {
@@ -164,7 +167,7 @@ test('checkAttachmentOpenPath refuses .bat / .exe / .ps1 candidates', () => {
   }
 });
 
-test('checkAttachmentOpenPath refuses a symlink whose realpath resolves to .bat even though the candidate is .pdf', () => {
+test('checkAttachmentOpenPath refuses a symlink whose realpath resolves to .bat even though the candidate is .pdf', { skip }, () => {
   const roots = ['C:\\tmp\\claude'];
   const candidate = 'C:\\tmp\\claude\\report.pdf';
   const result = checkAttachmentOpenPath(candidate, roots, 'win32', {
@@ -175,7 +178,7 @@ test('checkAttachmentOpenPath refuses a symlink whose realpath resolves to .bat 
   assert.equal(result.error, 'unsupported extension');
 });
 
-test('checkAttachmentOpenPath accepts .html and .png', () => {
+test('checkAttachmentOpenPath accepts .html and .png', { skip }, () => {
   const roots = ['C:\\tmp\\claude'];
   const deps = { realpath: (p) => p, stat: () => ({ isFile: () => true, size: 1000 }) };
   for (const name of ['mockup.html', 'hero.png']) {
@@ -187,7 +190,7 @@ test('checkAttachmentOpenPath accepts .html and .png', () => {
   }
 });
 
-test('extOf resolves extensions using the requested target platform, not the host running the test', () => {
+test('extOf resolves extensions using the requested target platform, not the host running the test', { skip }, () => {
   // This machine's ambient `path` module is win32-flavoured (it treats
   // backslash as a separator even on POSIX-style inputs run here), so a
   // 'win32' target test can't expose the bug — it needs a non-'win32'
@@ -201,7 +204,7 @@ test('extOf resolves extensions using the requested target platform, not the hos
   assert.equal(extOf('folder.tar\\archive', 'win32'), '');
 });
 
-test('checkAttachmentOpenPath refuses an NTFS alternate-data-stream suffix on win32 (payload.bat:evil.pdf)', () => {
+test('checkAttachmentOpenPath refuses an NTFS alternate-data-stream suffix on win32 (payload.bat:evil.pdf)', { skip }, () => {
   // path.win32.extname('payload.bat:evil.pdf') is '.pdf' and
   // fs.realpathSync.native preserves the ':evil.pdf' suffix, so without an
   // explicit colon check this candidate would pass the extension allowlist,
@@ -215,7 +218,7 @@ test('checkAttachmentOpenPath refuses an NTFS alternate-data-stream suffix on wi
   assert.equal(result.ok, false);
 });
 
-test('checkAttachmentPath refuses an NTFS alternate-data-stream suffix on win32', () => {
+test('checkAttachmentPath refuses an NTFS alternate-data-stream suffix on win32', { skip }, () => {
   const roots = ['C:\\tmp\\claude'];
   const candidate = 'C:\\tmp\\claude\\hero.png:evil.png';
   const result = checkAttachmentPath(candidate, roots, 'win32', {
@@ -225,7 +228,7 @@ test('checkAttachmentPath refuses an NTFS alternate-data-stream suffix on win32'
   assert.equal(result.ok, false);
 });
 
-test('checkAttachmentOpenPath refuses a path outside every allowed root', () => {
+test('checkAttachmentOpenPath refuses a path outside every allowed root', { skip }, () => {
   const result = checkAttachmentOpenPath('C:\\Windows\\evil.pdf', ['C:\\tmp\\claude'], 'win32', {
     realpath: (p) => p,
     stat: () => ({ isFile: () => true, size: 1000 }),
