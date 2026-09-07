@@ -5301,7 +5301,7 @@ function addColumn(args, targetRow, opts) {
     fontSize: fontSize,
     scrollback: (termSettings && termSettings.scrollback) || 5000,
     cursorStyle: (termSettings && termSettings.cursorStyle) || 'block',
-    cursorBlink: true,
+    cursorBlink: (termSettings && termSettings.cursorBlink !== undefined) ? termSettings.cursorBlink : false,
     allowProposedApi: true
   });
 
@@ -14851,12 +14851,13 @@ function saveVoiceSettings() {
 })();
 
 // --- Terminal tab wiring ---
-var TERM_DEFAULTS = { fontFamily: '', scrollback: 5000, cursorStyle: 'block', background: '#1a1a2e', foreground: '#e0e0e0' };
+var TERM_DEFAULTS = { fontFamily: '', scrollback: 5000, cursorStyle: 'block', cursorBlink: false, background: '#1a1a2e', foreground: '#e0e0e0' };
 var termSettings = Object.assign({}, TERM_DEFAULTS);
 (function wireTerminalTab() {
   var fontEl = document.getElementById('setting-term-font');
   var sbEl = document.getElementById('setting-term-scrollback');
   var cursorEl = document.getElementById('setting-term-cursor');
+  var cursorBlinkEl = document.getElementById('setting-term-cursor-blink');
   var bgEl = document.getElementById('setting-term-bg');
   var fgEl = document.getElementById('setting-term-fg');
   var resetBtn = document.getElementById('setting-term-reset');
@@ -14865,6 +14866,7 @@ var termSettings = Object.assign({}, TERM_DEFAULTS);
     fontEl.value = termSettings.fontFamily || '';
     sbEl.value = String(termSettings.scrollback || 5000);
     cursorEl.value = termSettings.cursorStyle || 'block';
+    if (cursorBlinkEl) cursorBlinkEl.checked = termSettings.cursorBlink !== false;
     bgEl.value = termSettings.background || TERM_DEFAULTS.background;
     if (fgEl) fgEl.value = termSettings.foreground || TERM_DEFAULTS.foreground;
   }
@@ -14883,6 +14885,7 @@ var termSettings = Object.assign({}, TERM_DEFAULTS);
   fontEl.addEventListener('change', function () { save({ fontFamily: fontEl.value }); });
   sbEl.addEventListener('change', function () { save({ scrollback: parseInt(sbEl.value, 10) || 5000 }); });
   cursorEl.addEventListener('change', function () { save({ cursorStyle: cursorEl.value }); });
+  if (cursorBlinkEl) cursorBlinkEl.addEventListener('change', function () { save({ cursorBlink: cursorBlinkEl.checked }); });
   bgEl.addEventListener('change', function () { save({ background: bgEl.value }); });
   if (fgEl) fgEl.addEventListener('change', function () { save({ foreground: fgEl.value }); });
   if (resetBtn) {
