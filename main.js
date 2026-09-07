@@ -10383,6 +10383,11 @@ if (!gotLock) {
     });
   }
 
+  // Disable GPU acceleration to save battery. Chromium's GPU acceleration
+  // causes significant power draw, especially with multiple terminals. The DOM
+  // renderer in xterm.js is sufficient for display and uses less power.
+  app.disableHardwareAcceleration();
+
   app.whenReady().then(async () => {
     seedAuthorizedProjectRoots(); // authorize pre-existing project roots BEFORE the renderer can persist new ones
     reconcileInterruptedHeadlessRuns();
