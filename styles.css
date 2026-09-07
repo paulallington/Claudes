@@ -688,7 +688,7 @@ html[data-platform="darwin"] .sidebar-header {
   flex-shrink: 0;
 }
 .headroom-service-dot.running { background: #22d3ee; box-shadow: 0 0 6px rgba(34, 211, 238, 0.6); }
-.headroom-service-dot.busy { background: #f59e0b; animation: headroom-pulse 1s ease-in-out infinite; }
+.headroom-service-dot.busy { background: #f59e0b; animation: headroom-pulse 1s ease-in-out infinite; animation-play-state: paused; }
 .headroom-service-dot.stopped { background: #6b7280; }
 @keyframes headroom-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 .headroom-service-label {
@@ -1470,7 +1470,7 @@ html[data-platform="darwin"] #toolbar {
   margin-right: 5px;
   font-size: 11px;
   line-height: 1;
-  animation: voiceSpeakingPulse 1s ease-in-out infinite;
+  animation: voiceSpeakingPulse 1s ease-in-out infinite; animation-play-state: paused;
 }
 @keyframes voiceSpeakingPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
@@ -1524,13 +1524,13 @@ html[data-platform="darwin"] #toolbar {
 .activity-dot.activity-working {
   background: var(--color-green);
   opacity: 1;
-  animation: pulse-working 1.5s ease-in-out infinite;
+  animation: pulse-working 1.5s ease-in-out infinite; animation-play-state: paused;
 }
 
 .activity-dot.activity-attention {
   background: #f5a623;
   opacity: 1;
-  animation: pulse-attention 1.2s ease-in-out infinite;
+  animation: pulse-attention 1.2s ease-in-out infinite; animation-play-state: paused;
 }
 
 .activity-dot.activity-idle {
@@ -1560,7 +1560,7 @@ html[data-platform="darwin"] #toolbar {
 .project-badge.badge-working .claude-icon,
 .workspace-badge.badge-working .claude-icon {
   filter: drop-shadow(0 0 3px var(--color-green));
-  animation: spin-working 2s linear infinite;
+  animation: spin-working 2s linear infinite; animation-play-state: paused;
 }
 
 @keyframes spin-working {
@@ -1570,7 +1570,7 @@ html[data-platform="darwin"] #toolbar {
 
 /* Attention flash for columns and sidebar items needing input */
 .attention-flash {
-  animation: attention-pulse 1.2s ease-in-out infinite;
+  animation: attention-pulse 1.2s ease-in-out infinite; animation-play-state: paused;
 }
 
 @keyframes attention-pulse {
@@ -1600,7 +1600,7 @@ html[data-platform="darwin"] #toolbar {
 
 .project-badge.badge-attention .claude-icon,
 .workspace-badge.badge-attention .claude-icon {
-  animation: pulse-icon-attention 1.2s ease-in-out infinite;
+  animation: pulse-icon-attention 1.2s ease-in-out infinite; animation-play-state: paused;
 }
 
 @keyframes pulse-icon-attention {
@@ -2074,7 +2074,7 @@ html[data-platform="darwin"] #toolbar {
 .minimize-chip.attention {
   border-color: #f5a623;
   color: var(--text-bright);
-  animation: pulse-attention 1.2s ease-in-out infinite;
+  animation: pulse-attention 1.2s ease-in-out infinite; animation-play-state: paused;
 }
 
 /* Overflow (⋯) trigger — same base look as the other .col-action icons, just
@@ -6168,7 +6168,7 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 }
 
 .automation-status-badge.badge-idle { background: rgba(34,197,94,0.2); color: #22c55e; }
-.automation-status-badge.badge-running { background: rgba(34,197,94,0.2); color: #22c55e; animation: pulse-working 1.5s ease-in-out infinite; }
+.automation-status-badge.badge-running { background: rgba(34,197,94,0.2); color: #22c55e; animation: pulse-working 1.5s ease-in-out infinite; animation-play-state: paused; }
 .automation-status-badge.badge-attention { background: rgba(245,166,35,0.2); color: #f5a623; }
 .automation-status-badge.badge-error { background: rgba(239,68,68,0.2); color: #ef4444; }
 .automation-status-badge.badge-scheduled { background: rgba(99,102,241,0.2); color: #6366f1; }
@@ -6408,7 +6408,7 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
   color: #22c55e;
   font-size: 11px;
   padding: 8px 0;
-  animation: automation-processing-pulse 1.5s ease-in-out infinite;
+  animation: automation-processing-pulse 1.5s ease-in-out infinite; animation-play-state: paused;
 }
 
 @keyframes automation-processing-pulse {
@@ -6437,7 +6437,7 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
   height: 6px;
   border-radius: 50%;
   background: #22c55e;
-  animation: automation-tab-pulse 1.5s ease-in-out infinite;
+  animation: automation-tab-pulse 1.5s ease-in-out infinite; animation-play-state: paused;
 }
 
 @keyframes automation-tab-pulse {
@@ -7063,7 +7063,7 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 
 #btn-automations-flyout.has-running {
   color: #22c55e;
-  animation: pulse-working 1.5s ease-in-out infinite;
+  animation: pulse-working 1.5s ease-in-out infinite; animation-play-state: paused;
 }
 
 /* Sidebar automation attention badge */
@@ -7273,7 +7273,7 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 }
 
 .pipeline-dot-idle { background: #22c55e; }
-.pipeline-dot-running { background: #3b82f6; animation: pulse-working 1.5s infinite; }
+.pipeline-dot-running { background: #3b82f6; animation: pulse-working 1.5s infinite; animation-play-state: paused; }
 .pipeline-dot-error { background: #ef4444; }
 .pipeline-dot-waiting { background: #666; }
 
@@ -7420,13 +7420,13 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 .automation-detail-manager-btn.needs-you {
   border-color: #f59e0b;
   color: #f59e0b;
-  animation: manager-pulse 1.5s infinite;
+  animation: manager-pulse 1.5s infinite; animation-play-state: paused;
 }
 
 .automation-detail-manager-btn.running {
   border-color: #3b82f6;
   color: #3b82f6;
-  animation: manager-pulse 1.5s infinite;
+  animation: manager-pulse 1.5s infinite; animation-play-state: paused;
 }
 
 .automation-detail-manager-btn.resolved {
@@ -8024,7 +8024,7 @@ body.mode-popout #btn-add-project {
 .headless-chip.state-running .headless-chip-icon::before {
   content: '\25D4';
   display: inline-block;
-  animation: headless-spin 1s linear infinite;
+  animation: headless-spin 1s linear infinite; animation-play-state: paused;
 }
 
 .headless-chip.state-done .headless-chip-icon::before {
@@ -8166,7 +8166,7 @@ body.mode-popout #btn-add-project {
   width: 10px; height: 10px; border-radius: 50%;
   flex-shrink: 0;
 }
-.headless-dock-row-status.running { background: var(--color-blue); animation: headless-spin 1s linear infinite; }
+.headless-dock-row-status.running { background: var(--color-blue); animation: headless-spin 1s linear infinite; animation-play-state: paused; }
 .headless-dock-row-status.completed { background: var(--color-green-env); }
 .headless-dock-row-status.error { background: var(--accent); }
 .headless-dock-row-status.cancelled { background: var(--text-muted); }
@@ -9039,7 +9039,7 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
   display: block;
   background: linear-gradient(90deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.12) 50%, rgba(255,255,255,0.05) 100%);
   background-size: 200% 100%;
-  animation: skel-pulse 1.4s ease-in-out infinite;
+  animation: skel-pulse 1.4s ease-in-out infinite; animation-play-state: paused;
   border-radius: 4px;
 }
 .skel-row { height: 12px; margin: 10px 0; }
@@ -9720,3 +9720,25 @@ body.light-theme .clawd-debug-log .ts { color: #8a8aa0; }
 .cw-hidden {
   display: none;
 }
+
+/* === Battery Optimization: Resume Animations Only When Active ===
+   All infinite animations are paused by default to save battery.
+   These rules resume them only when actually needed. */
+
+.headroom-service-dot.busy { animation-play-state: running; }
+.activity-dot.activity-working { animation-play-state: running; }
+.activity-dot.activity-attention { animation-play-state: running; }
+.project-badge.badge-working .claude-icon { animation-play-state: running; }
+.workspace-badge.badge-working .claude-icon { animation-play-state: running; }
+.project-badge.badge-attention .claude-icon { animation-play-state: running; }
+.workspace-badge.badge-attention .claude-icon { animation-play-state: running; }
+.attention-flash { animation-play-state: running; }
+.minimize-chip.attention { animation-play-state: running; }
+.automation-status-badge.badge-running { animation-play-state: running; }
+.automation-tab { animation-play-state: running; }
+.automation-tab.active { animation-play-state: running; }
+.pipeline-dot-running { animation-play-state: running; }
+.manager-busy { animation-play-state: running; }
+.headless-dock-row-status.running { animation-play-state: running; }
+.voice-indicator.speaking { animation-play-state: running; }
+

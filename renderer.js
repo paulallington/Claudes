@@ -10011,7 +10011,13 @@ function createGitGraphSection(graphLog) {
 
 function startGitPolling() {
   stopGitPolling();
-  gitPollTimer = setInterval(function () { refreshGitStatus(); }, 3000);
+  gitPollTimer = setInterval(function () {
+    // Only poll git status if the git tab is actually visible — don't waste CPU/GPU
+    // on git commands when the user isn't looking at the git tab.
+    if (isGitTabActive()) {
+      refreshGitStatus();
+    }
+  }, 3000);
 }
 
 function stopGitPolling() {
