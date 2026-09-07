@@ -548,6 +548,8 @@ var allColumns = new Map();
 // window.webglStatus() so users can see which columns are eating slots.
 var __webglContexts = new Set();
 var __WEBGL_SOFT_LIMIT = 14;
+var __focusedWebglColumnId = null;
+
 function releaseWebglForColumn(id) {
   var col = allColumns.get(id);
   if (col && col.webglAddon) {
@@ -555,6 +557,29 @@ function releaseWebglForColumn(id) {
     col.webglAddon = null;
   }
   __webglContexts.delete(id);
+  if (__focusedWebglColumnId === id) __focusedWebglColumnId = null;
+}
+
+function enableWebglForColumn(id) {
+  var col = allColumns.get(id);
+  if (!col || !col.terminal || col.webglAddon) return;
+  try {
+    if (typeof WebglAddon === 'undefined' || !WebglAddon.WebglAddon) return;
+    var webglAddon = new WebglAddon.WebglAddon();
+    col.terminal.loadAddon(webglAddon);
+    if (typeof webglAddon.onContextLoss === 'function') {
+      webglAddon.onContextLoss(function () {
+        console.warn('[WebGL] context lost for column', id, '— falling back to DOM renderer');
+        releaseWebglForColumn(id);
+        try { col.terminal.refresh(0, col.terminal.rows - 1); } catch (e) { /* ignore */ }
+      });
+    }
+    col.webglAddon = webglAddon;
+    __webglContexts.add(id);
+    __focusedWebglColumnId = id;
+  } catch (e) {
+    console.warn('[WebGL] failed to enable for column', id, ':', e);
+  }
 }
 window.webglStatus = function () {
   var rows = [];
@@ -5346,35 +5371,10 @@ function addColumn(args, targetRow, opts) {
       return true; // handled — prevents xterm passing it through
     });
   } catch (e) { /* parser API optional */ }
-  // WebGL renderer is fast but Chromium caps WebGL contexts at ~16 per process.
-  // When exceeded, Chromium silently kills the oldest context and that
-  // terminal's canvas goes blank. Subscribe to onContextLoss so we dispose the
-  // addon (xterm falls back to the DOM renderer) and re-render visible content.
-  var webglAddon = null;
-  try {
-    webglAddon = new WebglAddon.WebglAddon();
-    terminal.loadAddon(webglAddon);
-    if (typeof webglAddon.onContextLoss === 'function') {
-      webglAddon.onContextLoss(function () {
-        var c = allColumns.get(id);
-        console.warn('[WebGL] context lost for column', id,
-          'project=' + (c && c.projectKey),
-          'title=' + ((c && c.customTitle) || opts.title || ''),
-          '— falling back to DOM renderer');
-        releaseWebglForColumn(id);
-        try { terminal.refresh(0, terminal.rows - 1); } catch (e) { /* ignore */ }
-      });
-    }
-    __webglContexts.add(id);
-    if (__webglContexts.size >= __WEBGL_SOFT_LIMIT) {
-      console.warn('[WebGL] ' + __webglContexts.size +
-        ' active contexts — approaching Chromium\'s ~16 limit. ' +
-        'Run window.webglStatus() to see which columns hold them.');
-    }
-  } catch (e) {
-    webglAddon = null;
-    console.warn('WebGL addon failed, using DOM renderer:', e);
-  }
+  // WebGL rendering is only enabled on the focused column to save battery.
+  // The DOM renderer is used for inactive terminals. When this column gains focus,
+  // enableWebglForColumn() will load the WebGL addon for better performance.
+  col.webglAddon = null;
 
   // File:line link provider — clicking e.g. `src/foo.js:42` (or an absolute
   // path) opens the file in the inline editor, focused on that line. Skipped
@@ -7379,12 +7379,16 @@ function setFocusedColumn(id, opts) {
 
   if (state.focusedColumnId !== null && state.focusedColumnId !== id) {
     var prev = allColumns.get(state.focusedColumnId);
-    if (prev) prev.element.classList.remove('focused');
+    if (prev) {
+      prev.element.classList.remove('focused');
+      releaseWebglForColumn(state.focusedColumnId);
+    }
   }
   state.focusedColumnId = id;
   lastFocusedColumnId = id;
   col.element.classList.add('focused');
   if (col.terminal) col.terminal.focus();
+  enableWebglForColumn(id);
   if (window.Clawd && typeof window.Clawd.setFocusedColumn === 'function') {
     window.Clawd.setFocusedColumn(id);
   }
