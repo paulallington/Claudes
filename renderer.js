@@ -13256,6 +13256,9 @@ var headroomServiceLog = document.getElementById('headroom-service-log');
 var headroomServiceDash = document.getElementById('headroom-service-dash');
 var headroomServiceRestart = document.getElementById('headroom-service-restart');
 var headroomServiceState = { running: false, busy: false, stalled: false };
+// Fetched at most once per session — renderHeadroomService() is called
+// repeatedly and must not spawn a fresh uv/pipx probe every time.
+var headroomInstallHintFetched = false;
 
 function renderHeadroomService() {
   if (!headroomServiceEl) return;
@@ -13271,6 +13274,12 @@ function renderHeadroomService() {
     headroomServiceEl.classList.remove('hidden');
     if (mainEl) mainEl.classList.add('hidden');
     if (installEl) installEl.classList.remove('hidden');
+    if (!headroomInstallHintFetched && window.electronAPI && window.electronAPI.getHeadroomInstallHint) {
+      headroomInstallHintFetched = true;
+      window.electronAPI.getHeadroomInstallHint().then(function (result) {
+        if (result && result.command && headroomInstallCmd) headroomInstallCmd.textContent = result.command;
+      }).catch(function () { headroomInstallHintFetched = false; /* retry on a later render; static fallback stays */ });
+    }
     return;
   }
   headroomServiceEl.classList.remove('hidden');

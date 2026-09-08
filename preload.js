@@ -161,6 +161,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   findingsStickyTogglePin: () => ipcRenderer.invoke('findings:stickyTogglePin'),
   onFindingsStickyTheme: (cb) => ipcRenderer.on('findingssticky:theme', (_e, theme) => cb(theme)),
   getHeadroomStatus: () => ipcRenderer.invoke('headroom:status'),
+  getHeadroomInstallHint: () => ipcRenderer.invoke('headroom:installHint'),
   onHeadroomStatus: (cb) => ipcRenderer.on('headroom:status-changed', (_e, st) => cb(st)),
   getHeadroomServiceStatus: () => ipcRenderer.invoke('headroom:serviceStatus'),
   startHeadroomService: () => ipcRenderer.invoke('headroom:serviceStart'),
