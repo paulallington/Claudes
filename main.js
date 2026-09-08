@@ -6373,15 +6373,20 @@ ipcMain.handle('headroom:setOutputShaper', async (_e, on) => {
   return await _postShaperEnv(false);
 });
 ipcMain.handle('headroom:status', () => headroomStatus);
-// Which install command (uv vs pipx) matches this machine's Python tooling —
-// probed fresh each call (not cached) so installing uv while the panel is
-// open is picked up. Concurrent callers share one in-flight probe.
+// Which install command (uv vs pipx) matches this machine's Python tooling.
+// main does not cache the result (concurrent callers share one in-flight
+// probe), but the renderer fetches only once per session, so installing uv
+// while the panel is open is NOT picked up until the panel re-renders after
+// a failed fetch or the app restarts.
 function probeBinaryVersion(bin) {
   return new Promise((resolve) => {
     try {
       // Match probeHeadroom()'s platform handling: shell:true on Windows so
       // PATHEXT resolves .cmd/.bat shims, or real installs get missed.
-      execFile(bin, ['--version'], { timeout: 5000, windowsHide: true, shell: process.platform === 'win32' }, (err) => {
+      // 8000ms (not 5000): matches probeHeadroom()'s timeout at main.js:208 —
+      // a cold Python-backed `--version` (pipx is exactly this shape) can be
+      // slow to print, and a shorter timeout risks a false "not installed".
+      execFile(bin, ['--version'], { timeout: 8000, windowsHide: true, shell: process.platform === 'win32' }, (err) => {
         resolve(!err);
       });
     } catch {

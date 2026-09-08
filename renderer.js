@@ -13278,7 +13278,7 @@ function renderHeadroomService() {
       headroomInstallHintFetched = true;
       window.electronAPI.getHeadroomInstallHint().then(function (result) {
         if (result && result.command && headroomInstallCmd) headroomInstallCmd.textContent = result.command;
-      }).catch(function () { /* leave the static fallback text as-is */ });
+      }).catch(function () { headroomInstallHintFetched = false; /* retry on a later render; static fallback stays */ });
     }
     return;
   }
