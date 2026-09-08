@@ -3,6 +3,26 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const CodexModels = require('../lib/codex-models');
+const { codexContextDisplay } = require('../lib/codex-spawn');
+
+test('GPT-6-Astra is the exact default offline model and persisted context label', () => {
+  const catalog = CodexModels.fallbackCatalog();
+  const astra = catalog.models.find((model) => model.id === 'gpt-6-astra');
+
+  assert.ok(astra);
+  assert.strictEqual(astra.label, 'GPT-6-Astra');
+  assert.strictEqual(astra.hint, 'Our most capable model for complex, demanding work.');
+  assert.deepStrictEqual(astra.efforts.map((effort) => effort.id), [
+    'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
+  ]);
+  assert.deepStrictEqual(astra.tiers.map((tier) => tier.id), ['priority']);
+  assert.strictEqual(astra.isDefault, true);
+  assert.strictEqual(catalog.defaultModel, 'gpt-6-astra');
+  assert.match(codexContextDisplay({
+    settings: { model: 'gpt-6-astra' },
+    context: { usedTokens: 1, modelContextWindow: 1000 }
+  }).title, /\nGPT-6-Astra$/);
+});
 
 test('normalizeCatalog: maps visible app-server models and their model-specific capabilities', () => {
   const catalog = CodexModels.normalizeCatalog({ data: [
