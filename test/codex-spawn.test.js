@@ -214,26 +214,46 @@ test('approval badge survives a trailing handoff prompt (M2 regression)', () => 
   assert.strictEqual(codexApprovalLabelFromArgs(args), 'Yolo (bypass)');
 });
 
-test('managed resume keeps semantic settings but validates bridge coordinates', () => {
-  const semantic = buildCodexSpawn('/x', 'auto', {
+test('managed resume omits permission overrides after reload while preserving preset and thread intent', () => {
+  const tuning = {
     model: 'gpt-5.6-sol', effort: 'ultra', tier: 'priority'
-  }).args;
+  };
   const threadId = '123e4567-e89b-42d3-a456-426614174000';
-  assert.strictEqual(isCodexThreadId(threadId), true);
-  assert.deepStrictEqual(buildCodexRemoteResume(semantic, {
-    threadId,
+  const bridge = {
     remoteUrl: 'ws://127.0.0.1:45678',
     remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN'
-  }, 'Read .claudes/handoff.md first'), [
-    'resume', '-a', 'on-request', '-s', 'workspace-write',
+  };
+  const prompt = 'Read .claudes/handoff.md first';
+  const expectedResume = [
+    'resume',
     '--model', 'gpt-5.6-sol',
     '-c', 'model_reasoning_effort=ultra',
     '-c', 'service_tier=priority',
     '--remote', 'ws://127.0.0.1:45678',
     '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN',
-    threadId, 'Read .claudes/handoff.md first'
-  ]);
-  assert.strictEqual(buildCodexRemoteResume(semantic, {
+    threadId, prompt
+  ];
+  assert.strictEqual(isCodexThreadId(threadId), true);
+  for (const preset of CODEX_APPROVAL_PRESETS) {
+    const direct = buildCodexSpawn('/x', preset.key, tuning);
+    assert.deepStrictEqual(direct.args, preset.args.concat(codexTuningArgs(tuning)));
+    const saved = codexPersistShape(direct.args, threadId, true);
+    const restored = buildCodexRestore(JSON.parse(JSON.stringify(saved)), '/x', CodexModels);
+    assert.strictEqual(saved.codexPreset, preset.key);
+    assert.strictEqual(restored.opts.codexThreadId, threadId);
+    assert.deepStrictEqual(restored.args, direct.args);
+    assert.deepStrictEqual(buildCodexRemoteAttach(restored.args, {
+      ...bridge, mode: 'fresh', cwd: '/x', claimId: '0123456789abcdef0123456789abcdef'
+    }), direct.args.concat([
+      '-C', '/x', '--remote', bridge.remoteUrl,
+      '--remote-auth-token-env', bridge.remoteTokenEnvName
+    ]));
+    const prepared = { ...bridge, mode: 'resume', threadId: restored.opts.codexThreadId };
+    assert.deepStrictEqual(buildCodexRemoteAttach(restored.args, prepared, prompt), expectedResume, preset.key);
+    assert.deepStrictEqual(buildCodexRemoteResume(restored.args, prepared, prompt), expectedResume, preset.key);
+    assert.deepStrictEqual(codexPersistShape(restored.args, restored.opts.codexThreadId, true), saved);
+  }
+  assert.strictEqual(buildCodexRemoteResume([], {
     threadId: 'not-a-uuid', remoteUrl: 'ws://evil.example:80', remoteTokenEnvName: 'PATH'
   }), null);
 });
