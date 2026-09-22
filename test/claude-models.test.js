@@ -102,9 +102,22 @@ test('derived cache prices are correct for opus-5 (cacheRead 0.5, cacheCreation 
   assert.strictEqual(prices.cacheCreation, 6.25);
 });
 
+test('claude-opus-5-5 is 1M, priced 4/20 with derived cache prices, and pickable', () => {
+  const prices = pricesFor('claude-opus-5-5');
+  assert.strictEqual(prices.input, 4.0);
+  assert.strictEqual(prices.output, 20.0);
+  assert.strictEqual(prices.cacheRead, 0.4);
+  assert.strictEqual(prices.cacheCreation, 5.0);
+  assert.strictEqual(contextWindowFor('claude-opus-5-5'), 1000000);
+  assert.strictEqual(familyOf('claude-opus-5-5'), 'opus');
+  assert.strictEqual(lookup('claude-opus-5-5').label, 'Opus 5.5');
+  assert.strictEqual(lookup('claude-opus-5-5').pickable, true);
+});
+
 test('MODELS is the ordered array of pinned entries', () => {
   assert.deepStrictEqual(MODELS.map((m) => m.id), [
     'claude-fable-5',
+    'claude-opus-5-5',
     'claude-opus-5',
     'claude-opus-4-8',
     'claude-opus-4-7',
@@ -124,7 +137,7 @@ test('MODELS is the ordered array of pinned entries', () => {
 // or the most obvious dropdown picks silently lose the 1M window.
 
 test('resolveModelId: aliases resolve to the newest pinned id in their family', () => {
-  assert.strictEqual(resolveModelId('opus'), 'claude-opus-5');
+  assert.strictEqual(resolveModelId('opus'), 'claude-opus-5-5');
   assert.strictEqual(resolveModelId('sonnet'), 'claude-sonnet-5');
   assert.strictEqual(resolveModelId('haiku'), 'claude-haiku-4-5');
 });

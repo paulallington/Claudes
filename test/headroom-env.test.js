@@ -183,7 +183,7 @@ test('proxy args: timeout+retry flags present in all three modes', () => {
 // window for one of the most likely picks in the list.
 test('alias model is resolved and still gets the [1m] pin', () => {
   const env = buildHeadroomEnv({ enabled: true, oneM: true, oneMModel: 'opus' });
-  assert.strictEqual(env.ANTHROPIC_MODEL, 'claude-opus-5[1m]');
+  assert.strictEqual(env.ANTHROPIC_MODEL, 'claude-opus-5-5[1m]');
   assert.strictEqual(
     headroomModelWindow({ oneM: true, oneMModel: 'opus' }), 1000000
   );
