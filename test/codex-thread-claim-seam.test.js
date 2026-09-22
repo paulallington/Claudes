@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const CodexSpawn = require('../lib/codex-spawn');
+const CodexModels = require('../lib/codex-models');
+const SessionTarget = require('../lib/session-target');
 
 const root = path.join(__dirname, '..');
 const main = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
@@ -182,21 +184,26 @@ test('fresh preparation launches managed remote argv without resuming the stale 
   assert.ok(pendingAt !== -1 && fallbackAt > pendingAt, 'a pending fresh claim must show managed loading state, not direct fallback');
 });
 
-test('resume preparation keeps the exact verified thread and no transient claim', async () => {
+test('reload restores a saved YOLO column to its verified thread without permission overrides', async () => {
   const source = functionSource(renderer, 'spawnCodexColumn');
   const columns = new Map();
+  const preparedRequests = [];
+  const persisted = [];
   let globalColumnId = 0;
   const window = {
     CodexSpawn,
     electronAPI: {
-      codexPrepareThread: async () => ({
-        ok: true,
-        mode: 'resume',
-        threadId: THREAD,
-        remoteUrl: 'ws://127.0.0.1:4567',
-        remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN',
-        spawnTicket: 'b'.repeat(64)
-      })
+      codexPrepareThread: async (request) => {
+        preparedRequests.push(request);
+        return {
+          ok: true,
+          mode: 'resume',
+          threadId: THREAD,
+          remoteUrl: 'ws://127.0.0.1:4567',
+          remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN',
+          spawnTicket: 'b'.repeat(64)
+        };
+      }
     }
   };
   const addColumn = (args, _row, opts) => {
@@ -208,15 +215,30 @@ test('resume preparation keeps the exact verified thread and no transient claim'
   const spawn = new Function(
     'window', 'activeProjectKey', 'allColumns', 'addColumn', 'persistSessions',
     `let globalColumnId = 0; ${source}; return spawnCodexColumn;`
-  )(window, 'D:/project', columns, addColumn, () => {});
+  )(window, 'D:/project', columns, addColumn, () => {
+    const col = columns.get(globalColumnId);
+    persisted.push(CodexSpawn.codexPersistShape(col.persistedCmdArgs, col.codexThreadId, col.codexManaged));
+  });
 
-  const result = await spawn('D:/project', null, CodexSpawn.buildCodexSpawn('D:/project', 'auto'), { threadId: THREAD });
+  const original = CodexSpawn.buildCodexSpawn('D:/project', 'yolo', {
+    model: 'gpt-6-astra', effort: 'xhigh', tier: 'priority'
+  });
+  const saved = JSON.parse(JSON.stringify(CodexSpawn.codexPersistShape(original.args, THREAD, true)));
+  const restored = CodexSpawn.buildCodexRestore(saved, 'D:/project', CodexModels);
+  const result = await spawn('D:/project', null, restored, { threadId: saved.codexThreadId });
   const col = columns.get(1);
+  assert.deepStrictEqual(preparedRequests, [{ cwd: 'D:/project', threadId: THREAD }]);
+  assert.equal(result.managed, true);
   assert.equal(result.threadId, THREAD);
   assert.equal(col.codexThreadId, THREAD);
   assert.equal(col.codexClaimId, undefined);
-  assert.equal(col.spawnArgs[0], 'resume');
-  assert.equal(col.spawnArgs.at(-1), THREAD);
+  assert.equal(col.spawnTicket, 'b'.repeat(64));
+  assert.deepStrictEqual(col.spawnArgs, [
+    'resume', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort=xhigh', '-c', 'service_tier=priority',
+    '--remote', 'ws://127.0.0.1:4567', '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN', THREAD
+  ]);
+  assert.deepStrictEqual(col.persistedCmdArgs, original.args);
+  assert.deepStrictEqual(persisted, [saved]);
 });
 
 test('matching claim atomically adopts and persists the real UUID while rejecting replay and ambiguity', async () => {
@@ -300,4 +322,63 @@ test('restart uses the mode-aware attach builder and stores a pending fresh clai
   assert.match(restart, /preparedThread\.mode === 'fresh'[\s\S]*col\.codexThreadId = null/);
   assert.match(restart, /col\.codexClaimId = preparedThread\.claimId/);
   assert.match(restart, /persistSessions\(col\.projectKey, col\.workspaceId\)/);
+});
+
+test('respawn reattaches the YOLO conversation without changing its persisted permissions', async () => {
+  const semanticArgs = CodexSpawn.buildCodexSpawn('D:/project/worktree', 'yolo').args;
+  const col = {
+    cmd: 'codex', cmdArgs: semanticArgs.slice(), codexThreadId: THREAD, codexManaged: true,
+    cwd: 'D:/project/worktree', projectKey: 'D:/project', workspaceId: 'workspace-1',
+    element: { querySelector: () => null },
+    terminal: { clear() {}, cols: 100, rows: 30 }
+  };
+  const sent = [];
+  const persisted = [];
+  const watched = [];
+  const preparedRequests = [];
+  const context = {
+    allColumns: new Map([[1, col]]),
+    window: {
+      CodexSpawn, SessionTarget,
+      electronAPI: {
+        codexPrepareThread: async (request) => {
+          preparedRequests.push(request);
+          return {
+            ok: true, mode: 'resume', threadId: THREAD,
+            remoteUrl: 'ws://127.0.0.1:4567', remoteTokenEnvName: 'CLAUDES_CODEX_BRIDGE_TOKEN',
+            spawnTicket: 'c'.repeat(64)
+          };
+        }
+      }
+    },
+    fitTerminal() {}, bindColumnBaseUrl() {}, setColumnActivity() {},
+    startCodexThreadState: (id) => watched.push(id),
+    persistSessions: (projectKey, workspaceId) => persisted.push({
+      projectKey, workspaceId,
+      session: CodexSpawn.codexPersistShape(col.cmdArgs, col.codexThreadId, col.codexManaged)
+    }),
+    wsSend: (message) => sent.push(message),
+    gatedWsSend: (message) => sent.push(message)
+  };
+  vm.runInNewContext(functionSource(renderer, 'restartColumn'), context);
+  await context.restartColumn(1);
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(preparedRequests)), [{ cwd: col.cwd, threadId: THREAD }]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(sent)), [
+    { type: 'kill', id: 1 },
+    {
+      type: 'create', id: 1, cols: 100, rows: 30, cwd: col.cwd, cmd: 'codex',
+      args: ['resume', '--remote', 'ws://127.0.0.1:4567', '--remote-auth-token-env', 'CLAUDES_CODEX_BRIDGE_TOKEN', THREAD],
+      spawnTicket: 'c'.repeat(64)
+    }
+  ]);
+  assert.deepStrictEqual(watched, [1]);
+  assert.equal(col.codexThreadId, THREAD);
+  assert.equal(col.codexManaged, true);
+  assert.equal(col.codexClaimId, null);
+  assert.deepStrictEqual(col.cmdArgs, semanticArgs);
+  assert.deepStrictEqual(persisted, [{
+    projectKey: col.projectKey, workspaceId: col.workspaceId,
+    session: CodexSpawn.codexPersistShape(semanticArgs, THREAD, true)
+  }]);
 });
