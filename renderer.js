@@ -5292,6 +5292,13 @@ function addColumn(args, targetRow, opts) {
   if (Object.keys(overrides).length) themeForThisCol = Object.assign({}, termTheme, overrides);
   var terminal = new Terminal({
     theme: themeForThisCol,
+    // OSC 8 links (including Codex's) bypass WebLinksAddon. Use the same
+    // scheme-checked bridge instead of xterm's default window.open handler.
+    linkHandler: {
+      activate: function (event, uri) {
+        if (window.electronAPI && window.electronAPI.openExternal) window.electronAPI.openExternal(uri);
+      }
+    },
     // Per-platform font fallback: Cascadia/Consolas exist on Windows; JetBrains
     // Mono / Menlo on macOS; DejaVu Sans Mono / Liberation Mono on most Linux
     // distros. The closing 'monospace' is a guaranteed final fallback. A user
