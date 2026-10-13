@@ -6952,7 +6952,10 @@ function noteMissingConnectors(missing, profile) {
   if (!Array.isArray(missing) || missing.length === 0) return;
   console.warn('[mcp] selected claude.ai connectors have no cached URL and will not load this spawn:', missing.join(', '));
   const pid = (profile && profile.id) || PRIMARY_ID;
-  if (!connectorRefreshes.has(pid)) refreshClaudeAiConnectors(profile);
+  // Same throttle as discoverMcpServers: a connector disconnected in claude.ai
+  // stays missing after a clean refresh, so don't relaunch `claude mcp list` per spawn.
+  const lastTry = connectorRefreshAttempts.get(pid) || 0;
+  if (!connectorRefreshes.has(pid) && Date.now() - lastTry > CONNECTOR_AUTO_RETRY_MS) refreshClaudeAiConnectors(profile);
 }
 
 // List the MCP servers available to a project (merged user + project scope),
@@ -7029,7 +7032,11 @@ ipcMain.handle('mcp:buildProjectConfig', (event, projectPath) => {
     // --strict-mcp-config, so switch the renderer to allowlist mode (non-strict
     // + --settings allowedMcpServers) — only when one is actually selected.
     const allow = buildMcpAllowlist(projectDefault, discovered, connectorUrlMap());
-    noteMissingConnectors(allow.missingConnectors, profileForProjectPath(projectPath));
+    try {
+      noteMissingConnectors(allow.missingConnectors, profileForProjectPath(projectPath));
+    } catch (e) {
+      console.warn('[mcp] noteMissingConnectors failed:', e && e.message);
+    }
     if (allow.hasConnectors) {
       return { mcpConfigPath: file, strict: true, hasMcp: true, allowedMcpServers: allow.entries };
     }
@@ -9902,7 +9909,11 @@ async function runAgent(automationId, agentId, opts) {
     ? resolveProfileFor({ columnProfileId: opts.forcedProfileId })
     : resolveProfileFor({ columnProfileId: automation.profileId, projectProfileId: getProjectProfileIdByPath(automation.projectPath) });
   const agentEnv = Object.assign({}, getAgentEndpointEnv(agent, automation.projectPath), profile.env);
-  noteMissingConnectors(mcpConnectorsMissing, profile);
+  try {
+    noteMissingConnectors(mcpConnectorsMissing, profile);
+  } catch (e) {
+    console.warn('[mcp] noteMissingConnectors failed:', e && e.message);
+  }
 
   // Minted up front (not scraped from the event stream) so the run's
   // conversation is resumable even if it dies before emitting any event, and
