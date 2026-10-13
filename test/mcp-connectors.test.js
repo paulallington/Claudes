@@ -2,6 +2,9 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const {
   CONNECTOR_PREFIX,
   isConnectorName,
@@ -195,6 +198,18 @@ test('mergeSettingsKey: drops a malformed trailing bare --settings', () => {
     mergeSettingsKey(['--model', 'opus', '--settings'], 'allowedMcpServers', ALLOW),
     ['--model', 'opus', '--settings', JSON.stringify({ allowedMcpServers: ALLOW })]
   );
+});
+
+// --- renderer (UMD) contract ---
+
+test('loads in a sandbox with window but no module/require, exposing window.McpConnectors', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mcp-connectors.js'), 'utf8');
+  const sandbox = { window: {} };
+  vm.createContext(sandbox);
+  vm.runInContext(src, sandbox);
+  assert.strictEqual(typeof sandbox.window.McpConnectors.applyMcpScope, 'function');
+  assert.strictEqual(typeof sandbox.window.McpConnectors.buildMcpAllowlist, 'function');
+  assert.strictEqual(sandbox.window.McpConnectors.isConnectorName('claude.ai Granola'), true);
 });
 
 // --- applyMcpScope ---

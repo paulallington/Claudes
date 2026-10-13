@@ -49,6 +49,44 @@ test('buildInteractiveArgs: strict mcp only with an mcp config path', () => {
   assert.ok(!buildInteractiveArgs({ strictMcp: true }).includes('--strict-mcp-config'));
 });
 
+test('buildInteractiveArgs: allowedMcpServers -> non-strict mcp config + allowlist in --settings', () => {
+  const allow = [{ serverUrl: 'https://mcp.granola.ai/mcp' }];
+  const args = buildInteractiveArgs({
+    model: 'opus', mcpConfigPath: '/tmp/x.json', strictMcp: true, allowedMcpServers: allow, extraArgs: ['--verbose']
+  });
+  assert.deepStrictEqual(args, [
+    '--model', 'opus',
+    '--mcp-config', '/tmp/x.json',
+    '--verbose',
+    '--settings', JSON.stringify({ allowedMcpServers: allow })
+  ]);
+});
+
+test('buildInteractiveArgs: allowlist merges into a --settings from extraArgs instead of clobbering it', () => {
+  const args = buildInteractiveArgs({
+    mcpConfigPath: '/tmp/x.json',
+    allowedMcpServers: [],
+    extraArgs: ['--settings', '{"ultracode":true}']
+  });
+  assert.deepStrictEqual(args, [
+    '--mcp-config', '/tmp/x.json',
+    '--settings', JSON.stringify({ ultracode: true, allowedMcpServers: [] })
+  ]);
+});
+
+test('buildInteractiveArgs: unmergeable --settings file falls back to strict mcp config', () => {
+  const args = buildInteractiveArgs({
+    mcpConfigPath: '/tmp/x.json',
+    allowedMcpServers: [{ serverName: 'a' }],
+    extraArgs: ['--settings', 'user.json']
+  });
+  assert.deepStrictEqual(args, ['--mcp-config', '/tmp/x.json', '--strict-mcp-config', '--settings', 'user.json']);
+});
+
+test('buildInteractiveArgs: allowedMcpServers without mcpConfigPath is ignored', () => {
+  assert.deepStrictEqual(buildInteractiveArgs({ allowedMcpServers: [] }), []);
+});
+
 test('buildInteractiveArgs: extraArgs appended verbatim', () => {
   const args = buildInteractiveArgs({ extraArgs: ['--foo', 'bar'] });
   assert.deepStrictEqual(args, ['--foo', 'bar']);
