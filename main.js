@@ -33,6 +33,7 @@ const { atomicWriteJson, readJsonWithRecovery } = require('./lib/config-io');
 const { buildExploreAgentFile, EXPLORE_AGENT_REL } = require('./lib/explore-agent');
 const { tagBackgroundEvent } = require('./lib/voice-background');
 const { resolveProjectMcpSpawn, matchesProjectScope } = require('./lib/mcp-project');
+const { parseMcpListOutput, buildMcpAllowlist, mergeSettingsKey } = require('./lib/mcp-connectors');
 const WebSocket = require('ws');
 const {
   buildInteractiveArgs,
@@ -397,6 +398,7 @@ const ENDPOINTS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'endpoints.json' :
 const PROFILES_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'profiles.json' : 'profiles-dev.json');
 const PROFILES_DIR = path.join(CONFIG_DIR, app.isPackaged ? 'profiles' : 'profiles-dev');
 const SNIPPETS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'snippets.json' : 'snippets-dev.json');
+const MCP_CONNECTORS_FILE = path.join(CONFIG_DIR, app.isPackaged ? 'mcp-connectors.json' : 'mcp-connectors-dev.json');
 const VOICE_DEBUG_LOG = path.join(CONFIG_DIR, app.isPackaged ? 'voice-debug.log' : 'voice-debug-dev.log');
 
 // Per-spawn scoped MCP config files are short-lived (written just before a
@@ -6835,16 +6837,138 @@ ipcMain.handle('automations:getForProject', (event, projectPath) => {
   return data.automations.filter(a => a.projectPath.replace(/\\/g, '/') === normalized);
 });
 
+// --- claude.ai connectors (Granola, Wispr Flow, ...) ---
+// Remote MCP servers attached to the user's claude.ai account. They are not in
+// any settings file; the only way to enumerate them is `claude mcp list`, which
+// health-checks every server (~40s). So the result is cached per profile
+// (each subscription has its own account/connectors) and refreshed in the
+// background. Cache shape: { byProfile: { [profileId]: { fetchedAt, connectors: [{name,url}] } } }
+const CONNECTOR_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const CONNECTOR_REFRESH_TIMEOUT_MS = 120000;
+const CONNECTOR_AUTO_RETRY_MS = 5 * 60 * 1000;
+const connectorRefreshes = new Map();     // profileId -> in-flight Promise
+const connectorRefreshAttempts = new Map(); // profileId -> last start ms (throttles auto-refresh after failures)
+
+function readConnectorCache() {
+  try {
+    const data = JSON.parse(fs.readFileSync(MCP_CONNECTORS_FILE, 'utf8'));
+    if (data && typeof data === 'object' && data.byProfile && typeof data.byProfile === 'object') return data;
+  } catch { /* absent or corrupt: empty cache */ }
+  return { byProfile: {} };
+}
+
+function connectorUrlMap() {
+  const out = {};
+  const cache = readConnectorCache();
+  for (const pid of Object.keys(cache.byProfile)) {
+    const entry = cache.byProfile[pid];
+    for (const c of ((entry && Array.isArray(entry.connectors)) ? entry.connectors : [])) {
+      if (c && c.name && c.url) out[c.name] = c.url;
+    }
+  }
+  return out;
+}
+
+function refreshClaudeAiConnectors(profile) {
+  const pid = (profile && profile.id) || PRIMARY_ID;
+  if (connectorRefreshes.has(pid)) return connectorRefreshes.get(pid);
+  connectorRefreshAttempts.set(pid, Date.now());
+  const p = new Promise((resolve) => {
+    let out = '';
+    let settled = false;
+    let timer = null;
+    let child = null;
+    const finish = (exitCode, error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      let connectors = [];
+      try { connectors = parseMcpListOutput(out); } catch { connectors = []; }
+      let fetchedAt = null;
+      // A zero-exit run with no connectors is legitimate (API-key-only user);
+      // a failed/killed run that parsed nothing must not overwrite a good cache.
+      if (connectors.length > 0 || exitCode === 0) {
+        try {
+          fetchedAt = new Date().toISOString();
+          const cache = readConnectorCache();
+          cache.byProfile[pid] = { fetchedAt, connectors };
+          ensureConfigDir();
+          atomicWriteJson(MCP_CONNECTORS_FILE, cache);
+          BrowserWindow.getAllWindows().forEach((w) => {
+            try { w.webContents.send('mcp:connectorsUpdated', { profileId: pid }); } catch { /* ignore */ }
+          });
+        } catch (e) {
+          fetchedAt = null;
+          error = error || (e && e.message) || String(e);
+        }
+      }
+      resolve({ connectors, fetchedAt, error: error || null });
+    };
+    try {
+      child = spawn(getClaudePath(), ['mcp', 'list'], {
+        cwd: os.homedir(),
+        env: Object.assign({}, process.env, (profile && profile.env) || {}),
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+    } catch (e) {
+      finish(null, (e && e.message) || String(e));
+      return;
+    }
+    child.stdout.on('data', (chunk) => { out += chunk.toString(); });
+    child.stderr.on('data', () => { /* drained, not parsed */ });
+    child.on('error', (e) => finish(null, (e && e.message) || String(e)));
+    child.on('close', (code) => finish(code, code === 0 ? null : 'claude mcp list exited with code ' + code));
+    timer = setTimeout(() => {
+      try { child.kill(); } catch { /* already gone */ }
+      finish(null, 'claude mcp list timed out');
+    }, CONNECTOR_REFRESH_TIMEOUT_MS);
+  }).then((r) => { connectorRefreshes.delete(pid); return r; });
+  connectorRefreshes.set(pid, p);
+  return p;
+}
+
+function profileForProjectPath(projectPath) {
+  return resolveProfileFor({ projectProfileId: getProjectProfileIdByPath(projectPath) });
+}
+
 // List the MCP servers available to a project (merged user + project scope),
 // for the automation editor's MCP-allowlist checkboxes. Also returns the
 // project's saved default selection (if any) so the editor can pre-check it.
+// claude.ai connectors (from the per-profile cache) are appended with
+// scope 'claude.ai'; a stale/missing cache kicks off a background refresh.
 ipcMain.handle('automations:discoverMcpServers', (event, projectPath) => {
   const discovered = discoverProjectMcpServers(projectPath);
   const servers = Object.keys(discovered).sort().map(name => ({ name, scope: discovered[name].scope }));
+  let connectors = { fetchedAt: null, refreshing: false };
+  try {
+    const profile = profileForProjectPath(projectPath);
+    const entry = readConnectorCache().byProfile[profile.id];
+    if (entry && Array.isArray(entry.connectors)) {
+      entry.connectors.forEach((c) => {
+        if (c && c.name) servers.push({ name: c.name, scope: 'claude.ai', url: c.url || null });
+      });
+    }
+    const fetchedAt = entry && entry.fetchedAt ? entry.fetchedAt : null;
+    const age = fetchedAt ? Date.now() - Date.parse(fetchedAt) : Infinity;
+    const stale = !(age < CONNECTOR_CACHE_TTL_MS);
+    const lastTry = connectorRefreshAttempts.get(profile.id) || 0;
+    if (stale && !connectorRefreshes.has(profile.id) && Date.now() - lastTry > CONNECTOR_AUTO_RETRY_MS) {
+      refreshClaudeAiConnectors(profile);
+    }
+    connectors = { fetchedAt, refreshing: connectorRefreshes.has(profile.id) };
+  } catch (err) {
+    console.warn('[mcp] connector discovery failed:', err && err.message);
+  }
   const data = readAutomations();
   const norm = projectPath ? String(projectPath).replace(/\\/g, '/') : '';
   const projectDefault = (data.projectMcpDefaults && data.projectMcpDefaults[norm]) || null;
-  return { servers, projectDefault };
+  return { servers, projectDefault, connectors };
+});
+
+// Force a connector refresh for a project's profile and wait for it.
+ipcMain.handle('mcp:refreshConnectors', (event, projectPath) => {
+  return refreshClaudeAiConnectors(profileForProjectPath(projectPath));
 });
 
 // Persist a per-project default MCP allowlist (array of server names, or null to
@@ -6878,6 +7002,13 @@ ipcMain.handle('mcp:buildProjectConfig', (event, projectPath) => {
     const tmp = file + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(res.config), { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmp, file);
+    // Selected claude.ai connectors can't ride in --mcp-config and are dropped by
+    // --strict-mcp-config, so switch the renderer to allowlist mode (non-strict
+    // + --settings allowedMcpServers) — only when one is actually selected.
+    const allow = buildMcpAllowlist(projectDefault, discovered, connectorUrlMap());
+    if (allow.hasConnectors) {
+      return { mcpConfigPath: file, strict: true, hasMcp: true, allowedMcpServers: allow.entries };
+    }
     return { mcpConfigPath: file, strict: true, hasMcp: !!res.hasMcp };
   } catch (err) {
     console.warn('[mcp] buildProjectConfig failed, falling back to inherit-all:', err && err.message);
@@ -8870,9 +9001,24 @@ function spawnHeadlessClaude(prompt, cwd, opts) {
     fs.mkdirSync(path.dirname(mcpConfigPath), { recursive: true });
     fs.writeFileSync(mcpConfigPath, JSON.stringify(opts.mcpConfig), 'utf8');
     args.push('--mcp-config', mcpConfigPath);
-    // Scoped MCP allowlist: --strict-mcp-config makes the CLI ignore every other
-    // (user- and project-scoped) MCP server and load ONLY those in mcpConfig.
-    if (opts.strictMcp) args.push('--strict-mcp-config');
+    if (Array.isArray(opts.allowedMcpServers)) {
+      // Connector-aware scope: --strict-mcp-config would drop every claude.ai
+      // connector, so stay non-strict and restrict via settings allowedMcpServers.
+      const merged = mergeSettingsKey(args, 'allowedMcpServers', opts.allowedMcpServers);
+      if (merged) {
+        args.length = 0;
+        merged.forEach((a) => args.push(a));
+      } else {
+        // The agent's own --settings is a file we can't merge into: fall back
+        // to strict (connectors dropped) rather than leaving the scope unenforced.
+        console.warn('[mcp] cannot merge allowedMcpServers into a --settings file; using strict scope (claude.ai connectors dropped)');
+        args.push('--strict-mcp-config');
+      }
+    } else if (opts.strictMcp) {
+      // Scoped MCP allowlist: --strict-mcp-config makes the CLI ignore every other
+      // (user- and project-scoped) MCP server and load ONLY those in mcpConfig.
+      args.push('--strict-mcp-config');
+    }
     if (Array.isArray(opts.allowedTools) && opts.allowedTools.length > 0) {
       args.push('--allowedTools', opts.allowedTools.join(','));
     }
@@ -9322,6 +9468,7 @@ function spawnInteractiveScheduled(prompt, cwd, opts) {
     hasEndpoint: !!(opts.env && opts.env.ANTHROPIC_BASE_URL),
     mcpConfigPath: opts.mcpConfigPath,
     strictMcp: opts.strictMcp,
+    allowedMcpServers: opts.allowedMcpServers,
     extraArgs: opts.extraArgs
   });
   // Unlike spawnHeadlessClaude (which only learns session_id from stdout),
@@ -9711,6 +9858,10 @@ async function runAgent(automationId, agentId, opts) {
     const scoped = filterMcpDefs(available, mcpSelection, mongoServer || null);
     const mcpConfigPath = path.join(AUTOMATIONS_RUNS_DIR, automationId + '_' + agentId + '_' + runToken + '_mcp.json');
     mcpOpts = { mcpConfig: scoped, mcpConfigPath, allowedTools: mongoAllowed, strictMcp: true };
+    // Any selected claude.ai connector switches this run to allowlist mode
+    // (non-strict + settings allowedMcpServers); otherwise stay strict as before.
+    const allow = buildMcpAllowlist(mcpSelection, available, connectorUrlMap(), mongoServer || null);
+    if (allow.hasConnectors) mcpOpts.allowedMcpServers = allow.entries;
   } else if (mongoServer) {
     // No allowlist: legacy additive mongo-only config (no --strict-mcp-config).
     const mcpConfigPath = path.join(AUTOMATIONS_RUNS_DIR, automationId + '_' + agentId + '_' + runToken + '_mcp.json');
@@ -9757,6 +9908,7 @@ async function runAgent(automationId, agentId, opts) {
       mcpConfig: mcpOpts ? mcpOpts.mcpConfig : null,
       mcpConfigPath: mcpOpts ? mcpOpts.mcpConfigPath : null,
       strictMcp: mcpOpts ? mcpOpts.strictMcp : false,
+      allowedMcpServers: mcpOpts ? mcpOpts.allowedMcpServers : undefined,
       extraArgs: Array.isArray(agent.extraArgs) ? agent.extraArgs : null,
       sentinelPath,
       maxDurationMs: (typeof agent.maxDurationMs === 'number' && agent.maxDurationMs > 0) ? agent.maxDurationMs : 600000,
@@ -9796,6 +9948,7 @@ async function runAgent(automationId, agentId, opts) {
     mcpConfigPath: mcpOpts ? mcpOpts.mcpConfigPath : null,
     allowedTools: mcpOpts ? mcpOpts.allowedTools : null,
     strictMcp: mcpOpts ? mcpOpts.strictMcp : false,
+    allowedMcpServers: mcpOpts ? mcpOpts.allowedMcpServers : undefined,
     extraArgs: Array.isArray(agent.extraArgs) ? agent.extraArgs : null,
     env: agentEnv,
     profileId: profile.id,

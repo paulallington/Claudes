@@ -5593,7 +5593,11 @@ function addColumn(args, targetRow, opts) {
     var __col = allColumns.get(id);
     if (__col) __col.hasMcp = __hasMcp;
     bindColumnBaseUrl(sendMsg, { hasEndpoint: !!(opts.endpointId || (opts.env && opts.env.ANTHROPIC_BASE_URL)), isClaude: !cmd, hasMcp: __hasMcp, oneMModel: opts.model });
-    if (mcpRes) sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
+    // applyMcpScope handles the connector case (non-strict + merged --settings
+    // allowedMcpServers); without allowedMcpServers it matches appendProjectMcpArgs.
+    if (mcpRes) sendMsg.args = window.McpConnectors
+      ? window.McpConnectors.applyMcpScope(sendMsg.args, mcpRes)
+      : window.McpProject.appendProjectMcpArgs(sendMsg.args, mcpRes);
 
     vlog('spawn', { colId: id, cwd: cwd, cmd: sendMsg.cmd || 'claude', args: sendMsg.args });
     gatedWsSend(sendMsg);
@@ -7305,7 +7309,9 @@ async function restartColumn(id) {
     if (__mcpRes) {
       __rHasMcp = !!__mcpRes.hasMcp;
       col.hasMcp = __rHasMcp;
-      sendMsg.args = window.McpProject.appendProjectMcpArgs(sendMsg.args, __mcpRes);
+      sendMsg.args = window.McpConnectors
+        ? window.McpConnectors.applyMcpScope(sendMsg.args, __mcpRes)
+        : window.McpProject.appendProjectMcpArgs(sendMsg.args, __mcpRes);
     }
   }
   // Bind to the app-managed Headroom proxy by env var (no `headroom wrap`).
@@ -18289,7 +18295,91 @@ var automationEditingData = null; // Store the existing automation for preservin
 var modalAgents = []; // Tracks agent data for the modal
 var modalMcpServers = []; // [{name, scope}] MCP servers discovered for the modal's project
 var modalMcpProjectPath = null; // project path the above were discovered for
+var modalMcpConnectors = null; // { fetchedAt, refreshing } claude.ai connector cache state (null = not discovered)
 var activeCloneAutomationId = null;
+
+// --- claude.ai connectors in the MCP pickers (shared by the Manage MCP servers
+// modal and the automation editor). Connectors arrive from discoverMcpServers as
+// servers with scope 'claude.ai' (name keeps the full "claude.ai " prefix; the
+// checkbox value stays the full name, only the label drops the prefix).
+function isMcpConnector(s) {
+  return !!s && s.scope === 'claude.ai';
+}
+
+function mcpConnectorStatusText(info) {
+  if (info && info.refreshing) return 'Loading connectors from your claude.ai account…';
+  if (info && info.fetchedAt) return 'Updated ' + formatRelativeTime(info.fetchedAt);
+  return 'Not loaded yet';
+}
+
+// HTML for the "claude.ai connectors" group. cbClass is the picker's checkbox
+// class (so its existing read-back picks the connectors up); isChecked(name)
+// decides the initial tick.
+function mcpConnectorGroupHtml(connectorServers, info, cbClass, isChecked) {
+  var body = '';
+  if (connectorServers.length > 0) {
+    body = connectorServers.map(function (s) {
+      var label = window.McpConnectors && s.name.indexOf(window.McpConnectors.CONNECTOR_PREFIX) === 0
+        ? s.name.slice(window.McpConnectors.CONNECTOR_PREFIX.length) : s.name;
+      return '<label class="automation-permission-option" title="' + escapeHtml(s.url || '') + '">' +
+        '<input type="checkbox" class="' + cbClass + '" data-server="' + escapeHtml(s.name) + '"' + (isChecked(s.name) ? ' checked' : '') + '>' +
+        '<span>' + escapeHtml(label) + '</span>' +
+      '</label>';
+    }).join('');
+  } else if (!(info && info.refreshing)) {
+    body = '<div class="automation-permission-hint">No claude.ai connectors found</div>';
+  }
+  return '<div class="mcp-connector-group">' +
+    '<div class="mcp-connector-heading">claude.ai connectors</div>' +
+    '<div class="mcp-connector-list">' + body + '</div>' +
+    '<div class="mcp-connector-footer">' +
+      '<span class="mcp-connector-status">' + escapeHtml(mcpConnectorStatusText(info)) + '</span>' +
+      '<button type="button" class="mcp-connector-refresh"' + (info && info.refreshing ? ' disabled' : '') + '>Refresh</button>' +
+    '</div>' +
+  '</div>';
+}
+
+// Wire every Refresh button under rootEl: force a `claude mcp list` fetch for the
+// project's subscription (~40s), then let the picker re-discover and re-render.
+function bindMcpConnectorRefresh(rootEl, projectPath, rerender) {
+  if (!rootEl) return;
+  rootEl.querySelectorAll('.mcp-connector-refresh').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (!projectPath || !window.electronAPI || !window.electronAPI.refreshMcpConnectors) return;
+      btn.disabled = true;
+      var st = btn.parentNode.querySelector('.mcp-connector-status');
+      if (st) st.textContent = mcpConnectorStatusText({ refreshing: true });
+      window.electronAPI.refreshMcpConnectors(projectPath).catch(function () { /* surfaced as stale status */ }).then(function () {
+        rerender();
+      });
+    });
+  });
+}
+
+// Re-discover the automation editor's servers (e.g. after connectors finished
+// loading). preserveTicks folds the user's unsaved checkbox state back into
+// modalAgents before the cards are re-rendered.
+function reloadModalMcpServers(preserveTicks) {
+  var p = modalMcpProjectPath;
+  if (!p || !window.electronAPI || !window.electronAPI.discoverMcpServers) return Promise.resolve();
+  return window.electronAPI.discoverMcpServers(p).then(function (res) {
+    // Ignore if the modal was closed or switched projects meanwhile.
+    if (modalMcpProjectPath !== p) return;
+    modalMcpServers = (res && res.servers) || [];
+    modalMcpConnectors = (res && res.connectors) || null;
+    if (preserveTicks) syncAllAgentsFromCards();
+    renderModalAgentCards();
+  }).catch(function () { /* no MCP discovery — checkboxes just won't show */ });
+}
+
+if (window.electronAPI && window.electronAPI.onMcpConnectorsUpdated) {
+  window.electronAPI.onMcpConnectorsUpdated(function () {
+    var overlay = document.getElementById('automation-modal-overlay');
+    if (overlay && !overlay.classList.contains('hidden') && modalMcpProjectPath && modalAgents.length > 0) {
+      reloadModalMcpServers(true);
+    }
+  });
+}
 
 // Check if adding upstreamIdx as a dependency of agentIdx would create a cycle
 function wouldCreateCycle(agentIdx, upstreamIdx) {
@@ -18388,15 +18478,9 @@ function openAutomationModal(existingAutomation) {
   // resolves near-instantly (before the user can meaningfully edit).
   var mcpProjPath = existingAutomation ? existingAutomation.projectPath : (typeof getActiveProjectPath === 'function' ? getActiveProjectPath() : null);
   modalMcpServers = [];
+  modalMcpConnectors = null;
   modalMcpProjectPath = mcpProjPath;
-  if (mcpProjPath && window.electronAPI && window.electronAPI.discoverMcpServers) {
-    window.electronAPI.discoverMcpServers(mcpProjPath).then(function (res) {
-      // Ignore if the modal was closed or switched projects meanwhile.
-      if (modalMcpProjectPath !== mcpProjPath) return;
-      modalMcpServers = (res && res.servers) || [];
-      renderModalAgentCards();
-    }).catch(function () { /* no MCP discovery — checkboxes just won't show */ });
-  }
+  if (mcpProjPath) reloadModalMcpServers(false);
 
   // Manager section — available for all automations (single or multi-agent)
   var managerSection = document.getElementById('automation-manager-section');
@@ -18485,6 +18569,7 @@ function renderModalAgentCards() {
     var idx = parseInt(card.dataset.agentIndex);
     bindAgentCardEvents(card, idx);
   });
+  bindMcpConnectorRefresh(container, modalMcpProjectPath, function () { reloadModalMcpServers(true); });
   // After all cards rendered & bound, update chip disabled states
   updateRunAfterChipStates();
 }
@@ -18562,17 +18647,20 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
   // MCP-server allowlist checkboxes, populated from modalMcpServers (discovered
   // for the project when the modal opened). null selection = inherit all.
   var mcpSel = agent && Array.isArray(agent.mcpServers) ? agent.mcpServers : null;
-  var mcpBoxes;
-  if (!modalMcpServers || modalMcpServers.length === 0) {
+  var mcpIsChecked = function (name) { return (mcpSel === null) ? true : (mcpSel.indexOf(name) !== -1); };
+  var mcpFileServers = (modalMcpServers || []).filter(function (s) { return !isMcpConnector(s); });
+  var mcpConnectorServers = (modalMcpServers || []).filter(isMcpConnector);
+  var mcpBoxes = '';
+  if (mcpFileServers.length === 0 && mcpConnectorServers.length === 0 && !modalMcpConnectors) {
     mcpBoxes = '<div class="automation-permission-hint">No MCP servers discovered for this project (all inherited).</div>';
   } else {
-    mcpBoxes = modalMcpServers.map(function (s) {
-      var checked = (mcpSel === null) ? true : (mcpSel.indexOf(s.name) !== -1);
+    mcpBoxes = mcpFileServers.map(function (s) {
       return '<label class="automation-permission-option">' +
-        '<input type="checkbox" class="agent-mcp-server-cb" data-server="' + escapeHtml(s.name) + '"' + (checked ? ' checked' : '') + '>' +
+        '<input type="checkbox" class="agent-mcp-server-cb" data-server="' + escapeHtml(s.name) + '"' + (mcpIsChecked(s.name) ? ' checked' : '') + '>' +
         '<span>' + escapeHtml(s.name) + ' <span class="automation-permission-hint">(' + escapeHtml(s.scope) + ')</span></span>' +
       '</label>';
     }).join('');
+    if (modalMcpConnectors) mcpBoxes += mcpConnectorGroupHtml(mcpConnectorServers, modalMcpConnectors, 'agent-mcp-server-cb', mcpIsChecked);
   }
   var mcpServersHtml =
     '<div class="automation-form-group">' +
@@ -22363,9 +22451,21 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
   var inheritRefreshBtn = document.getElementById('mcp-inherit-refresh');
   function reloadInheritList() {
     if (!projectPath || !window.electronAPI || !window.electronAPI.discoverMcpServers) return Promise.resolve();
-    return window.electronAPI.discoverMcpServers(projectPath).then(function (res) {
-      renderInheritList((res && res.servers) || [], (res && res.projectDefault) || null);
-    }).catch(function () { renderInheritList([], null); });
+    var p = projectPath;
+    return window.electronAPI.discoverMcpServers(p).then(function (res) {
+      if (projectPath !== p) return;
+      // Ticks persist on every change, so a re-render from disk keeps the user's
+      // state. If they hadn't changed anything yet, rebase the respawn baseline
+      // so connectors appearing later don't read as a selection change.
+      var untouched = currentInheritSig() === inheritSigAtOpen;
+      renderInheritList((res && res.servers) || [], (res && res.projectDefault) || null, (res && res.connectors) || null);
+      if (untouched) inheritSigAtOpen = currentInheritSig();
+    }).catch(function () { renderInheritList([], null, null); });
+  }
+  if (window.electronAPI && window.electronAPI.onMcpConnectorsUpdated) {
+    window.electronAPI.onMcpConnectorsUpdated(function () {
+      if (!modal.classList.contains('hidden') && projectPath) reloadInheritList();
+    });
   }
   if (inheritRefreshBtn) inheritRefreshBtn.addEventListener('click', reloadInheritList);
   var projectPath = null;
@@ -22507,12 +22607,14 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
     if (el) el.addEventListener('keydown', function (e) { e.stopPropagation(); });
   });
 
-  function renderInheritList(servers, projectDefault) {
+  function renderInheritList(allServers, projectDefault, connectorsInfo) {
     if (!inheritListEl) return;
     inheritListEl.innerHTML = '';
     var hadSelection = Array.isArray(projectDefault);
     inheritListEl.setAttribute('data-had-selection', hadSelection ? 'true' : 'false');
-    if (!servers || servers.length === 0) {
+    var servers = (allServers || []).filter(function (s) { return !isMcpConnector(s); });
+    var connectorServers = (allServers || []).filter(isMcpConnector);
+    if (servers.length === 0 && connectorServers.length === 0 && !connectorsInfo) {
       var hint = document.createElement('div');
       hint.className = 'automation-permission-hint';
       hint.textContent = 'No MCP servers discovered for this project (all inherited).';
@@ -22539,6 +22641,16 @@ document.getElementById('btn-automation-copy-output').addEventListener('click', 
       label.appendChild(span);
       inheritListEl.appendChild(label);
     });
+    if (connectorsInfo) {
+      var wrap = document.createElement('div');
+      wrap.innerHTML = mcpConnectorGroupHtml(connectorServers, connectorsInfo, 'mcp-inherit-cb', function (name) {
+        return !hadSelection || projectDefault.indexOf(name) !== -1;
+      });
+      var group = wrap.firstElementChild;
+      group.querySelectorAll('.mcp-inherit-cb').forEach(function (cb) { cb.addEventListener('change', persistInherit); });
+      bindMcpConnectorRefresh(group, projectPath, reloadInheritList);
+      inheritListEl.appendChild(group);
+    }
   }
 
   function persistInherit() {

@@ -9123,6 +9123,58 @@ html[data-theme="light"] .term-search-btn:hover { background: rgba(0,0,0,0.06); 
   max-height: 240px;
   overflow-y: auto;
 }
+/* claude.ai connectors group, shared by the Manage MCP servers modal and the
+   automation editor's per-agent MCP picker. */
+.mcp-connector-group {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-dim, #333);
+}
+.mcp-connector-heading {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim, #666);
+}
+.mcp-connector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#mcp-inherit-list .mcp-connector-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px 20px;
+}
+.mcp-connector-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mcp-connector-status {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.mcp-connector-refresh {
+  font-size: 11px;
+  padding: 1px 8px;
+  background: transparent;
+  border: 1px solid var(--border-dim, #333);
+  color: var(--text-dim, #666);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mcp-connector-refresh:hover:not(:disabled) {
+  color: var(--text-primary, #e0e0e0);
+  border-color: var(--text-dim, #666);
+}
+.mcp-connector-refresh:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .mcp-edit-pane {
   flex: 1;
   padding: 16px 20px;
