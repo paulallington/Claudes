@@ -6863,7 +6863,11 @@ function connectorUrlMap() {
   for (const pid of Object.keys(cache.byProfile)) {
     const entry = cache.byProfile[pid];
     for (const c of ((entry && Array.isArray(entry.connectors)) ? entry.connectors : [])) {
-      if (c && c.name && c.url) out[c.name] = c.url;
+      if (!c || !c.name || !c.url) continue;
+      // Union across profiles: the same connector can live on several accounts
+      // with different URLs, and any of them may be the one a spawn runs under.
+      const urls = out[c.name] || (out[c.name] = []);
+      if (urls.indexOf(c.url) === -1) urls.push(c.url);
     }
   }
   return out;
@@ -6885,9 +6889,10 @@ function refreshClaudeAiConnectors(profile) {
       let connectors = [];
       try { connectors = parseMcpListOutput(out); } catch { connectors = []; }
       let fetchedAt = null;
-      // A zero-exit run with no connectors is legitimate (API-key-only user);
-      // a failed/killed run that parsed nothing must not overwrite a good cache.
-      if (connectors.length > 0 || exitCode === 0) {
+      // Only a clean exit may write the cache: a zero-exit run with no connectors
+      // is legitimate (API-key-only user), but a timed-out/failed run — even one
+      // that parsed a partial list — must never overwrite a good cache.
+      if (exitCode === 0) {
         try {
           fetchedAt = new Date().toISOString();
           const cache = readConnectorCache();
@@ -6902,7 +6907,8 @@ function refreshClaudeAiConnectors(profile) {
           error = error || (e && e.message) || String(e);
         }
       }
-      resolve({ connectors, fetchedAt, error: error || null });
+      // names only: the renderer never receives connector URLs
+      resolve({ names: connectors.map((c) => c.name), fetchedAt, error: error || null });
     };
     try {
       child = spawn(getClaudePath(), ['mcp', 'list'], {
@@ -6920,7 +6926,14 @@ function refreshClaudeAiConnectors(profile) {
     child.on('error', (e) => finish(null, (e && e.message) || String(e)));
     child.on('close', (code) => finish(code, code === 0 ? null : 'claude mcp list exited with code ' + code));
     timer = setTimeout(() => {
-      try { child.kill(); } catch { /* already gone */ }
+      // `claude mcp list` spawns stdio servers; on Windows child.kill() leaves them orphaned.
+      try {
+        if (process.platform === 'win32' && child.pid) {
+          execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => { /* ignore errors */ });
+        } else {
+          child.kill();
+        }
+      } catch { /* already gone */ }
       finish(null, 'claude mcp list timed out');
     }, CONNECTOR_REFRESH_TIMEOUT_MS);
   }).then((r) => { connectorRefreshes.delete(pid); return r; });
@@ -6930,6 +6943,16 @@ function refreshClaudeAiConnectors(profile) {
 
 function profileForProjectPath(projectPath) {
   return resolveProfileFor({ projectProfileId: getProjectProfileIdByPath(projectPath) });
+}
+
+// A selected connector with no cached URL can't be allow-listed, so it silently
+// won't load. Warn, and refresh in the background (unless one is in flight) so a
+// cold cache self-heals for the next spawn.
+function noteMissingConnectors(missing, profile) {
+  if (!Array.isArray(missing) || missing.length === 0) return;
+  console.warn('[mcp] selected claude.ai connectors have no cached URL and will not load this spawn:', missing.join(', '));
+  const pid = (profile && profile.id) || PRIMARY_ID;
+  if (!connectorRefreshes.has(pid)) refreshClaudeAiConnectors(profile);
 }
 
 // List the MCP servers available to a project (merged user + project scope),
@@ -6946,7 +6969,7 @@ ipcMain.handle('automations:discoverMcpServers', (event, projectPath) => {
     const entry = readConnectorCache().byProfile[profile.id];
     if (entry && Array.isArray(entry.connectors)) {
       entry.connectors.forEach((c) => {
-        if (c && c.name) servers.push({ name: c.name, scope: 'claude.ai', url: c.url || null });
+        if (c && c.name) servers.push({ name: c.name, scope: 'claude.ai' });
       });
     }
     const fetchedAt = entry && entry.fetchedAt ? entry.fetchedAt : null;
@@ -7006,6 +7029,7 @@ ipcMain.handle('mcp:buildProjectConfig', (event, projectPath) => {
     // --strict-mcp-config, so switch the renderer to allowlist mode (non-strict
     // + --settings allowedMcpServers) — only when one is actually selected.
     const allow = buildMcpAllowlist(projectDefault, discovered, connectorUrlMap());
+    noteMissingConnectors(allow.missingConnectors, profileForProjectPath(projectPath));
     if (allow.hasConnectors) {
       return { mcpConfigPath: file, strict: true, hasMcp: true, allowedMcpServers: allow.entries };
     }
@@ -9852,6 +9876,7 @@ async function runAgent(automationId, agentId, opts) {
   // temp mcp-config / sentinel filenames.
   const runToken = Date.now() + '_' + crypto.randomBytes(4).toString('hex');
   let mcpOpts = null;
+  let mcpConnectorsMissing = []; // warned/refreshed once the profile is resolved, below
   if (mcpSelection !== null) {
     // Scoped allowlist: strict config with ONLY the selected servers (+ mongo).
     const available = discoverProjectMcpServers(automation.projectPath);
@@ -9862,6 +9887,7 @@ async function runAgent(automationId, agentId, opts) {
     // (non-strict + settings allowedMcpServers); otherwise stay strict as before.
     const allow = buildMcpAllowlist(mcpSelection, available, connectorUrlMap(), mongoServer || null);
     if (allow.hasConnectors) mcpOpts.allowedMcpServers = allow.entries;
+    mcpConnectorsMissing = allow.missingConnectors || [];
   } else if (mongoServer) {
     // No allowlist: legacy additive mongo-only config (no --strict-mcp-config).
     const mcpConfigPath = path.join(AUTOMATIONS_RUNS_DIR, automationId + '_' + agentId + '_' + runToken + '_mcp.json');
@@ -9876,6 +9902,7 @@ async function runAgent(automationId, agentId, opts) {
     ? resolveProfileFor({ columnProfileId: opts.forcedProfileId })
     : resolveProfileFor({ columnProfileId: automation.profileId, projectProfileId: getProjectProfileIdByPath(automation.projectPath) });
   const agentEnv = Object.assign({}, getAgentEndpointEnv(agent, automation.projectPath), profile.env);
+  noteMissingConnectors(mcpConnectorsMissing, profile);
 
   // Minted up front (not scraped from the event stream) so the run's
   // conversation is resumable even if it dies before emitting any event, and

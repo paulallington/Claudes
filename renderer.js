@@ -18321,7 +18321,7 @@ function mcpConnectorGroupHtml(connectorServers, info, cbClass, isChecked) {
     body = connectorServers.map(function (s) {
       var label = window.McpConnectors && s.name.indexOf(window.McpConnectors.CONNECTOR_PREFIX) === 0
         ? s.name.slice(window.McpConnectors.CONNECTOR_PREFIX.length) : s.name;
-      return '<label class="automation-permission-option" title="' + escapeHtml(s.url || '') + '">' +
+      return '<label class="automation-permission-option">' +
         '<input type="checkbox" class="' + cbClass + '" data-server="' + escapeHtml(s.name) + '"' + (isChecked(s.name) ? ' checked' : '') + '>' +
         '<span>' + escapeHtml(label) + '</span>' +
       '</label>';
@@ -18356,10 +18356,56 @@ function bindMcpConnectorRefresh(rootEl, projectPath, rerender) {
   });
 }
 
+// Inner HTML of an agent card's MCP-servers block (the .agent-mcp-servers div),
+// from modalMcpServers / modalMcpConnectors. isChecked(name) decides each tick.
+function agentMcpBoxesHtml(isChecked) {
+  var fileServers = (modalMcpServers || []).filter(function (s) { return !isMcpConnector(s); });
+  var connectorServers = (modalMcpServers || []).filter(isMcpConnector);
+  if (fileServers.length === 0 && connectorServers.length === 0 && !modalMcpConnectors) {
+    return '<div class="automation-permission-hint">No MCP servers discovered for this project (all inherited).</div>';
+  }
+  var boxes = fileServers.map(function (s) {
+    return '<label class="automation-permission-option">' +
+      '<input type="checkbox" class="agent-mcp-server-cb" data-server="' + escapeHtml(s.name) + '"' + (isChecked(s.name) ? ' checked' : '') + '>' +
+      '<span>' + escapeHtml(s.name) + ' <span class="automation-permission-hint">(' + escapeHtml(s.scope) + ')</span></span>' +
+    '</label>';
+  }).join('');
+  if (modalMcpConnectors) boxes += mcpConnectorGroupHtml(connectorServers, modalMcpConnectors, 'agent-mcp-server-cb', isChecked);
+  return boxes;
+}
+
+// Re-render ONLY each card's MCP-servers block in place (connectors finishing
+// their background load must not rebuild the cards: that would re-expand
+// collapsed ones and steal focus/caret from whatever the user is typing).
+// Current unsaved ticks are read from the DOM; a server that wasn't there at the
+// last render starts checked iff the agent is still inherit-all.
+function refreshModalMcpBlocks() {
+  var container = document.getElementById('automation-agents-list');
+  if (!container) return;
+  container.querySelectorAll('.agent-card').forEach(function (card) {
+    var block = card.querySelector('.agent-mcp-servers');
+    if (!block) return;
+    var idx = parseInt(card.dataset.agentIndex);
+    var saved = modalAgents[idx] && Array.isArray(modalAgents[idx].mcpServers) ? modalAgents[idx].mcpServers : null;
+    var ticks = {};
+    var allChecked = true;
+    block.querySelectorAll('.agent-mcp-server-cb').forEach(function (cb) {
+      ticks[cb.getAttribute('data-server')] = cb.checked;
+      if (!cb.checked) allChecked = false;
+    });
+    var inheritAll = block.getAttribute('data-had-selection') !== 'true' && allChecked;
+    block.innerHTML = agentMcpBoxesHtml(function (name) {
+      if (Object.prototype.hasOwnProperty.call(ticks, name)) return ticks[name];
+      return inheritAll || (!!saved && saved.indexOf(name) !== -1);
+    });
+    bindMcpConnectorRefresh(block, modalMcpProjectPath, refreshModalMcpBlocksFromServer);
+  });
+}
+
 // Re-discover the automation editor's servers (e.g. after connectors finished
-// loading). preserveTicks folds the user's unsaved checkbox state back into
-// modalAgents before the cards are re-rendered.
-function reloadModalMcpServers(preserveTicks) {
+// loading). inPlace updates just the cards' MCP blocks (preserving unsaved
+// ticks); otherwise (initial open) the cards are fully re-rendered.
+function reloadModalMcpServers(inPlace) {
   var p = modalMcpProjectPath;
   if (!p || !window.electronAPI || !window.electronAPI.discoverMcpServers) return Promise.resolve();
   return window.electronAPI.discoverMcpServers(p).then(function (res) {
@@ -18367,10 +18413,12 @@ function reloadModalMcpServers(preserveTicks) {
     if (modalMcpProjectPath !== p) return;
     modalMcpServers = (res && res.servers) || [];
     modalMcpConnectors = (res && res.connectors) || null;
-    if (preserveTicks) syncAllAgentsFromCards();
-    renderModalAgentCards();
+    if (inPlace) refreshModalMcpBlocks();
+    else renderModalAgentCards();
   }).catch(function () { /* no MCP discovery — checkboxes just won't show */ });
 }
+
+function refreshModalMcpBlocksFromServer() { return reloadModalMcpServers(true); }
 
 if (window.electronAPI && window.electronAPI.onMcpConnectorsUpdated) {
   window.electronAPI.onMcpConnectorsUpdated(function () {
@@ -18569,7 +18617,7 @@ function renderModalAgentCards() {
     var idx = parseInt(card.dataset.agentIndex);
     bindAgentCardEvents(card, idx);
   });
-  bindMcpConnectorRefresh(container, modalMcpProjectPath, function () { reloadModalMcpServers(true); });
+  bindMcpConnectorRefresh(container, modalMcpProjectPath, refreshModalMcpBlocksFromServer);
   // After all cards rendered & bound, update chip disabled states
   updateRunAfterChipStates();
 }
@@ -18647,21 +18695,7 @@ function createAgentCardHtml(agentIndex, agent, isCollapsed, allAgents) {
   // MCP-server allowlist checkboxes, populated from modalMcpServers (discovered
   // for the project when the modal opened). null selection = inherit all.
   var mcpSel = agent && Array.isArray(agent.mcpServers) ? agent.mcpServers : null;
-  var mcpIsChecked = function (name) { return (mcpSel === null) ? true : (mcpSel.indexOf(name) !== -1); };
-  var mcpFileServers = (modalMcpServers || []).filter(function (s) { return !isMcpConnector(s); });
-  var mcpConnectorServers = (modalMcpServers || []).filter(isMcpConnector);
-  var mcpBoxes = '';
-  if (mcpFileServers.length === 0 && mcpConnectorServers.length === 0 && !modalMcpConnectors) {
-    mcpBoxes = '<div class="automation-permission-hint">No MCP servers discovered for this project (all inherited).</div>';
-  } else {
-    mcpBoxes = mcpFileServers.map(function (s) {
-      return '<label class="automation-permission-option">' +
-        '<input type="checkbox" class="agent-mcp-server-cb" data-server="' + escapeHtml(s.name) + '"' + (mcpIsChecked(s.name) ? ' checked' : '') + '>' +
-        '<span>' + escapeHtml(s.name) + ' <span class="automation-permission-hint">(' + escapeHtml(s.scope) + ')</span></span>' +
-      '</label>';
-    }).join('');
-    if (modalMcpConnectors) mcpBoxes += mcpConnectorGroupHtml(mcpConnectorServers, modalMcpConnectors, 'agent-mcp-server-cb', mcpIsChecked);
-  }
+  var mcpBoxes = agentMcpBoxesHtml(function (name) { return (mcpSel === null) ? true : (mcpSel.indexOf(name) !== -1); });
   var mcpServersHtml =
     '<div class="automation-form-group">' +
       '<label>MCP servers <span class="automation-permission-hint">(unchecked = disabled for this agent; leave all checked to inherit every server)</span></label>' +
