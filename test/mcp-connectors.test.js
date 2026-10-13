@@ -39,3 +39,32 @@ test('parseMcpListOutput: extracts only claude.ai connectors with http(s) urls',
     { name: 'claude.ai Granola', url: 'https://mcp.granola.ai/mcp' }
   ]);
 });
+
+test('parseMcpListOutput: strips ANSI escapes and CRs before matching', () => {
+  const esc = String.fromCharCode(27);
+  const text = esc + '[32mclaude.ai Granola: https://mcp.granola.ai/mcp - ' + esc + '[0m✓ Connected\r\n' +
+    esc + '[1mclaude.ai Wispr Flow: https://api.wisprflow.ai/connect/mcp - ! Needs authentication\r\n';
+  assert.deepStrictEqual(parseMcpListOutput(text), [
+    { name: 'claude.ai Granola', url: 'https://mcp.granola.ai/mcp' },
+    { name: 'claude.ai Wispr Flow', url: 'https://api.wisprflow.ai/connect/mcp' }
+  ]);
+});
+
+test('parseMcpListOutput: tolerates (HTTP)/(SSE) tags and colons in names, dedupes by name', () => {
+  const text = [
+    'claude.ai Foo: Bar: https://foo.example/mcp?x=1 (SSE) - ✔ Connected',
+    'claude.ai Granola: https://mcp.granola.ai/mcp (HTTP) - ✓ Connected',
+    'claude.ai Granola: https://other.example/mcp - ✗ Failed'
+  ].join('\n');
+  assert.deepStrictEqual(parseMcpListOutput(text), [
+    { name: 'claude.ai Foo: Bar', url: 'https://foo.example/mcp?x=1' },
+    { name: 'claude.ai Granola', url: 'https://mcp.granola.ai/mcp' }
+  ]);
+});
+
+test('parseMcpListOutput: ignores connectors with non-http targets; bad input -> []', () => {
+  assert.deepStrictEqual(parseMcpListOutput('claude.ai Weird: npx foo - ✓ Connected'), []);
+  assert.deepStrictEqual(parseMcpListOutput(''), []);
+  assert.deepStrictEqual(parseMcpListOutput(null), []);
+  assert.deepStrictEqual(parseMcpListOutput(42), []);
+});
