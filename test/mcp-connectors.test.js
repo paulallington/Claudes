@@ -263,10 +263,16 @@ test('applyMcpScope: args already carrying --mcp-config (Strip MCPs) are returne
   assert.notStrictEqual(out, input);
 });
 
-test('applyMcpScope: no scope -> copy, with any stale app allowlist stripped', () => {
-  const stale = ['--settings', JSON.stringify({ ultracode: true, allowedMcpServers: ALLOW })];
-  assert.deepStrictEqual(applyMcpScope(stale, null), ['--settings', '{"ultracode":true}']);
-  assert.deepStrictEqual(applyMcpScope(['a'], { strict: true }), ['a']);
+test('applyMcpScope: no scope / no allowlist -> args byte-identical, user allowedMcpServers survives', () => {
+  const user = ['--settings', '{ "allowedMcpServers":[{"serverName":"a"}], "x":1.0 }'];
+  const viaNull = applyMcpScope(user, null);
+  assert.deepStrictEqual(viaNull, user);
+  assert.notStrictEqual(viaNull, user);
+  assert.deepStrictEqual(applyMcpScope(user, { strict: true }), user);
+  assert.deepStrictEqual(
+    applyMcpScope(user, { mcpConfigPath: 'p.json', strict: true }),
+    user.concat(['--mcp-config', 'p.json', '--strict-mcp-config'])
+  );
   assert.deepStrictEqual(applyMcpScope(undefined, null), []);
 });
 
