@@ -10,6 +10,7 @@ const {
   isConnectorName,
   parseMcpListOutput,
   serverUrlOf,
+  urlOriginPattern,
   buildMcpAllowlist,
   mergeSettingsKey,
   applyMcpScope
@@ -92,6 +93,23 @@ test('serverUrlOf: returns http(s) url strings only', () => {
   assert.strictEqual(serverUrlOf('https://a.example'), null);
 });
 
+// --- urlOriginPattern ---
+
+test('urlOriginPattern: origin wildcard only; path, query, userinfo never leak', () => {
+  assert.strictEqual(urlOriginPattern('https://mcp.sentry.dev/mcp'), 'https://mcp.sentry.dev/*');
+  assert.strictEqual(urlOriginPattern('https://h.example/s/SECRET/mcp?api_key=K'), 'https://h.example/*');
+  assert.strictEqual(urlOriginPattern('https://user:pw@h.example:8443/mcp'), 'https://h.example:8443/*');
+  assert.strictEqual(urlOriginPattern('HTTP://Host.Example/x'), 'http://host.example/*');
+});
+
+test('urlOriginPattern: null for unparseable or non-http(s) input', () => {
+  assert.strictEqual(urlOriginPattern('not a url'), null);
+  assert.strictEqual(urlOriginPattern('ws://h.example/mcp'), null);
+  assert.strictEqual(urlOriginPattern('file:///c/x'), null);
+  assert.strictEqual(urlOriginPattern(null), null);
+  assert.strictEqual(urlOriginPattern(42), null);
+});
+
 // --- buildMcpAllowlist ---
 
 const DISCOVERED = {
@@ -105,8 +123,8 @@ test('buildMcpAllowlist: connectors by serverUrl, remote file servers by url, st
     buildMcpAllowlist(['claude.ai Granola', 'sentry', 'mongodb'], DISCOVERED, CONNECTORS),
     {
       entries: [
-        { serverUrl: 'https://mcp.granola.ai/mcp' },
-        { serverUrl: 'https://mcp.sentry.dev/mcp' },
+        { serverUrl: 'https://mcp.granola.ai/*' },
+        { serverUrl: 'https://mcp.sentry.dev/*' },
         { serverName: 'mongodb' }
       ],
       hasConnectors: true,
@@ -131,11 +149,20 @@ test('buildMcpAllowlist: extraServers always included, duplicates collapsed', ()
   assert.deepStrictEqual(
     buildMcpAllowlist(['mongodb'], DISCOVERED, CONNECTORS, extra),
     {
-      entries: [{ serverName: 'mongodb' }, { serverUrl: 'https://r.example/mcp' }],
+      entries: [{ serverName: 'mongodb' }, { serverUrl: 'https://r.example/*' }],
       hasConnectors: false,
       missingConnectors: []
     }
   );
+});
+
+test('buildMcpAllowlist: secrets embedded in remote urls never reach the allowlist', () => {
+  const found = {
+    k: { def: { url: 'https://u:p@h.example/s/SECRET/mcp?api_key=K' }, scope: 'user' }
+  };
+  const out = buildMcpAllowlist(['k'], found, null);
+  assert.deepStrictEqual(out.entries, [{ serverUrl: 'https://h.example/*' }]);
+  assert.ok(!JSON.stringify(out).includes('SECRET'));
 });
 
 test('buildMcpAllowlist: non-array selection and missing maps are tolerated', () => {
