@@ -7,7 +7,9 @@ const {
   isConnectorName,
   parseMcpListOutput,
   serverUrlOf,
-  buildMcpAllowlist
+  buildMcpAllowlist,
+  mergeSettingsKey,
+  applyMcpScope
 } = require('../lib/mcp-connectors');
 
 // --- isConnectorName ---
@@ -141,5 +143,56 @@ test('buildMcpAllowlist: non-array selection and missing maps are tolerated', ()
   assert.deepStrictEqual(
     buildMcpAllowlist(['claude.ai Granola', 'x'], undefined, undefined),
     { entries: [], hasConnectors: false, missingConnectors: ['claude.ai Granola'] }
+  );
+});
+
+// --- mergeSettingsKey ---
+
+const ALLOW = [{ serverUrl: 'https://mcp.granola.ai/mcp' }];
+
+test('mergeSettingsKey: no --settings -> appends a fresh one, input untouched', () => {
+  const input = ['--model', 'opus'];
+  const out = mergeSettingsKey(input, 'allowedMcpServers', ALLOW);
+  assert.deepStrictEqual(out, ['--model', 'opus', '--settings', JSON.stringify({ allowedMcpServers: ALLOW })]);
+  assert.deepStrictEqual(input, ['--model', 'opus']);
+});
+
+test('mergeSettingsKey: no --settings and undefined value -> unchanged copy', () => {
+  const input = ['--model', 'opus'];
+  const out = mergeSettingsKey(input, 'allowedMcpServers', undefined);
+  assert.deepStrictEqual(out, ['--model', 'opus']);
+  assert.notStrictEqual(out, input);
+});
+
+test('mergeSettingsKey: merges into the LAST --settings JSON in place, preserving other keys', () => {
+  const input = ['--settings', '{"a":1}', '--x', '--settings', '{"ultracode":true,"env":{"K":"v"}}', '--y'];
+  const out = mergeSettingsKey(input, 'allowedMcpServers', ALLOW);
+  assert.deepStrictEqual(out, [
+    '--settings', '{"a":1}', '--x',
+    '--settings', JSON.stringify({ ultracode: true, env: { K: 'v' }, allowedMcpServers: ALLOW }),
+    '--y'
+  ]);
+});
+
+test('mergeSettingsKey: handles the single-token --settings=<json> form', () => {
+  const out = mergeSettingsKey(['--settings={"a":1}'], 'allowedMcpServers', ALLOW);
+  assert.deepStrictEqual(out, ['--settings=' + JSON.stringify({ a: 1, allowedMcpServers: ALLOW })]);
+});
+
+test('mergeSettingsKey: undefined value deletes the key', () => {
+  const input = ['--settings', JSON.stringify({ a: 1, allowedMcpServers: ALLOW })];
+  assert.deepStrictEqual(mergeSettingsKey(input, 'allowedMcpServers', undefined), ['--settings', '{"a":1}']);
+});
+
+test('mergeSettingsKey: file-path or non-object --settings is unmergeable -> null', () => {
+  assert.strictEqual(mergeSettingsKey(['--settings', 'C:\\cfg\\s.json'], 'k', ALLOW), null);
+  assert.strictEqual(mergeSettingsKey(['--settings', '[1]'], 'k', ALLOW), null);
+  assert.strictEqual(mergeSettingsKey(['--settings=s.json'], 'k', undefined), null);
+});
+
+test('mergeSettingsKey: drops a malformed trailing bare --settings', () => {
+  assert.deepStrictEqual(
+    mergeSettingsKey(['--model', 'opus', '--settings'], 'allowedMcpServers', ALLOW),
+    ['--model', 'opus', '--settings', JSON.stringify({ allowedMcpServers: ALLOW })]
   );
 });
