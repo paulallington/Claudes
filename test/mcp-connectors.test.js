@@ -196,3 +196,71 @@ test('mergeSettingsKey: drops a malformed trailing bare --settings', () => {
     ['--model', 'opus', '--settings', JSON.stringify({ allowedMcpServers: ALLOW })]
   );
 });
+
+// --- applyMcpScope ---
+
+test('applyMcpScope: allowlist scope -> non-strict --mcp-config plus merged allowedMcpServers', () => {
+  const input = ['--model', 'opus'];
+  const out = applyMcpScope(input, { mcpConfigPath: 'C:\\t\\mcp.json', strict: true, allowedMcpServers: ALLOW });
+  assert.deepStrictEqual(out, [
+    '--model', 'opus',
+    '--settings', JSON.stringify({ allowedMcpServers: ALLOW }),
+    '--mcp-config', 'C:\\t\\mcp.json'
+  ]);
+  assert.ok(!out.includes('--strict-mcp-config'));
+  assert.deepStrictEqual(input, ['--model', 'opus']);
+});
+
+test('applyMcpScope: merges into an existing --settings rather than appending a second', () => {
+  const out = applyMcpScope(
+    ['--settings', '{"ultracode":true}'],
+    { mcpConfigPath: 'p.json', allowedMcpServers: [] }
+  );
+  assert.deepStrictEqual(out, [
+    '--settings', JSON.stringify({ ultracode: true, allowedMcpServers: [] }),
+    '--mcp-config', 'p.json'
+  ]);
+});
+
+test('applyMcpScope: unmergeable user settings file falls back to legacy strict config', () => {
+  const out = applyMcpScope(
+    ['--settings', 'user.json'],
+    { mcpConfigPath: 'p.json', allowedMcpServers: ALLOW }
+  );
+  assert.deepStrictEqual(out, ['--settings', 'user.json', '--mcp-config', 'p.json', '--strict-mcp-config']);
+});
+
+test('applyMcpScope: legacy scope honours strict flag', () => {
+  assert.deepStrictEqual(
+    applyMcpScope(['a'], { mcpConfigPath: 'p.json', strict: true }),
+    ['a', '--mcp-config', 'p.json', '--strict-mcp-config']
+  );
+  assert.deepStrictEqual(
+    applyMcpScope(['a'], { mcpConfigPath: 'p.json', strict: false }),
+    ['a', '--mcp-config', 'p.json']
+  );
+});
+
+test('applyMcpScope: args already carrying --mcp-config (Strip MCPs) are returned unchanged', () => {
+  const input = ['--mcp-config', 'empty.json', '--strict-mcp-config'];
+  const out = applyMcpScope(input, { mcpConfigPath: 'p.json', strict: true, allowedMcpServers: ALLOW });
+  assert.deepStrictEqual(out, input);
+  assert.notStrictEqual(out, input);
+});
+
+test('applyMcpScope: no scope -> copy, with any stale app allowlist stripped', () => {
+  const stale = ['--settings', JSON.stringify({ ultracode: true, allowedMcpServers: ALLOW })];
+  assert.deepStrictEqual(applyMcpScope(stale, null), ['--settings', '{"ultracode":true}']);
+  assert.deepStrictEqual(applyMcpScope(['a'], { strict: true }), ['a']);
+  assert.deepStrictEqual(applyMcpScope(undefined, null), []);
+});
+
+test('applyMcpScope: a respawn re-scoping an already-stamped allowlist replaces it', () => {
+  const first = applyMcpScope(['--model', 'opus'], { mcpConfigPath: 'p.json', allowedMcpServers: ALLOW });
+  const rebuilt = applyMcpScope(first.slice(0, -2), { mcpConfigPath: 'p.json', allowedMcpServers: [] });
+  assert.deepStrictEqual(rebuilt, [
+    '--model', 'opus',
+    '--settings', JSON.stringify({ allowedMcpServers: [] }),
+    '--mcp-config', 'p.json'
+  ]);
+});
