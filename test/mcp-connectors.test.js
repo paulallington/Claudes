@@ -165,6 +165,21 @@ test('buildMcpAllowlist: secrets embedded in remote urls never reach the allowli
   assert.ok(!JSON.stringify(out).includes('SECRET'));
 });
 
+test('buildMcpAllowlist: a connector name may map to several urls (one per profile), deduped', () => {
+  const urls = {
+    'claude.ai Custom': ['https://a.example/mcp', 'https://b.example/mcp', 'https://a.example/other'],
+    'claude.ai Bad': ['nonsense']
+  };
+  assert.deepStrictEqual(
+    buildMcpAllowlist(['claude.ai Custom', 'claude.ai Bad'], null, urls),
+    {
+      entries: [{ serverUrl: 'https://a.example/*' }, { serverUrl: 'https://b.example/*' }],
+      hasConnectors: true,
+      missingConnectors: ['claude.ai Bad']
+    }
+  );
+});
+
 test('buildMcpAllowlist: non-array selection and missing maps are tolerated', () => {
   assert.deepStrictEqual(
     buildMcpAllowlist(null, null, null),
