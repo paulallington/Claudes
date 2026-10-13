@@ -86,3 +86,60 @@ test('serverUrlOf: returns http(s) url strings only', () => {
   assert.strictEqual(serverUrlOf(null), null);
   assert.strictEqual(serverUrlOf('https://a.example'), null);
 });
+
+// --- buildMcpAllowlist ---
+
+const DISCOVERED = {
+  sentry: { def: { type: 'http', url: 'https://mcp.sentry.dev/mcp' }, scope: 'user' },
+  mongodb: { def: { command: 'npx', args: ['-y', 'mongodb-mcp-server'] }, scope: 'project' }
+};
+const CONNECTORS = { 'claude.ai Granola': 'https://mcp.granola.ai/mcp' };
+
+test('buildMcpAllowlist: connectors by serverUrl, remote file servers by url, stdio by serverName', () => {
+  assert.deepStrictEqual(
+    buildMcpAllowlist(['claude.ai Granola', 'sentry', 'mongodb'], DISCOVERED, CONNECTORS),
+    {
+      entries: [
+        { serverUrl: 'https://mcp.granola.ai/mcp' },
+        { serverUrl: 'https://mcp.sentry.dev/mcp' },
+        { serverName: 'mongodb' }
+      ],
+      hasConnectors: true,
+      missingConnectors: []
+    }
+  );
+});
+
+test('buildMcpAllowlist: unknown connectors are reported missing, unknown names skipped', () => {
+  assert.deepStrictEqual(
+    buildMcpAllowlist(['claude.ai Gone', 'nope', 'mongodb'], DISCOVERED, CONNECTORS),
+    {
+      entries: [{ serverName: 'mongodb' }],
+      hasConnectors: false,
+      missingConnectors: ['claude.ai Gone']
+    }
+  );
+});
+
+test('buildMcpAllowlist: extraServers always included, duplicates collapsed', () => {
+  const extra = { mongodb: { command: 'npx', args: [] }, remote: { url: 'https://r.example/mcp' } };
+  assert.deepStrictEqual(
+    buildMcpAllowlist(['mongodb'], DISCOVERED, CONNECTORS, extra),
+    {
+      entries: [{ serverName: 'mongodb' }, { serverUrl: 'https://r.example/mcp' }],
+      hasConnectors: false,
+      missingConnectors: []
+    }
+  );
+});
+
+test('buildMcpAllowlist: non-array selection and missing maps are tolerated', () => {
+  assert.deepStrictEqual(
+    buildMcpAllowlist(null, null, null),
+    { entries: [], hasConnectors: false, missingConnectors: [] }
+  );
+  assert.deepStrictEqual(
+    buildMcpAllowlist(['claude.ai Granola', 'x'], undefined, undefined),
+    { entries: [], hasConnectors: false, missingConnectors: ['claude.ai Granola'] }
+  );
+});
