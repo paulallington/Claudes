@@ -2,7 +2,13 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { CONNECTOR_PREFIX, isConnectorName, parseMcpListOutput } = require('../lib/mcp-connectors');
+const {
+  CONNECTOR_PREFIX,
+  isConnectorName,
+  parseMcpListOutput,
+  serverUrlOf,
+  buildMcpAllowlist
+} = require('../lib/mcp-connectors');
 
 // --- isConnectorName ---
 
@@ -67,4 +73,16 @@ test('parseMcpListOutput: ignores connectors with non-http targets; bad input ->
   assert.deepStrictEqual(parseMcpListOutput(''), []);
   assert.deepStrictEqual(parseMcpListOutput(null), []);
   assert.deepStrictEqual(parseMcpListOutput(42), []);
+});
+
+// --- serverUrlOf ---
+
+test('serverUrlOf: returns http(s) url strings only', () => {
+  assert.strictEqual(serverUrlOf({ type: 'http', url: 'https://a.example/mcp' }), 'https://a.example/mcp');
+  assert.strictEqual(serverUrlOf({ url: 'HTTP://a.example/mcp' }), 'HTTP://a.example/mcp');
+  assert.strictEqual(serverUrlOf({ command: 'npx', args: [] }), null);
+  assert.strictEqual(serverUrlOf({ url: 'ws://a.example' }), null);
+  assert.strictEqual(serverUrlOf({ url: 42 }), null);
+  assert.strictEqual(serverUrlOf(null), null);
+  assert.strictEqual(serverUrlOf('https://a.example'), null);
 });
