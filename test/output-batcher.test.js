@@ -47,3 +47,53 @@ test('immediate push with nothing pending delivers just the data', () => {
   assert.deepEqual(delivered, [['a', 'now']]);
   assert.equal(timers.length, 0);
 });
+
+test('flush delivers one id now and leaves the others queued', () => {
+  const { batcher, delivered, fire } = setup();
+  batcher.push('a', 'A', false);
+  batcher.push('b', 'B', false);
+  batcher.flush('b');
+  assert.deepEqual(delivered, [['b', 'B']]);
+  fire();
+  assert.deepEqual(delivered, [['b', 'B'], ['a', 'A']]);
+});
+
+test('flush of an unknown id is a no-op', () => {
+  const { batcher, delivered } = setup();
+  batcher.flush('nope');
+  assert.deepEqual(delivered, []);
+});
+
+test('drop discards pending data for that id only', () => {
+  const { batcher, delivered, fire } = setup();
+  batcher.push('a', 'A', false);
+  batcher.push('b', 'B', false);
+  batcher.drop('a');
+  fire();
+  assert.deepEqual(delivered, [['b', 'B']]);
+});
+
+test('timer re-arms when data arrives after a flush', () => {
+  const { batcher, delivered, timers, fire } = setup();
+  batcher.push('a', '1', false);
+  fire();
+  batcher.push('a', '2', false);
+  assert.equal(timers.length, 2);
+  fire();
+  assert.deepEqual(delivered, [['a', '1'], ['a', '2']]);
+});
+
+test('the timer is disarmed once nothing is pending', () => {
+  const { batcher, timers } = setup();
+  batcher.push('a', '1', false);
+  batcher.push('a', '2', true);
+  assert.equal(timers[0].cleared, true);
+  batcher.push('a', '3', false);
+  assert.equal(timers.length, 2);
+});
+
+test('flushAll with nothing pending delivers nothing', () => {
+  const { batcher, delivered } = setup();
+  batcher.flushAll();
+  assert.deepEqual(delivered, []);
+});
