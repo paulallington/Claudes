@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const {
   automationRowState,
   openItemCount,
-} = require('../lib/automation-sidebar-view');
+  projectPathKey,
+} =require('../lib/automation-sidebar-view');
 
 function auto(overrides) {
   return Object.assign({ id: 'a1', name: 'Cert Watcher', projectPath: 'C:\\Git\\Proj', enabled: true, agents: [{ id: 'g1' }] }, overrides);
@@ -39,4 +40,11 @@ test('openItemCount counts unacknowledged findings and unresolved decisions once
   assert.equal(openItemCount(findings, 'a3'), 0);
   assert.equal(openItemCount(null, 'a1'), 0);
   assert.equal(openItemCount(undefined, 'a1'), 0);
+});
+
+test('projectPathKey normalises backslashes to forward slashes and tolerates non-strings', () => {
+  assert.equal(projectPathKey('C:\\Users\\paul\\Git\\Claudes'),'C:/Users/paul/Git/Claudes');
+  assert.equal(projectPathKey('/home/paul/proj'), '/home/paul/proj');
+  assert.equal(projectPathKey(null), '');
+  assert.equal(projectPathKey(undefined), '');
 });
