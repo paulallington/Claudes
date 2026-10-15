@@ -1093,6 +1093,8 @@ var pendingEchoAt = Object.create(null);   // column id -> performance.now() of 
 var PERF_ECHO_STALE_MS = 10000;
 (function startRendererLagReporting() {
   if (!perfLagStats || !perfEchoStats) return;
+  // main ignores popout snapshots, so don't pay for the probe/observer/reporter.
+  if (popoutMode) return;
   var PROBE_MS = 500;
   var last = performance.now();
   // Chromium throttles timers in hidden pages to >= 1 s (once a minute after

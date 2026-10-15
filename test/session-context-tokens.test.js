@@ -43,7 +43,7 @@ test('large file: falls back to a full read when the usage line is only near the
   fs.unlinkSync(p);
 });
 
-test('large file: sinceMs still filters entries found in the tail', () => {
+test('large file: sinceMs returns the newest tail entry at or after the cutoff', () => {
   const old = Object.assign({ timestamp: '2026-01-01T00:00:00Z' }, usageLine(900));
   const fresh = Object.assign({ timestamp: '2026-03-01T00:00:00Z' }, usageLine(40));
   const p = bigTmpFile([old], [fresh], 600);
@@ -85,7 +85,7 @@ test('large file: sinceMs hitting a too-old usage entry in the tail returns null
   fs.unlinkSync(p);
 });
 
-test('large file: a multi-byte character straddling a window boundary does not break the result', () => {
+test('large file: a multi-byte character split at the tail boundary does not break the result', () => {
   const usage = Buffer.from(JSON.stringify(usageLine(654)) + '\n');
   const euro = Buffer.from('\u20ac');  // 3 bytes
   const euros = 200000;                 // ~600 KB, longer than the first two windows
@@ -160,6 +160,14 @@ test('sinceMs returns the most recent assistant turn at or after the cutoff', ()
   ]);
   const cutoff = Date.parse('2026-02-01T00:00:00Z');
   assert.strictEqual(lastAssistantContextTokens(p, cutoff), 1200);
+  fs.unlinkSync(p);
+});
+
+test('sinceMs includes an entry whose timestamp exactly equals the cutoff', () => {
+  const p = tmpFile([
+    { type: 'assistant', timestamp: '2026-02-01T00:00:00Z', message: { usage: { input_tokens: 321, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }
+  ]);
+  assert.strictEqual(lastAssistantContextTokens(p, Date.parse('2026-02-01T00:00:00Z')), 321);
   fs.unlinkSync(p);
 });
 
