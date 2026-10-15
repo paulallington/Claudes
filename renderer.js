@@ -3409,6 +3409,16 @@ function buildProjectItem(project, index) {
     addWorkspace(index);
   });
 
+  // New-automation button, left of the + on hover.
+  var addAutoBtn = document.createElement('span');
+  addAutoBtn.className = 'project-add-automation';
+  addAutoBtn.textContent = '⚡︎';
+  addAutoBtn.title = 'New automation';
+  addAutoBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    openNewAutomationForProject(index);
+  });
+
   var removeBtn = document.createElement('span');
   removeBtn.className = 'project-remove';
   removeBtn.textContent = '\u00d7';
@@ -3539,6 +3549,25 @@ function buildProjectItem(project, index) {
       addMenuItem('Kill all instances (' + liveCount + ')', 'kill-all');
     }
 
+    // Automations: the project-wide actions that used to live only in the
+    // Automations tab header. Pause / Resume follow the sidebar row states.
+    var autoDivider = document.createElement('div');
+    autoDivider.className = 'project-context-item project-context-divider';
+    autoDivider.style.cssText = 'border-top:1px solid var(--border-primary); padding:0; margin:4px 0; cursor:default;';
+    menu.appendChild(autoDivider);
+    var projAutoRows = sidebarAutomationRows[window.AutomationSidebarView.projectPathKey(project.path)] || [];
+    addMenuItem('New automation…', 'new-automation');
+    if (projAutoRows.length > 0) {
+      if (projAutoRows.some(function (r) { return r.state !== 'disabled'; })) {
+        addMenuItem('Pause all automations', 'pause-all-automations');
+      }
+      if (projAutoRows.some(function (r) { return r.state === 'disabled'; })) {
+        addMenuItem('Resume all automations', 'resume-all-automations');
+      }
+      addMenuItem('Export all automations…', 'export-automations');
+    }
+    addMenuItem('Import automations…', 'import-automations');
+
     // Sync entries — populated async so the labels reflect the current state.
     var syncDivider = document.createElement('div');
     syncDivider.className = 'project-context-item project-context-divider';
@@ -3647,6 +3676,21 @@ function buildProjectItem(project, index) {
         chooseLayoutToRestore(config.projects[projIndex].path);
       } else if (action === 'kill-all') {
         killAllInstancesForProject(config.projects[projIndex].path);
+      } else if (action === 'new-automation') {
+        openNewAutomationForProject(projIndex);
+      } else if (action === 'pause-all-automations') {
+        if (ensureProjectActive(projIndex)) pauseAllAutomations();
+      } else if (action === 'resume-all-automations') {
+        if (ensureProjectActive(projIndex)) resumeAllAutomations();
+      } else if (action === 'export-automations') {
+        if (ensureProjectActive(projIndex)) exportAllAutomations();
+      } else if (action === 'import-automations') {
+        if (ensureProjectActive(projIndex)) {
+          // The import preview renders inside the Automations tab.
+          var autoTab = document.querySelector('.explorer-tab[data-tab="automations"]');
+          if (autoTab && !autoTab.classList.contains('active')) autoTab.click();
+          importAutomationsFromFile();
+        }
       } else if (action === 'toggle-voice-mute') {
         config.projects[projIndex].voiceMuted = !config.projects[projIndex].voiceMuted;
         saveConfig();
@@ -3665,6 +3709,7 @@ function buildProjectItem(project, index) {
   // Top → middle → bottom assembly.
   rightSide.appendChild(removeBtn);
   rightSide.appendChild(middleRow);
+  rightSide.appendChild(addAutoBtn);
   rightSide.appendChild(addWsBtn);
   item.appendChild(info);
   item.appendChild(rightSide);
@@ -19818,17 +19863,47 @@ document.getElementById('automation-manager-enabled').addEventListener('change',
 });
 document.getElementById('btn-refresh-automations').addEventListener('click', refreshAutomations);
 
-document.getElementById('btn-pause-all-automations').addEventListener('click', function () {
+// Project-wide automation actions. Shared by the Automations tab buttons and
+// the project right-click menu; both act on the active project. They read the
+// list fresh because automationsForProject lags a project switch.
+function setAllProjectAutomationsEnabled(enabled) {
   if (!activeProjectKey) { alert('Select a project first.'); return; }
-  if (automationsForProject.length === 0) return;
-  window.electronAPI.setAllAutomationsEnabled(activeProjectKey, false).then(function () { refreshAutomations(); });
-});
+  var key = activeProjectKey;
+  window.electronAPI.getAutomationsForProject(key).then(function (automations) {
+    if (!automations || automations.length === 0) return;
+    return window.electronAPI.setAllAutomationsEnabled(key, enabled).then(function () { refreshAutomations(); });
+  });
+}
 
-document.getElementById('btn-resume-all-automations').addEventListener('click', function () {
+function pauseAllAutomations() { setAllProjectAutomationsEnabled(false); }
+
+function resumeAllAutomations() { setAllProjectAutomationsEnabled(true); }
+
+function exportAllAutomations() {
   if (!activeProjectKey) { alert('Select a project first.'); return; }
-  if (automationsForProject.length === 0) return;
-  window.electronAPI.setAllAutomationsEnabled(activeProjectKey, true).then(function () { refreshAutomations(); });
-});
+  var key = activeProjectKey;
+  window.electronAPI.getAutomationsForProject(key).then(function (automations) {
+    if (!automations || automations.length === 0) { alert('No automations to export.'); return; }
+    window.electronAPI.exportAutomations(key);
+  });
+}
+
+function importAutomationsFromFile() {
+  if (!activeProjectKey) { alert('Select a project first.'); return; }
+
+  // Step 1: Select file and preview
+  window.electronAPI.previewImport().then(function (preview) {
+    if (!preview || preview.cancelled) return;
+    if (preview.error) { alert(preview.error); return; }
+
+    // Step 2: Show preview panel in the automations list area
+    showImportPreview(preview);
+  });
+}
+
+document.getElementById('btn-pause-all-automations').addEventListener('click', pauseAllAutomations);
+
+document.getElementById('btn-resume-all-automations').addEventListener('click', resumeAllAutomations);
 
 document.getElementById('btn-automations-global-paused-resume').addEventListener('click', function () {
   window.electronAPI.getAutomationSettings().then(function (settings) {
@@ -19842,24 +19917,9 @@ document.getElementById('btn-automations-global-paused-resume').addEventListener
   });
 });
 
-document.getElementById('btn-export-automations').addEventListener('click', function () {
-  if (!activeProjectKey) { alert('Select a project first.'); return; }
-  if (automationsForProject.length === 0) { alert('No automations to export.'); return; }
-  window.electronAPI.exportAutomations(activeProjectKey);
-});
+document.getElementById('btn-export-automations').addEventListener('click', exportAllAutomations);
 
-document.getElementById('btn-import-automations').addEventListener('click', function () {
-  if (!activeProjectKey) { alert('Select a project first.'); return; }
-
-  // Step 1: Select file and preview
-  window.electronAPI.previewImport().then(function (preview) {
-    if (!preview || preview.cancelled) return;
-    if (preview.error) { alert(preview.error); return; }
-
-    // Step 2: Show preview panel in the automations list area
-    showImportPreview(preview);
-  });
-});
+document.getElementById('btn-import-automations').addEventListener('click', importAutomationsFromFile);
 
 function showImportPreview(preview) {
   importInProgress = true;

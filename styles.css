@@ -446,6 +446,24 @@ html[data-platform="darwin"] .sidebar-header {
 .project-item.popped-out .project-add-workspace { display: none; }
 .project-item .project-add-workspace.disabled { pointer-events: none; opacity: 0.4; }
 
+/* New-automation button: sits left of the + button, same hover reveal. */
+.project-item .project-add-automation {
+  display: none;
+  position: absolute;
+  bottom: 4px;
+  right: 26px;
+  cursor: pointer;
+  color: var(--text-dimmer);
+  font-size: 12px;
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 3px;
+  -webkit-app-region: no-drag;
+}
+.project-item:hover .project-add-automation { display: inline-block; }
+.project-item .project-add-automation:hover { color: var(--text-primary); }
+.project-item.popped-out .project-add-automation { display: none; }
+
 /* Workspace sub-rows — peer entries under a project card. Each tracks its
    own terminals, badge, and active state. Primary is the project card itself
    (not a sub-row). */
