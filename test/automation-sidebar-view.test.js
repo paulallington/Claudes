@@ -6,6 +6,7 @@ const {
   openItemCounts,
   projectPathKey,
   buildSidebarAutomationRows,
+  rowsNeedingFlash,
 } = require('../lib/automation-sidebar-view');
 
 function auto(overrides) {
@@ -108,4 +109,16 @@ test('openItemCounts maps automationId to the open count using the openItemCount
   assert.deepEqual(openItemCounts(findings), { a1: 3, a3: 1 });
   assert.deepEqual(openItemCounts(null), {});
   assert.deepEqual(openItemCounts(undefined), {});
+});
+
+test('rowsNeedingFlash picks rows whose badge grew or that newly need attention, and ignores first sight', () => {
+  var row = function (id, state, badgeCount) { return { id: id, name: id, state: state, badgeCount: badgeCount }; };
+  var prev = { 'C:/p': [row('a', 'idle', 1), row('b', 'idle', 2), row('c', 'attention', 1), row('d', 'idle', 0)] };
+  var next = {
+    'C:/p': [row('a', 'idle', 2), row('b', 'idle', 1), row('c', 'attention', 1), row('d', 'attention', 0), row('e', 'attention', 3)],
+    'C:/q': [row('f', 'idle', 4)],
+  };
+  assert.deepEqual(rowsNeedingFlash(prev, next).sort(), ['a', 'd']);
+  assert.deepEqual(rowsNeedingFlash({}, next), [], 'nothing to compare on the first load');
+  assert.deepEqual(rowsNeedingFlash(null, null), []);
 });
