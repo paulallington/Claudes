@@ -82,6 +82,17 @@ test('buildSidebarAutomationRows dims and titles paused rows and tolerates missi
   assert.deepEqual(buildSidebarAutomationRows([null, 'x'], [], {}), {});
 });
 
+test('buildSidebarAutomationRows uses opts.openCounts instead of findings when given', () => {
+  var automations = [auto({ id: 'a1' }), auto({ id: 'a2', projectPath: 'C:/Git/Other' })];
+  var findings = [{ id: 'f1', automationId: 'a2', acknowledgedAt: null }];
+  var rows = buildSidebarAutomationRows(automations, findings, { globalEnabled: true, openCounts: { a1: 2 } });
+  assert.equal(rows['C:/Git/Proj'][0].badgeCount, 2);
+  assert.equal(rows['C:/Git/Proj'][0].title, 'Idle \u00b7 2 open items');
+  assert.equal(rows['C:/Git/Other'][0].badgeCount, 0);
+  var viaNull = buildSidebarAutomationRows(automations, null, { openCounts: { a2: 1 } });
+  assert.equal(viaNull['C:/Git/Other'][0].title, 'Idle \u00b7 1 open item');
+});
+
 test('openItemCounts maps automationId to the open count using the openItemCount rule', () => {
   var ack = '2026-10-15T00:00:00.000Z';
   var findings = [
