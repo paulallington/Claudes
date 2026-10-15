@@ -15,6 +15,8 @@ const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-
 const { isValidHookToken } = require('./lib/hook-token');
 const { nextPollDelay } = require('./lib/poll-backoff');
 const { isRelevantRootEvent } = require('./lib/fs-watch-filter');
+const { sanitizeRendererLag, formatMainLag, formatRendererLag } = require('./lib/perf-line');
+const { monitorEventLoopDelay } = require('perf_hooks');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
@@ -269,10 +271,21 @@ function maybeAutoUpdateHeadroom() {
 // for per-process CPU/memory and log a single line. Hook traffic is
 // counted between samples so we can see throughput.
 //
-// To read each [perf] line: "tails=N hooks=H | Browser cpu=X% mem=YMB;
-// Renderer cpu=X% mem=YMB; …". Sustained high CPU on one process points
-// at where to look (Browser = Electron main; Renderer = the window's UI).
+// To read each [perf] line: "tails=N hooks=H ... mainLag=a/b/c | rLag=...
+// | Browser cpu=X% mem=YMB; Renderer cpu=X% mem=YMB; …". Sustained high CPU
+// on one process points at where to look (Browser = Electron main;
+// Renderer = the window's UI).
+//   mainLag=p50/p99/max   main-process event-loop delay in ms over the window
+//                         (perf_hooks histogram, 20ms resolution)
+//   rLag=p50/p99/max      renderer event-loop lag in ms, sent by the renderer
+//   lt=<n>/<ms>ms         renderer long tasks: count / total duration
+//   echo=p50/p99/max(n=)  keystroke-to-terminal-echo latency in ms, n samples
+//   termKB                terminal output bytes written in the window
+// The rLag segment only appears when a renderer snapshot arrived since the
+// previous sample (the renderer sends one every 15 s via perf:rendererLag).
 const PERF_SAMPLE_MS = 15_000;
+const mainLagHist = monitorEventLoopDelay({ resolution: 20 });
+let perfRendererLag = null;  // latest sanitized snapshot, cleared once logged
 let perfHookCount = 0;
 let perfFsEvents = 0;        // raw fs.watch callbacks
 let perfCtxReads = 0;        // session:contextTokens IPC handler calls (cache + miss)
@@ -298,17 +311,27 @@ function perfSample() {
       + ' hooks=' + perfHookCount
       + ' fsEvents=' + perfFsEvents
       + ' ctxReads=' + perfCtxReads + '/' + ctxStats.fullReads + 'full(' + ctxMB + ')'
+      + formatMainLag(mainLagHist)
+      + formatRendererLag(perfRendererLag)
       + ' | ' + procs.join('; '));
   } catch (err) {
     diagLog('[perf] sample failed:', err && err.message);
   }
+  mainLagHist.reset();
+  perfRendererLag = null;
   perfHookCount = 0;
   perfFsEvents = 0;
   perfCtxReads = 0;
 }
 // Schedule once app is ready so getAppMetrics has the full process tree.
 if (typeof app !== 'undefined') {
+  ipcMain.on('perf:rendererLag', (_event, snap) => {
+    // Untrusted renderer payload: keep only known, clamped numeric fields.
+    const clean = sanitizeRendererLag(snap);
+    if (clean) perfRendererLag = clean;
+  });
   app.whenReady().then(() => {
+    mainLagHist.enable();
     setInterval(perfSample, PERF_SAMPLE_MS).unref();
     // First sample after 5s — lets startup quiesce before we baseline.
     setTimeout(perfSample, 5000).unref();
