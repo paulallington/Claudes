@@ -3630,8 +3630,8 @@ function buildProjectItem(project, index) {
       addMenuItem('Kill all instances (' + liveCount + ')', 'kill-all');
     }
 
-    // Automations: the project-wide actions that used to live only in the
-    // Automations tab header. Pause / Resume follow the sidebar row states.
+    // Automations: project-wide actions. Pause / Resume follow the sidebar row
+    // states.
     var autoDivider = document.createElement('div');
     autoDivider.className = 'project-context-item project-context-divider';
     autoDivider.style.cssText = 'border-top:1px solid var(--border-primary); padding:0; margin:4px 0; cursor:default;';
@@ -3646,6 +3646,7 @@ function buildProjectItem(project, index) {
         addMenuItem('Resume all automations', 'resume-all-automations');
       }
       addMenuItem('Export all automations…', 'export-automations');
+      addMenuItem('Delete all automations…', 'delete-all-automations');
     }
     addMenuItem('Import automations…', 'import-automations');
 
@@ -3765,6 +3766,8 @@ function buildProjectItem(project, index) {
         if (ensureProjectActive(projIndex)) resumeAllAutomations();
       } else if (action === 'export-automations') {
         if (ensureProjectActive(projIndex)) exportAllAutomations();
+      } else if (action === 'delete-all-automations') {
+        if (ensureProjectActive(projIndex)) deleteAllProjectAutomations(config.projects[projIndex]);
       } else if (action === 'import-automations') {
         if (ensureProjectActive(projIndex)) importAutomationsFromFile();
       } else if (action === 'toggle-voice-mute') {
@@ -20699,6 +20702,22 @@ function setAllProjectAutomationsEnabled(enabled) {
 function pauseAllAutomations() { setAllProjectAutomationsEnabled(false); }
 
 function resumeAllAutomations() { setAllProjectAutomationsEnabled(true); }
+
+// Reads the list fresh: the sidebar rows lag a project switch, and the count in
+// the prompt has to be the real one.
+function deleteAllProjectAutomations(project) {
+  if (!activeProjectKey) { alert('Select a project first.'); return; }
+  var key = activeProjectKey;
+  window.electronAPI.getAutomationsForProject(key).then(function (automations) {
+    if (!automations || automations.length === 0) { alert('No automations to delete.'); return; }
+    if (!confirm('Delete ALL ' + automations.length + ' automations for "' + (project && project.name || 'this project') + '"? This cannot be undone.')) return;
+    return window.electronAPI.deleteAllAutomations(key).then(function (result) {
+      // refreshAutomationPage closes the page when its automation is gone.
+      if (result && result.deleted) refreshAutomations();
+      refreshAutomationsFlyout();
+    });
+  });
+}
 
 function exportAllAutomations() {
   if (!activeProjectKey) { alert('Select a project first.'); return; }
