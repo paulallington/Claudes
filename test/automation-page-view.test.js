@@ -321,3 +321,21 @@ test('nextSelectedRunKey: nothing selected yet picks the default, and an empty l
 test('nextSelectedRunKey: a first run on an empty agent switches to Live', () => {
   assert.equal(nextSelectedRunKey([], [runItem('live', true)], null), 'live');
 });
+
+const { exceedsLiveHardCap, scrollTopAfterTrim } = require('../lib/automation-page-view');
+
+test('exceedsLiveHardCap: buffered output beyond twice the cap is trimmed even before a frame flush', () => {
+  assert.equal(exceedsLiveHardCap(1000, 500), false);
+  assert.equal(exceedsLiveHardCap(1001, 500), true);
+  assert.equal(exceedsLiveHardCap(0, 500), false);
+  assert.equal(exceedsLiveHardCap(5000, 0), false);
+  assert.equal(exceedsLiveHardCap(NaN, 500), false);
+});
+
+test('scrollTopAfterTrim: moves the view up by the height that was trimmed from the top, never below 0', () => {
+  assert.equal(scrollTopAfterTrim(800, 5000, 4000), 0);  // the viewed text itself was trimmed
+  assert.equal(scrollTopAfterTrim(2000, 5000, 4000), 1000);
+  assert.equal(scrollTopAfterTrim(300, 5000, 5000), 300);
+  assert.equal(scrollTopAfterTrim(300, 4000, 5000), 300);  // content grew: nothing was trimmed
+  assert.equal(scrollTopAfterTrim(undefined, 5000, 4000), 0);
+});

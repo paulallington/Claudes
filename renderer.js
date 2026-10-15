@@ -4372,7 +4372,7 @@ function restoreSessions(projectPath, workspaceId) {
 
     try {
       if (entries.length === 0 && minimizedEntries.length === 0) {
-        addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, { workspaceId: workspaceId });
+        addColumn(spawnArgs.length > 0 ? spawnArgs : null, null, { workspaceId: workspaceId, keepAutomationPage: true });
         return;
       }
 
@@ -4387,7 +4387,7 @@ function restoreSessions(projectPath, workspaceId) {
           }
           targetRow = rowsByIdx[e.rowIdx];
         }
-        var rowOpts = { workspaceId: workspaceId };
+        var rowOpts = { workspaceId: workspaceId, keepAutomationPage: true };
         if (e.title) rowOpts.title = e.title;
         // Threaded through to addColumn's opts.model -> bindColumnBaseUrl's
         // oneMModel, so a Headroom-bound column restores pinned to the model
@@ -4447,7 +4447,7 @@ function restoreSessions(projectPath, workspaceId) {
       // restore lands the chip in a new bottom row when re-restored.
       for (var me = 0; me < minimizedEntries.length; me++) {
         var ment = minimizedEntries[me];
-        var minRowOpts = { workspaceId: workspaceId };
+        var minRowOpts = { workspaceId: workspaceId, keepAutomationPage: true };
         if (ment.title) minRowOpts.title = ment.title;
         if (ment.model) minRowOpts.model = ment.model;
         if (ment.profileId) minRowOpts.profileId = ment.profileId;
@@ -5519,10 +5519,9 @@ function addColumn(args, targetRow, opts) {
   var state = getActiveState();
   if (!state) return;
   // A column the user spawns belongs on screen, so it takes over from the
-  // automation page. A session restore adds columns on its own schedule, which
-  // can land after the user has opened a page on a project whose columns were
-  // still loading, so it must leave the page up.
-  if (!state.restoringLayout && !opts.keepAutomationPage) closeAutomationPage();
+  // automation page. Restore and transfer paths add columns on their own
+  // schedule (possibly after the user opened a page) and pass keepAutomationPage.
+  if (!opts.keepAutomationPage) closeAutomationPage();
   // User is spawning a column — clear the post-killAll suppression and hide
   // the empty-state hint.
   state.suppressAutoSpawn = false;
@@ -18432,6 +18431,7 @@ function loadAutomationPageRuns() {
     if (st !== automationPageState || seq !== st.runsSeq) return;
     var list = Array.isArray(history) ? history : [];
     st.runsLoaded = true;
+    st.olderPrevLimit = null;
     st.canLoadOlder = view.canLoadOlderRuns(list.length, limit, AUTOMATION_PAGE_HISTORY_MAX);
     var liveStartedAt = onManager
       ? (automation.manager.lastRunStatus === 'running' ? automation.manager.lastRunAt : null)
@@ -18445,7 +18445,14 @@ function loadAutomationPageRuns() {
     st.runKey = view.nextSelectedRunKey(prevItems, st.runItems, st.runKey);
     renderAutomationPageRuns();
     if (st.runKey !== st.loadedRunKey) loadAutomationPageRun();
-  }).catch(function () { /* keep the current list */ });
+  }).catch(function () {
+    // Keep the current list. A failed "Show older runs" puts the button back.
+    if (st !== automationPageState || seq !== st.runsSeq || st.olderPrevLimit == null) return;
+    st.historyLimit = st.olderPrevLimit;
+    st.olderPrevLimit = null;
+    st.canLoadOlder = true;
+    renderAutomationPageRuns();
+  });
 }
 
 function renderAutomationPageRuns() {
@@ -18497,6 +18504,7 @@ function renderAutomationPageRuns() {
     older.className = 'automation-detail-run-all automation-page-runs-older';
     older.textContent = 'Show older runs';
     older.addEventListener('click', function () {
+      st.olderPrevLimit = st.historyLimit;
       st.historyLimit = AUTOMATION_PAGE_HISTORY_MAX;
       st.canLoadOlder = false;
       renderAutomationPageRuns();
@@ -18744,6 +18752,13 @@ function feedAutomationPageOutput(automationId, agentKey, chunk) {
   if (!chunk || st.liveLoading) return;
   st.outputText += chunk;
   st.pendingText = (st.pendingText || '') + chunk;
+  // A minimised window gets no animation frames, so the flush below may not run
+  // for a long time. Stop the buffer growing without limit in the meantime.
+  if (window.AutomationPageView.exceedsLiveHardCap(st.outputText.length, AUTOMATION_PAGE_LIVE_MAX_CHARS)) {
+    st.outputText = window.AutomationPageView.trimOutputTail(st.outputText, AUTOMATION_PAGE_LIVE_MAX_CHARS).text;
+    if (st.pendingText.length > st.outputText.length) st.pendingText = st.outputText;
+    setAutomationPageTrimNote(true);
+  }
   if (st.flushQueued) return;
   st.flushQueued = true;
   // Re-marking a large output is far dearer than appending, so slow down while
@@ -18762,28 +18777,44 @@ function flushAutomationPageOutput(st) {
   st.pendingText = '';
   // Trim once per flush, not per chunk: slicing a 500,000 character string for
   // every chunk of a chatty run would cost more than the appends do.
-  var tail = window.AutomationPageView.trimOutputTail(st.outputText, AUTOMATION_PAGE_LIVE_MAX_CHARS);
+  var view = window.AutomationPageView;
+  var tail = view.trimOutputTail(st.outputText, AUTOMATION_PAGE_LIVE_MAX_CHARS);
+  var outEl = automationPageNode('output');
+  var emptyEl = automationPageNode('empty');
+  var wasHidden = outEl.classList.contains('hidden');
+  var follow = wasHidden || view.isNearBottom(outEl.scrollTop, outEl.clientHeight, outEl.scrollHeight);
+  var scrollTop = outEl.scrollTop;
+  var rebuild = wasHidden || st.findQuery || outEl.childNodes.length !== 1 || outEl.firstChild.nodeType !== 3;
+  // Text trimmed off the top shifts everything the user is reading upwards, so
+  // when they have scrolled up, the view is moved back by the height that went.
+  var keepView = !follow && !wasHidden;
+  var heightBefore = 0;
+  if (rebuild && keepView && tail.removed > 0) {
+    // Draw the untrimmed text first to learn how tall the trimmed part is.
+    renderAutomationPageOutput();
+    heightBefore = outEl.scrollHeight;
+  }
   if (tail.removed > 0) {
     st.outputText = tail.text;
     setAutomationPageTrimNote(true);
   }
-  var outEl = automationPageNode('output');
-  var emptyEl = automationPageNode('empty');
-  var wasHidden = outEl.classList.contains('hidden');
-  var follow = wasHidden || window.AutomationPageView.isNearBottom(outEl.scrollTop, outEl.clientHeight, outEl.scrollHeight);
-  var scrollTop = outEl.scrollTop;
   if (wasHidden) {
     outEl.classList.remove('hidden');
     emptyEl.classList.add('hidden');
     renderAutomationPageOutput();
-  } else if (st.findQuery || outEl.childNodes.length !== 1 || outEl.firstChild.nodeType !== 3) {
+  } else if (rebuild) {
     renderAutomationPageOutput();
-    outEl.scrollTop = scrollTop;
+    outEl.scrollTop = heightBefore ? view.scrollTopAfterTrim(scrollTop, heightBefore, outEl.scrollHeight) : scrollTop;
   } else {
     outEl.firstChild.appendData(text);
-    // The text node still holds what was just trimmed from st.outputText.
+    // The text node still holds anything trimmed from st.outputText, here or
+    // while the window was minimised.
     var extra = outEl.firstChild.length - st.outputText.length;
-    if (extra > 0) outEl.firstChild.deleteData(0, extra);
+    if (extra > 0) {
+      heightBefore = outEl.scrollHeight;
+      outEl.firstChild.deleteData(0, extra);
+      if (keepView) outEl.scrollTop = view.scrollTopAfterTrim(scrollTop, heightBefore, outEl.scrollHeight);
+    }
   }
   if (follow) outEl.scrollTop = outEl.scrollHeight;
 }
@@ -18845,7 +18876,10 @@ function automationPageDisplayName(st) {
       var st = automationPageState;
       if (!st) return;
       window.electronAPI.findingsAcknowledgeAll({ automationId: st.automationId })
-        .then(function () { refreshFindingSurfaces(); })
+        .then(function (res) {
+          if (res && res.ok) { refreshFindingSurfaces(); return; }
+          showToast('Could not mark these done', { kind: 'error' });
+        })
         .catch(function () { showToast('Could not mark these done', { kind: 'error' }); });
     });
   }
