@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { sanitizeRendererLag, formatMainLag, formatRendererLag } = require('../lib/perf-line');
+const { sanitizeRendererLag, formatMainLag, formatRendererLag, MAIN_LAG_RESOLUTION_MS } = require('../lib/perf-line');
 
 const full = {
   lagP50: 4, lagP99: 40, lagMax: 120, longTasks: 3, longTaskMs: 210,
@@ -29,9 +29,19 @@ test('sanitizeRendererLag clamps huge values', () => {
   assert.strictEqual(sanitizeRendererLag({ lagMax: 1e12 }).lagMax, 1e7);
 });
 
-test('formatMainLag renders p50/p99/max in whole ms from nanoseconds', () => {
-  const h = { percentile: (p) => (p === 50 ? 2.4e6 : 31.6e6), max: 120.2e6 };
-  assert.strictEqual(formatMainLag(h), ' mainLag=2/32/120');
+test('formatMainLag subtracts the sampling resolution and floors at zero', () => {
+  // monitorEventLoopDelay records the whole gap between ticks, so an idle loop
+  // reads as the resolution itself.
+  const h = { percentile: (p) => (p === 50 ? 22.4e6 : 51.6e6), max: 140.2e6 };
+  assert.strictEqual(formatMainLag(h, 20), ' mainLag=2/32/120');
+  const idle = { percentile: () => 18e6, max: 20e6 };
+  assert.strictEqual(formatMainLag(idle, 20), ' mainLag=0/0/0');
+});
+
+test('formatMainLag defaults to the shared sampling resolution', () => {
+  const h = { percentile: () => 31e6, max: 39e6 };
+  assert.strictEqual(MAIN_LAG_RESOLUTION_MS, 20);
+  assert.strictEqual(formatMainLag(h), ' mainLag=11/11/19');
 });
 
 test('formatRendererLag renders the full snapshot', () => {

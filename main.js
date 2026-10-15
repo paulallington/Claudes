@@ -15,7 +15,7 @@ const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-
 const { isValidHookToken } = require('./lib/hook-token');
 const { nextPollDelay } = require('./lib/poll-backoff');
 const { isRelevantRootEvent } = require('./lib/fs-watch-filter');
-const { sanitizeRendererLag, formatMainLag, formatRendererLag } = require('./lib/perf-line');
+const { sanitizeRendererLag, formatMainLag, formatRendererLag, MAIN_LAG_RESOLUTION_MS } = require('./lib/perf-line');
 const { monitorEventLoopDelay } = require('perf_hooks');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
@@ -275,8 +275,10 @@ function maybeAutoUpdateHeadroom() {
 // | Browser cpu=X% mem=YMB; Renderer cpu=X% mem=YMB; …". Sustained high CPU
 // on one process points at where to look (Browser = Electron main;
 // Renderer = the window's UI).
-//   mainLag=p50/p99/max   main-process event-loop delay in ms over the window
-//                         (perf_hooks histogram, 20ms resolution)
+//   mainLag=p50/p99/max   main-process event-loop delay in ms over the window,
+//                         beyond the 20ms sampling tick (perf_hooks histogram).
+//                         Windows timer granularity (~15.6ms) still adds
+//                         baseline noise, so p99/max are the useful figures.
 //   rLag=p50/p99/max      renderer event-loop lag in ms, sent by the renderer
 //   lt=<n>/<ms>ms         renderer long tasks: count / total duration
 //   echo=p50/p99/max(n=)  keystroke-to-terminal-echo latency in ms, n samples
@@ -284,7 +286,7 @@ function maybeAutoUpdateHeadroom() {
 // The rLag segment only appears when a renderer snapshot arrived since the
 // previous sample (the renderer sends one every 15 s via perf:rendererLag).
 const PERF_SAMPLE_MS = 15_000;
-const mainLagHist = monitorEventLoopDelay({ resolution: 20 });
+const mainLagHist = monitorEventLoopDelay({ resolution: MAIN_LAG_RESOLUTION_MS });
 let perfRendererLag = null;  // latest sanitized snapshot, cleared once logged
 let perfHookCount = 0;
 let perfFsEvents = 0;        // raw fs.watch callbacks
@@ -311,7 +313,7 @@ function perfSample() {
       + ' hooks=' + perfHookCount
       + ' fsEvents=' + perfFsEvents
       + ' ctxReads=' + perfCtxReads + '/' + ctxStats.fullReads + 'full(' + ctxMB + ')'
-      + formatMainLag(mainLagHist)
+      + formatMainLag(mainLagHist, MAIN_LAG_RESOLUTION_MS)
       + formatRendererLag(perfRendererLag)
       + ' | ' + procs.join('; '));
   } catch (err) {
