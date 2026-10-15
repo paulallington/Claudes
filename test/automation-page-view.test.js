@@ -6,6 +6,7 @@ const {
   formatRunTime,
   buildRunListItems,
   pickDefaultRunKey,
+  filterOutputLines,
 } = require('../lib/automation-page-view');
 
 test('formatDuration: empty for null or invalid input', () => {
@@ -108,6 +109,15 @@ test('pickDefaultRunKey: live first, else newest, else null', () => {
   assert.equal(pickDefaultRunKey([{ key: 'a', isLive: false }, { key: 'b', isLive: false }]), 'a');
   assert.equal(pickDefaultRunKey([]), null);
   assert.equal(pickDefaultRunKey(null), null);
+});
+
+test('filterOutputLines: counts case-insensitive matches', () => {
+  assert.deepEqual(filterOutputLines('Error here\nanother ERROR\nfine', 'error'), { matchCount: 2 });
+  assert.deepEqual(filterOutputLines('aaaa', 'aa'), { matchCount: 2 });
+  assert.deepEqual(filterOutputLines('abc', 'x'), { matchCount: 0 });
+  assert.deepEqual(filterOutputLines('abc', ''), { matchCount: 0 });
+  assert.deepEqual(filterOutputLines(null, 'a'), { matchCount: 0 });
+  assert.deepEqual(filterOutputLines('abc', null), { matchCount: 0 });
 });
 
 test('runStatusMarker: unknown or missing status falls back', () => {
