@@ -5,6 +5,7 @@ const {
   runStatusMarker,
   formatRunTime,
   buildRunListItems,
+  pickDefaultRunKey,
 } = require('../lib/automation-page-view');
 
 test('formatDuration: empty for null or invalid input', () => {
@@ -100,6 +101,13 @@ test('buildRunListItems: tolerates null history and missing fields', () => {
   assert.equal(items[0].summary, '');
   assert.equal(items[1].key, '1');
   assert.equal(items[1].marker.label, 'Unknown');
+});
+
+test('pickDefaultRunKey: live first, else newest, else null', () => {
+  assert.equal(pickDefaultRunKey([{ key: 'live', isLive: true }, { key: 'a', isLive: false }]), 'live');
+  assert.equal(pickDefaultRunKey([{ key: 'a', isLive: false }, { key: 'b', isLive: false }]), 'a');
+  assert.equal(pickDefaultRunKey([]), null);
+  assert.equal(pickDefaultRunKey(null), null);
 });
 
 test('runStatusMarker: unknown or missing status falls back', () => {
