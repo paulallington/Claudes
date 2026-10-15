@@ -8029,14 +8029,57 @@ textarea.settings-input { resize: vertical; font-family: inherit; }
   border-top: 2px solid var(--accent);
 }
 
-/* Import Progress */
-.import-progress-panel {
-  padding: 12px;
+/* Import modal: preview, then clone progress */
+.import-modal {
+  width: 500px;
+}
+
+.import-modal-body {
+  flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+  overflow-y: auto;
 }
 
 .import-progress-header {
-  margin-bottom: 12px;
+  margin-bottom: 0;
 }
+
+.import-modal-count {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-top: 4px;
+}
+
+.import-modal-warn {
+  font-size: 11px;
+  color: #f59e0b;
+  margin-top: 2px;
+}
+
+.import-modal-agents {
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.import-modal-badge {
+  margin-left: 6px;
+}
+
+.import-modal-badge-clone {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+}
+
+.import-modal-note {
+  text-align: center;
+  font-size: 10px;
+  opacity: 0.4;
+}
+
+.import-progress-icon.import-icon-done { color: #22c55e; }
+.import-progress-icon.import-icon-busy { color: #3b82f6; }
+.import-progress-icon.import-icon-error { color: #ef4444; }
 
 .import-progress-list {
   display: flex;
@@ -8089,11 +8132,6 @@ textarea.settings-input { resize: vertical; font-family: inherit; }
   font-size: 11px;
   opacity: 0.6;
   margin-top: 4px;
-}
-
-.import-progress-footer {
-  margin-top: 12px;
-  text-align: center;
 }
 
 /* Automation section headers (Manual / Scheduled) */

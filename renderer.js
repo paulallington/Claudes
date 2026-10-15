@@ -645,7 +645,6 @@ var popoutProjectKey = null;
 // Automations state
 var automationsForProject = [];
 var allAutomationsData = null;
-var importInProgress = false;
 // Sidebar automation rows: view-models keyed by projectPathKey, rebuilt by
 // refreshSidebarAutomations(). activeAutomationPage names the selected row.
 var sidebarAutomationRows = {};
@@ -3767,12 +3766,7 @@ function buildProjectItem(project, index) {
       } else if (action === 'export-automations') {
         if (ensureProjectActive(projIndex)) exportAllAutomations();
       } else if (action === 'import-automations') {
-        if (ensureProjectActive(projIndex)) {
-          // The import preview renders inside the Automations tab.
-          var autoTab = document.querySelector('.explorer-tab[data-tab="automations"]');
-          if (autoTab && !autoTab.classList.contains('active')) autoTab.click();
-          importAutomationsFromFile();
-        }
+        if (ensureProjectActive(projIndex)) importAutomationsFromFile();
       } else if (action === 'toggle-voice-mute') {
         config.projects[projIndex].voiceMuted = !config.projects[projIndex].voiceMuted;
         saveConfig();
@@ -17927,7 +17921,6 @@ function refreshAutomations() {
   // already ends here, so the sidebar rows follow along.
   refreshSidebarAutomations();
   refreshAutomationPage();
-  if (importInProgress) return; // Don't overwrite import progress panel
   var listEl = document.getElementById('automations-list');
   var noProjectEl = document.getElementById('automations-no-project');
   var searchBar = document.getElementById('automations-search-bar');
@@ -20713,6 +20706,64 @@ function exportAllAutomations() {
   });
 }
 
+// Import runs in a modal: preview, confirm, then clone progress. The overlay
+// blocks the sidebar, so the project cannot change under an import in flight.
+// Everything is built with createElement/textContent because names and counts
+// come from the imported file.
+var importModalBusy = false; // confirm pressed, clones running: no dismissing
+var importLogEl = null;      // clone log while progress is showing
+
+function importModalNode(suffix) {
+  return document.getElementById('import-modal-' + suffix);
+}
+
+function importEl(tag, className, text) {
+  var el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+function openImportModal(title) {
+  importModalNode('title').textContent = title;
+  clearNode(importModalNode('body'));
+  importModalNode('overlay').classList.remove('hidden');
+}
+
+function closeImportModal() {
+  importModalNode('overlay').classList.add('hidden');
+  clearNode(importModalNode('body'));
+  importModalBusy = false;
+  importLogEl = null;
+  refreshAutomations();
+}
+
+function setImportModalBusy(busy) {
+  importModalBusy = busy;
+  document.getElementById('btn-import-modal-close').style.visibility = busy ? 'hidden' : '';
+}
+
+// Footer buttons: a null label hides that button. Handlers are assigned (not
+// added) so each step replaces the previous one.
+function setImportModalButtons(confirmLabel, onConfirm, cancelLabel, onCancel) {
+  var confirmBtn = document.getElementById('btn-import-confirm');
+  var cancelBtn = document.getElementById('btn-import-cancel');
+  confirmBtn.style.display = confirmLabel ? '' : 'none';
+  confirmBtn.textContent = confirmLabel || '';
+  confirmBtn.disabled = false;
+  confirmBtn.onclick = onConfirm || null;
+  cancelBtn.style.display = cancelLabel ? '' : 'none';
+  cancelBtn.textContent = cancelLabel || '';
+  cancelBtn.onclick = onCancel || null;
+}
+
+function importIcon(row, glyph, state) {
+  var icon = row.querySelector('.import-progress-icon');
+  icon.textContent = glyph;
+  icon.classList.remove('import-icon-done', 'import-icon-busy', 'import-icon-error');
+  if (state) icon.classList.add('import-icon-' + state);
+}
+
 function importAutomationsFromFile() {
   if (!activeProjectKey) { alert('Select a project first.'); return; }
 
@@ -20721,7 +20772,7 @@ function importAutomationsFromFile() {
     if (!preview || preview.cancelled) return;
     if (preview.error) { alert(preview.error); return; }
 
-    // Step 2: Show preview panel in the automations list area
+    // Step 2: Show the preview for confirmation
     showImportPreview(preview);
   });
 }
@@ -20747,165 +20798,115 @@ document.getElementById('btn-export-automations').addEventListener('click', expo
 document.getElementById('btn-import-automations').addEventListener('click', importAutomationsFromFile);
 
 function showImportPreview(preview) {
-  importInProgress = true;
-  var listEl = document.getElementById('automations-list');
-  var searchBar = document.getElementById('automations-search-bar');
-  var noProject = document.getElementById('automations-no-project');
-  if (searchBar) searchBar.style.display = 'none';
-  if (noProject) noProject.style.display = 'none';
-  listEl.innerHTML = '';
+  var projectKey = activeProjectKey;
+  setImportModalBusy(false);
+  openImportModal('Import Preview');
+  var body = importModalNode('body');
 
-  var panel = document.createElement('div');
-  panel.className = 'import-progress-panel';
-
-  // Header
-  var headerHtml = '<div class="import-progress-header">' +
-    '<strong>Import Preview</strong>' +
-    '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' +
-    safeNum(preview.automationCount) + ' automations, ' + safeNum(preview.totalAgents) + ' agents';
-  if (safeNum(preview.totalManagers) > 0) headerHtml += ', ' + safeNum(preview.totalManagers) + ' managers';
-  headerHtml += '</div>';
+  var header = importEl('div', 'import-progress-header');
+  var count = safeNum(preview.automationCount) + ' automations, ' + safeNum(preview.totalAgents) + ' agents';
+  if (safeNum(preview.totalManagers) > 0) count += ', ' + safeNum(preview.totalManagers) + ' managers';
+  header.appendChild(importEl('div', 'import-modal-count', count));
   if (safeNum(preview.totalIsolated) > 0) {
-    headerHtml += '<div style="font-size:11px;color:#f59e0b;margin-top:2px;">' + safeNum(preview.totalIsolated) + ' repo clone(s) will be set up after import</div>';
+    header.appendChild(importEl('div', 'import-modal-warn', safeNum(preview.totalIsolated) + ' repo clone(s) will be set up after import'));
   }
-  headerHtml += '</div>';
+  body.appendChild(header);
 
-  // Automation list
-  var listHtml = '<div class="import-progress-list">';
-  preview.automations.forEach(function (a) {
-    var badges = '';
-    if (a.hasManager) badges += '<span class="agent-badge agent-badge-chained" style="margin-left:6px;">Manager</span>';
-    if (a.hasChaining) badges += '<span class="agent-badge agent-badge-isolated" style="margin-left:4px;">Chained</span>';
-    if (safeNum(a.isolatedCount) > 0) badges += '<span class="agent-badge" style="margin-left:4px;background:rgba(59,130,246,0.15);color:#60a5fa;">' + safeNum(a.isolatedCount) + ' clone(s)</span>';
-
-    listHtml += '<div class="import-progress-row">' +
-      '<span class="import-progress-icon">&#9711;</span>' +
-      '<span class="import-progress-name">' + escapeHtml(a.name) + '</span>' +
-      '<span style="font-size:11px;opacity:0.5;">' + safeNum(a.agentCount) + ' agent' + (safeNum(a.agentCount) > 1 ? 's' : '') + '</span>' +
-      badges +
-      '</div>';
+  var list = importEl('div', 'import-progress-list');
+  (preview.automations || []).forEach(function (a) {
+    var row = importEl('div', 'import-progress-row');
+    row.appendChild(importEl('span', 'import-progress-icon', '◯'));
+    row.appendChild(importEl('span', 'import-progress-name', a.name));
+    row.appendChild(importEl('span', 'import-modal-agents', safeNum(a.agentCount) + ' agent' + (safeNum(a.agentCount) > 1 ? 's' : '')));
+    if (a.hasManager) row.appendChild(importEl('span', 'agent-badge agent-badge-chained import-modal-badge', 'Manager'));
+    if (a.hasChaining) row.appendChild(importEl('span', 'agent-badge agent-badge-isolated import-modal-badge', 'Chained'));
+    if (safeNum(a.isolatedCount) > 0) {
+      row.appendChild(importEl('span', 'agent-badge import-modal-badge import-modal-badge-clone', safeNum(a.isolatedCount) + ' clone(s)'));
+    }
+    list.appendChild(row);
   });
-  listHtml += '</div>';
+  body.appendChild(list);
+  body.appendChild(importEl('div', 'import-modal-note', 'Automations will be imported as paused'));
 
-  // Footer with confirm/cancel
-  var footerHtml = '<div class="import-progress-footer" style="display:flex;gap:8px;justify-content:center;margin-top:16px;">' +
-    '<button class="modal-btn-save import-confirm-btn">Confirm Import</button>' +
-    '<button class="modal-btn-save import-cancel-btn" style="background:transparent;border:1px solid #444;">Cancel</button>' +
-    '</div>' +
-    '<div style="text-align:center;font-size:10px;opacity:0.4;margin-top:6px;">Automations will be imported as paused</div>';
+  setImportModalButtons('Confirm Import', function () {
+    var confirmBtn = document.getElementById('btn-import-confirm');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Importing...';
+    document.getElementById('btn-import-cancel').style.display = 'none';
+    setImportModalBusy(true);
 
-  panel.innerHTML = headerHtml + listHtml + footerHtml;
-  listEl.appendChild(panel);
-
-  // Cancel — go back to normal list
-  panel.querySelector('.import-cancel-btn').addEventListener('click', function () {
-    importInProgress = false;
-    refreshAutomations();
-  });
-
-  // Confirm — run the import
-  panel.querySelector('.import-confirm-btn').addEventListener('click', function () {
-    // Disable buttons
-    panel.querySelector('.import-confirm-btn').disabled = true;
-    panel.querySelector('.import-confirm-btn').textContent = 'Importing...';
-    panel.querySelector('.import-cancel-btn').style.display = 'none';
-
-    window.electronAPI.importAutomations(activeProjectKey, preview.filePath).then(function (result) {
-      if (result && result.error) { alert(result.error); refreshAutomations(); return; }
-      if (!result || !result.count) { refreshAutomations(); return; }
+    window.electronAPI.importAutomations(projectKey, preview.filePath).then(function (result) {
+      if (result && result.error) { alert(result.error); closeImportModal(); return; }
+      if (!result || !result.count) { closeImportModal(); return; }
 
       refreshAutomationsFlyout();
 
       var needsClone = (result.importedIds || []).filter(function (a) { return a.needsClone; });
       if (needsClone.length > 0) {
-        // Transition the preview panel into progress mode
-        showImportProgress(result, needsClone);
+        // Transition the preview into progress mode
+        showImportProgress(result, needsClone, projectKey);
       } else {
-        // No clones needed — show done
-        panel.querySelector('.import-progress-header').innerHTML = '<strong>Import Complete</strong>' +
-          '<div style="font-size:11px;opacity:0.6;margin-top:4px;">' + safeNum(result.count) + ' automations imported (paused)</div>';
-        // Mark all rows as ready
-        panel.querySelectorAll('.import-progress-icon').forEach(function (icon) {
-          icon.innerHTML = '&#10003;';
-          icon.style.color = '#22c55e';
-        });
-        panel.querySelector('.import-confirm-btn').textContent = 'Done';
-        panel.querySelector('.import-confirm-btn').disabled = false;
-        panel.querySelector('.import-confirm-btn').onclick = function () { refreshAutomations(); };
+        // No clones needed: show done
+        importModalNode('title').textContent = 'Import Complete';
+        clearNode(header);
+        header.appendChild(importEl('div', 'import-modal-count', safeNum(result.count) + ' automations imported (paused)'));
+        list.querySelectorAll('.import-progress-row').forEach(function (row) { importIcon(row, '✓', 'done'); });
+        setImportModalBusy(false);
+        setImportModalButtons('Done', closeImportModal, null, null);
       }
-    });
-  });
+    }).catch(function () { closeImportModal(); });
+  }, 'Cancel', closeImportModal);
 }
 
-function showImportProgress(importResult, needsClone) {
-  importInProgress = true;
-  var listEl = document.getElementById('automations-list');
-  listEl.innerHTML = '';
+function showImportProgress(importResult, needsClone, projectKey) {
+  setImportModalBusy(true);
+  openImportModal('Imported ' + safeNum(importResult.count) + ' automations (paused)');
+  setImportModalButtons(null, null, null, null);
+  var body = importModalNode('body');
 
-  var panel = document.createElement('div');
-  panel.className = 'import-progress-panel';
-  panel.innerHTML = '<div class="import-progress-header">' +
-    '<strong>Imported ' + safeNum(importResult.count) + ' automations (paused)</strong>' +
-    '<div class="import-progress-subtitle">Setting up ' + safeNum(needsClone.length) + ' repo clone(s)...</div>' +
-    '</div>' +
-    '<div class="import-progress-list"></div>' +
-    '<pre class="import-progress-log"></pre>' +
-    '<div class="import-progress-footer" style="display:none;">' +
-    '<button class="automation-detail-run-all import-progress-done">Done</button>' +
-    '</div>';
-
-  var progressList = panel.querySelector('.import-progress-list');
-  var logEl = panel.querySelector('.import-progress-log');
+  var subtitle = importEl('div', 'import-progress-subtitle', 'Setting up ' + safeNum(needsClone.length) + ' repo clone(s)...');
+  body.appendChild(subtitle);
+  var progressList = importEl('div', 'import-progress-list');
+  body.appendChild(progressList);
+  var logEl = importEl('pre', 'import-progress-log');
+  body.appendChild(logEl);
+  importLogEl = logEl;
 
   // Build rows for ALL imported automations
+  var rowsById = {};
   importResult.importedIds.forEach(function (auto) {
-    var row = document.createElement('div');
-    row.className = 'import-progress-row';
-    row.id = 'import-row-' + auto.id;
-    var statusIcon = auto.needsClone ? '&#9711;' : '&#10003;';
-    var statusColor = auto.needsClone ? '' : 'color:#22c55e;';
-    row.innerHTML = '<span class="import-progress-icon" style="' + statusColor + '">' + statusIcon + '</span>' +
-      '<span class="import-progress-name">' + escapeHtml(auto.name) + '</span>' +
-      '<span class="import-progress-status">' + (auto.needsClone ? 'Pending clone...' : 'Ready') + '</span>';
+    var row = importEl('div', 'import-progress-row');
+    row.appendChild(importEl('span', 'import-progress-icon', auto.needsClone ? '◯' : '✓'));
+    if (!auto.needsClone) row.querySelector('.import-progress-icon').classList.add('import-icon-done');
+    row.appendChild(importEl('span', 'import-progress-name', auto.name));
+    row.appendChild(importEl('span', 'import-progress-status', auto.needsClone ? 'Pending clone...' : 'Ready'));
     progressList.appendChild(row);
+    rowsById[auto.id] = row;
   });
-
-  listEl.appendChild(panel);
-
-  // Listen for clone progress events and show in the log
-  var importCloneHandler = function (data) {
-    if (logEl) {
-      logEl.textContent += data.line;
-      logEl.scrollTop = logEl.scrollHeight;
-    }
-  };
-  window.electronAPI.onCloneProgress(importCloneHandler);
 
   // Process clones sequentially
   var cloneNext = function (idx) {
     if (idx >= needsClone.length) {
       // All done
-      importInProgress = false;
-      panel.querySelector('.import-progress-subtitle').textContent = 'All clones complete. Automations are paused — enable them when ready.';
-      panel.querySelector('.import-progress-footer').style.display = '';
-      panel.querySelector('.import-progress-done').addEventListener('click', function () {
-        importInProgress = false;
-        refreshAutomations();
-      });
+      subtitle.textContent = 'All clones complete. Automations are paused. Enable them when ready.';
+      setImportModalBusy(false);
+      setImportModalButtons('Done', closeImportModal, null, null);
       return;
     }
 
     var auto = needsClone[idx];
-    var row = document.getElementById('import-row-' + auto.id);
+    var row = rowsById[auto.id];
+    var setStatus = function (text) {
+      if (row) row.querySelector('.import-progress-status').textContent = text;
+    };
     if (row) {
-      row.querySelector('.import-progress-icon').innerHTML = '&#8987;';
-      row.querySelector('.import-progress-icon').style.color = '#3b82f6';
-      row.querySelector('.import-progress-status').textContent = 'Cloning...';
+      importIcon(row, '⌛', 'busy');
+      setStatus('Cloning...');
     }
     // Show which automation is being cloned in the log
-    if (logEl) logEl.textContent += '\n--- Cloning: ' + auto.name + ' ---\n';
+    logEl.textContent += '\n--- Cloning: ' + auto.name + ' ---\n';
 
-    window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
+    window.electronAPI.getAutomationsForProject(projectKey).then(function (automations) {
       var automation = automations.find(function (a) { return a.id === auto.id; });
       if (!automation) { cloneNext(idx + 1); return; }
 
@@ -20915,7 +20916,7 @@ function showImportProgress(importResult, needsClone) {
       var stepsDone = 0;
 
       var updateRowStatus = function () {
-        if (row) row.querySelector('.import-progress-status').textContent = 'Cloning (' + stepsDone + '/' + totalSteps + ')...';
+        setStatus('Cloning (' + stepsDone + '/' + totalSteps + ')...');
       };
 
       var cloneAgentStep = function (agIdx) {
@@ -20924,19 +20925,14 @@ function showImportProgress(importResult, needsClone) {
             updateRowStatus();
             window.electronAPI.setupManagerClone(auto.id).then(function (result) {
               stepsDone++;
-              if (row) {
-                row.querySelector('.import-progress-icon').innerHTML = result && result.error ? '&#10007;' : '&#10003;';
-                row.querySelector('.import-progress-icon').style.color = result && result.error ? '#ef4444' : '#22c55e';
-                row.querySelector('.import-progress-status').textContent = result && result.error ? 'Error: ' + result.error : 'Ready';
-              }
+              var failed = !!(result && result.error);
+              if (row) importIcon(row, failed ? '✗' : '✓', failed ? 'error' : 'done');
+              setStatus(failed ? 'Error: ' + result.error : 'Ready');
               cloneNext(idx + 1);
             });
           } else {
-            if (row) {
-              row.querySelector('.import-progress-icon').innerHTML = '&#10003;';
-              row.querySelector('.import-progress-icon').style.color = '#22c55e';
-              row.querySelector('.import-progress-status').textContent = 'Ready';
-            }
+            if (row) importIcon(row, '✓', 'done');
+            setStatus('Ready');
             cloneNext(idx + 1);
           }
           return;
@@ -20944,9 +20940,7 @@ function showImportProgress(importResult, needsClone) {
         updateRowStatus();
         window.electronAPI.setupAgentClone(auto.id, isolatedAgents[agIdx].id).then(function (result) {
           stepsDone++;
-          if (result && result.error && row) {
-            row.querySelector('.import-progress-status').textContent = 'Error: ' + result.error;
-          }
+          if (result && result.error) setStatus('Error: ' + result.error);
           cloneAgentStep(agIdx + 1);
         });
       };
@@ -20957,6 +20951,22 @@ function showImportProgress(importResult, needsClone) {
 
   cloneNext(0);
 }
+
+// Clone output for the import in progress. Registered once: the preload API
+// has no way to remove a listener, so a handler per import would pile up.
+window.electronAPI.onCloneProgress(function (data) {
+  if (!importLogEl) return;
+  importLogEl.textContent += data.line;
+  importLogEl.scrollTop = importLogEl.scrollHeight;
+});
+
+document.getElementById('btn-import-modal-close').addEventListener('click', closeImportModal);
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Escape' || importModalBusy) return;
+  if (importModalNode('overlay').classList.contains('hidden')) return;
+  e.preventDefault();
+  closeImportModal();
+});
 
 document.getElementById('btn-clear-automations').addEventListener('click', function () {
   if (!activeProjectKey) { alert('Select a project first.'); return; }
