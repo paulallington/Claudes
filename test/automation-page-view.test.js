@@ -125,3 +125,59 @@ test('runStatusMarker: unknown or missing status falls back', () => {
   assert.deepEqual(runStatusMarker(null), { glyph: '•', cls: 'run-unknown', label: 'Unknown' });
   assert.deepEqual(runStatusMarker(undefined), { glyph: '•', cls: 'run-unknown', label: 'Unknown' });
 });
+
+const { buildAgentTabs, pickDefaultAgentKey } = require('../lib/automation-page-view');
+
+function agent(id, extra) {
+  return Object.assign({ id, name: 'Agent ' + id, currentRunStartedAt: null, lastRunAt: null, lastRunStatus: null }, extra);
+}
+
+test('buildAgentTabs: no tab strip for one agent without a manager', () => {
+  assert.deepEqual(buildAgentTabs({ agents: [agent('a')] }), []);
+  assert.deepEqual(buildAgentTabs({ agents: [agent('a')], manager: { enabled: false } }), []);
+  assert.deepEqual(buildAgentTabs(null), []);
+});
+
+test('buildAgentTabs: one tab per agent, plus Manager when enabled', () => {
+  const tabs = buildAgentTabs({
+    agents: [agent('a'), agent('b', { currentRunStartedAt: '2026-10-15T10:00:00Z' }), agent('c', { lastRunStatus: 'error' })],
+    manager: { enabled: true, lastRunStatus: 'resolved', needsHuman: false },
+  });
+  assert.deepEqual(tabs.map((t) => t.key), ['a', 'b', 'c', 'manager']);
+  assert.deepEqual(tabs.map((t) => t.label), ['Agent a', 'Agent b', 'Agent c', 'Manager']);
+  assert.deepEqual(tabs.map((t) => t.status), ['idle', 'running', 'error', 'idle']);
+  assert.equal(tabs[3].isManager, true);
+  assert.equal(tabs[0].isManager, false);
+});
+
+test('buildAgentTabs: a single agent with a manager still shows both tabs', () => {
+  const tabs = buildAgentTabs({ agents: [agent('a')], manager: { enabled: true } });
+  assert.deepEqual(tabs.map((t) => t.key), ['a', 'manager']);
+});
+
+test('buildAgentTabs: manager status is running, attention (needs a person) or error', () => {
+  const base = { agents: [agent('a'), agent('b')] };
+  assert.equal(buildAgentTabs({ ...base, manager: { enabled: true, lastRunStatus: 'running' } })[2].status, 'running');
+  assert.equal(buildAgentTabs({ ...base, manager: { enabled: true, needsHuman: true, lastRunStatus: 'escalated' } })[2].status, 'attention');
+  assert.equal(buildAgentTabs({ ...base, manager: { enabled: true, lastRunStatus: 'error' } })[2].status, 'error');
+});
+
+test('pickDefaultAgentKey: a running agent wins', () => {
+  const a = { agents: [agent('a', { lastRunAt: '2026-10-15T09:00:00Z' }), agent('b', { currentRunStartedAt: '2026-10-15T08:00:00Z' })] };
+  assert.equal(pickDefaultAgentKey(a), 'b');
+});
+
+test('pickDefaultAgentKey: otherwise the most recently run agent', () => {
+  const a = { agents: [
+    agent('a', { lastRunAt: '2026-10-14T09:00:00Z' }),
+    agent('b', { lastRunAt: '2026-10-15T07:00:00Z' }),
+    agent('c'),
+  ] };
+  assert.equal(pickDefaultAgentKey(a), 'b');
+});
+
+test('pickDefaultAgentKey: otherwise the first agent, or null with none', () => {
+  assert.equal(pickDefaultAgentKey({ agents: [agent('a'), agent('b')] }), 'a');
+  assert.equal(pickDefaultAgentKey({ agents: [] }), null);
+  assert.equal(pickDefaultAgentKey(null), null);
+});

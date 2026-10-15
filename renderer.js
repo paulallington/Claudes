@@ -18691,8 +18691,17 @@ function showAutomationPage(projectPath, automationId) {
     automationId: automationId,
     automation: null,
     globalEnabled: true,
-    agentKey: null,
-    refreshSeq: 0
+    agentKey: null,       // an agent id, or 'manager'
+    refreshSeq: 0,
+    runsSeq: 0,
+    detailSeq: 0,
+    runItems: [],
+    runKey: null,         // selected run: a startedAt key, or 'live'
+    loadedRunKey: null,   // the run whose detail is on screen
+    signature: '',        // selected agent's run state when the list was loaded
+    managerRuns: {},      // startedAt -> manager history entry (entries carry their output)
+    outputText: '',
+    emptyMessage: ''
   };
   resetAutomationPagePanes();
   pageEl.classList.remove('hidden');
@@ -18707,11 +18716,19 @@ function resetAutomationPagePanes() {
   automationPageNode('state').className = 'automation-status-badge';
   automationPageNode('meta').textContent = '';
   clearNode(automationPageNode('actions'));
+  var strip = automationPageNode('agents');
+  clearNode(strip);
+  strip.classList.add('hidden');
+  clearNode(automationPageNode('runs'));
+  automationPageNode('run-title').textContent = '';
+  renderAutomationPageRunDetail(null);
+  setAutomationPageOutput('', '');
 }
 
 // Re-read the automation and redraw what depends on it. Called on open, from
 // refreshAutomations() (every create/edit/toggle ends there) and from the agent
-// and manager events. A selected-agent change in run state reloads the run list.
+// and manager events. The run list reloads when the selected agent's run state
+// has changed since it was loaded, or when opts.reloadRuns is set.
 function refreshAutomationPage(opts) {
   var st = automationPageState;
   if (!st) return;
@@ -18728,7 +18745,9 @@ function refreshAutomationPage(opts) {
     if (!automation) { closeAutomationPage(); return; }
     st.automation = automation;
     st.globalEnabled = !(results[1] && results[1].globalEnabled === false);
+    if (!automationPageHasTab(st, st.agentKey)) st.agentKey = window.AutomationPageView.pickDefaultAgentKey(automation);
     renderAutomationPageChrome();
+    if (o.reloadRuns || automationPageSignature(st) !== st.signature) loadAutomationPageRuns();
   }).catch(function () { /* keep the current view */ });
 }
 
@@ -18748,6 +18767,7 @@ function renderAutomationPageChrome() {
   metaEl.textContent = meta;
   metaEl.title = meta;
 
+  renderAutomationPageTabs();
   renderAutomationPageActions();
 }
 
@@ -18852,6 +18872,272 @@ function renderAutomationPageActions() {
       else if (action === 'delete') deleteAutomationFromUi(automation);
     });
   });
+}
+
+function automationPageHasTab(st, key) {
+  if (!key) return false;
+  if (key === 'manager') return !!(st.automation.manager && st.automation.manager.enabled);
+  return !!findAutomationAgent(st.automation, key);
+}
+
+// What decides whether the loaded run list is out of date: the selected
+// agent's (or manager's) run state.
+function automationPageSignature(st) {
+  var automation = st.automation;
+  if (!automation) return '';
+  if (st.agentKey === 'manager' && automation.manager) {
+    return ['m', automation.manager.lastRunAt, automation.manager.lastRunStatus].join('|');
+  }
+  var agent = findAutomationAgent(automation, st.agentKey);
+  return agent ? ['a', agent.currentRunStartedAt, agent.lastRunAt, agent.lastRunStatus].join('|') : '';
+}
+
+function renderAutomationPageTabs() {
+  var st = automationPageState;
+  if (!st || !st.automation) return;
+  var tabs = window.AutomationPageView.buildAgentTabs(st.automation);
+  var strip = automationPageNode('agents');
+  clearNode(strip);
+  strip.classList.toggle('hidden', tabs.length === 0);
+  tabs.forEach(function (tab) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'automation-page-tab' + (tab.key === st.agentKey ? ' active' : '');
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('aria-selected', tab.key === st.agentKey ? 'true' : 'false');
+    var dot = document.createElement('span');
+    dot.className = 'automation-page-tab-dot' + (tab.status !== 'idle' ? ' ' + tab.status : '');
+    var label = document.createElement('span');
+    label.textContent = tab.label;
+    btn.appendChild(dot);
+    btn.appendChild(label);
+    btn.addEventListener('click', function () { selectAutomationPageAgent(tab.key); });
+    strip.appendChild(btn);
+  });
+}
+
+function selectAutomationPageAgent(key) {
+  var st = automationPageState;
+  if (!st || key === st.agentKey || !automationPageHasTab(st, key)) return;
+  st.agentKey = key;
+  st.runKey = null;
+  st.loadedRunKey = null;
+  st.runItems = [];
+  // Invalidate anything still loading for the previous tab.
+  st.runsSeq++;
+  st.detailSeq++;
+  clearNode(automationPageNode('runs'));
+  renderAutomationPageRunDetail(null);
+  automationPageNode('run-title').textContent = '';
+  setAutomationPageOutput('', '');
+  renderAutomationPageChrome();
+  loadAutomationPageRuns();
+}
+
+// Fetch the selected agent's (or the manager's) history and redraw the run
+// list. The selection is kept when that run is still listed, otherwise it goes
+// to the live run, else the newest.
+function loadAutomationPageRuns() {
+  var st = automationPageState;
+  if (!st || !st.automation) return;
+  var view = window.AutomationPageView;
+  var automation = st.automation;
+  var onManager = st.agentKey === 'manager' && !!automation.manager;
+  var agent = onManager ? null : findAutomationAgent(automation, st.agentKey);
+  if (!onManager && !agent) {
+    renderAutomationPageRuns();
+    setAutomationPageOutput('', 'No runs yet.');
+    return;
+  }
+  var seq = ++st.runsSeq;
+  st.signature = automationPageSignature(st);
+  var historyP = onManager
+    ? window.electronAPI.getManagerHistory(automation.id, 50)
+    : window.electronAPI.getAgentHistory(automation.id, agent.id, 50);
+  historyP.then(function (history) {
+    if (st !== automationPageState || seq !== st.runsSeq) return;
+    var list = Array.isArray(history) ? history : [];
+    var liveStartedAt = onManager
+      ? (automation.manager.lastRunStatus === 'running' ? automation.manager.lastRunAt : null)
+      : agent.currentRunStartedAt;
+    st.managerRuns = {};
+    if (onManager) {
+      list.forEach(function (entry) { if (entry && entry.startedAt) st.managerRuns[entry.startedAt] = entry; });
+    }
+    st.runItems = view.buildRunListItems(list, { liveStartedAt: liveStartedAt });
+    var stillListed = st.runKey && st.runItems.some(function (item) { return item.key === st.runKey; });
+    if (!stillListed) st.runKey = view.pickDefaultRunKey(st.runItems);
+    renderAutomationPageRuns();
+    if (st.runKey !== st.loadedRunKey) loadAutomationPageRun();
+  }).catch(function () { /* keep the current list */ });
+}
+
+function renderAutomationPageRuns() {
+  var st = automationPageState;
+  if (!st) return;
+  var listEl = automationPageNode('runs');
+  var scrollTop = listEl.scrollTop;
+  clearNode(listEl);
+  st.runItems.forEach(function (item) {
+    var row = document.createElement('div');
+    row.className = 'automation-page-run' + (item.key === st.runKey ? ' active' : '');
+    row.dataset.key = item.key;
+    row.setAttribute('role', 'button');
+
+    var line = document.createElement('div');
+    line.className = 'automation-page-run-line';
+    var marker = document.createElement('span');
+    marker.className = 'automation-page-run-marker ' + item.marker.cls;
+    marker.textContent = item.marker.glyph;
+    marker.title = item.marker.label;
+    var time = document.createElement('span');
+    time.className = 'automation-page-run-time';
+    time.textContent = item.timeLabel;
+    var duration = document.createElement('span');
+    duration.className = 'automation-page-run-duration';
+    duration.textContent = item.durationLabel;
+    line.appendChild(marker);
+    line.appendChild(time);
+    line.appendChild(duration);
+
+    var summary = document.createElement('div');
+    summary.className = 'automation-page-run-summary';
+    summary.textContent = item.summary || item.marker.label;
+
+    row.appendChild(line);
+    row.appendChild(summary);
+    row.addEventListener('click', function () { selectAutomationPageRun(item.key); });
+    listEl.appendChild(row);
+  });
+  listEl.scrollTop = scrollTop;
+}
+
+function selectAutomationPageRun(key) {
+  var st = automationPageState;
+  if (!st || key === st.runKey) return;
+  st.runKey = key;
+  renderAutomationPageRuns();
+  loadAutomationPageRun();
+}
+
+// Show the selected run: header line, summary, attention items and output.
+function loadAutomationPageRun() {
+  var st = automationPageState;
+  if (!st || !st.automation) return;
+  var automation = st.automation;
+  var onManager = st.agentKey === 'manager' && !!automation.manager;
+  var agent = onManager ? null : findAutomationAgent(automation, st.agentKey);
+  var item = st.runItems.find(function (it) { return it.key === st.runKey; }) || null;
+  var seq = ++st.detailSeq;
+  st.loadedRunKey = st.runKey;
+  renderAutomationPageRunDetail(null);
+  if (!item) {
+    renderAutomationPageRunTitle(null, null);
+    setAutomationPageOutput('', 'No runs yet.');
+    return;
+  }
+  renderAutomationPageRunTitle(item, null);
+
+  function show(run) {
+    if (st !== automationPageState || seq !== st.detailSeq) return;
+    renderAutomationPageRunTitle(item, run);
+    renderAutomationPageRunDetail(run);
+    setAutomationPageOutput(run && run.output ? String(run.output) : '', 'No output recorded.');
+  }
+
+  if (item.isLive) {
+    setAutomationPageOutput('', 'Running. No output yet.');
+    var liveP = onManager
+      ? window.electronAPI.getManagerLiveOutput(automation.id)
+      : window.electronAPI.getAgentLiveOutput(automation.id, agent.id);
+    liveP.then(function (text) {
+      if (st !== automationPageState || seq !== st.detailSeq) return;
+      setAutomationPageOutput(text || '', 'Running. No output yet.', { follow: true });
+    }).catch(function () { /* the next chunk will populate it */ });
+  } else if (onManager) {
+    show(st.managerRuns[item.startedAt] || null);
+  } else {
+    window.electronAPI.getAgentRunDetail(automation.id, agent.id, item.startedAt).then(show).catch(function () { show(null); });
+  }
+}
+
+// "02:14 · Succeeded · 4m 12s · exit 0"
+function renderAutomationPageRunTitle(item, run) {
+  var titleEl = automationPageNode('run-title');
+  if (!item) { titleEl.textContent = ''; return; }
+  var parts = [item.timeLabel, item.marker.label, item.durationLabel];
+  if (run && run.exitCode !== undefined && run.exitCode !== null) parts.push('exit ' + run.exitCode);
+  var text = parts.filter(Boolean).join(' · ');
+  titleEl.textContent = text;
+  titleEl.title = text;
+}
+
+function appendAutomationPageAttention(container, title, detail) {
+  var row = document.createElement('div');
+  row.className = 'automation-detail-attention-item';
+  var icon = document.createElement('span');
+  icon.className = 'attention-icon';
+  icon.textContent = '⚠';
+  var body = document.createElement('div');
+  var strong = document.createElement('strong');
+  strong.textContent = title;
+  body.appendChild(strong);
+  if (detail) {
+    var detailEl = document.createElement('div');
+    detailEl.className = 'automation-detail-attention-detail';
+    detailEl.textContent = detail;
+    body.appendChild(detailEl);
+  }
+  row.appendChild(icon);
+  row.appendChild(body);
+  container.appendChild(row);
+}
+
+// Summary and attention items for one run; null clears both. Manager runs carry
+// the actions they took instead of attention items.
+function renderAutomationPageRunDetail(run) {
+  var st = automationPageState;
+  var summaryEl = automationPageNode('summary');
+  var attentionEl = automationPageNode('attention');
+  clearNode(attentionEl);
+  var summary = run && run.summary ? String(run.summary) : '';
+  summaryEl.textContent = summary;
+  summaryEl.classList.toggle('hidden', !summary);
+  var count = 0;
+  if (run && Array.isArray(run.attentionItems)) {
+    run.attentionItems.forEach(function (it) {
+      appendAutomationPageAttention(attentionEl, it.summary || '', it.detail || '');
+      count++;
+    });
+  }
+  if (run && Array.isArray(run.actions)) {
+    run.actions.forEach(function (action) {
+      var target = st && st.automation && action.agentId ? findAutomationAgent(st.automation, action.agentId) : null;
+      appendAutomationPageAttention(attentionEl, 'Action: ' + action.type,
+        action.agentId ? 'Agent: ' + (target ? target.name : action.agentId) : '');
+      count++;
+    });
+  }
+  attentionEl.classList.toggle('hidden', count === 0);
+}
+
+// Replace the output pane's content. With no text the pane shows
+// emptyMessage instead. opts.follow scrolls to the end (a live run); otherwise
+// the pane starts at the top.
+function setAutomationPageOutput(text, emptyMessage, opts) {
+  var st = automationPageState;
+  if (st) {
+    st.outputText = text;
+    st.emptyMessage = emptyMessage;
+  }
+  var outEl = automationPageNode('output');
+  var emptyEl = automationPageNode('empty');
+  var hasText = !!text;
+  outEl.classList.toggle('hidden', !hasText);
+  emptyEl.classList.toggle('hidden', hasText);
+  emptyEl.textContent = hasText ? '' : emptyMessage;
+  outEl.textContent = text;
+  outEl.scrollTop = opts && opts.follow ? outEl.scrollHeight : 0;
 }
 
 // ============================================================
