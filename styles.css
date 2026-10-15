@@ -1517,6 +1517,8 @@ html[data-platform="darwin"] #toolbar {
 }
 .automation-page.hidden,
 .automation-page .hidden { display: none; }
+.automation-page > .automations-global-paused-banner,
+.automation-page > .automations-runwindow-strip { flex-shrink: 0; }
 
 .automation-page-header {
   display: flex;

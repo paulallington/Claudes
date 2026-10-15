@@ -18743,6 +18743,7 @@ function showAutomationPage(projectPath, automationId, opts) {
   };
   resetAutomationPagePanes();
   pageEl.classList.remove('hidden');
+  refreshAutomationsStatusStrip();
   refreshAutomationPage({ reloadRuns: true });
   loadAutomationPageNeeds();
 }
@@ -18852,6 +18853,8 @@ function refreshAutomationPage(opts) {
     window.electronAPI.getAutomationSettings()
   ]).then(function (results) {
     if (st !== automationPageState || seq !== st.refreshSeq) return;
+    // The scheduler pause banner sits above the header and follows the setting.
+    applyGlobalPausedBannerUi(results[1]);
     var automation = (results[0] || []).find(function (a) { return a.id === st.automationId; });
     // Only a definite miss closes the page; a failed read keeps what is shown.
     if (!automation) { closeAutomationPage(); return; }
