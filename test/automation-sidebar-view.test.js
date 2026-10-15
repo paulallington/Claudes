@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   automationRowState,
   openItemCount,
+  openItemCounts,
   projectPathKey,
   buildSidebarAutomationRows,
 } = require('../lib/automation-sidebar-view');
@@ -79,4 +80,21 @@ test('buildSidebarAutomationRows dims and titles paused rows and tolerates missi
   assert.deepEqual(buildSidebarAutomationRows(undefined, undefined, undefined), {});
   assert.deepEqual(buildSidebarAutomationRows([], [], {}), {});
   assert.deepEqual(buildSidebarAutomationRows([null, 'x'], [], {}), {});
+});
+
+test('openItemCounts maps automationId to the open count using the openItemCount rule', () => {
+  var ack = '2026-10-15T00:00:00.000Z';
+  var findings = [
+    { id: 'f1', automationId: 'a1', acknowledgedAt: null },
+    { id: 'f2', automationId: 'a1', acknowledgedAt: ack },
+    { id: 'f3', automationId: 'a1', acknowledgedAt: ack, decision: { prompt: 'Renew?' }, resolution: null },
+    { id: 'f4', automationId: 'a1', acknowledgedAt: null, decision: { prompt: 'Renew?' }, resolution: null },
+    { id: 'f5', automationId: 'a2', acknowledgedAt: ack, decision: { prompt: 'x' }, resolution: { choiceId: 'y' } },
+    { id: 'f6', automationId: 'a3', acknowledgedAt: null },
+    { id: 'f7', acknowledgedAt: null },
+    null,
+  ];
+  assert.deepEqual(openItemCounts(findings), { a1: 3, a3: 1 });
+  assert.deepEqual(openItemCounts(null), {});
+  assert.deepEqual(openItemCounts(undefined), {});
 });
