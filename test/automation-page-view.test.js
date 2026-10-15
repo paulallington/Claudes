@@ -126,7 +126,48 @@ test('runStatusMarker: unknown or missing status falls back', () => {
   assert.deepEqual(runStatusMarker(undefined), { glyph: '•', cls: 'run-unknown', label: 'Unknown' });
 });
 
-const { buildAgentTabs, pickDefaultAgentKey, isNearBottom } = require('../lib/automation-page-view');
+const { buildAgentTabs, pickDefaultAgentKey, isNearBottom, splitMatches } = require('../lib/automation-page-view');
+
+test('splitMatches: nothing to highlight without a query', () => {
+  assert.deepEqual(splitMatches('abc', ''), { matchCount: 0, segments: null });
+  assert.deepEqual(splitMatches('abc', null), { matchCount: 0, segments: null });
+  assert.deepEqual(splitMatches(null, 'a'), { matchCount: 0, segments: null });
+});
+
+test('splitMatches: case-insensitive segments keep the original text', () => {
+  assert.deepEqual(splitMatches('Error here, ERROR', 'error'), {
+    matchCount: 2,
+    segments: [
+      { text: 'Error', match: true },
+      { text: ' here, ', match: false },
+      { text: 'ERROR', match: true },
+    ],
+  });
+  assert.deepEqual(splitMatches('abc', 'x'), { matchCount: 0, segments: [{ text: 'abc', match: false }] });
+});
+
+test('splitMatches: the query is literal text, not a pattern', () => {
+  const res = splitMatches('a.b axb a+b', 'a.b');
+  assert.equal(res.matchCount, 1);
+  assert.deepEqual(res.segments.filter((s) => s.match).map((s) => s.text), ['a.b']);
+  assert.equal(splitMatches('1 (2) 3', '(2)').matchCount, 1);
+});
+
+test('splitMatches: very large output is only counted, not split', () => {
+  const big = 'ab'.repeat(10);
+  assert.deepEqual(splitMatches(big, 'ab', { maxChars: 10 }), { matchCount: 10, segments: null });
+});
+
+test('splitMatches: highlighting stops at maxMatches but the count stays whole', () => {
+  assert.deepEqual(splitMatches('aaaa', 'a', { maxMatches: 2 }), {
+    matchCount: 4,
+    segments: [
+      { text: 'a', match: true },
+      { text: 'a', match: true },
+      { text: 'aa', match: false },
+    ],
+  });
+});
 
 test('isNearBottom: follows the tail only when within the threshold of the end', () => {
   assert.equal(isNearBottom(960, 400, 1360), true);   // exactly at the end

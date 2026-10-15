@@ -18701,7 +18701,10 @@ function showAutomationPage(projectPath, automationId) {
     signature: '',        // selected agent's run state when the list was loaded
     managerRuns: {},      // startedAt -> manager history entry (entries carry their output)
     outputText: '',
-    emptyMessage: ''
+    emptyMessage: '',
+    findQuery: '',
+    findIndex: 0,
+    marks: []             // <mark> elements for the current Find query
   };
   resetAutomationPagePanes();
   pageEl.classList.remove('hidden');
@@ -18721,6 +18724,7 @@ function resetAutomationPagePanes() {
   strip.classList.add('hidden');
   clearNode(automationPageNode('runs'));
   automationPageNode('run-title').textContent = '';
+  automationPageNode('find').value = '';
   renderAutomationPageRunDetail(null);
   setAutomationPageOutput('', '');
 }
@@ -19144,8 +19148,57 @@ function setAutomationPageOutput(text, emptyMessage, opts) {
   outEl.classList.toggle('hidden', !hasText);
   emptyEl.classList.toggle('hidden', hasText);
   emptyEl.textContent = hasText ? '' : emptyMessage;
-  outEl.textContent = text;
+  renderAutomationPageOutput();
   outEl.scrollTop = opts && opts.follow ? outEl.scrollHeight : 0;
+}
+
+// Draw st.outputText into the pane, wrapping Find matches in <mark>. Output is
+// only ever added as text nodes, never parsed as markup.
+function renderAutomationPageOutput() {
+  var st = automationPageState;
+  var outEl = automationPageNode('output');
+  var countEl = automationPageNode('find-count');
+  clearNode(outEl);
+  if (!st) { countEl.textContent = ''; return; }
+  st.marks = [];
+  var query = st.findQuery || '';
+  if (!query) {
+    outEl.textContent = st.outputText;
+    countEl.textContent = '';
+    return;
+  }
+  var res = window.AutomationPageView.splitMatches(st.outputText, query);
+  countEl.textContent = res.matchCount + (res.matchCount === 1 ? ' match' : ' matches');
+  if (!res.segments) {
+    outEl.textContent = st.outputText;
+    return;
+  }
+  var frag = document.createDocumentFragment();
+  res.segments.forEach(function (seg) {
+    if (!seg.match) { frag.appendChild(document.createTextNode(seg.text)); return; }
+    var mark = document.createElement('mark');
+    mark.textContent = seg.text;
+    st.marks.push(mark);
+    frag.appendChild(mark);
+  });
+  outEl.appendChild(frag);
+  markCurrentAutomationPageMatch(false);
+}
+
+// Highlight the current match and optionally scroll it into view.
+function markCurrentAutomationPageMatch(scroll) {
+  var st = automationPageState;
+  if (!st || !st.marks || !st.marks.length) return;
+  if (st.findIndex < 0 || st.findIndex >= st.marks.length) st.findIndex = 0;
+  st.marks.forEach(function (mark, i) { mark.classList.toggle('current', i === st.findIndex); });
+  if (scroll) st.marks[st.findIndex].scrollIntoView({ block: 'center', inline: 'nearest' });
+}
+
+function stepAutomationPageMatch(delta) {
+  var st = automationPageState;
+  if (!st || !st.marks || !st.marks.length) return;
+  st.findIndex = (st.findIndex + delta + st.marks.length) % st.marks.length;
+  markCurrentAutomationPageMatch(true);
 }
 
 // Called from the agent/manager output events. Feeds the page only when it is
@@ -19158,7 +19211,10 @@ function feedAutomationPageOutput(automationId, agentKey, chunk) {
   st.pendingText = (st.pendingText || '') + chunk;
   if (st.flushQueued) return;
   st.flushQueued = true;
-  requestAnimationFrame(function () { flushAutomationPageOutput(st); });
+  // Re-marking a large output is far dearer than appending, so slow down while
+  // a Find query is active.
+  if (st.findQuery) setTimeout(function () { flushAutomationPageOutput(st); }, 250);
+  else requestAnimationFrame(function () { flushAutomationPageOutput(st); });
 }
 
 // Chunks are batched per frame so a chatty run does one DOM write and one
@@ -19173,17 +19229,90 @@ function flushAutomationPageOutput(st) {
   var emptyEl = automationPageNode('empty');
   var wasHidden = outEl.classList.contains('hidden');
   var follow = wasHidden || window.AutomationPageView.isNearBottom(outEl.scrollTop, outEl.clientHeight, outEl.scrollHeight);
+  var scrollTop = outEl.scrollTop;
   if (wasHidden) {
     outEl.classList.remove('hidden');
     emptyEl.classList.add('hidden');
-    outEl.textContent = st.outputText;
-  } else if (outEl.childNodes.length === 1 && outEl.firstChild.nodeType === 3) {
-    outEl.firstChild.appendData(text);
+    renderAutomationPageOutput();
+  } else if (st.findQuery || outEl.childNodes.length !== 1 || outEl.firstChild.nodeType !== 3) {
+    renderAutomationPageOutput();
+    outEl.scrollTop = scrollTop;
   } else {
-    outEl.textContent = st.outputText;
+    outEl.firstChild.appendData(text);
   }
   if (follow) outEl.scrollTop = outEl.scrollHeight;
 }
+
+var AUTOMATION_PAGE_WRAP_KEY = 'claudes.automationPage.wrap';
+
+function readAutomationPageWrap() {
+  try { return localStorage.getItem(AUTOMATION_PAGE_WRAP_KEY) !== 'off'; } catch (e) { return true; }
+}
+
+function applyAutomationPageWrap(on) {
+  automationPageNode('output').classList.toggle('no-wrap', !on);
+  var btn = automationPageNode('wrap');
+  btn.classList.toggle('active', on);
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
+// "Nightly triage", or "Nightly triage: Triage agent" for a pipeline's agent.
+function automationPageDisplayName(st) {
+  var automation = st.automation;
+  var name = automation.name || (automation.agents[0] && automation.agents[0].name) || 'Automation';
+  if (st.agentKey === 'manager') return name + ': Manager';
+  var agent = findAutomationAgent(automation, st.agentKey);
+  return automation.agents.length > 1 && agent ? name + ': ' + agent.name : name;
+}
+
+(function setupAutomationPageTools() {
+  var openBtn = automationPageNode('open-claude');
+  var copyBtn = automationPageNode('copy');
+  var wrapBtn = automationPageNode('wrap');
+  var findEl = automationPageNode('find');
+  if (!openBtn || !copyBtn || !wrapBtn || !findEl) return;
+
+  applyAutomationPageWrap(readAutomationPageWrap());
+
+  openBtn.addEventListener('click', function () {
+    var st = automationPageState;
+    if (!st || !st.automation) return;
+    openAutomationOutputInClaude(automationPageDisplayName(st), st.outputText);
+  });
+
+  copyBtn.addEventListener('click', function () {
+    var st = automationPageState;
+    if (!st || !st.outputText) return;
+    window.electronAPI.clipboardWriteText(st.outputText);
+    copyBtn.textContent = 'Copied';
+    setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1500);
+  });
+
+  wrapBtn.addEventListener('click', function () {
+    var on = !readAutomationPageWrap();
+    try { localStorage.setItem(AUTOMATION_PAGE_WRAP_KEY, on ? 'on' : 'off'); } catch (e) { /* not persisted */ }
+    applyAutomationPageWrap(on);
+  });
+
+  findEl.addEventListener('input', function () {
+    var st = automationPageState;
+    if (!st) return;
+    st.findQuery = findEl.value;
+    st.findIndex = 0;
+    renderAutomationPageOutput();
+    markCurrentAutomationPageMatch(true);
+  });
+  findEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      stepAutomationPageMatch(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'Escape') {
+      findEl.value = '';
+      findEl.dispatchEvent(new Event('input'));
+      findEl.blur();
+    }
+  });
+})();
 
 // ============================================================
 // Automation Modal (New / Edit) — Multi-Agent Support
@@ -21686,13 +21815,9 @@ refreshSidebarAutomations();
 // ============================================================
 
 // Copy output button
-document.getElementById('btn-automation-open-claude').addEventListener('click', function () {
-  if (!activeAutomationDetailId) return;
-  var outputEl = document.getElementById('automation-detail-output');
-  var nameEl = document.getElementById('automation-detail-name');
-  var automationName = nameEl ? nameEl.textContent : 'Automation';
-  var output = outputEl.textContent || '';
-
+// Spawn a Claude column seeded with an automation run's output. Shared by the
+// explorer detail panel and the automation page.
+function openAutomationOutputInClaude(automationName, output) {
   if (!output || output === 'Loading...' || output.indexOf('Processing...') === 0) {
     alert('No output to continue with.');
     return;
@@ -21705,6 +21830,13 @@ document.getElementById('btn-automation-open-claude').addEventListener('click', 
   var spawnArgs = buildSpawnArgs();
   spawnArgs.push('--append-system-prompt', context);
   addColumn(spawnArgs, null, spawnOpts({ title: automationName }));
+}
+
+document.getElementById('btn-automation-open-claude').addEventListener('click', function () {
+  if (!activeAutomationDetailId) return;
+  var outputEl = document.getElementById('automation-detail-output');
+  var nameEl = document.getElementById('automation-detail-name');
+  openAutomationOutputInClaude(nameEl ? nameEl.textContent : 'Automation', outputEl.textContent || '');
 });
 
 document.getElementById('btn-automation-copy-output').addEventListener('click', function () {
