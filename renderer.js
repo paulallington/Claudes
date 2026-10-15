@@ -1150,14 +1150,16 @@ var UNFOCUSED_OUTPUT_FLUSH_MS = 50;
 var outputBatcher = window.OutputBatcher ? window.OutputBatcher.createOutputBatcher({
   intervalMs: UNFOCUSED_OUTPUT_FLUSH_MS,
   deliver: handleColumnData,
+  onError: function (err, id) { console.warn('Column output delivery failed for', id, err); },
   setTimer: function (fn, ms) { return setTimeout(fn, ms); },
   clearTimer: function (handle) { clearTimeout(handle); }
 }) : null;
 
-// With no active project state yet there is no focus to protect, so write at once.
+// Uses the window-wide lastFocusedColumnId (set by setFocusedColumn, cleared when
+// that column is removed) so popout windows, where getActiveState() can be null,
+// still batch. With nothing focused yet there is nothing to protect, so write at once.
 function isFocusedColumnId(id) {
-  var st = getActiveState();
-  return !st || st.focusedColumnId === id;
+  return lastFocusedColumnId == null || lastFocusedColumnId === id;
 }
 
 // Everything a chunk of pty output triggers: the xterm write plus prompt,
@@ -1168,30 +1170,31 @@ function handleColumnData(id, data) {
   if (col) {
     col.terminal.write(data);
     if (!resizeSuppressed.has(id) && data && col.hasUserInput) {
-      // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
-      var trimmed = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
-      // "Interrupted" with or without the middle-dot — the chunk can
-      // arrive partial, so match permissively. This must work on a
-      // resumed session that hasn't seen a user keystroke yet, so it
-      // runs OUTSIDE the col.hasUserInput gate below.
+      // Detection runs per flushed batch, which may be several chunks
+      // concatenated. Strip all CSI sequences, including private-mode ones such as
+      // \x1b[?25h, so a batch ending in a cursor show still ends with the prompt.
+      var stripped = data.replace(/\x1b\[[?>=]?[0-9;]*[a-zA-Z]/g, '');
+      var trimmed = stripped.trimEnd();
+      // "Interrupted" with or without the middle-dot. The text can arrive
+      // partial, so match permissively.
       var wasInterrupted = /Interrupted/.test(trimmed) &&
         (/What should Claude do/.test(trimmed) || /\bEsc\b/.test(trimmed));
       if (wasInterrupted && window.Clawd && window.Clawd.setColumnAnimation) {
         window.Clawd.setColumnAnimation(id, 'idle');
       }
       if (col.hasUserInput) {
-        // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
+        // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of the batch
         var endsWithPrompt = /\n\s*[>❯]\s*$/.test(trimmed) || /^\s*[>❯]\s*$/.test(trimmed) ||
           /Do you want to proceed/.test(trimmed) || /Esc to cancel/.test(trimmed) ||
           /\d\.\s*(Yes|No)\s*$/.test(trimmed);
         if (endsWithPrompt && col.activityState === 'working') {
           setColumnActivity(id, 'waiting');
           notifyAttentionNeeded(id);
-        } else if (data.length > 10 && !endsWithPrompt) {
+        } else if (stripped.length > 10 && !endsWithPrompt) {
           setColumnActivity(id, 'working');
         }
         // Safety net for Clawd: whenever a prompt is visible, the column
-        // is awaiting input — flip the widget to idle regardless of the
+        // is awaiting input, so flip the widget to idle regardless of the
         // tracked activityState.
         if (endsWithPrompt && window.Clawd && window.Clawd.setColumnAnimation) {
           window.Clawd.setColumnAnimation(id, 'idle');
@@ -1201,7 +1204,7 @@ function handleColumnData(id, data) {
     // Auto-open browser when server starts listening. Parse the actual
     // URL out of the dotnet/asp.net log line ("Now listening on:
     // https://localhost:7142") rather than using the configured
-    // applicationUrl — .NET's launchSettings.json stores the latter as a
+    // applicationUrl. .NET's launchSettings.json stores the latter as a
     // semicolon-separated list (e.g. "https://...;http://..."), which
     // shell.openExternal can't interpret as a URL on Windows and falls
     // through to opening File Explorer.
@@ -1261,6 +1264,8 @@ function connectWS() {
         if (perfEchoStats && echoMs <= PERF_ECHO_STALE_MS) perfEchoStats.record(echoMs);
       }
       if (outputBatcher && msg.data) {
+        // Nothing to write to for an unknown column; don't queue it.
+        if (!allColumns.has(msg.id)) return;
         outputBatcher.push(msg.id, msg.data, isFocusedColumnId(msg.id));
       } else {
         handleColumnData(msg.id, msg.data);
@@ -5184,6 +5189,7 @@ function createExitOverlay(id, exitCode, col) {
     // Re-derived from the live global flag; passthrough for endpoint/arbitrary cmd.
     bindColumnBaseUrl(sendMsg, { hasEndpoint: !!(col.endpointId || (col.env && col.env.ANTHROPIC_BASE_URL)), isClaude: !col.cmd, hasMcp: !!(col && col.hasMcp), oneMModel: col.model });
     gatedWsSend(sendMsg);
+    if (outputBatcher) outputBatcher.drop(id);
     col.terminal.clear();
     setColumnActivity(id, 'working');
     // Run-tab launches: the previous exit fired refreshRunConfigs and set the
@@ -7348,7 +7354,9 @@ async function restartColumn(id) {
   var overlay = col.element.querySelector('.exit-overlay');
   if (overlay) overlay.remove();
 
-  // Clear and respawn
+  // Clear and respawn. Drop old-pty output still queued in the batcher so it
+  // is not written onto the cleared terminal.
+  if (outputBatcher) outputBatcher.drop(id);
   col.terminal.clear();
   fitTerminal(col.terminal, col.fitAddon);
 
@@ -7483,6 +7491,7 @@ function tryEndpointFailover(colId) {
 
       // Re-create the pty with the same column id and the fallback env.
       // Reuse existing args (--resume sessionId if present) so the user keeps their place.
+      if (outputBatcher) outputBatcher.drop(colId);
       try { col.terminal.clear(); } catch (e) {}
       fitTerminal(col.terminal, col.fitAddon);
       var respawnMsg = {
@@ -8289,6 +8298,7 @@ function showColumnOverflowMenu(id, x, y) {
 
   addRow('⌫', 'Clear terminal', function () {
     var c = allColumns.get(id);
+    if (outputBatcher) outputBatcher.drop(id);
     if (c && c.terminal) c.terminal.clear();
   });
 
