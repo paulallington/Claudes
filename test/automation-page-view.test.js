@@ -232,7 +232,60 @@ test('pickDefaultAgentKey: otherwise the first agent, or null with none', () => 
   assert.equal(pickDefaultAgentKey(null), null);
 });
 
-const { nextSelectedRunKey } = require('../lib/automation-page-view');
+const { nextSelectedRunKey, trimOutputTail, liveDurationLabel, canLoadOlderRuns, pageShortcutAction } = require('../lib/automation-page-view');
+
+test('pageShortcutAction: Ctrl+F finds in the output', () => {
+  assert.equal(pageShortcutAction({ key: 'f', mod: true, shift: false }), 'find');
+  assert.equal(pageShortcutAction({ key: 'F', mod: true, shift: false }), 'find');
+});
+
+test('pageShortcutAction: shortcuts that act on a column are ignored while the page shows', () => {
+  assert.equal(pageShortcutAction({ key: 'W', mod: true, shift: true }), 'ignore');
+  assert.equal(pageShortcutAction({ key: 'm', mod: true, shift: true }), 'ignore');
+  assert.equal(pageShortcutAction({ key: '3', mod: true, shift: false }), 'ignore');
+  assert.equal(pageShortcutAction({ key: 'ArrowLeft', mod: true, shift: false }), 'ignore');
+  assert.equal(pageShortcutAction({ key: 'ArrowDown', mod: true, shift: false }), 'ignore');
+});
+
+test('pageShortcutAction: spawn, sidebar toggle, plain keys and a missing modifier are left alone', () => {
+  assert.equal(pageShortcutAction({ key: 'T', mod: true, shift: true }), null);
+  assert.equal(pageShortcutAction({ key: 'R', mod: true, shift: true }), null);
+  assert.equal(pageShortcutAction({ key: 'b', mod: true, shift: false }), null);
+  assert.equal(pageShortcutAction({ key: '0', mod: true, shift: false }), null);
+  assert.equal(pageShortcutAction({ key: 'w', mod: false, shift: true }), null);
+  assert.equal(pageShortcutAction({ key: 'f', mod: false, shift: false }), null);
+  assert.equal(pageShortcutAction(null), null);
+});
+
+test('trimOutputTail: text within the cap is returned untouched', () => {
+  assert.deepEqual(trimOutputTail('abcdef', 6), { text: 'abcdef', removed: 0 });
+  assert.deepEqual(trimOutputTail('', 5), { text: '', removed: 0 });
+});
+
+test('trimOutputTail: longer text keeps the last max characters and reports how many went', () => {
+  assert.deepEqual(trimOutputTail('abcdefghij', 4), { text: 'ghij', removed: 6 });
+});
+
+test('trimOutputTail: bad input is treated as empty text, a bad cap trims nothing', () => {
+  assert.deepEqual(trimOutputTail(null, 4), { text: '', removed: 0 });
+  assert.deepEqual(trimOutputTail('abc', 0), { text: 'abc', removed: 0 });
+  assert.deepEqual(trimOutputTail('abc', NaN), { text: 'abc', removed: 0 });
+});
+
+test('liveDurationLabel: how long a live run has been going, empty for a bad start', () => {
+  const start = '2026-10-15T10:00:00.000Z';
+  assert.equal(liveDurationLabel(start, Date.parse(start) + 75000), '1m 15s');
+  assert.equal(liveDurationLabel(start, Date.parse(start) - 5000), '<1s');
+  assert.equal(liveDurationLabel('nonsense', Date.now()), '');
+  assert.equal(liveDurationLabel(null, Date.now()), '');
+});
+
+test('canLoadOlderRuns: only when a full page came back and the ceiling is not reached', () => {
+  assert.equal(canLoadOlderRuns(20, 20, 50), true);
+  assert.equal(canLoadOlderRuns(7, 20, 50), false);
+  assert.equal(canLoadOlderRuns(50, 50, 50), false);
+  assert.equal(canLoadOlderRuns(0, 20, 50), false);
+});
 
 const runItem = (key, isLive) => ({ key, isLive: !!isLive });
 
