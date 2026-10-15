@@ -463,3 +463,29 @@ test('pruneFindings still protects an unanswered decision over cap', () => {
   var pruned = pruneFindings(acked, '2026-08-01T00:00:00.000Z', { perAutomation: 1, global: 1 });
   assert.equal(pruned.findings.length, 5, 'acknowledging an unanswered question must not make it evictable');
 });
+
+test('listFindings can scope to one automation and to open findings (unacknowledged, or a decision still unanswered)', () => {
+  var decision = { prompt: 'Chase?', options: [{ id: 'yes', label: 'Yes' }] };
+  var r = upsertFindings({ version: 1, findings: [] }, [
+    { automationId: 'auto_1', agentId: 'a', item: { summary: 'plain unacked' } },
+    { automationId: 'auto_1', agentId: 'a', item: { summary: 'acked, no decision' } },
+    { automationId: 'auto_1', agentId: 'a', item: { key: 'k1', summary: 'acked, decision pending', decision: decision } },
+    { automationId: 'auto_1', agentId: 'a', item: { key: 'k2', summary: 'acked, decision answered', decision: decision } },
+    { automationId: 'auto_2', agentId: 'a', item: { summary: 'other automation' } },
+  ], '2026-08-01T00:00:00.000Z');
+  var store = r.store;
+  var idOf = function (s) { return store.findings.find(f => f.summary === s).id; };
+  ['acked, no decision', 'acked, decision pending', 'acked, decision answered'].forEach(function (s) {
+    store = acknowledgeFinding(store, idOf(s), '2026-08-01T01:00:00.000Z');
+  });
+  store = resolveFinding(store, idOf('acked, decision answered'), { choiceId: 'yes' }, '2026-08-01T02:00:00.000Z');
+
+  var scoped = listFindings(store, { automationId: 'auto_1' }).map(f => f.summary).sort();
+  assert.deepEqual(scoped, ['acked, decision answered', 'acked, decision pending', 'acked, no decision', 'plain unacked']);
+
+  var open = listFindings(store, { automationId: 'auto_1', openOnly: true }).map(f => f.summary).sort();
+  assert.deepEqual(open, ['acked, decision pending', 'plain unacked']);
+
+  var openAll = listFindings(store, { openOnly: true }).map(f => f.summary).sort();
+  assert.deepEqual(openAll, ['acked, decision pending', 'other automation', 'plain unacked']);
+});

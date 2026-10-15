@@ -8494,7 +8494,9 @@ ipcMain.handle('findings:list', (event, opts) => {
   try {
     const store = readFindings();
     const unacknowledgedOnly = !!(opts && opts.unacknowledgedOnly);
-    return { ok: true, findings: FindingsStore.listFindings(store, { unacknowledgedOnly }) };
+    const openOnly = !!(opts && opts.openOnly);
+    const automationId = opts && typeof opts.automationId === 'string' ? opts.automationId : undefined;
+    return { ok: true, findings: FindingsStore.listFindings(store, { unacknowledgedOnly, openOnly, automationId }) };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }
@@ -8983,7 +8985,7 @@ function sendFindingsNotification(automation, newFindings) {
         if (mainWindow.isMinimized()) mainWindow.restore();
         mainWindow.show();
         mainWindow.focus();
-        mainWindow.webContents.send('findings:focus', { id: first.id });
+        mainWindow.webContents.send('findings:focus', { id: first.id, automationId: automation.id });
       }
     });
     notif.show();
