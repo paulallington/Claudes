@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-thresholds');
 const { isValidHookToken } = require('./lib/hook-token');
 const { nextPollDelay } = require('./lib/poll-backoff');
+const { isRelevantRootEvent } = require('./lib/fs-watch-filter');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
@@ -3448,13 +3449,18 @@ ipcMain.handle('fs:startWatch', (event, projectPath) => {
   try { safe = assertInsideAllowedRoots(projectPath); } catch { return { ok: false, error: 'forbidden' }; }
   if (FS_WATCHERS.has(safe)) return { ok: true, alreadyWatching: true };
   try {
-    // recursive: true is the only sensible mode here. Supported on darwin/win32
-    // natively, and on Linux since Node 20. Fall back to a non-recursive watcher
-    // if the platform refuses recursive.
+    // Non-recursive on purpose. The only consumer of fs:changed is the
+    // Explorer's refreshFileTree(), which rebuilds just the root level
+    // (subfolders load lazily and collapse on refresh), so deep changes
+    // triggered work with no visible effect. A recursive watch over a home or
+    // OneDrive root produced thousands of events per 15 s.
     let watcher;
-    function onFsEvent() { incrPerfFsEvent(); scheduleEmit(); }
-    try { watcher = fs.watch(safe, { recursive: true }, onFsEvent); }
-    catch { watcher = fs.watch(safe, { recursive: false }, onFsEvent); }
+    function onFsEvent(eventType, filename) {
+      incrPerfFsEvent();
+      if (!isRelevantRootEvent(filename, ALWAYS_IGNORED_DIRS)) return;
+      scheduleEmit();
+    }
+    watcher = fs.watch(safe, onFsEvent);
     let timer = null;
     function scheduleEmit() {
       if (timer) return;
