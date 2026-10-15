@@ -30,3 +30,20 @@ test('non-immediate push is not delivered synchronously, and ids share one timer
   fire();
   assert.deepEqual(delivered, [['a', 'xz'], ['b', 'y']]);
 });
+
+test('immediate push delivers that id pending data first, in one call', () => {
+  const { batcher, delivered, fire } = setup();
+  batcher.push('a', 'one', false);
+  batcher.push('b', 'other', false);
+  batcher.push('a', 'two', true);
+  assert.deepEqual(delivered, [['a', 'onetwo']]);
+  fire();
+  assert.deepEqual(delivered, [['a', 'onetwo'], ['b', 'other']]);
+});
+
+test('immediate push with nothing pending delivers just the data', () => {
+  const { batcher, delivered, timers } = setup();
+  batcher.push('a', 'now', true);
+  assert.deepEqual(delivered, [['a', 'now']]);
+  assert.equal(timers.length, 0);
+});
