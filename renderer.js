@@ -1155,8 +1155,8 @@ var outputBatcher = window.OutputBatcher ? window.OutputBatcher.createOutputBatc
   clearTimer: function (handle) { clearTimeout(handle); }
 }) : null;
 
-// Uses the window-wide lastFocusedColumnId (set by setFocusedColumn, cleared when
-// that column is removed) so popout windows, where getActiveState() can be null,
+// Uses the window-wide lastFocusedColumnId (set by setFocusedColumn, moved to a
+// sibling or cleared when that column is removed) so popout windows, where getActiveState() can be null,
 // still batch. With nothing focused yet there is nothing to protect, so write at once.
 function isFocusedColumnId(id) {
   return lastFocusedColumnId == null || lastFocusedColumnId === id;
@@ -1170,11 +1170,8 @@ function handleColumnData(id, data) {
   if (col) {
     col.terminal.write(data);
     if (!resizeSuppressed.has(id) && data && col.hasUserInput) {
-      // Detection runs per flushed batch, which may be several chunks
-      // concatenated. Strip all CSI sequences, including private-mode ones such as
-      // \x1b[?25h, so a batch ending in a cursor show still ends with the prompt.
-      var stripped = data.replace(/\x1b\[[?>=]?[0-9;]*[a-zA-Z]/g, '');
-      var trimmed = stripped.trimEnd();
+      // Focused columns deliver chunk by chunk; unfocused ones get a 50 ms batch here.
+      var trimmed = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
       // "Interrupted" with or without the middle-dot. The text can arrive
       // partial, so match permissively.
       var wasInterrupted = /Interrupted/.test(trimmed) &&
@@ -1190,7 +1187,7 @@ function handleColumnData(id, data) {
         if (endsWithPrompt && col.activityState === 'working') {
           setColumnActivity(id, 'waiting');
           notifyAttentionNeeded(id);
-        } else if (stripped.length > 10 && !endsWithPrompt) {
+        } else if (data.length > 10 && !endsWithPrompt) {
           setColumnActivity(id, 'working');
         }
         // Safety net for Clawd: whenever a prompt is visible, the column
@@ -7523,7 +7520,11 @@ function setFocusedColumn(id, opts) {
     if (prev) prev.element.classList.remove('focused');
   }
   state.focusedColumnId = id;
-  lastFocusedColumnId = id;
+  // A column in a hidden (non-active) project/workspace must not take the
+  // window-wide focus id, or the visible focused column would start batching.
+  // getActiveState() is null in popouts, where we keep assigning.
+  var activeState = getActiveState();
+  if (!activeState || activeState === state) lastFocusedColumnId = id;
   // Show output held while the column was unfocused before the user types.
   if (outputBatcher) outputBatcher.flush(id);
   col.element.classList.add('focused');
