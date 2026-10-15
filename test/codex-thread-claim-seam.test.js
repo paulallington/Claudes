@@ -338,6 +338,7 @@ test('respawn reattaches the YOLO conversation without changing its persisted pe
   const preparedRequests = [];
   const context = {
     allColumns: new Map([[1, col]]),
+    outputBatcher: null,
     window: {
       CodexSpawn, SessionTarget,
       electronAPI: {
