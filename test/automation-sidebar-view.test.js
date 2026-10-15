@@ -4,7 +4,8 @@ const {
   automationRowState,
   openItemCount,
   projectPathKey,
-} =require('../lib/automation-sidebar-view');
+  buildSidebarAutomationRows,
+} = require('../lib/automation-sidebar-view');
 
 function auto(overrides) {
   return Object.assign({ id: 'a1', name: 'Cert Watcher', projectPath: 'C:\\Git\\Proj', enabled: true, agents: [{ id: 'g1' }] }, overrides);
@@ -47,4 +48,35 @@ test('projectPathKey normalises backslashes to forward slashes and tolerates non
   assert.equal(projectPathKey('/home/paul/proj'), '/home/paul/proj');
   assert.equal(projectPathKey(null), '');
   assert.equal(projectPathKey(undefined), '');
+});
+
+test('buildSidebarAutomationRows groups row models by normalised project path in input order', () => {
+  var automations = [
+    auto({ id: 'a1', name: 'Cert Watcher', projectPath: 'C:\\Git\\Proj' }),
+    auto({ id: 'a2', name: 'Disk Watcher', projectPath: 'C:/Git/Other', enabled: false }),
+    auto({ id: 'a3', name: 'Backups', projectPath: 'C:/Git/Proj', agents: [{ id: 'g', currentRunStartedAt: 'x' }] }),
+    auto({ id: 'a4', name: 'Lint', projectPath: 'C:/Git/Proj', agents: [{ id: 'g', lastRunStatus: 'error' }] }),
+  ];
+  var findings = [
+    { id: 'f1', automationId: 'a1', acknowledgedAt: null },
+    { id: 'f2', automationId: 'a1', acknowledgedAt: null },
+    { id: 'f3', automationId: 'a4', acknowledgedAt: null },
+  ];
+  var rows = buildSidebarAutomationRows(automations, findings, { globalEnabled: true });
+  assert.deepEqual(Object.keys(rows), ['C:/Git/Proj', 'C:/Git/Other']);
+  assert.deepEqual(rows['C:/Git/Proj'].map(function (r) { return r.id; }), ['a1', 'a3', 'a4']);
+  assert.deepEqual(rows['C:/Git/Proj'][0], { id: 'a1', name: 'Cert Watcher', state: 'idle', badgeCount: 2, dimmed: false, title: 'Idle \u00b7 2 open items' });
+  assert.equal(rows['C:/Git/Proj'][1].title, 'Running');
+  assert.equal(rows['C:/Git/Proj'][2].title, 'Needs attention \u00b7 1 open item');
+  assert.deepEqual(rows['C:/Git/Other'][0], { id: 'a2', name: 'Disk Watcher', state: 'disabled', badgeCount: 0, dimmed: true, title: 'Disabled' });
+});
+
+test('buildSidebarAutomationRows dims and titles paused rows and tolerates missing inputs', () => {
+  var rows = buildSidebarAutomationRows([auto()], null, { globalEnabled: false });
+  assert.equal(rows['C:/Git/Proj'][0].state, 'paused');
+  assert.equal(rows['C:/Git/Proj'][0].dimmed, true);
+  assert.equal(rows['C:/Git/Proj'][0].title, 'Paused (scheduler paused)');
+  assert.deepEqual(buildSidebarAutomationRows(undefined, undefined, undefined), {});
+  assert.deepEqual(buildSidebarAutomationRows([], [], {}), {});
+  assert.deepEqual(buildSidebarAutomationRows([null, 'x'], [], {}), {});
 });
