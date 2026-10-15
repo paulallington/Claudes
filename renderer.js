@@ -1139,6 +1139,90 @@ var PERF_ECHO_STALE_MS = 10000;
   }, 15000);
 })();
 
+// Unfocused columns' output is held and flushed together every 50 ms; the
+// focused column is written immediately so typing echo is never delayed.
+// Measured with 8 Claude-like columns on a 3440 px window (each ~10 small
+// cursor-addressed redraws/s): written per chunk, the columns repainted in
+// different frames and the window presented 20-40 frames/s. One shared flush
+// cut presents/s from ~21 to ~9, GPU-process main thread ~35%, viz compositor
+// ~42%, renderer compositor ~25%. xterm parsing itself was ~1% of a core.
+var UNFOCUSED_OUTPUT_FLUSH_MS = 50;
+var outputBatcher = window.OutputBatcher ? window.OutputBatcher.createOutputBatcher({
+  intervalMs: UNFOCUSED_OUTPUT_FLUSH_MS,
+  deliver: handleColumnData,
+  setTimer: function (fn, ms) { return setTimeout(fn, ms); },
+  clearTimer: function (handle) { clearTimeout(handle); }
+}) : null;
+
+// With no active project state yet there is no focus to protect, so write at once.
+function isFocusedColumnId(id) {
+  var st = getActiveState();
+  return !st || st.focusedColumnId === id;
+}
+
+// Everything a chunk of pty output triggers: the xterm write plus prompt,
+// interrupt and launch-URL detection. Runs at flush time, so `data` is one or
+// more concatenated chunks; all the checks look at the tail or search within.
+function handleColumnData(id, data) {
+  var col = allColumns.get(id);
+  if (col) {
+    col.terminal.write(data);
+    if (!resizeSuppressed.has(id) && data && col.hasUserInput) {
+      // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
+      var trimmed = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
+      // "Interrupted" with or without the middle-dot — the chunk can
+      // arrive partial, so match permissively. This must work on a
+      // resumed session that hasn't seen a user keystroke yet, so it
+      // runs OUTSIDE the col.hasUserInput gate below.
+      var wasInterrupted = /Interrupted/.test(trimmed) &&
+        (/What should Claude do/.test(trimmed) || /\bEsc\b/.test(trimmed));
+      if (wasInterrupted && window.Clawd && window.Clawd.setColumnAnimation) {
+        window.Clawd.setColumnAnimation(id, 'idle');
+      }
+      if (col.hasUserInput) {
+        // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
+        var endsWithPrompt = /\n\s*[>❯]\s*$/.test(trimmed) || /^\s*[>❯]\s*$/.test(trimmed) ||
+          /Do you want to proceed/.test(trimmed) || /Esc to cancel/.test(trimmed) ||
+          /\d\.\s*(Yes|No)\s*$/.test(trimmed);
+        if (endsWithPrompt && col.activityState === 'working') {
+          setColumnActivity(id, 'waiting');
+          notifyAttentionNeeded(id);
+        } else if (data.length > 10 && !endsWithPrompt) {
+          setColumnActivity(id, 'working');
+        }
+        // Safety net for Clawd: whenever a prompt is visible, the column
+        // is awaiting input — flip the widget to idle regardless of the
+        // tracked activityState.
+        if (endsWithPrompt && window.Clawd && window.Clawd.setColumnAnimation) {
+          window.Clawd.setColumnAnimation(id, 'idle');
+        }
+      }
+    }
+    // Auto-open browser when server starts listening. Parse the actual
+    // URL out of the dotnet/asp.net log line ("Now listening on:
+    // https://localhost:7142") rather than using the configured
+    // applicationUrl — .NET's launchSettings.json stores the latter as a
+    // semicolon-separated list (e.g. "https://...;http://..."), which
+    // shell.openExternal can't interpret as a URL on Windows and falls
+    // through to opening File Explorer.
+    if (col.launchUrl && !col.launchUrlOpened) {
+      var nlMatch = data.match(/Now listening on:\s*(https?:\/\/[^\s\r\n]+)/i);
+      if (nlMatch) {
+        col.launchUrlOpened = true;
+        // Kestrel often binds to "any address" (e.g. http://[::]:8080,
+        // http://0.0.0.0:8080, http://+:8080, http://*:8080) and logs that
+        // verbatim. Browsers can't navigate to those — rewrite to
+        // localhost so the auto-open lands on a connectable URL.
+        var openUrl = nlMatch[1].replace(
+          /^(https?:\/\/)(\[::\]|\[::0\]|0\.0\.0\.0|\+|\*)(:|\/|$)/i,
+          '$1localhost$3'
+        );
+        window.electronAPI.openExternal(openUrl);
+      }
+    }
+  }
+}
+
 function connectWS() {
   // Per-launch token presented as a subprotocol. pty-server rejects the WS
   // handshake if the token is missing or wrong, so a drive-by browser page
@@ -1165,6 +1249,9 @@ function connectWS() {
   ws.onmessage = function (event) {
     var msg;
     try { msg = JSON.parse(event.data); } catch (e) { return; }
+    // Deliver this column's queued output before handling exit/reattach, so no
+    // output lands after the overlay or respawn.
+    if (outputBatcher && msg.type !== 'data' && msg.id !== undefined) outputBatcher.flush(msg.id);
     if (msg.type === 'data') {
       if (msg.data) perfTermBytes += msg.data.length;
       var echoSentAt = pendingEchoAt[msg.id];
@@ -1173,62 +1260,10 @@ function connectWS() {
         var echoMs = performance.now() - echoSentAt;
         if (perfEchoStats && echoMs <= PERF_ECHO_STALE_MS) perfEchoStats.record(echoMs);
       }
-      var col = allColumns.get(msg.id);
-      if (col) {
-        col.terminal.write(msg.data);
-          if (!resizeSuppressed.has(msg.id) && msg.data && col.hasUserInput) {
-          // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
-          var trimmed = msg.data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
-          // "Interrupted" with or without the middle-dot — the chunk can
-          // arrive partial, so match permissively. This must work on a
-          // resumed session that hasn't seen a user keystroke yet, so it
-          // runs OUTSIDE the col.hasUserInput gate below.
-          var wasInterrupted = /Interrupted/.test(trimmed) &&
-            (/What should Claude do/.test(trimmed) || /\bEsc\b/.test(trimmed));
-          if (wasInterrupted && window.Clawd && window.Clawd.setColumnAnimation) {
-            window.Clawd.setColumnAnimation(msg.id, 'idle');
-          }
-          if (col.hasUserInput) {
-            // Detect Claude's input prompt: line starting with > or ❯ followed by cursor/space at end of chunk
-            var endsWithPrompt = /\n\s*[>❯]\s*$/.test(trimmed) || /^\s*[>❯]\s*$/.test(trimmed) ||
-              /Do you want to proceed/.test(trimmed) || /Esc to cancel/.test(trimmed) ||
-              /\d\.\s*(Yes|No)\s*$/.test(trimmed);
-            if (endsWithPrompt && col.activityState === 'working') {
-              setColumnActivity(msg.id, 'waiting');
-              notifyAttentionNeeded(msg.id);
-            } else if (msg.data.length > 10 && !endsWithPrompt) {
-              setColumnActivity(msg.id, 'working');
-            }
-            // Safety net for Clawd: whenever a prompt is visible, the column
-            // is awaiting input — flip the widget to idle regardless of the
-            // tracked activityState.
-            if (endsWithPrompt && window.Clawd && window.Clawd.setColumnAnimation) {
-              window.Clawd.setColumnAnimation(msg.id, 'idle');
-            }
-          }
-        }
-        // Auto-open browser when server starts listening. Parse the actual
-        // URL out of the dotnet/asp.net log line ("Now listening on:
-        // https://localhost:7142") rather than using the configured
-        // applicationUrl — .NET's launchSettings.json stores the latter as a
-        // semicolon-separated list (e.g. "https://...;http://..."), which
-        // shell.openExternal can't interpret as a URL on Windows and falls
-        // through to opening File Explorer.
-        if (col.launchUrl && !col.launchUrlOpened) {
-          var nlMatch = msg.data.match(/Now listening on:\s*(https?:\/\/[^\s\r\n]+)/i);
-          if (nlMatch) {
-            col.launchUrlOpened = true;
-            // Kestrel often binds to "any address" (e.g. http://[::]:8080,
-            // http://0.0.0.0:8080, http://+:8080, http://*:8080) and logs that
-            // verbatim. Browsers can't navigate to those — rewrite to
-            // localhost so the auto-open lands on a connectable URL.
-            var openUrl = nlMatch[1].replace(
-              /^(https?:\/\/)(\[::\]|\[::0\]|0\.0\.0\.0|\+|\*)(:|\/|$)/i,
-              '$1localhost$3'
-            );
-            window.electronAPI.openExternal(openUrl);
-          }
-        }
+      if (outputBatcher && msg.data) {
+        outputBatcher.push(msg.id, msg.data, isFocusedColumnId(msg.id));
+      } else {
+        handleColumnData(msg.id, msg.data);
       }
     } else if (msg.type === 'exit') {
       var col2 = allColumns.get(msg.id);
@@ -1281,6 +1316,8 @@ function connectWS() {
   };
   ws.onclose = function () {
     wsConnecting = false;
+    // Old-socket output goes to the terminals before any reattach replay.
+    if (outputBatcher) outputBatcher.flushAll();
     // The socket can close because pty-server crashed and main auto-restarted
     // it (lib/pty-restart-policy). The new server normally re-binds the same
     // preferred port, but if that port is briefly still held it falls back to an
@@ -2827,6 +2864,7 @@ function disposeColumnLocalOnly(id) {
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
   delete pendingEchoAt[id];
+  if (outputBatcher) outputBatcher.drop(id);
   codexWatchCounts.delete(id);
 
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
@@ -7130,6 +7168,7 @@ function removeColumn(id) {
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
   delete pendingEchoAt[id];
+  if (outputBatcher) outputBatcher.drop(id);
   codexWatchCounts.delete(id);
 
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
@@ -7476,6 +7515,8 @@ function setFocusedColumn(id, opts) {
   }
   state.focusedColumnId = id;
   lastFocusedColumnId = id;
+  // Show output held while the column was unfocused before the user types.
+  if (outputBatcher) outputBatcher.flush(id);
   col.element.classList.add('focused');
   if (col.terminal) col.terminal.focus();
   if (window.Clawd && typeof window.Clawd.setFocusedColumn === 'function') {
