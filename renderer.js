@@ -19030,6 +19030,7 @@ function loadAutomationPageRun() {
   var item = st.runItems.find(function (it) { return it.key === st.runKey; }) || null;
   var seq = ++st.detailSeq;
   st.loadedRunKey = st.runKey;
+  st.liveLoading = false;
   renderAutomationPageRunDetail(null);
   if (!item) {
     renderAutomationPageRunTitle(null, null);
@@ -19047,13 +19048,19 @@ function loadAutomationPageRun() {
 
   if (item.isLive) {
     setAutomationPageOutput('', 'Running. No output yet.');
+    // The snapshot already holds every chunk main sent before it answered, so
+    // chunks that arrive while it is in flight are dropped, not appended twice.
+    st.liveLoading = true;
     var liveP = onManager
       ? window.electronAPI.getManagerLiveOutput(automation.id)
       : window.electronAPI.getAgentLiveOutput(automation.id, agent.id);
     liveP.then(function (text) {
       if (st !== automationPageState || seq !== st.detailSeq) return;
+      st.liveLoading = false;
       setAutomationPageOutput(text || '', 'Running. No output yet.', { follow: true });
-    }).catch(function () { /* the next chunk will populate it */ });
+    }).catch(function () {
+      if (st === automationPageState && seq === st.detailSeq) st.liveLoading = false;
+    });
   } else if (onManager) {
     show(st.managerRuns[item.startedAt] || null);
   } else {
@@ -19129,6 +19136,7 @@ function setAutomationPageOutput(text, emptyMessage, opts) {
   if (st) {
     st.outputText = text;
     st.emptyMessage = emptyMessage;
+    st.pendingText = '';
   }
   var outEl = automationPageNode('output');
   var emptyEl = automationPageNode('empty');
@@ -19138,6 +19146,43 @@ function setAutomationPageOutput(text, emptyMessage, opts) {
   emptyEl.textContent = hasText ? '' : emptyMessage;
   outEl.textContent = text;
   outEl.scrollTop = opts && opts.follow ? outEl.scrollHeight : 0;
+}
+
+// Called from the agent/manager output events. Feeds the page only when it is
+// showing that agent's (or the manager's) Live run.
+function feedAutomationPageOutput(automationId, agentKey, chunk) {
+  var st = automationPageState;
+  if (!st || st.automationId !== automationId || st.agentKey !== agentKey || st.runKey !== 'live') return;
+  if (!chunk || st.liveLoading) return;
+  st.outputText += chunk;
+  st.pendingText = (st.pendingText || '') + chunk;
+  if (st.flushQueued) return;
+  st.flushQueued = true;
+  requestAnimationFrame(function () { flushAutomationPageOutput(st); });
+}
+
+// Chunks are batched per frame so a chatty run does one DOM write and one
+// layout read per frame. The pane keeps following the tail only if the user was
+// already at the bottom.
+function flushAutomationPageOutput(st) {
+  st.flushQueued = false;
+  if (st !== automationPageState || !st.pendingText) return;
+  var text = st.pendingText;
+  st.pendingText = '';
+  var outEl = automationPageNode('output');
+  var emptyEl = automationPageNode('empty');
+  var wasHidden = outEl.classList.contains('hidden');
+  var follow = wasHidden || window.AutomationPageView.isNearBottom(outEl.scrollTop, outEl.clientHeight, outEl.scrollHeight);
+  if (wasHidden) {
+    outEl.classList.remove('hidden');
+    emptyEl.classList.add('hidden');
+    outEl.textContent = st.outputText;
+  } else if (outEl.childNodes.length === 1 && outEl.firstChild.nodeType === 3) {
+    outEl.firstChild.appendData(text);
+  } else {
+    outEl.textContent = st.outputText;
+  }
+  if (follow) outEl.scrollTop = outEl.scrollHeight;
 }
 
 // ============================================================
@@ -21086,6 +21131,7 @@ window.electronAPI.onAgentStarted(function (data) {
   refreshAutomationsFlyout();
   updateAutomationsTabIndicator();
   updateAutomationSidebarBadges();
+  refreshAutomationPage({ automationId: data.automationId, reloadRuns: true });
   if (activeAutomationDetailId === data.automationId) {
     window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
       var auto = automations.find(function (a) { return a.id === data.automationId; });
@@ -21095,6 +21141,7 @@ window.electronAPI.onAgentStarted(function (data) {
 });
 
 window.electronAPI.onAgentOutput(function (data) {
+  feedAutomationPageOutput(data.automationId, data.agentId, data.chunk);
   if (activeAutomationDetailId === data.automationId && activeAgentDetailId === data.agentId && agentDetailViewingLive) {
     var outputEl = document.getElementById('automation-detail-output');
     if (outputEl) {
@@ -21111,6 +21158,9 @@ window.electronAPI.onAgentCompleted(function (data) {
   refreshAutomationsFlyout();
   updateAutomationSidebarBadges();
   updateAutomationsTabIndicator();
+  // A finished live run is gone from the list, so the page selects the run
+  // that was just saved.
+  refreshAutomationPage({ automationId: data.automationId, reloadRuns: true });
   if (activeAutomationDetailId === data.automationId) {
     window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
       var auto = automations.find(function (a) { return a.id === data.automationId; });
@@ -21126,6 +21176,7 @@ window.electronAPI.onAgentCompleted(function (data) {
 window.electronAPI.onManagerStarted(function (data) {
   refreshAutomations();
   refreshAutomationsFlyout();
+  refreshAutomationPage({ automationId: data.automationId, reloadRuns: true });
   if (activeAutomationDetailId === data.automationId && activeDetailAutomation) {
     window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
       var auto = automations.find(function (a) { return a.id === data.automationId; });
@@ -21138,6 +21189,7 @@ window.electronAPI.onManagerCompleted(function (data) {
   refreshAutomations();
   refreshAutomationsFlyout();
   updateAutomationSidebarBadges();
+  refreshAutomationPage({ automationId: data.automationId, reloadRuns: true });
   if (activeAutomationDetailId === data.automationId && activeDetailAutomation) {
     window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
       var auto = automations.find(function (a) { return a.id === data.automationId; });
@@ -21147,6 +21199,7 @@ window.electronAPI.onManagerCompleted(function (data) {
 });
 
 window.electronAPI.onManagerOutput(function (data) {
+  feedAutomationPageOutput(data.automationId, 'manager', data.chunk);
   if (viewingManagerLive && viewingManagerAutomationId === data.automationId) {
     var outputEl = document.getElementById('automation-detail-output');
     if (outputEl) {

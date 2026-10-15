@@ -126,7 +126,16 @@ test('runStatusMarker: unknown or missing status falls back', () => {
   assert.deepEqual(runStatusMarker(undefined), { glyph: '•', cls: 'run-unknown', label: 'Unknown' });
 });
 
-const { buildAgentTabs, pickDefaultAgentKey } = require('../lib/automation-page-view');
+const { buildAgentTabs, pickDefaultAgentKey, isNearBottom } = require('../lib/automation-page-view');
+
+test('isNearBottom: follows the tail only when within the threshold of the end', () => {
+  assert.equal(isNearBottom(960, 400, 1360), true);   // exactly at the end
+  assert.equal(isNearBottom(920, 400, 1360), true);   // 40px short
+  assert.equal(isNearBottom(919, 400, 1360), false);  // 41px short
+  assert.equal(isNearBottom(0, 400, 300), true);      // content shorter than the pane
+  assert.equal(isNearBottom(500, 400, 1360, 500), true);
+  assert.equal(isNearBottom(undefined, 400, 1360), false);
+});
 
 function agent(id, extra) {
   return Object.assign({ id, name: 'Agent ' + id, currentRunStartedAt: null, lastRunAt: null, lastRunStatus: null }, extra);
