@@ -327,7 +327,10 @@ function perfSample() {
 }
 // Schedule once app is ready so getAppMetrics has the full process tree.
 if (typeof app !== 'undefined') {
-  ipcMain.on('perf:rendererLag', (_event, snap) => {
+  ipcMain.on('perf:rendererLag', (event, snap) => {
+    // Popouts load index.html and report too; only the main window's snapshot
+    // belongs in the [perf] line.
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
     // Untrusted renderer payload: keep only known, clamped numeric fields.
     const clean = sanitizeRendererLag(snap);
     if (clean) perfRendererLag = clean;
