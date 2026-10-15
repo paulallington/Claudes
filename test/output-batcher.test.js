@@ -97,3 +97,53 @@ test('flushAll with nothing pending delivers nothing', () => {
   batcher.flushAll();
   assert.deepEqual(delivered, []);
 });
+
+function setupThrowing(badIds) {
+  const delivered = [];
+  const errors = [];
+  const timers = [];
+  const batcher = createOutputBatcher({
+    intervalMs: 50,
+    deliver: (id, data) => {
+      if (badIds.includes(id)) throw new Error('boom ' + id);
+      delivered.push([id, data]);
+    },
+    onError: (err, id) => errors.push([err.message, id]),
+    setTimer: (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; },
+    clearTimer: (t) => { t.cleared = true; },
+  });
+  return { batcher, delivered, errors, timers };
+}
+
+test('flushAll still delivers the other ids when one deliver throws', () => {
+  const { batcher, delivered, errors, timers } = setupThrowing(['b']);
+  batcher.push('a', 'A', false);
+  batcher.push('b', 'B', false);
+  batcher.push('c', 'C', false);
+  timers[0].fn();
+  assert.deepEqual(delivered, [['a', 'A'], ['c', 'C']]);
+  assert.deepEqual(errors, [['boom b', 'b']]);
+  batcher.push('a', 'again', false);
+  assert.equal(timers.length, 2);
+  timers[1].fn();
+  assert.deepEqual(delivered[2], ['a', 'again']);
+});
+
+test('flush and immediate push report a throwing deliver instead of throwing', () => {
+  const { batcher, errors } = setupThrowing(['b']);
+  batcher.push('b', 'B', false);
+  assert.doesNotThrow(() => batcher.flush('b'));
+  assert.doesNotThrow(() => batcher.push('b', 'x', true));
+  assert.equal(errors.length, 2);
+});
+
+test('a throwing deliver without onError is swallowed', () => {
+  const batcher = createOutputBatcher({
+    intervalMs: 50,
+    deliver: () => { throw new Error('x'); },
+    setTimer: () => 1,
+    clearTimer: () => {},
+  });
+  batcher.push('a', 'A', false);
+  assert.doesNotThrow(() => batcher.flushAll());
+});
