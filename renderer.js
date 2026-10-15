@@ -1077,6 +1077,56 @@ var wsReconnectTimer = null;
 var wsServerDownToast = null;
 var wsConnecting = false;
 
+// Responsiveness telemetry. Every 15 s the renderer sends event-loop lag,
+// long-task totals, keystroke-to-echo latency and terminal output volume to
+// main (perf:rendererLag), which logs it, then the counters reset. Echo
+// latency is the time from a user keystroke to the next output chunk for that
+// column, so it includes pty and Claude's own processing, not just the renderer.
+var perfLagStats = window.LagStats ? window.LagStats.createLagStats() : null;
+var perfEchoStats = window.LagStats ? window.LagStats.createLagStats() : null;
+var perfLongTasks = 0;
+var perfLongTaskMs = 0;
+var perfTermBytes = 0;
+var pendingEchoAt = Object.create(null);   // column id -> performance.now() of unechoed keystroke
+var PERF_ECHO_STALE_MS = 10000;
+(function startRendererLagReporting() {
+  if (!perfLagStats || !perfEchoStats) return;
+  var PROBE_MS = 500;
+  var last = performance.now();
+  setInterval(function () {
+    var now = performance.now();
+    perfLagStats.record(Math.max(0, now - last - PROBE_MS));
+    last = now;
+  }, PROBE_MS);
+  try {
+    new PerformanceObserver(function (list) {
+      var entries = list.getEntries();
+      for (var i = 0; i < entries.length; i++) {
+        perfLongTasks++;
+        perfLongTaskMs += entries[i].duration;
+      }
+    }).observe({ type: 'longtask', buffered: false });
+  } catch (e) { /* longtask not supported */ }
+  setInterval(function () {
+    var lag = perfLagStats.snapshot();
+    var echo = perfEchoStats.snapshot();
+    var snap = {
+      lagP50: Math.round(lag.p50), lagP99: Math.round(lag.p99), lagMax: Math.round(lag.max),
+      longTasks: perfLongTasks, longTaskMs: Math.round(perfLongTaskMs),
+      echoP50: Math.round(echo.p50), echoP99: Math.round(echo.p99), echoMax: Math.round(echo.max),
+      echoCount: echo.count, termKB: Math.round(perfTermBytes / 1024)
+    };
+    perfLagStats.reset();
+    perfEchoStats.reset();
+    perfLongTasks = 0;
+    perfLongTaskMs = 0;
+    perfTermBytes = 0;
+    if (window.electronAPI && window.electronAPI.reportRendererLag) {
+      try { window.electronAPI.reportRendererLag(snap); } catch (e) { /* diagnostics only */ }
+    }
+  }, 15000);
+})();
+
 function connectWS() {
   // Per-launch token presented as a subprotocol. pty-server rejects the WS
   // handshake if the token is missing or wrong, so a drive-by browser page
@@ -1102,6 +1152,13 @@ function connectWS() {
     var msg;
     try { msg = JSON.parse(event.data); } catch (e) { return; }
     if (msg.type === 'data') {
+      if (msg.data) perfTermBytes += msg.data.length;
+      var echoSentAt = pendingEchoAt[msg.id];
+      if (echoSentAt !== undefined) {
+        delete pendingEchoAt[msg.id];
+        var echoMs = performance.now() - echoSentAt;
+        if (perfEchoStats && echoMs <= PERF_ECHO_STALE_MS) perfEchoStats.record(echoMs);
+      }
       var col = allColumns.get(msg.id);
       if (col) {
         col.terminal.write(msg.data);
@@ -5617,6 +5674,11 @@ function addColumn(args, targetRow, opts) {
   terminal.onData(function (data) {
     if (handleSnippetExpansion(id, data)) return;  // consumed by snippet expansion
     wsSend({ type: 'write', id: id, data: data });
+    if (data.length > 0 && data.charCodeAt(0) !== 0x1b) {
+      var echoNow = performance.now();   // see "Responsiveness telemetry"
+      var echoPrev = pendingEchoAt[id];
+      if (echoPrev === undefined || echoNow - echoPrev > PERF_ECHO_STALE_MS) pendingEchoAt[id] = echoNow;
+    }
     var c = allColumns.get(id);
     if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
       c.lastInputAt = Date.now();

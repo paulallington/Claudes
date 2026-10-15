@@ -182,6 +182,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPersonality: () => ipcRenderer.invoke('voice:getPersonality'),
   setPersonality: (text) => ipcRenderer.invoke('voice:setPersonality', text),
   voiceLog: (line) => ipcRenderer.send('voice:log', line),
+  reportRendererLag: (snap) => ipcRenderer.send('perf:rendererLag', snap),
   revealVoiceLog: () => ipcRenderer.invoke('voice:revealLog'),
   onVoiceHookEvent: (cb) => ipcRenderer.on('voice:hookEvent', (e, ev) => cb(ev)),
   onVoiceSettingsChanged: (cb) => ipcRenderer.on('voice:settingsChanged', () => cb()),
