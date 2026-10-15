@@ -4,6 +4,7 @@ const {
   formatDuration,
   runStatusMarker,
   formatRunTime,
+  buildRunListItems,
 } = require('../lib/automation-page-view');
 
 test('formatDuration: empty for null or invalid input', () => {
@@ -52,6 +53,53 @@ test('formatRunTime: accepts ms for now and tolerates bad input', () => {
   assert.equal(formatRunTime(new Date(2026, 9, 15, 0, 0).toISOString(), now), '00:00');
   assert.equal(formatRunTime(null, now), '');
   assert.equal(formatRunTime('not a date', now), '');
+});
+
+test('buildRunListItems: newest first, with labels, markers and keys', () => {
+  var now = new Date(2026, 9, 15, 14, 30);
+  var older = new Date(2026, 9, 14, 9, 0).toISOString();
+  var newer = new Date(2026, 9, 15, 8, 0).toISOString();
+  var items = buildRunListItems([
+    { startedAt: older, durationMs: 252000, status: 'error', summary: 'Disk full' },
+    { startedAt: newer, durationMs: 12000, status: 'completed', summary: 'All good' },
+  ], { now: now });
+  assert.equal(items.length, 2);
+  assert.deepEqual(items[0], {
+    key: newer, isLive: false, startedAt: newer, timeLabel: '08:00', durationLabel: '12s',
+    marker: { glyph: '✓', cls: 'run-ok', label: 'Succeeded' }, summary: 'All good',
+  });
+  assert.equal(items[1].key, older);
+  assert.equal(items[1].timeLabel, 'Yesterday 09:00');
+  assert.equal(items[1].durationLabel, '4m 12s');
+  assert.equal(items[1].marker.cls, 'run-error');
+});
+
+test('buildRunListItems: a live run is prepended with elapsed time', () => {
+  var now = new Date(2026, 9, 15, 14, 30, 0);
+  var liveStartedAt = new Date(2026, 9, 15, 14, 25, 30).toISOString();
+  var items = buildRunListItems([{ startedAt: new Date(2026, 9, 15, 8, 0).toISOString(), status: 'completed' }],
+    { liveStartedAt: liveStartedAt, now: now });
+  assert.equal(items.length, 2);
+  assert.equal(items[0].key, 'live');
+  assert.equal(items[0].isLive, true);
+  assert.equal(items[0].startedAt, liveStartedAt);
+  assert.equal(items[0].timeLabel, 'Live');
+  assert.equal(items[0].durationLabel, '4m 30s');
+  assert.equal(items[0].marker.cls, 'run-live');
+  assert.equal(items[1].isLive, false);
+});
+
+test('buildRunListItems: tolerates null history and missing fields', () => {
+  assert.deepEqual(buildRunListItems(null, {}), []);
+  assert.deepEqual(buildRunListItems(undefined), []);
+  var items = buildRunListItems([{ status: 'completed' }, null], { now: new Date(2026, 9, 15) });
+  assert.equal(items.length, 2);
+  assert.equal(items[0].key, '0');
+  assert.equal(items[0].timeLabel, '');
+  assert.equal(items[0].durationLabel, '');
+  assert.equal(items[0].summary, '');
+  assert.equal(items[1].key, '1');
+  assert.equal(items[1].marker.label, 'Unknown');
 });
 
 test('runStatusMarker: unknown or missing status falls back', () => {
