@@ -3,13 +3,63 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const { lastAssistantContextTokens, modelContextLimit } = require('../lib/session-context-tokens');
+const { lastAssistantContextTokens, modelContextLimit, sampleAndResetReadStats } = require('../lib/session-context-tokens');
 
 function tmpFile(lines) {
   const p = path.join(os.tmpdir(), 'ctxtok-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.jsonl');
   fs.writeFileSync(p, lines.map(JSON.stringify).join('\n') + '\n');
   return p;
 }
+
+// head lines, then `filler` ~1KB non-usage lines, then tail lines.
+function bigTmpFile(head, tail, filler) {
+  const p = path.join(os.tmpdir(), 'ctxtok-big-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.jsonl');
+  const fillerLine = JSON.stringify({ type: 'user', message: { content: 'x'.repeat(1000) } });
+  const parts = head.map(JSON.stringify);
+  for (let i = 0; i < filler; i++) parts.push(fillerLine);
+  fs.writeFileSync(p, parts.concat(tail.map(JSON.stringify)).join('\n') + '\n');
+  return p;
+}
+const usageLine = (n) => ({ type: 'assistant', message: { usage: { input_tokens: n, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } });
+
+test('large file: reads only the tail when the usage line is near the end', () => {
+  const p = bigTmpFile([usageLine(1)], [usageLine(777)], 600);
+  assert.ok(fs.statSync(p).size > 512 * 1024);
+  sampleAndResetReadStats();
+  assert.strictEqual(lastAssistantContextTokens(p), 777);
+  const stats = sampleAndResetReadStats();
+  assert.ok(stats.bytesRead <= 256 * 1024, 'bytesRead ' + stats.bytesRead);
+  assert.strictEqual(stats.fullReads, 0);
+  fs.unlinkSync(p);
+});
+
+test('large file: falls back to a full read when the usage line is only near the start', () => {
+  const p = bigTmpFile([usageLine(555)], [], 600);
+  sampleAndResetReadStats();
+  assert.strictEqual(lastAssistantContextTokens(p), 555);
+  const stats = sampleAndResetReadStats();
+  assert.strictEqual(stats.fullReads, 1);
+  assert.ok(stats.bytesRead > 512 * 1024);
+  fs.unlinkSync(p);
+});
+
+test('large file: sinceMs still filters entries found in the tail', () => {
+  const old = Object.assign({ timestamp: '2026-01-01T00:00:00Z' }, usageLine(900));
+  const fresh = Object.assign({ timestamp: '2026-03-01T00:00:00Z' }, usageLine(40));
+  const p = bigTmpFile([fresh], [old], 600);
+  const cutoff = Date.parse('2026-02-01T00:00:00Z');
+  assert.strictEqual(lastAssistantContextTokens(p, cutoff), 40);
+  fs.unlinkSync(p);
+});
+
+test('unchanged file with no usage line is read once, then served from cache', () => {
+  const p = bigTmpFile([], [{ type: 'user', message: { content: 'hi' } }], 600);
+  assert.strictEqual(lastAssistantContextTokens(p), null);
+  sampleAndResetReadStats();
+  assert.strictEqual(lastAssistantContextTokens(p), null);
+  assert.strictEqual(sampleAndResetReadStats().bytesRead, 0);
+  fs.unlinkSync(p);
+});
 
 test('returns null for empty file', () => {
   const p = tmpFile([]);
