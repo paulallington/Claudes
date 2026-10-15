@@ -1080,8 +1080,10 @@ var wsConnecting = false;
 // Responsiveness telemetry. Every 15 s the renderer sends event-loop lag,
 // long-task totals, keystroke-to-echo latency and terminal output volume to
 // main (perf:rendererLag), which logs it, then the counters reset. Echo
-// latency is the time from a user keystroke to the next output chunk for that
-// column, so it includes pty and Claude's own processing, not just the renderer.
+// latency is keystroke to the column's next output at an idle prompt (not
+// stamped while the column is working), so it includes pty and Claude CLI
+// time, not just the renderer. termKB is thousands of characters received
+// (string length, not bytes); the field name is a contract with main.
 var perfLagStats = window.LagStats ? window.LagStats.createLagStats() : null;
 var perfEchoStats = window.LagStats ? window.LagStats.createLagStats() : null;
 var perfLongTasks = 0;
@@ -1093,9 +1095,17 @@ var PERF_ECHO_STALE_MS = 10000;
   if (!perfLagStats || !perfEchoStats) return;
   var PROBE_MS = 500;
   var last = performance.now();
+  // Chromium throttles timers in hidden pages to >= 1 s (once a minute after
+  // 5 minutes), which would read as seconds of fake lag. Skip samples while
+  // hidden and restart the baseline when the window comes back.
+  document.addEventListener('visibilitychange', function () {
+    last = performance.now();
+  });
   setInterval(function () {
     var now = performance.now();
-    perfLagStats.record(Math.max(0, now - last - PROBE_MS));
+    if (document.visibilityState === 'visible') {
+      perfLagStats.record(Math.max(0, now - last - PROBE_MS));
+    }
     last = now;
   }, PROBE_MS);
   try {
@@ -1142,6 +1152,8 @@ function connectWS() {
       wsServerDownToast = null;
     }
     if (wsHasConnectedBefore) {
+      // Output for a keystroke sent on the dead socket never arrives.
+      pendingEchoAt = Object.create(null);
       reattachAllColumns();
     } else {
       wsHasConnectedBefore = true;
@@ -2812,6 +2824,7 @@ function disposeColumnLocalOnly(id) {
   releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
+  delete pendingEchoAt[id];
   codexWatchCounts.delete(id);
 
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
@@ -5674,12 +5687,14 @@ function addColumn(args, targetRow, opts) {
   terminal.onData(function (data) {
     if (handleSnippetExpansion(id, data)) return;  // consumed by snippet expansion
     wsSend({ type: 'write', id: id, data: data });
-    if (data.length > 0 && data.charCodeAt(0) !== 0x1b) {
+    var c = allColumns.get(id);
+    // Only at an idle prompt: mid-turn, Claude's spinner redraws (~100 ms)
+    // would end the measurement and read as a fast echo.
+    if (data.length > 0 && data.charCodeAt(0) !== 0x1b && !(c && c.activityState === 'working')) {
       var echoNow = performance.now();   // see "Responsiveness telemetry"
       var echoPrev = pendingEchoAt[id];
       if (echoPrev === undefined || echoNow - echoPrev > PERF_ECHO_STALE_MS) pendingEchoAt[id] = echoNow;
     }
-    var c = allColumns.get(id);
     if (c && data.length > 0 && data.charCodeAt(0) !== 0x1b) {
       c.lastInputAt = Date.now();
       // Typing is attention on this column for voice auto-play, even if a prior
@@ -7112,6 +7127,7 @@ function removeColumn(id) {
   releaseWebglForColumn(id);
   if (col.terminal) col.terminal.dispose();
   allColumns.delete(id);
+  delete pendingEchoAt[id];
   codexWatchCounts.delete(id);
 
   var state = projectStates.get(stateKey(col.projectKey, col.workspaceId));
