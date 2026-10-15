@@ -8507,7 +8507,8 @@ ipcMain.handle('findings:list', (event, opts) => {
 ipcMain.handle('findings:openCounts', () => {
   try {
     const store = readFindings();
-    return { ok: true, counts: AutomationSidebarView.openItemCounts(FindingsStore.listFindings(store, { unacknowledgedOnly: false })) };
+    // readFindings guarantees an array, and counting needs no ordering.
+    return { ok: true, counts: AutomationSidebarView.openItemCounts(store.findings) };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }
