@@ -2788,6 +2788,7 @@ function applyTransferredColumns(projIdx, transfer) {
 
   transfer.forEach(function (entry) {
     addColumn(entry.cmdArgs || [], null, {
+      keepAutomationPage: true, // moving an existing terminal, not a spawn
       reattachPtyId: entry.ptyId,
       sessionId: entry.sessionId,
       title: entry.title,
@@ -5493,8 +5494,11 @@ function addColumn(args, targetRow, opts) {
 
   var state = getActiveState();
   if (!state) return;
-  // A new column belongs on screen, so it takes over from the automation page.
-  closeAutomationPage();
+  // A column the user spawns belongs on screen, so it takes over from the
+  // automation page. A session restore adds columns on its own schedule, which
+  // can land after the user has opened a page on a project whose columns were
+  // still loading, so it must leave the page up.
+  if (!state.restoringLayout && !opts.keepAutomationPage) closeAutomationPage();
   // User is spawning a column — clear the post-killAll suppression and hide
   // the empty-state hint.
   state.suppressAutoSpawn = false;
