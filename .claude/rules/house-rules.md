@@ -45,6 +45,12 @@ session-start check offers to re-sync the copies.
 - Commit by pathspec (`git commit --only <paths>` or `git commit -- <paths>`). Never `git add`
   then `git commit`, and never build the file list from `git diff --name-only`: both sweep up
   another session's work.
+- Never `git stash` in a shared working tree: it takes other sessions' changes with it. To test
+  against HEAD, use a detached worktree.
+- When your changes and another session's are in the same file, don't split hunks with
+  `git diff -U0` + `git apply --cached --unidiff-zero`: it can silently reorder adjacent blocks.
+  Build the staged file explicitly (`git hash-object -w` + `git update-index --cacheinfo`) and
+  compare `git show :<file>` with the working tree before committing.
 - Run `git ls-files <dir>` before deleting a folder inside the repo. Scratch output goes outside it.
 - Commit small and often. Push only when asked (memory is the exception).
 - Before stating what production does, read the deployed branch (`git fetch`, then
@@ -62,6 +68,8 @@ session-start check offers to re-sync the copies.
   report success and still be wrong.
 - Before a check trusts a stored value, read the code that writes it.
 - Report test results as they are, including skips and failures.
+- If an MCP call reports success but nothing changed, load its schema (ToolSearch) and check the
+  parameter names before trying again.
 
 ## Safety
 
