@@ -654,6 +654,7 @@ var sidebarAutomationsSeq = 0;
 var sidebarAutomationsTimer = null;
 var sidebarAutomationsTrailing = false;
 var activeAutomationPage = null; // { projectPath, automationId } or null
+var automationPageState = null; // view state while #automation-page is showing, else null
 
 // ============================================================
 // Headless Runs
@@ -3062,7 +3063,7 @@ function buildWorkspaceItem(project, projectIndex, ws, wsIndex) {
   wsItem.appendChild(right);
 
   wsItem.addEventListener('click', function () {
-    clearActiveAutomationPage();
+    closeAutomationPage({ restoreColumns: false });
     setActiveWorkspace(projectIndex, ws.id, false);
   });
 
@@ -3157,18 +3158,36 @@ function isAutomationPageActiveFor(project) {
   return !!(activeAutomationPage && activeAutomationPage.projectPath === project.path);
 }
 
-// Interim: opens the automation's detail in the explorer Automations tab. A
-// later step replaces this body with the full-window automation page.
+// Show the full-window page for one automation in place of the active
+// project's columns. The columns container is only hidden, so terminals keep
+// running underneath.
 function openAutomationPage(projectIndex, automationId) {
   var project = config.projects[projectIndex];
   if (!project || !ensureProjectActive(projectIndex)) return;
+  var alreadyShowing = !!(automationPageState && automationPageState.automationId === automationId
+    && automationPageState.projectPath === project.path);
   activeAutomationPage = { projectPath: project.path, automationId: automationId };
-  var tab = document.querySelector('.explorer-tab[data-tab="automations"]');
-  if (tab) tab.click();
-  window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
-    var auto = automations.find(function (a) { return a.id === automationId; });
-    if (auto) openAutomationDetail(auto);
-  });
+  if (alreadyShowing) refreshAutomationPage({ reloadRuns: true });
+  else showAutomationPage(project.path, automationId);
+  renderProjectList();
+}
+
+// Hide the page and bring the project's columns back. Idempotent. Callers that
+// are about to show a container themselves (setActiveWorkspace) pass
+// { restoreColumns: false } so the terminals are not refitted twice.
+function closeAutomationPage(opts) {
+  clearActiveAutomationPage();
+  if (!automationPageState) return;
+  automationPageState = null;
+  var pageEl = document.getElementById('automation-page');
+  if (pageEl) pageEl.classList.add('hidden');
+  if (opts && opts.restoreColumns === false) return;
+  var state = getActiveState();
+  if (state) {
+    state.containerEl.style.display = 'flex';
+    if (state.focusedColumnId !== null) setFocusedColumn(state.focusedColumnId);
+    refitAll();
+  }
   renderProjectList();
 }
 
@@ -3230,8 +3249,9 @@ function buildAutomationItem(project, projectIndex, row) {
 }
 
 // Same shared #project-context-menu element as the project and workspace
-// menus (see the coupling note on showWorkspaceContextMenu).
-function showAutomationContextMenu(event, project, projectIndex, row) {
+// menus (see the coupling note on showWorkspaceContextMenu). items is
+// [{ label, action }]; onAction gets the clicked item's action.
+function showAutomationMenuAt(x, y, items, onAction) {
   var menu = document.getElementById('project-context-menu');
   if (!menu) {
     menu = document.createElement('div');
@@ -3241,51 +3261,28 @@ function showAutomationContextMenu(event, project, projectIndex, row) {
   }
   while (menu.firstChild) menu.removeChild(menu.firstChild);
 
-  function addItem(label, action) {
+  items.forEach(function (item) {
     var mi = document.createElement('div');
     mi.className = 'project-context-item';
-    mi.dataset.action = action;
-    mi.textContent = label;
+    mi.dataset.action = item.action;
+    mi.textContent = item.label;
     menu.appendChild(mi);
-  }
-  addItem('Run now', 'run');
-  addItem(row.state === 'disabled' ? 'Resume' : 'Pause', 'toggle');
-  addItem('Edit…', 'edit');
-  addItem('Export…', 'export');
-  addItem('Delete…', 'delete');
+  });
 
-  menu.style.left = event.clientX + 'px';
-  menu.style.top = event.clientY + 'px';
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
   menu.style.display = 'block';
+  if (window.MenuPosition) {
+    var rect = menu.getBoundingClientRect();
+    var pos = window.MenuPosition.clampMenuPosition(x, y, rect.width, rect.height, window.innerWidth, window.innerHeight);
+    menu.style.left = pos.left + 'px';
+    menu.style.top = pos.top + 'px';
+  }
 
   menu.onclick = function (ev) {
     var action = ev.target.dataset.action;
     menu.style.display = 'none';
-    if (!action) return;
-    // Fresh read so Edit and Run now see the current agents, not the row model.
-    window.electronAPI.getAutomationsForProject(project.path).then(function (automations) {
-      var automation = automations.find(function (a) { return a.id === row.id; });
-      if (!automation) return;
-      if (action === 'run') {
-        if (automation.agents.length === 1) window.electronAPI.runAgentNow(automation.id, automation.agents[0].id);
-        else window.electronAPI.runAutomationNow(automation.id);
-        refreshAutomations();
-      } else if (action === 'toggle') {
-        window.electronAPI.toggleAutomation(automation.id).then(function () { refreshAutomations(); });
-      } else if (action === 'edit') {
-        if (!ensureProjectActive(projectIndex)) return;
-        openAutomationModal(automation);
-      } else if (action === 'export') {
-        window.electronAPI.exportAutomation(automation.id);
-      } else if (action === 'delete') {
-        if (confirm('Delete automation "' + (automation.name || automation.agents[0].name) + '"?')) {
-          window.electronAPI.deleteAutomation(automation.id).then(function () {
-            if (activeAutomationPage && activeAutomationPage.automationId === automation.id) activeAutomationPage = null;
-            refreshAutomations();
-          });
-        }
-      }
-    });
+    if (action) onAction(action);
   };
 
   setTimeout(function () {
@@ -3294,6 +3291,50 @@ function showAutomationContextMenu(event, project, projectIndex, row) {
       document.removeEventListener('click', closeMenu);
     });
   }, 0);
+}
+
+// A single-agent automation runs its agent directly (it works for chained and
+// manual agents too); a pipeline runs every independent agent.
+function runAutomationFromUi(automation) {
+  if (automation.agents.length === 1) window.electronAPI.runAgentNow(automation.id, automation.agents[0].id);
+  else window.electronAPI.runAutomationNow(automation.id);
+  refreshAutomations();
+}
+
+function deleteAutomationFromUi(automation) {
+  if (!confirm('Delete automation "' + (automation.name || automation.agents[0].name) + '"?')) return;
+  window.electronAPI.deleteAutomation(automation.id).then(function () {
+    if (activeAutomationPage && activeAutomationPage.automationId === automation.id) closeAutomationPage();
+    refreshAutomations();
+  });
+}
+
+function showAutomationContextMenu(event, project, projectIndex, row) {
+  showAutomationMenuAt(event.clientX, event.clientY, [
+    { label: 'Run now', action: 'run' },
+    { label: row.state === 'disabled' ? 'Resume' : 'Pause', action: 'toggle' },
+    { label: 'Edit…', action: 'edit' },
+    { label: 'Export…', action: 'export' },
+    { label: 'Delete…', action: 'delete' }
+  ], function (action) {
+    // Fresh read so Edit and Run now see the current agents, not the row model.
+    window.electronAPI.getAutomationsForProject(project.path).then(function (automations) {
+      var automation = automations.find(function (a) { return a.id === row.id; });
+      if (!automation) return;
+      if (action === 'run') {
+        runAutomationFromUi(automation);
+      } else if (action === 'toggle') {
+        window.electronAPI.toggleAutomation(automation.id).then(function () { refreshAutomations(); });
+      } else if (action === 'edit') {
+        if (!ensureProjectActive(projectIndex)) return;
+        openAutomationModal(automation);
+      } else if (action === 'export') {
+        window.electronAPI.exportAutomation(automation.id);
+      } else if (action === 'delete') {
+        deleteAutomationFromUi(automation);
+      }
+    });
+  });
 }
 
 function buildProjectItem(project, index) {
@@ -3442,7 +3483,7 @@ function buildProjectItem(project, index) {
     }
     // Clicking the project card always routes to Primary, even if the user
     // was previously on a sub-workspace.
-    clearActiveAutomationPage();
+    closeAutomationPage({ restoreColumns: false });
     setActiveWorkspace(index, null, false);
   });
 
@@ -3987,6 +4028,7 @@ function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
   if (emptyState) emptyState.remove();
 
   lastGitRaw = null;
+  closeAutomationPage({ restoreColumns: false });
   var state = getOrCreateProjectState(newStateKey);
   state.containerEl.style.display = 'flex';
   refreshExplorer();
@@ -4870,6 +4912,7 @@ function removeProject(index) {
 }
 
 function showEmptyState() {
+  closeAutomationPage({ restoreColumns: false });
   projectStates.forEach(function (state) {
     state.containerEl.style.display = 'none';
   });
@@ -5417,6 +5460,8 @@ function addColumn(args, targetRow, opts) {
 
   var state = getActiveState();
   if (!state) return;
+  // A new column belongs on screen, so it takes over from the automation page.
+  closeAutomationPage();
   // User is spawning a column — clear the post-killAll suppression and hide
   // the empty-state hint.
   state.suppressAutoSpawn = false;
@@ -6395,6 +6440,7 @@ function addDiffColumn(diffData, opts) {
   var state = getOrCreateProjectState(activeProjectKey);
   if (!state) return;
   // Ensure container is visible
+  closeAutomationPage({ restoreColumns: false });
   state.containerEl.style.display = 'flex';
 
   // Two diff slots: one for file list (commit clicks), one for diff content (file clicks)
@@ -8934,6 +8980,9 @@ function rebuildRowDOM(row) {
 // ============================================================
 
 function refitAll() {
+  // The columns are display:none under the automation page; fitting them now
+  // would shrink every pty to nothing.
+  if (automationPageState) return;
   var state = getActiveState();
   if (!state) return;
   state.columns.forEach(function (col, id) {
@@ -17838,6 +17887,7 @@ function refreshAutomations() {
   // Every create/edit/delete/toggle/import/clear and agent/manager event
   // already ends here, so the sidebar rows follow along.
   refreshSidebarAutomations();
+  refreshAutomationPage();
   if (importInProgress) return; // Don't overwrite import progress panel
   var listEl = document.getElementById('automations-list');
   var noProjectEl = document.getElementById('automations-no-project');
@@ -18605,6 +18655,204 @@ document.getElementById('automation-detail-run-select').addEventListener('change
     switchToAgentRunView(activeAutomationDetailId, activeAgentDetailId, this.value);
   }
 });
+
+// ============================================================
+// Automation Page
+// ============================================================
+// Full-window view of one automation, shown in place of the active project's
+// columns (see openAutomationPage). Static markup lives in index.html; every
+// dynamic node is built with createElement/textContent because names, summaries
+// and run output are untrusted text.
+
+function automationPageNode(suffix) {
+  return document.getElementById('automation-page-' + suffix);
+}
+
+function clearNode(node) {
+  while (node && node.firstChild) node.removeChild(node.firstChild);
+}
+
+function findAutomationAgent(automation, agentId) {
+  return (automation.agents || []).find(function (ag) { return ag.id === agentId; }) || null;
+}
+
+function agentNeedsReclone(agent) {
+  return !!(agent && agent.isolation && agent.isolation.enabled && agent.lastError
+    && agent.lastError.indexOf('Working directory not found') !== -1);
+}
+
+function showAutomationPage(projectPath, automationId) {
+  var pageEl = document.getElementById('automation-page');
+  if (!pageEl) return;
+  var columns = getActiveState();
+  if (columns) columns.containerEl.style.display = 'none';
+  automationPageState = {
+    projectPath: projectPath,
+    automationId: automationId,
+    automation: null,
+    globalEnabled: true,
+    agentKey: null,
+    refreshSeq: 0
+  };
+  resetAutomationPagePanes();
+  pageEl.classList.remove('hidden');
+  refreshAutomationPage({ reloadRuns: true });
+}
+
+// Blank the page so the previous automation's content never flashes while the
+// new one loads.
+function resetAutomationPagePanes() {
+  automationPageNode('name').textContent = '';
+  automationPageNode('state').textContent = '';
+  automationPageNode('state').className = 'automation-status-badge';
+  automationPageNode('meta').textContent = '';
+  clearNode(automationPageNode('actions'));
+}
+
+// Re-read the automation and redraw what depends on it. Called on open, from
+// refreshAutomations() (every create/edit/toggle ends there) and from the agent
+// and manager events. A selected-agent change in run state reloads the run list.
+function refreshAutomationPage(opts) {
+  var st = automationPageState;
+  if (!st) return;
+  var o = opts || {};
+  if (o.automationId && o.automationId !== st.automationId) return;
+  var seq = ++st.refreshSeq;
+  Promise.all([
+    window.electronAPI.getAutomationsForProject(st.projectPath),
+    window.electronAPI.getAutomationSettings()
+  ]).then(function (results) {
+    if (st !== automationPageState || seq !== st.refreshSeq) return;
+    var automation = (results[0] || []).find(function (a) { return a.id === st.automationId; });
+    // Only a definite miss closes the page; a failed read keeps what is shown.
+    if (!automation) { closeAutomationPage(); return; }
+    st.automation = automation;
+    st.globalEnabled = !(results[1] && results[1].globalEnabled === false);
+    renderAutomationPageChrome();
+  }).catch(function () { /* keep the current view */ });
+}
+
+function renderAutomationPageChrome() {
+  var st = automationPageState;
+  if (!st || !st.automation) return;
+  var automation = st.automation;
+  automationPageNode('name').textContent = automation.name || (automation.agents[0] && automation.agents[0].name) || 'Automation';
+
+  var pill = automationPagePill(automation, st.globalEnabled);
+  var pillEl = automationPageNode('state');
+  pillEl.className = 'automation-status-badge ' + pill.cls;
+  pillEl.textContent = pill.text;
+
+  var metaEl = automationPageNode('meta');
+  var meta = automationPageMetaText(automation, st.agentKey);
+  metaEl.textContent = meta;
+  metaEl.title = meta;
+
+  renderAutomationPageActions();
+}
+
+// Same semantics as the explorer card badge (resolveAutomationCardStatus), plus
+// the sidebar's "needs you" for a manager waiting on a person or a stale error.
+function automationPagePill(automation, globalEnabled) {
+  var card = window.AutomationsPauseUi.resolveAutomationCardStatus({ globalEnabled: globalEnabled, automation: automation });
+  var rowState = window.AutomationSidebarView.automationRowState(automation, { globalEnabled: globalEnabled });
+  if (rowState === 'attention' && card.badgeClass !== 'badge-error') {
+    return { cls: 'badge-attention', text: 'needs you' };
+  }
+  return { cls: card.badgeClass, text: card.badgeText.replace(/\.+$/, '') };
+}
+
+function automationPageMetaText(automation, agentKey) {
+  var view = window.AutomationPageView;
+  var parts = [];
+  if (agentKey === 'manager' && automation.manager) {
+    var mgr = automation.manager;
+    parts.push('Manager');
+    parts.push(mgr.lastRunAt ? 'last run ' + view.formatRunTime(mgr.lastRunAt) : 'never run');
+    return parts.join(' · ');
+  }
+  var agent = findAutomationAgent(automation, agentKey) || automation.agents[0];
+  if (!agent) return '';
+  if (agent.runMode === 'run_after') {
+    parts.push('Waits for upstream');
+  } else {
+    try { parts.push(formatScheduleText(agent)); } catch (e) { /* malformed schedule: leave it out */ }
+  }
+  if (agent.currentRunStartedAt) parts.push('running since ' + view.formatRunTime(agent.currentRunStartedAt));
+  else if (agent.lastRunAt) parts.push('last run ' + view.formatRunTime(agent.lastRunAt));
+  else parts.push('never run');
+  return parts.join(' · ');
+}
+
+function renderAutomationPageActions() {
+  var st = automationPageState;
+  if (!st || !st.automation) return;
+  var automation = st.automation;
+  var actionsEl = automationPageNode('actions');
+  clearNode(actionsEl);
+
+  var multi = automation.agents.length > 1;
+  var onManager = st.agentKey === 'manager' && !!automation.manager;
+  var agent = onManager ? null : (findAutomationAgent(automation, st.agentKey) || automation.agents[0]);
+
+  function addButton(label, title, handler, cls) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'automation-detail-run-all' + (cls ? ' ' + cls : '');
+    btn.textContent = label;
+    btn.title = title;
+    btn.addEventListener('click', handler);
+    actionsEl.appendChild(btn);
+    return btn;
+  }
+
+  if (onManager && automation.manager.needsHuman) {
+    addButton('Talk to the manager', 'Open a Claude column with what the manager found', function () {
+      launchManagerTerminal(automation);
+    }, 'needs-you');
+  }
+  var runBtn = addButton('Run now', multi ? 'Run every independent agent' : 'Run this automation now', function () {
+    runAutomationFromUi(automation);
+  });
+  if (!multi && agent && agent.currentRunStartedAt) {
+    runBtn.disabled = true;
+    runBtn.title = 'Already running';
+  }
+  if (onManager) {
+    addButton('Run manager', 'Run the manager now', function () {
+      window.electronAPI.runManager(automation.id);
+    });
+  } else if (multi && agent) {
+    addButton('Run this agent', 'Run only ' + agent.name, function () {
+      window.electronAPI.runAgentNow(automation.id, agent.id);
+      refreshAutomations();
+    });
+  }
+  if (agentNeedsReclone(agent)) {
+    addButton('Re-clone', 'Re-clone repository', function () {
+      window.electronAPI.setupAgentClone(automation.id, agent.id).then(function (result) {
+        if (result && result.error) alert('Re-clone failed: ' + result.error);
+        else refreshAutomations();
+      });
+    });
+  }
+  addButton(automation.enabled ? 'Pause' : 'Resume', automation.enabled ? 'Pause this automation' : 'Resume this automation', function () {
+    window.electronAPI.toggleAutomation(automation.id).then(function () { refreshAutomations(); });
+  });
+  addButton('Edit', 'Edit this automation', function () {
+    openAutomationModal(automation);
+  });
+  var moreBtn = addButton('⋯', 'More', function () {
+    var rect = moreBtn.getBoundingClientRect();
+    showAutomationMenuAt(rect.left, rect.bottom + 2, [
+      { label: 'Export…', action: 'export' },
+      { label: 'Delete…', action: 'delete' }
+    ], function (action) {
+      if (action === 'export') window.electronAPI.exportAutomation(automation.id);
+      else if (action === 'delete') deleteAutomationFromUi(automation);
+    });
+  });
+}
 
 // ============================================================
 // Automation Modal (New / Edit) — Multi-Agent Support

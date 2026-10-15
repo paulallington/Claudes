@@ -1502,6 +1502,237 @@ html[data-platform="darwin"] #toolbar {
   overflow: hidden;
 }
 
+/* --- Automation page: replaces the active project's columns in
+   #columns-container. Each pane scrolls itself; the page never does. --- */
+
+.automation-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-main);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.automation-page.hidden,
+.automation-page .hidden { display: none; }
+
+.automation-page-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 40px;
+  padding: 0 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-primary);
+}
+.automation-page-icon { color: var(--text-secondary); font-size: 13px; }
+.automation-page-name {
+  font-weight: 600;
+  font-size: 13px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.automation-page-meta {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.automation-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.automation-page-actions button,
+.automation-page-run-tools button { padding: 3px 10px; }
+.automation-page-actions button:disabled { opacity: 0.45; cursor: default; }
+.automation-page-actions .needs-you { border-color: #f5a623; color: #f5a623; }
+
+.automation-page-agents {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-primary);
+  overflow-x: auto;
+}
+.automation-page-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.automation-page-tab:hover { background: var(--hover-light); color: var(--text-primary); }
+.automation-page-tab.active { border-bottom-color: var(--accent); color: var(--text-bright); }
+.automation-page-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dimmer);
+}
+.automation-page-tab-dot.running { background: #3b82f6; }
+.automation-page-tab-dot.error { background: #ef4444; }
+.automation-page-tab-dot.attention { background: #f5a623; }
+
+.automation-page-body {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+.automation-page-left {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border-primary);
+  background: var(--bg-main);
+}
+.automation-page-section-title {
+  flex-shrink: 0;
+  padding: 8px 12px 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.automation-page-runs { flex: 1; min-height: 0; overflow-y: auto; }
+
+.automation-page-run {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  height: 44px;
+  padding: 0 12px 0 9px;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  user-select: none;
+}
+.automation-page-run:hover { background: var(--hover-light); }
+.automation-page-run.active {
+  border-left-color: var(--accent);
+  background: var(--hover-light);
+  color: var(--text-bright);
+}
+.automation-page-run-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+.automation-page-run-marker { width: 12px; text-align: center; font-weight: 700; }
+.automation-page-run-time { flex: 1; min-width: 0; }
+.automation-page-run-duration { color: var(--text-muted); font-size: 11px; }
+.automation-page-run-summary {
+  padding-left: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.automation-page-run-marker.run-ok { color: #22c55e; }
+.automation-page-run-marker.run-error { color: #ef4444; }
+.automation-page-run-marker.run-attention { color: #f5a623; }
+.automation-page-run-marker.run-live { color: #3b82f6; }
+.automation-page-run-marker.run-warn,
+.automation-page-run-marker.run-skipped,
+.automation-page-run-marker.run-unknown { color: var(--text-muted); }
+
+.automation-page-right {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.automation-page-run-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  min-height: 34px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.automation-page-run-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 12px;
+}
+.automation-page-run-tools { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.automation-page-find {
+  width: 130px;
+  padding: 3px 6px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 11px;
+}
+.automation-page-find:focus { outline: none; border-color: var(--accent); }
+.automation-page-find-count { min-width: 56px; color: var(--text-muted); font-size: 11px; }
+.automation-page-run-tools button.active { border-color: var(--accent); color: var(--text-bright); }
+
+.automation-page-right .automation-detail-summary,
+.automation-page-right .automation-detail-attention {
+  flex-shrink: 0;
+  max-height: 140px;
+  overflow-y: auto;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+.automation-page-empty {
+  flex: 1;
+  padding: 16px 12px;
+  color: var(--text-muted);
+}
+.automation-page-output {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  user-select: text;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+  background: var(--bg-main);
+}
+.automation-page-output.no-wrap { white-space: pre; word-break: normal; }
+.automation-page-output mark {
+  background: rgba(245, 166, 35, 0.35);
+  color: inherit;
+  border-radius: 2px;
+}
+.automation-page-output mark.current { background: rgba(245, 166, 35, 0.85); color: #1a1a2e; }
+
 .row {
   display: flex;
   flex: 1 1 0;

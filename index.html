@@ -439,6 +439,39 @@
       </div>
       <div id="columns-container">
         <div id="sticky-notes-container"></div>
+        <div id="automation-page" class="automation-page hidden">
+          <div class="automation-page-header">
+            <span class="automation-page-icon" aria-hidden="true">&#9889;&#xFE0E;</span>
+            <span id="automation-page-name" class="automation-page-name"></span>
+            <span id="automation-page-state" class="automation-status-badge"></span>
+            <span id="automation-page-meta" class="automation-page-meta"></span>
+            <div id="automation-page-actions" class="automation-page-actions"></div>
+          </div>
+          <div id="automation-page-agents" class="automation-page-agents hidden" role="tablist"></div>
+          <div class="automation-page-body">
+            <div class="automation-page-left">
+              <div id="automation-page-needs" class="automation-page-needs"></div>
+              <div class="automation-page-section-title">Runs</div>
+              <div id="automation-page-runs" class="automation-page-runs"></div>
+            </div>
+            <div class="automation-page-right">
+              <div class="automation-page-run-header">
+                <div id="automation-page-run-title" class="automation-page-run-title"></div>
+                <div class="automation-page-run-tools">
+                  <button id="automation-page-open-claude" class="automation-detail-run-all" type="button" title="Continue this output in a new Claude column">Open in Claude</button>
+                  <button id="automation-page-copy" class="automation-detail-run-all" type="button" title="Copy the output">Copy</button>
+                  <input id="automation-page-find" class="automation-page-find" type="text" placeholder="Find&hellip;" spellcheck="false" autocomplete="off" aria-label="Find in output">
+                  <span id="automation-page-find-count" class="automation-page-find-count"></span>
+                  <button id="automation-page-wrap" class="automation-detail-run-all" type="button" title="Wrap long lines">Wrap</button>
+                </div>
+              </div>
+              <div id="automation-page-summary" class="automation-detail-summary hidden"></div>
+              <div id="automation-page-attention" class="automation-detail-attention hidden"></div>
+              <div id="automation-page-empty" class="automation-page-empty">No runs yet.</div>
+              <pre id="automation-page-output" class="automation-page-output hidden"></pre>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     <div id="automations-flyout" class="automations-flyout hidden">
@@ -1661,6 +1694,7 @@
   <script src="./lib/attachment-strip.js"></script>
   <script src="./lib/findings-inbox-view.js"></script>
   <script src="./lib/automation-sidebar-view.js"></script>
+  <script src="./lib/automation-page-view.js"></script>
   <script src="./lib/lag-stats.js"></script>
   <script src="./renderer.js"></script>
 </body>
