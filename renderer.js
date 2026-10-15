@@ -3161,12 +3161,20 @@ function isAutomationPageActiveFor(project) {
   return !!(activeAutomationPage && activeAutomationPage.projectPath === project.path);
 }
 
+// A popout window shows one project's terminals and has no sidebar, and there
+// is no channel to ask the main window to show the page, so say where to go.
+function refuseAutomationPageInPopout() {
+  showToast('Open this automation from the main window');
+  return false;
+}
+
 // Show the full-window page for one automation in place of the active
 // project's columns. The columns container is only hidden, so terminals keep
 // running underneath.
 // opts.agentKey picks the initial agent tab (an agent id, or 'manager').
 // Returns true when the page is showing.
 function openAutomationPage(projectIndex, automationId, opts) {
+  if (popoutMode) return refuseAutomationPageInPopout();
   var project = config.projects[projectIndex];
   if (!project || !ensureProjectActive(projectIndex)) return false;
   var agentKey = opts && opts.agentKey ? opts.agentKey : null;
@@ -3192,6 +3200,7 @@ function openAutomationPage(projectIndex, automationId, opts) {
 // toolbar flyout): finds the project that owns it, which may not be the active
 // one. Resolves true when the page opened, otherwise toasts and resolves false.
 function openAutomationPageById(automationId, opts) {
+  if (popoutMode) return Promise.resolve(refuseAutomationPageInPopout());
   var fail = function () {
     showToast('Could not find that automation', { kind: 'error' });
     return false;
