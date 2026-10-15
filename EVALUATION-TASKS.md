@@ -73,6 +73,11 @@ not listed here (pty-server token auth, Electron sandbox/CSP, path containment, 
   re-registration can accumulate listeners.
 - [ ] **Document the system-Node requirement** for end users — the app is broken without Node and
   only says so at first terminal spawn.
+- [ ] **Validate `projectPath` in the project-scoped automation IPCs.** `automations:deleteAllForProject`
+  (`main.js:7340`), `:setAllEnabled` (`:7388`), `:export` (`:7671`) and `:import` (`:7817`) call
+  `projectPath.replace(...)` on whatever the renderer sends: no type check, and no check that it is a known
+  project. A non-string throws; an unknown path matches nothing, but `deleteAllForProject` also removes the
+  matched automations' clones and run history, so the check should come first. Pre-existing.
 
 ---
 
