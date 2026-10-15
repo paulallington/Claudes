@@ -4828,7 +4828,7 @@ function clawdPollTail(columnId) {
     fs.readSync(fd, buf, 0, buf.length, t.offset);
     fs.closeSync(fd);
     chunk = buf.toString('utf8');
-  } catch { return true; }
+  } catch { return false; }  // persistent read error: let the backoff apply, not 150 ms spin
   t.offset = stat.size;
   _clawdReplayBuffer(t, chunk, { flush: false });
   _clawdEmitIfChanged(columnId, t, false);
