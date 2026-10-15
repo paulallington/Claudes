@@ -20003,11 +20003,12 @@ function exportAllAutomations(key) {
   });
 }
 
-// Import runs in a modal: preview, confirm, then clone progress. The overlay
-// blocks the sidebar, so the project cannot change under an import in flight.
-// Everything is built with createElement/textContent because names and counts
-// come from the imported file.
-var importModalBusy = false; // confirm pressed, clones running: no dismissing
+// Import runs in a modal: preview, confirm, then clone progress. Clones can
+// take minutes, so the progress step can be hidden (Hide button or Escape) while
+// they carry on; a toast says when they are done. Everything is built with
+// createElement/textContent because names and counts come from the imported file.
+var importModalBusy = false; // confirm pressed: the modal cannot be cancelled
+var importCloning = false;   // clones running: the modal can be hidden, not cancelled
 var importLogEl = null;      // clone log while progress is showing
 
 function importModalNode(suffix) {
@@ -20031,8 +20032,15 @@ function closeImportModal() {
   importModalNode('overlay').classList.add('hidden');
   clearNode(importModalNode('body'));
   importModalBusy = false;
+  importCloning = false;
   importLogEl = null;
   refreshAutomations();
+}
+
+// Hide the progress step without stopping the clones. The rows and log keep
+// updating off screen.
+function hideImportModal() {
+  importModalNode('overlay').classList.add('hidden');
 }
 
 function setImportModalBusy(busy) {
@@ -20062,6 +20070,7 @@ function importIcon(row, glyph, state) {
 }
 
 function importAutomationsFromFile(projectKey) {
+  if (importCloning) { showToast('An import is still running'); return; }
   // Step 1: Select file and preview
   window.electronAPI.previewImport().then(function (preview) {
     if (!preview || preview.cancelled) return;
@@ -20145,8 +20154,9 @@ function showImportPreview(preview, projectKey) {
 
 function showImportProgress(importResult, needsClone, projectKey) {
   setImportModalBusy(true);
+  importCloning = true;
   openImportModal('Imported ' + safeNum(importResult.count) + ' automations (paused)');
-  setImportModalButtons(null, null, null, null);
+  setImportModalButtons(null, null, 'Hide', hideImportModal);
   var body = importModalNode('body');
 
   var subtitle = importEl('div', 'import-progress-subtitle', 'Setting up ' + safeNum(needsClone.length) + ' repo clone(s)...');
@@ -20169,15 +20179,28 @@ function showImportProgress(importResult, needsClone, projectKey) {
     rowsById[auto.id] = row;
   });
 
-  // Process clones sequentially
-  var cloneNext = function (idx) {
-    if (idx >= needsClone.length) {
-      // All done
-      subtitle.textContent = 'All clones complete. Automations are paused. Enable them when ready.';
-      setImportModalBusy(false);
-      setImportModalButtons('Done', closeImportModal, null, null);
+  var failures = 0; // automations with at least one failed clone step
+
+  var finish = function () {
+    importCloning = false;
+    var plural = failures === 1 ? ' failure' : ' failures';
+    if (importModalNode('overlay').classList.contains('hidden')) {
+      // Hidden while cloning: nobody is looking at the Done button.
+      closeImportModal();
+      if (failures > 0) showToast('Import finished with ' + failures + plural, { kind: 'error' });
+      else showToast('Import finished');
       return;
     }
+    subtitle.textContent = failures > 0
+      ? 'Clones finished with ' + failures + plural + '. Automations are paused. Enable them when ready.'
+      : 'All clones complete. Automations are paused. Enable them when ready.';
+    setImportModalBusy(false);
+    setImportModalButtons('Done', closeImportModal, null, null);
+  };
+
+  // Process clones sequentially
+  var cloneNext = function (idx) {
+    if (idx >= needsClone.length) { finish(); return; }
 
     var auto = needsClone[idx];
     var row = rowsById[auto.id];
@@ -20191,8 +20214,41 @@ function showImportProgress(importResult, needsClone, projectKey) {
     // Show which automation is being cloned in the log
     logEl.textContent += '\n--- Cloning: ' + auto.name + ' ---\n';
 
+    var errors = []; // this automation's failed steps
+    var settled = false;
+    var settle = function () {
+      if (settled) return;
+      settled = true;
+      if (errors.length > 0) {
+        failures++;
+        if (row) importIcon(row, '✗', 'error');
+        setStatus('Error: ' + errors[0]);
+      } else {
+        if (row) importIcon(row, '✓', 'done');
+        setStatus('Ready');
+      }
+      cloneNext(idx + 1);
+    };
+    // A rejected call counts as a failed step, so one bad clone cannot stall the
+    // rest or leave the modal stuck. Two-argument then, so a throw inside next()
+    // is not also reported as a failed clone.
+    var runStep = function (promise, next) {
+      promise.then(function (result) {
+        if (result && result.error) {
+          errors.push(String(result.error));
+          logEl.textContent += 'ERROR: ' + result.error + '\n';
+        }
+        next();
+      }, function (err) {
+        var message = String((err && err.message) || err || 'Clone failed');
+        errors.push(message);
+        logEl.textContent += 'ERROR: ' + message + '\n';
+        next();
+      });
+    };
+
     window.electronAPI.getAutomationsForProject(projectKey).then(function (automations) {
-      var automation = automations.find(function (a) { return a.id === auto.id; });
+      var automation = (automations || []).find(function (a) { return a.id === auto.id; });
       if (!automation) { cloneNext(idx + 1); return; }
 
       var isolatedAgents = automation.agents.filter(function (ag) { return ag.isolation && ag.isolation.enabled; });
@@ -20208,29 +20264,26 @@ function showImportProgress(importResult, needsClone, projectKey) {
         if (agIdx >= isolatedAgents.length) {
           if (hasManagerIso) {
             updateRowStatus();
-            window.electronAPI.setupManagerClone(auto.id).then(function (result) {
+            runStep(window.electronAPI.setupManagerClone(auto.id), function () {
               stepsDone++;
-              var failed = !!(result && result.error);
-              if (row) importIcon(row, failed ? '✗' : '✓', failed ? 'error' : 'done');
-              setStatus(failed ? 'Error: ' + result.error : 'Ready');
-              cloneNext(idx + 1);
+              settle();
             });
           } else {
-            if (row) importIcon(row, '✓', 'done');
-            setStatus('Ready');
-            cloneNext(idx + 1);
+            settle();
           }
           return;
         }
         updateRowStatus();
-        window.electronAPI.setupAgentClone(auto.id, isolatedAgents[agIdx].id).then(function (result) {
+        runStep(window.electronAPI.setupAgentClone(auto.id, isolatedAgents[agIdx].id), function () {
           stepsDone++;
-          if (result && result.error) setStatus('Error: ' + result.error);
           cloneAgentStep(agIdx + 1);
         });
       };
 
       cloneAgentStep(0);
+    }).catch(function (err) {
+      errors.push(String((err && err.message) || err || 'Could not read the automation'));
+      settle();
     });
   };
 
@@ -20247,8 +20300,11 @@ window.electronAPI.onCloneProgress(function (data) {
 
 document.getElementById('btn-import-modal-close').addEventListener('click', closeImportModal);
 document.addEventListener('keydown', function (e) {
-  if (e.key !== 'Escape' || importModalBusy) return;
+  if (e.key !== 'Escape') return;
   if (importModalNode('overlay').classList.contains('hidden')) return;
+  // Escape never cancels clones in flight; it only gets the modal out of the way.
+  if (importCloning) { e.preventDefault(); hideImportModal(); return; }
+  if (importModalBusy) return;
   e.preventDefault();
   closeImportModal();
 });
