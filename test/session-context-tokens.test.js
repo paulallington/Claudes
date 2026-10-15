@@ -46,10 +46,60 @@ test('large file: falls back to a full read when the usage line is only near the
 test('large file: sinceMs still filters entries found in the tail', () => {
   const old = Object.assign({ timestamp: '2026-01-01T00:00:00Z' }, usageLine(900));
   const fresh = Object.assign({ timestamp: '2026-03-01T00:00:00Z' }, usageLine(40));
-  const p = bigTmpFile([fresh], [old], 600);
+  const p = bigTmpFile([old], [fresh], 600);
   const cutoff = Date.parse('2026-02-01T00:00:00Z');
   assert.strictEqual(lastAssistantContextTokens(p, cutoff), 40);
   fs.unlinkSync(p);
+});
+
+test('large file: a single line over 256 KB after the last usage line grows the window, not a full read', () => {
+  const p = path.join(os.tmpdir(), 'ctxtok-huge-' + Date.now() + '.jsonl');
+  const filler = JSON.stringify({ type: 'user', message: { content: 'x'.repeat(1000) } });
+  const parts = [JSON.stringify(usageLine(1))];
+  for (let i = 0; i < 2500; i++) parts.push(filler);
+  parts.push(JSON.stringify(usageLine(777)));
+  parts.push(JSON.stringify({ type: 'user', message: { content: 'y'.repeat(300 * 1024) } }));
+  fs.writeFileSync(p, parts.join('\n') + '\n');
+  assert.ok(fs.statSync(p).size > 2.5 * 1024 * 1024);
+  sampleAndResetReadStats();
+  assert.strictEqual(lastAssistantContextTokens(p), 777);
+  const stats = sampleAndResetReadStats();
+  assert.strictEqual(stats.fullReads, 0);
+  assert.ok(stats.bytesRead <= 512 * 1024, 'bytesRead ' + stats.bytesRead);
+  fs.unlinkSync(p);
+});
+
+test('large file: sinceMs hitting a too-old usage entry in the tail returns null without a full read', () => {
+  const old = Object.assign({ timestamp: '2026-01-01T00:00:00Z' }, usageLine(900));
+  const older = Object.assign({ timestamp: '2025-12-01T00:00:00Z' }, usageLine(800));
+  const p = bigTmpFile([older], [old], 600);
+  const cutoff = Date.parse('2026-02-01T00:00:00Z');
+  sampleAndResetReadStats();
+  assert.strictEqual(lastAssistantContextTokens(p, cutoff), null);
+  const stats = sampleAndResetReadStats();
+  assert.strictEqual(stats.fullReads, 0);
+  assert.ok(stats.bytesRead <= 256 * 1024, 'bytesRead ' + stats.bytesRead);
+  // and the null is cached
+  assert.strictEqual(lastAssistantContextTokens(p, cutoff), null);
+  assert.strictEqual(sampleAndResetReadStats().bytesRead, 0);
+  fs.unlinkSync(p);
+});
+
+test('large file: a multi-byte character straddling a window boundary does not break the result', () => {
+  const usage = Buffer.from(JSON.stringify(usageLine(654)) + '\n');
+  const euro = Buffer.from('\u20ac');  // 3 bytes
+  const euros = 200000;                 // ~600 KB, longer than the first two windows
+  // Pad so the first-window boundary lands one byte into a euro.
+  for (let pad = 0; pad < 3; pad++) {
+    const total = pad + euros * 3 + 1 + usage.length;
+    if ((total - 256 * 1024 - pad) % 3 === 0) continue;
+    const p = path.join(os.tmpdir(), 'ctxtok-mb-' + Date.now() + '-' + pad + '.jsonl');
+    fs.writeFileSync(p, Buffer.concat([Buffer.alloc(pad, 'a'), Buffer.concat(Array(euros).fill(euro)), Buffer.from('\n'), usage]));
+    assert.strictEqual(lastAssistantContextTokens(p), 654);
+    fs.unlinkSync(p);
+    return;
+  }
+  assert.fail('no straddling layout found');
 });
 
 test('unchanged file with no usage line is read once, then served from cache', () => {
