@@ -62,6 +62,7 @@ const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
 const { checkAttachmentPath, checkAttachmentOpenPath, checkAttachmentContainment } = require('./lib/attachment-file-guard');
 const FindingsStore = require('./lib/findings-store');
 const AutomationSidebarView = require('./lib/automation-sidebar-view');
+const { isFresh: statIsFresh } = require('./lib/stat-cache');
 const { buildResolutionsBlock, pendingResolutionIds } = require('./lib/findings-resolution-injection');
 const https = require('https');
 
@@ -1017,21 +1018,40 @@ function writeAutomations(data) {
 // Durable cross-automation store of `attentionItems` emitted by agent runs
 // (see finalizeAgentRun's findings write hook). Same recovery/atomic-write
 // convention as automations.json.
+// The store is megabytes on a long-lived install and the sidebar asks for
+// counts on every project switch and agent event, so the parsed store is kept
+// in memory and only re-read when findings.json's mtime/size change. Callers
+// treat the returned store as read-only (every FindingsStore function returns
+// a new store), so it is shared rather than copied. A recovered read is never
+// cached: it carries the transient _recovered flag and is not authoritative.
+let findingsCache = null; // { mtimeMs, size, data }
+
+function statFindings() {
+  try { const st = fs.statSync(FINDINGS_FILE); return { mtimeMs: st.mtimeMs, size: st.size }; } catch (e) { return null; }
+}
+
 function readFindings() {
   ensureConfigDir();
+  const stat = statFindings();
+  if (findingsCache && statIsFresh(findingsCache, stat)) return findingsCache.data;
+  findingsCache = null;
   const defaults = { version: 1, findings: [] };
   const { data, recovered } = readJsonWithRecovery(FINDINGS_FILE);
   const result = (data && typeof data === 'object') ? data : defaults;
   if (!Array.isArray(result.findings)) result.findings = [];
   if (typeof result.version !== 'number') result.version = 1;
   if (recovered) result._recovered = true;
+  else if (stat) findingsCache = { mtimeMs: stat.mtimeMs, size: stat.size, data: result };
   return result;
 }
 
 function writeFindings(data) {
   ensureConfigDir();
   if (data && data._recovered) { try { delete data._recovered; } catch (e) {} } // never persist the transient flag
+  findingsCache = null;
   atomicWriteJson(FINDINGS_FILE, data);
+  const stat = statFindings();
+  if (stat && data && typeof data === 'object') findingsCache = { mtimeMs: stat.mtimeMs, size: stat.size, data };
 }
 
 // Caps passed to FindingsStore.pruneFindings after every write, so the store
