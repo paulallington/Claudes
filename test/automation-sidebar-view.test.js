@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   automationRowState,
+  openItemCount,
 } = require('../lib/automation-sidebar-view');
 
 function auto(overrides) {
@@ -20,4 +21,22 @@ test('automationRowState resolves precedence: disabled > running > attention > p
   assert.equal(automationRowState(auto(), { globalEnabled: true }), 'idle');
   assert.equal(automationRowState(auto(), {}), 'idle');
   assert.equal(automationRowState(auto({ agents: undefined }), undefined), 'idle');
+});
+
+test('openItemCount counts unacknowledged findings and unresolved decisions once each, for one automation', () => {
+  var ack = '2026-10-15T00:00:00.000Z';
+  var findings = [
+    { id: 'f1', automationId: 'a1', acknowledgedAt: null, decision: null, resolution: null },
+    { id: 'f2', automationId: 'a1', acknowledgedAt: ack, decision: null, resolution: null },
+    { id: 'f3', automationId: 'a1', acknowledgedAt: ack, decision: { prompt: 'Renew?' }, resolution: null },
+    { id: 'f4', automationId: 'a1', acknowledgedAt: ack, decision: { prompt: 'Renew?' }, resolution: { choiceId: 'yes' } },
+    { id: 'f5', automationId: 'a1', acknowledgedAt: null, decision: { prompt: 'Renew?' }, resolution: null },
+    { id: 'f6', automationId: 'a2', acknowledgedAt: null, decision: null, resolution: null },
+    null,
+  ];
+  assert.equal(openItemCount(findings, 'a1'), 3);
+  assert.equal(openItemCount(findings, 'a2'), 1);
+  assert.equal(openItemCount(findings, 'a3'), 0);
+  assert.equal(openItemCount(null, 'a1'), 0);
+  assert.equal(openItemCount(undefined, 'a1'), 0);
 });
