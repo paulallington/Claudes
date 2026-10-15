@@ -655,6 +655,10 @@ var sidebarAutomationsTimer = null;
 var sidebarAutomationsTrailing = false;
 var activeAutomationPage = null; // { projectPath, automationId } or null
 var automationPageState = null; // view state while #automation-page is showing, else null
+// Automation ids whose sidebar row flashes (open items grew or it newly needs
+// attention) until the user opens that automation's page. A Set so the flash
+// survives the project list re-rendering.
+var flashingAutomationIds = new Set();
 
 // ============================================================
 // Headless Runs
@@ -3161,15 +3165,49 @@ function isAutomationPageActiveFor(project) {
 // Show the full-window page for one automation in place of the active
 // project's columns. The columns container is only hidden, so terminals keep
 // running underneath.
-function openAutomationPage(projectIndex, automationId) {
+// opts.agentKey picks the initial agent tab (an agent id, or 'manager').
+// Returns true when the page is showing.
+function openAutomationPage(projectIndex, automationId, opts) {
   var project = config.projects[projectIndex];
-  if (!project || !ensureProjectActive(projectIndex)) return;
+  if (!project || !ensureProjectActive(projectIndex)) return false;
+  var agentKey = opts && opts.agentKey ? opts.agentKey : null;
   var alreadyShowing = !!(automationPageState && automationPageState.automationId === automationId
     && automationPageState.projectPath === project.path);
   activeAutomationPage = { projectPath: project.path, automationId: automationId };
-  if (alreadyShowing) refreshAutomationPage({ reloadRuns: true });
-  else showAutomationPage(project.path, automationId);
+  flashingAutomationIds.delete(automationId);
+  if (alreadyShowing) {
+    if (agentKey) {
+      if (automationPageState.automation) selectAutomationPageAgent(agentKey);
+      else automationPageState.agentKey = agentKey;
+    }
+    refreshAutomationPage({ reloadRuns: true });
+    loadAutomationPageNeeds();
+  } else {
+    showAutomationPage(project.path, automationId, { agentKey: agentKey });
+  }
   renderProjectList();
+  return true;
+}
+
+// Opens an automation's page from its id alone (notification clicks, the
+// toolbar flyout): finds the project that owns it, which may not be the active
+// one. Resolves true when the page opened, otherwise toasts and resolves false.
+function openAutomationPageById(automationId, opts) {
+  var fail = function () {
+    showToast('Could not find that automation', { kind: 'error' });
+    return false;
+  };
+  if (!automationId || !window.electronAPI || !window.electronAPI.getAutomations) return Promise.resolve(fail());
+  return window.electronAPI.getAutomations().then(function (data) {
+    var automation = ((data && data.automations) || []).find(function (a) { return a.id === automationId; });
+    if (!automation || !config || !config.projects) return fail();
+    var key = window.AutomationSidebarView.projectPathKey(automation.projectPath);
+    var index = config.projects.findIndex(function (p) {
+      return window.AutomationSidebarView.projectPathKey(p.path) === key;
+    });
+    if (index < 0) return fail();
+    return openAutomationPage(index, automationId, opts);
+  }).catch(fail);
 }
 
 // Hide the page and bring the project's columns back. Idempotent. Callers that
@@ -3202,6 +3240,7 @@ function buildAutomationItem(project, projectIndex, row) {
   item.dataset.projectPath = project.path;
   item.dataset.automationId = row.id;
   if (row.dimmed) item.classList.add('dimmed');
+  if (flashingAutomationIds.has(row.id)) item.classList.add('attention-flash');
   if (activeAutomationPage && activeAutomationPage.automationId === row.id
       && activeAutomationPage.projectPath === project.path) {
     item.classList.add('active');
@@ -18681,7 +18720,7 @@ function agentNeedsReclone(agent) {
     && agent.lastError.indexOf('Working directory not found') !== -1);
 }
 
-function showAutomationPage(projectPath, automationId) {
+function showAutomationPage(projectPath, automationId, opts) {
   var pageEl = document.getElementById('automation-page');
   if (!pageEl) return;
   var columns = getActiveState();
@@ -18691,7 +18730,10 @@ function showAutomationPage(projectPath, automationId) {
     automationId: automationId,
     automation: null,
     globalEnabled: true,
-    agentKey: null,       // an agent id, or 'manager'
+    agentKey: opts && opts.agentKey ? opts.agentKey : null, // an agent id, or 'manager'
+    needs: [],            // open findings for this automation (the Needs you pane)
+    needsSeq: 0,
+    highlightFindingId: null, // finding to scroll to once the Needs you pane has it
     refreshSeq: 0,
     runsSeq: 0,
     detailSeq: 0,
@@ -18709,6 +18751,7 @@ function showAutomationPage(projectPath, automationId) {
   resetAutomationPagePanes();
   pageEl.classList.remove('hidden');
   refreshAutomationPage({ reloadRuns: true });
+  loadAutomationPageNeeds();
 }
 
 // Blank the page so the previous automation's content never flashes while the
@@ -18723,10 +18766,82 @@ function resetAutomationPagePanes() {
   clearNode(strip);
   strip.classList.add('hidden');
   clearNode(automationPageNode('runs'));
+  renderAutomationPageNeeds();
   automationPageNode('run-title').textContent = '';
   automationPageNode('find').value = '';
   renderAutomationPageRunDetail(null);
   setAutomationPageOutput('', '');
+}
+
+// Needs you: the shown automation's open findings (unacknowledged, or a
+// decision still waiting for an answer). findings:list scopes by automationId,
+// so only this automation's findings cross the IPC.
+function loadAutomationPageNeeds() {
+  var st = automationPageState;
+  if (!st || !window.electronAPI || !window.electronAPI.findingsList) return Promise.resolve();
+  var seq = ++st.needsSeq;
+  return window.electronAPI.findingsList({ automationId: st.automationId, openOnly: true }).then(function (res) {
+    if (st !== automationPageState || seq !== st.needsSeq) return;
+    if (!res || !res.ok) return; // keep what is shown
+    st.needs = res.findings || [];
+    renderAutomationPageNeeds();
+  }).catch(function () { /* keep what is shown */ });
+}
+
+// What a card shows that can change: used to skip a rebuild (which would wipe
+// half-typed answer text) when a findings update did not touch this pane.
+function automationPageNeedsSignature(needs) {
+  return needs.map(function (f) {
+    return [f.id, f.acknowledgedAt || '', f.occurrences || 0, f.lastSeenAt || '',
+      f.resolution ? f.resolution.resolvedAt : ''].join(':');
+  }).join('|');
+}
+
+function renderAutomationPageNeeds() {
+  var st = automationPageState;
+  var paneEl = automationPageNode('needs');
+  var listEl = automationPageNode('needs-list');
+  if (!paneEl || !listEl) return;
+  var needs = st ? st.needs : [];
+  paneEl.classList.toggle('hidden', needs.length === 0);
+  if (needs.length === 0) {
+    clearNode(listEl);
+    paneEl.dataset.signature = '';
+    return;
+  }
+  automationPageNode('needs-title').textContent = 'Needs you (' + needs.length + ')';
+  var signature = automationPageNeedsSignature(needs);
+  if (signature !== paneEl.dataset.signature) {
+    var scrollTop = listEl.scrollTop;
+    clearNode(listEl);
+    var now = new Date();
+    needs.forEach(function (finding) {
+      var card = buildFindingCard(finding, now, { ackLabel: 'Done', detailInlineMax: 160 });
+      card.classList.add('automation-page-need');
+      listEl.appendChild(card);
+    });
+    listEl.scrollTop = scrollTop;
+    paneEl.dataset.signature = signature;
+  }
+  // Kept until the card turns up: a notification can land before the list
+  // that contains its finding has loaded.
+  if (st.highlightFindingId && highlightAutomationPageFinding(st.highlightFindingId)) {
+    st.highlightFindingId = null;
+  }
+}
+
+function highlightAutomationPageFinding(findingId) {
+  var listEl = automationPageNode('needs-list');
+  if (!listEl) return false;
+  var el = null;
+  listEl.querySelectorAll('.findings-inbox-item').forEach(function (card) {
+    if (card.dataset.findingId === findingId) el = card;
+  });
+  if (!el) return false;
+  el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  el.classList.add('findings-inbox-item-highlight');
+  setTimeout(function () { el.classList.remove('findings-inbox-item-highlight'); }, 2500);
+  return true;
 }
 
 // Re-read the automation and redraw what depends on it. Called on open, from
@@ -20974,31 +21089,13 @@ function refreshAutomationsFlyout() {
           '<span class="automations-flyout-row-status" style="color:' + statusColor + '">' + statusText + '</span>' +
           runWindowBadgeHtml(auto) +
           '</div>' +
-          pipelineDotsHtml +
-          '<div class="automations-flyout-row-expanded">' +
-            '<div class="automations-flyout-row-summary">Loading...</div>' +
-            '<div class="automations-flyout-history"></div>' +
-          '</div>';
+          pipelineDotsHtml;
 
+        // Opens the automation's own page; the page carries the runs and summaries.
         row.addEventListener('click', function () {
-          var wasExpanded = row.classList.contains('expanded');
-          listEl.querySelectorAll('.automations-flyout-row').forEach(function (r) { r.classList.remove('expanded'); });
-          if (!wasExpanded) {
-            row.classList.add('expanded');
-            var summaryEl = row.querySelector('.automations-flyout-row-summary');
-            if (isSimple) {
-              var ag = auto.agents[0];
-              window.electronAPI.getAgentHistory(auto.id, ag.id, 5).then(function (history) {
-                if (history.length > 0) { summaryEl.textContent = history[0].summary || 'No summary'; }
-                else { summaryEl.textContent = 'No runs yet'; }
-              });
-            } else {
-              summaryEl.innerHTML = '';
-              auto.agents.forEach(function (ag) {
-                summaryEl.innerHTML += '<div><strong>' + escapeHtml(ag.name) + ':</strong> ' + escapeHtml(ag.lastSummary || 'No runs') + '</div>';
-              });
-            }
-          }
+          var flyoutEl = document.getElementById('automations-flyout');
+          if (flyoutEl) flyoutEl.classList.add('hidden');
+          openAutomationPageById(auto.id);
         });
 
         listEl.appendChild(row);
@@ -21340,13 +21437,9 @@ window.electronAPI.onManagerOutput(function (data) {
   }
 });
 
+// A manager notification click opens the automation's page on the Manager tab.
 window.electronAPI.onFocusManager(function (data) {
-  var tab = document.querySelector('.explorer-tab[data-tab="automations"]');
-  if (tab) tab.click();
-  window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
-    var auto = automations.find(function (a) { return a.id === data.automationId; });
-    if (auto) openAutomationDetail(auto);
-  });
+  openAutomationPageById(data && data.automationId, { agentKey: 'manager' });
 });
 
 function updateAutomationsTabIndicator() {
@@ -21443,6 +21536,15 @@ function runSidebarAutomationsRefresh() {
     );
     var json = JSON.stringify(rows);
     if (json === sidebarAutomationRowsJson) return;
+    // Rows that gained open items or now need attention flash until opened.
+    // Follows the same setting as column attention flashes in the sidebar, and
+    // skips the page the user is already looking at.
+    if (notifSettings.sidebar) {
+      window.AutomationSidebarView.rowsNeedingFlash(sidebarAutomationRows, rows).forEach(function (id) {
+        var viewing = activeAutomationPage && activeAutomationPage.automationId === id;
+        if (!viewing) flashingAutomationIds.add(id);
+      });
+    }
     sidebarAutomationRows = rows;
     sidebarAutomationRowsJson = json;
     if (config && config.projects && config.projects.length > 0) renderProjectList();
@@ -21521,45 +21623,103 @@ function renderFindingsInbox() {
 }
 
 function renderFindingInboxItem(finding, now) {
+  return buildFindingCard(finding, now, { ackLabel: 'Acknowledge', showOpenRun: true });
+}
+
+function findingCardButton(className, label, onClick) {
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'findings-inbox-btn ' + className;
+  btn.textContent = label;
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+// One finding as a card: summary, meta line, detail, actions, then its decision
+// (if any). Shared by the explorer inbox and the automation page's Needs you
+// pane. Built with createElement/textContent because every field is untrusted.
+// opts: ackLabel (acknowledge button text), showOpenRun (adds "Open run"),
+// detailInlineMax (when set, detail up to that many characters shows inline
+// and longer detail collapses behind a Show detail toggle; unset keeps it
+// collapsed behind a click on the summary).
+function buildFindingCard(finding, now, opts) {
+  var o = opts || {};
+  var view = window.FindingsInboxView;
   var row = document.createElement('div');
   row.className = 'findings-inbox-item';
   row.dataset.findingId = finding.id;
 
-  var occLabel = window.FindingsInboxView.occurrenceLabel(finding.occurrences);
-  var relTime = window.FindingsInboxView.formatFindingRelativeTime(finding.lastSeenAt, now);
-  var action = window.FindingsInboxView.findingConversationAction(finding);
+  var summaryEl = document.createElement('div');
+  summaryEl.className = 'findings-inbox-summary';
+  summaryEl.textContent = finding.summary || '';
+  row.appendChild(summaryEl);
 
+  var metaEl = document.createElement('div');
+  metaEl.className = 'findings-inbox-meta';
+  var relTime = view.formatFindingRelativeTime(finding.lastSeenAt, now);
   var metaParts = [];
-  if (finding.agentName) metaParts.push(escapeHtml(finding.agentName));
-  if (relTime) metaParts.push(escapeHtml(relTime));
-  var metaHtml = metaParts.join(' &middot; ');
-  if (occLabel) metaHtml += ' <span class="findings-inbox-occurrence">&middot; ' + escapeHtml(occLabel) + '</span>';
-
-  row.innerHTML =
-    '<div class="findings-inbox-summary">' + escapeHtml(finding.summary || '') + '</div>' +
-    '<div class="findings-inbox-meta">' + metaHtml + '</div>' +
-    (finding.detail ? '<div class="findings-inbox-detail hidden">' + escapeHtml(finding.detail) + '</div>' : '') +
-    '<div class="findings-inbox-actions">' +
-      '<button type="button" class="findings-inbox-btn findings-inbox-btn-ack">Acknowledge</button>' +
-      '<button type="button" class="findings-inbox-btn findings-inbox-btn-open-run">Open run</button>' +
-      '<button type="button" class="findings-inbox-btn findings-inbox-btn-open-convo">' + escapeHtml(action.label) + '</button>' +
-    '</div>';
-
-  var summaryEl = row.querySelector('.findings-inbox-summary');
-  if (finding.detail) {
-    summaryEl.classList.add('findings-inbox-summary-expandable');
-    summaryEl.addEventListener('click', function () {
-      row.querySelector('.findings-inbox-detail').classList.toggle('hidden');
-    });
+  if (finding.agentName) metaParts.push(finding.agentName);
+  if (relTime) metaParts.push(relTime);
+  metaEl.textContent = metaParts.join(' · ');
+  var occLabel = view.occurrenceLabel(finding.occurrences);
+  if (occLabel) {
+    var occEl = document.createElement('span');
+    occEl.className = 'findings-inbox-occurrence';
+    occEl.textContent = (metaParts.length ? ' · ' : '') + occLabel;
+    metaEl.appendChild(occEl);
   }
-  row.querySelector('.findings-inbox-btn-ack').addEventListener('click', function () { findingsInboxAcknowledge(finding.id); });
-  row.querySelector('.findings-inbox-btn-open-run').addEventListener('click', function () { findingsInboxOpenRun(finding); });
-  row.querySelector('.findings-inbox-btn-open-convo').addEventListener('click', function () { findingsInboxOpenConversation(finding); });
+  row.appendChild(metaEl);
+
+  var actionsEl = document.createElement('div');
+  actionsEl.className = 'findings-inbox-actions';
+
+  if (finding.detail) {
+    var detailEl = document.createElement('div');
+    detailEl.className = 'findings-inbox-detail';
+    detailEl.textContent = finding.detail;
+    row.appendChild(detailEl);
+    var inline = typeof o.detailInlineMax === 'number' && String(finding.detail).length <= o.detailInlineMax;
+    if (!inline) {
+      detailEl.classList.add('hidden');
+      summaryEl.classList.add('findings-inbox-summary-expandable');
+      var toggleBtn = null;
+      var toggleDetail = function () {
+        var hidden = detailEl.classList.toggle('hidden');
+        if (toggleBtn) toggleBtn.textContent = hidden ? 'Show detail' : 'Hide detail';
+      };
+      summaryEl.addEventListener('click', toggleDetail);
+      if (typeof o.detailInlineMax === 'number') {
+        toggleBtn = findingCardButton('findings-inbox-btn-detail', 'Show detail', toggleDetail);
+        actionsEl.appendChild(toggleBtn);
+      }
+    }
+  }
+
+  actionsEl.appendChild(findingCardButton('findings-inbox-btn-ack', o.ackLabel || 'Acknowledge', function () {
+    findingsInboxAcknowledge(finding.id);
+  }));
+  if (o.showOpenRun) {
+    actionsEl.appendChild(findingCardButton('findings-inbox-btn-open-run', 'Open run', function () {
+      findingsInboxOpenRun(finding);
+    }));
+  }
+  actionsEl.appendChild(findingCardButton('findings-inbox-btn-open-convo', view.findingConversationAction(finding).label, function () {
+    findingsInboxOpenConversation(finding);
+  }));
+  row.appendChild(actionsEl);
 
   var decisionEl = renderFindingDecision(finding, now);
   if (decisionEl) row.appendChild(decisionEl);
 
   return row;
+}
+
+// Redraws every surface that lists findings: the explorer inbox, the open
+// automation page's Needs you pane and the sidebar badges.
+function refreshFindingSurfaces() {
+  refreshFindingsInbox();
+  loadAutomationPageNeeds();
+  refreshSidebarAutomations();
 }
 
 // Renders a finding's optional `decision`: option buttons + free-text box
@@ -21626,7 +21786,7 @@ function renderFindingDecision(finding, now) {
 }
 
 function findingsInboxResolve(id, choiceId, text) {
-  window.electronAPI.findingsResolve(id, { choiceId: choiceId, text: text }).then(function () { refreshFindingsInbox(); }).catch(function () {
+  window.electronAPI.findingsResolve(id, { choiceId: choiceId, text: text }).then(function () { refreshFindingSurfaces(); }).catch(function () {
     if (typeof showToast === 'function') showToast('Could not record answer', { kind: 'error' });
   });
 }
@@ -21650,13 +21810,13 @@ function findingsInboxResolve(id, choiceId, text) {
 })();
 
 function findingsInboxAcknowledge(id) {
-  window.electronAPI.findingsAcknowledge(id).then(function () { refreshFindingsInbox(); }).catch(function () {
+  window.electronAPI.findingsAcknowledge(id).then(function () { refreshFindingSurfaces(); }).catch(function () {
     if (typeof showToast === 'function') showToast('Could not acknowledge finding', { kind: 'error' });
   });
 }
 
 function findingsInboxAcknowledgeAll(automationId) {
-  window.electronAPI.findingsAcknowledgeAll(automationId ? { automationId: automationId } : null).then(function () { refreshFindingsInbox(); }).catch(function () {
+  window.electronAPI.findingsAcknowledgeAll(automationId ? { automationId: automationId } : null).then(function () { refreshFindingSurfaces(); }).catch(function () {
     if (typeof showToast === 'function') showToast('Could not acknowledge findings', { kind: 'error' });
   });
 }
@@ -21787,22 +21947,23 @@ if (findingsStickyBtn) {
 if (window.electronAPI && window.electronAPI.onFindingsUpdated) {
   window.electronAPI.onFindingsUpdated(function (data) {
     updateFindingsInboxBadge(data && typeof data.count === 'number' ? data.count : 0);
-    refreshFindingsInbox();
-    refreshSidebarAutomations();
+    refreshFindingSurfaces();
   });
 }
 
+// A findings notification click opens the owning automation's page and
+// highlights the finding in its Needs you pane.
 if (window.electronAPI && window.electronAPI.onFindingsFocus) {
   window.electronAPI.onFindingsFocus(function (data) {
-    var tab = document.querySelector('.explorer-tab[data-tab="automations"]');
-    if (tab) tab.click();
-    refreshFindingsInbox().then(function () {
-      if (!data || !data.id) return;
-      var el = document.querySelector('.findings-inbox-item[data-finding-id="' + CSS.escape(data.id) + '"]');
-      if (!el) return;
-      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      el.classList.add('findings-inbox-item-highlight');
-      setTimeout(function () { el.classList.remove('findings-inbox-item-highlight'); }, 2000);
+    if (!data || !data.automationId) {
+      showToast('Could not find that automation', { kind: 'error' });
+      return;
+    }
+    openAutomationPageById(data.automationId).then(function (opened) {
+      if (!opened || !automationPageState || automationPageState.automationId !== data.automationId) return;
+      automationPageState.highlightFindingId = data.id || null;
+      // The pane may already hold the finding (page was open): apply now.
+      renderAutomationPageNeeds();
     });
   });
 }

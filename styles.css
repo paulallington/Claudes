@@ -1617,6 +1617,31 @@ html[data-platform="darwin"] #toolbar {
 }
 .automation-page-runs { flex: 1; min-height: 0; overflow-y: auto; }
 
+/* Needs you: capped so the runs list stays visible; the cards scroll on their own. */
+.automation-page-needs {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  max-height: 45%;
+  min-height: 0;
+  border-bottom: 1px solid var(--border-primary);
+}
+.automation-page-needs-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 8px 8px;
+}
+.automation-page-needs .findings-inbox-item.automation-page-need {
+  border-left: 3px solid #f5a623;
+  border-radius: 4px;
+}
+.automation-page-needs .findings-inbox-item.findings-inbox-item-highlight {
+  outline: 1px solid #f5a623;
+  background: rgba(245, 166, 35, 0.12);
+}
+.automation-page-needs .findings-inbox-btn-detail { margin-right: auto; }
+
 .automation-page-run {
   display: flex;
   flex-direction: column;
