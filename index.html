@@ -398,7 +398,10 @@
           <div class="automation-page-body">
             <div class="automation-page-left">
               <div id="automation-page-needs" class="automation-page-needs hidden">
-                <div id="automation-page-needs-title" class="automation-page-section-title"></div>
+                <div class="automation-page-needs-head">
+                  <div id="automation-page-needs-title" class="automation-page-section-title"></div>
+                  <button id="automation-page-needs-all" class="automation-detail-run-all automation-page-needs-all hidden" type="button" title="Mark every open item done">All done</button>
+                </div>
                 <div id="automation-page-needs-list" class="automation-page-needs-list"></div>
               </div>
               <div class="automation-page-section-title">Runs</div>
@@ -407,7 +410,7 @@
             <div class="automation-page-right">
               <div class="automation-page-run-header">
                 <div id="automation-page-run-title" class="automation-page-run-title"></div>
-                <div class="automation-page-run-tools">
+                <div id="automation-page-tools" class="automation-page-run-tools">
                   <button id="automation-page-open-claude" class="automation-detail-run-all" type="button" title="Continue this output in a new Claude column">Open in Claude</button>
                   <button id="automation-page-copy" class="automation-detail-run-all" type="button" title="Copy the output">Copy</button>
                   <input id="automation-page-find" class="automation-page-find" type="text" placeholder="Find&hellip;" spellcheck="false" autocomplete="off" aria-label="Find in output">
@@ -417,6 +420,7 @@
               </div>
               <div id="automation-page-summary" class="automation-detail-summary hidden"></div>
               <div id="automation-page-attention" class="automation-detail-attention hidden"></div>
+              <div id="automation-page-trim-note" class="automation-page-trim-note hidden">Showing the last 500,000 characters</div>
               <div id="automation-page-empty" class="automation-page-empty">No runs yet.</div>
               <pre id="automation-page-output" class="automation-page-output hidden"></pre>
             </div>

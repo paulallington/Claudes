@@ -1619,8 +1619,22 @@ html[data-platform="darwin"] #toolbar {
   text-transform: uppercase;
 }
 .automation-page-runs { flex: 1; min-height: 0; overflow-y: auto; }
+.automation-page-runs-empty { padding: 8px 12px; color: var(--text-muted); }
+.automation-page-runs-older {
+  display: block;
+  margin: 6px 12px 10px;
+  padding: 3px 10px;
+}
 
 /* Needs you: capped so the runs list stays visible; the cards scroll on their own. */
+.automation-page-needs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  padding-right: 8px;
+}
+.automation-page-needs-all { padding: 1px 8px; font-size: 10px; }
 .automation-page-needs {
   display: flex;
   flex-direction: column;
@@ -1732,6 +1746,13 @@ html[data-platform="darwin"] #toolbar {
   overflow-y: auto;
   padding-left: 12px;
   padding-right: 12px;
+}
+.automation-page-trim-note {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+  border-bottom: 1px solid var(--border-primary);
 }
 .automation-page-empty {
   flex: 1;
@@ -9201,6 +9222,8 @@ body.light-theme .clawd-debug-log .ts { color: #8a8aa0; }
   pointer-events: none;
   overflow: hidden;
 }
+/* Notes belong to the columns, which the automation page replaces. */
+#columns-container.automation-page-open #sticky-notes-container { display: none; }
 
 .sticky-note {
   position: absolute;

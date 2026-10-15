@@ -653,6 +653,16 @@ var sidebarAutomationsTimer = null;
 var sidebarAutomationsTrailing = false;
 var activeAutomationPage = null; // { projectPath, automationId } or null
 var automationPageState = null; // view state while #automation-page is showing, else null
+var automationPageLiveTimer = null; // 1s interval that ticks the Live row's duration
+// Saved runs loaded per agent: the first load is small, "Show older runs" asks
+// for everything the store keeps (see getAgentHistory in main.js).
+var AUTOMATION_PAGE_HISTORY_LIMIT = 20;
+var AUTOMATION_PAGE_HISTORY_MAX = 50;
+// Live output beyond this is dropped from the front, so a chatty run cannot
+// grow the page (and every Find re-render) without bound.
+var AUTOMATION_PAGE_LIVE_MAX_CHARS = 500000;
+// With Find active every output chunk would re-mark the whole output.
+var AUTOMATION_PAGE_FIND_FLUSH_MS = 1000;
 // Automation ids whose sidebar row flashes (open items grew or it newly needs
 // attention) until the user opens that automation's page. A Set so the flash
 // survives the project list re-rendering.
@@ -3225,6 +3235,8 @@ function closeAutomationPage(opts) {
   clearActiveAutomationPage();
   if (!automationPageState) return;
   automationPageState = null;
+  syncAutomationPageLiveTimer();
+  document.getElementById('columns-container').classList.remove('automation-page-open');
   var pageEl = document.getElementById('automation-page');
   if (pageEl) pageEl.classList.add('hidden');
   if (opts && opts.restoreColumns === false) return;
@@ -3357,13 +3369,16 @@ function deleteAutomationFromUi(automation) {
 }
 
 function showAutomationContextMenu(event, project, projectIndex, row) {
-  showAutomationMenuAt(event.clientX, event.clientY, [
-    { label: 'Run now', action: 'run' },
-    { label: row.state === 'disabled' ? 'Resume' : 'Pause', action: 'toggle' },
+  var paused = row.state === 'disabled';
+  var items = [
+    { label: paused ? 'Resume' : 'Pause', action: 'toggle' },
     { label: 'Edit…', action: 'edit' },
     { label: 'Export…', action: 'export' },
     { label: 'Delete…', action: 'delete' }
-  ], function (action) {
+  ];
+  // A paused automation cannot be run from here; Resume comes first.
+  if (!paused) items.unshift({ label: 'Run now', action: 'run' });
+  showAutomationMenuAt(event.clientX, event.clientY, items, function (action) {
     // Fresh read so Edit and Run now see the current agents, not the row model.
     window.electronAPI.getAutomationsForProject(project.path).then(function (automations) {
       var automation = automations.find(function (a) { return a.id === row.id; });
@@ -9112,6 +9127,22 @@ document.addEventListener('keydown', function (e) {
     e.preventDefault();
     addRow();
     return;
+  }
+  // The columns are hidden under the automation page, so column shortcuts must
+  // not act on them (Ctrl+Shift+W would kill a terminal nobody can see).
+  if (automationPageState) {
+    var pageAction = window.AutomationPageView.pageShortcutAction({ key: e.key, mod: mod, shift: e.shiftKey });
+    if (pageAction === 'find') {
+      var pageFind = automationPageNode('find');
+      // The Find box is hidden until a run is selected; do nothing without it.
+      if (pageFind && pageFind.offsetParent !== null) {
+        e.preventDefault();
+        pageFind.focus();
+        pageFind.select();
+      }
+      return;
+    }
+    if (pageAction === 'ignore') return;
   }
   if (mod && e.shiftKey && (e.key === 'W' || e.key === 'w')) {
     e.preventDefault();
@@ -18017,6 +18048,8 @@ function showAutomationPage(projectPath, automationId, opts) {
   if (!pageEl) return;
   var columns = getActiveState();
   if (columns) columns.containerEl.style.display = 'none';
+  // Sticky notes float over #columns-container and belong to the columns.
+  document.getElementById('columns-container').classList.add('automation-page-open');
   automationPageState = {
     projectPath: projectPath,
     automationId: automationId,
@@ -18031,7 +18064,10 @@ function showAutomationPage(projectPath, automationId, opts) {
     detailSeq: 0,
     runItems: [],
     runKey: null,         // selected run: a startedAt key, or 'live'
-    loadedRunKey: null,   // the run whose detail is on screen
+    loadedRunKey: undefined, // the run whose detail is on screen (undefined: none shown yet, so an empty agent still gets its empty state)
+    historyLimit: AUTOMATION_PAGE_HISTORY_LIMIT,
+    canLoadOlder: false,  // a "Show older runs" button is due under the list
+    runsLoaded: false,    // the run list has loaded once, so an empty list means no runs
     signature: '',        // selected agent's run state when the list was loaded
     managerRuns: {},      // startedAt -> manager history entry (entries carry their output)
     outputText: '',
@@ -18064,6 +18100,13 @@ function resetAutomationPagePanes() {
   automationPageNode('find').value = '';
   renderAutomationPageRunDetail(null);
   setAutomationPageOutput('', '');
+  setAutomationPageToolsVisible(false);
+}
+
+// Open in Claude, Copy, Find and Wrap act on a run, so they only show with one.
+function setAutomationPageToolsVisible(visible) {
+  var tools = automationPageNode('tools');
+  if (tools) tools.classList.toggle('hidden', !visible);
 }
 
 // Needs you: the shown automation's open findings (unacknowledged, or a
@@ -18103,6 +18146,12 @@ function renderAutomationPageNeeds() {
     return;
   }
   automationPageNode('needs-title').textContent = 'Needs you (' + needs.length + ')';
+  // Acknowledging leaves unanswered decisions listed, so offer it only when it
+  // would clear something.
+  var allBtn = automationPageNode('needs-all');
+  if (allBtn) {
+    allBtn.classList.toggle('hidden', !(needs.length >= 2 && needs.some(function (f) { return !f.acknowledgedAt; })));
+  }
   var signature = automationPageNeedsSignature(needs);
   if (signature !== paneEl.dataset.signature) {
     var scrollTop = listEl.scrollTop;
@@ -18245,18 +18294,21 @@ function renderAutomationPageActions() {
       launchManagerTerminal(automation);
     }, 'needs-you');
   }
-  var runBtn = addButton('Run now', multi ? 'Run every independent agent' : 'Run this automation now', function () {
-    runAutomationFromUi(automation);
-  });
-  if (!multi && agent && agent.currentRunStartedAt) {
-    runBtn.disabled = true;
-    runBtn.title = 'Already running';
+  // A paused automation cannot be run from here; Resume comes first.
+  if (automation.enabled) {
+    var runBtn = addButton('Run now', multi ? 'Run every independent agent' : 'Run this automation now', function () {
+      runAutomationFromUi(automation);
+    });
+    if (!multi && agent && agent.currentRunStartedAt) {
+      runBtn.disabled = true;
+      runBtn.title = 'Already running';
+    }
   }
   if (onManager) {
     addButton('Run manager', 'Run the manager now', function () {
       window.electronAPI.runManager(automation.id);
     });
-  } else if (multi && agent) {
+  } else if (multi && agent && automation.enabled) {
     addButton('Run this agent', 'Run only ' + agent.name, function () {
       window.electronAPI.runAgentNow(automation.id, agent.id);
       refreshAutomations();
@@ -18335,15 +18387,20 @@ function selectAutomationPageAgent(key) {
   if (!st || key === st.agentKey || !automationPageHasTab(st, key)) return;
   st.agentKey = key;
   st.runKey = null;
-  st.loadedRunKey = null;
+  st.loadedRunKey = undefined;
   st.runItems = [];
+  st.historyLimit = AUTOMATION_PAGE_HISTORY_LIMIT;
+  st.canLoadOlder = false;
+  st.runsLoaded = false;
   // Invalidate anything still loading for the previous tab.
   st.runsSeq++;
   st.detailSeq++;
   clearNode(automationPageNode('runs'));
+  syncAutomationPageLiveTimer();
   renderAutomationPageRunDetail(null);
   automationPageNode('run-title').textContent = '';
   setAutomationPageOutput('', '');
+  setAutomationPageToolsVisible(false);
   renderAutomationPageChrome();
   loadAutomationPageRuns();
 }
@@ -18359,18 +18416,23 @@ function loadAutomationPageRuns() {
   var onManager = st.agentKey === 'manager' && !!automation.manager;
   var agent = onManager ? null : findAutomationAgent(automation, st.agentKey);
   if (!onManager && !agent) {
+    st.runsLoaded = true;
     renderAutomationPageRuns();
     setAutomationPageOutput('', 'No runs yet.');
+    setAutomationPageToolsVisible(false);
     return;
   }
   var seq = ++st.runsSeq;
   st.signature = automationPageSignature(st);
+  var limit = st.historyLimit;
   var historyP = onManager
-    ? window.electronAPI.getManagerHistory(automation.id, 50)
-    : window.electronAPI.getAgentHistory(automation.id, agent.id, 50);
+    ? window.electronAPI.getManagerHistory(automation.id, limit)
+    : window.electronAPI.getAgentHistory(automation.id, agent.id, limit);
   historyP.then(function (history) {
     if (st !== automationPageState || seq !== st.runsSeq) return;
     var list = Array.isArray(history) ? history : [];
+    st.runsLoaded = true;
+    st.canLoadOlder = view.canLoadOlderRuns(list.length, limit, AUTOMATION_PAGE_HISTORY_MAX);
     var liveStartedAt = onManager
       ? (automation.manager.lastRunStatus === 'running' ? automation.manager.lastRunAt : null)
       : agent.currentRunStartedAt;
@@ -18392,6 +18454,12 @@ function renderAutomationPageRuns() {
   var listEl = automationPageNode('runs');
   var scrollTop = listEl.scrollTop;
   clearNode(listEl);
+  if (st.runsLoaded && st.runItems.length === 0) {
+    var none = document.createElement('div');
+    none.className = 'automation-page-runs-empty';
+    none.textContent = 'No runs yet.';
+    listEl.appendChild(none);
+  }
   st.runItems.forEach(function (item) {
     var row = document.createElement('div');
     row.className = 'automation-page-run' + (item.key === st.runKey ? ' active' : '');
@@ -18423,7 +18491,49 @@ function renderAutomationPageRuns() {
     row.addEventListener('click', function () { selectAutomationPageRun(item.key); });
     listEl.appendChild(row);
   });
+  if (st.canLoadOlder) {
+    var older = document.createElement('button');
+    older.type = 'button';
+    older.className = 'automation-detail-run-all automation-page-runs-older';
+    older.textContent = 'Show older runs';
+    older.addEventListener('click', function () {
+      st.historyLimit = AUTOMATION_PAGE_HISTORY_MAX;
+      st.canLoadOlder = false;
+      renderAutomationPageRuns();
+      loadAutomationPageRuns();
+    });
+    listEl.appendChild(older);
+  }
   listEl.scrollTop = scrollTop;
+  syncAutomationPageLiveTimer();
+}
+
+// One interval while the page shows a Live row, so its duration counts up
+// between the events that rebuild the list. It stops itself once there is no
+// Live row (run ended, agent tab changed) and closeAutomationPage stops it.
+function syncAutomationPageLiveTimer() {
+  var st = automationPageState;
+  var hasLive = !!(st && st.runItems.some(function (it) { return it.isLive; }));
+  if (!hasLive) {
+    if (automationPageLiveTimer) clearInterval(automationPageLiveTimer);
+    automationPageLiveTimer = null;
+    return;
+  }
+  if (!automationPageLiveTimer) automationPageLiveTimer = setInterval(tickAutomationPageLive, 1000);
+}
+
+function tickAutomationPageLive() {
+  var st = automationPageState;
+  var item = st && st.runItems.find(function (it) { return it.isLive; });
+  if (!item) { syncAutomationPageLiveTimer(); return; }
+  item.durationLabel = window.AutomationPageView.liveDurationLabel(item.startedAt);
+  var rows = automationPageNode('runs').querySelectorAll('.automation-page-run');
+  rows.forEach(function (row) {
+    if (row.dataset.key !== 'live') return;
+    var label = row.querySelector('.automation-page-run-duration');
+    if (label) label.textContent = item.durationLabel;
+  });
+  if (st.runKey === 'live') renderAutomationPageRunTitle(item, null);
 }
 
 function selectAutomationPageRun(key) {
@@ -18449,8 +18559,10 @@ function loadAutomationPageRun() {
   if (!item) {
     renderAutomationPageRunTitle(null, null);
     setAutomationPageOutput('', 'No runs yet.');
+    setAutomationPageToolsVisible(false);
     return;
   }
+  setAutomationPageToolsVisible(true);
   renderAutomationPageRunTitle(item, null);
 
   function show(run) {
@@ -18471,7 +18583,7 @@ function loadAutomationPageRun() {
     liveP.then(function (text) {
       if (st !== automationPageState || seq !== st.detailSeq) return;
       st.liveLoading = false;
-      setAutomationPageOutput(text || '', 'Running. No output yet.', { follow: true });
+      setAutomationPageOutput(text || '', 'Running. No output yet.', { follow: true, live: true });
     }).catch(function () {
       if (st === automationPageState && seq === st.detailSeq) st.liveLoading = false;
     });
@@ -18543,10 +18655,18 @@ function renderAutomationPageRunDetail(run) {
 }
 
 // Replace the output pane's content. With no text the pane shows
-// emptyMessage instead. opts.follow scrolls to the end (a live run); otherwise
-// the pane starts at the top.
+// emptyMessage instead. opts.follow scrolls to the end; otherwise the pane
+// starts at the top. opts.live caps the text to its last
+// AUTOMATION_PAGE_LIVE_MAX_CHARS characters and says so above the output.
 function setAutomationPageOutput(text, emptyMessage, opts) {
   var st = automationPageState;
+  var trimmed = false;
+  if (opts && opts.live) {
+    var tail = window.AutomationPageView.trimOutputTail(text, AUTOMATION_PAGE_LIVE_MAX_CHARS);
+    text = tail.text;
+    trimmed = tail.removed > 0;
+  }
+  setAutomationPageTrimNote(trimmed);
   if (st) {
     st.outputText = text;
     st.emptyMessage = emptyMessage;
@@ -18560,6 +18680,11 @@ function setAutomationPageOutput(text, emptyMessage, opts) {
   emptyEl.textContent = hasText ? '' : emptyMessage;
   renderAutomationPageOutput();
   outEl.scrollTop = opts && opts.follow ? outEl.scrollHeight : 0;
+}
+
+function setAutomationPageTrimNote(shown) {
+  var note = automationPageNode('trim-note');
+  if (note) note.classList.toggle('hidden', !shown);
 }
 
 // Draw st.outputText into the pane, wrapping Find matches in <mark>. Output is
@@ -18623,7 +18748,7 @@ function feedAutomationPageOutput(automationId, agentKey, chunk) {
   st.flushQueued = true;
   // Re-marking a large output is far dearer than appending, so slow down while
   // a Find query is active.
-  if (st.findQuery) setTimeout(function () { flushAutomationPageOutput(st); }, 250);
+  if (st.findQuery) setTimeout(function () { flushAutomationPageOutput(st); }, AUTOMATION_PAGE_FIND_FLUSH_MS);
   else requestAnimationFrame(function () { flushAutomationPageOutput(st); });
 }
 
@@ -18635,6 +18760,13 @@ function flushAutomationPageOutput(st) {
   if (st !== automationPageState || !st.pendingText) return;
   var text = st.pendingText;
   st.pendingText = '';
+  // Trim once per flush, not per chunk: slicing a 500,000 character string for
+  // every chunk of a chatty run would cost more than the appends do.
+  var tail = window.AutomationPageView.trimOutputTail(st.outputText, AUTOMATION_PAGE_LIVE_MAX_CHARS);
+  if (tail.removed > 0) {
+    st.outputText = tail.text;
+    setAutomationPageTrimNote(true);
+  }
   var outEl = automationPageNode('output');
   var emptyEl = automationPageNode('empty');
   var wasHidden = outEl.classList.contains('hidden');
@@ -18649,6 +18781,9 @@ function flushAutomationPageOutput(st) {
     outEl.scrollTop = scrollTop;
   } else {
     outEl.firstChild.appendData(text);
+    // The text node still holds what was just trimmed from st.outputText.
+    var extra = outEl.firstChild.length - st.outputText.length;
+    if (extra > 0) outEl.firstChild.deleteData(0, extra);
   }
   if (follow) outEl.scrollTop = outEl.scrollHeight;
 }
@@ -18703,6 +18838,17 @@ function automationPageDisplayName(st) {
     try { localStorage.setItem(AUTOMATION_PAGE_WRAP_KEY, on ? 'on' : 'off'); } catch (e) { /* not persisted */ }
     applyAutomationPageWrap(on);
   });
+
+  var allDoneBtn = automationPageNode('needs-all');
+  if (allDoneBtn) {
+    allDoneBtn.addEventListener('click', function () {
+      var st = automationPageState;
+      if (!st) return;
+      window.electronAPI.findingsAcknowledgeAll({ automationId: st.automationId })
+        .then(function () { refreshFindingSurfaces(); })
+        .catch(function () { showToast('Could not mark these done', { kind: 'error' }); });
+    });
+  }
 
   findEl.addEventListener('input', function () {
     var st = automationPageState;
@@ -21775,6 +21921,9 @@ function openAutomationOutputInClaude(automationName, output) {
   function createNewNote() {
     var projectKey = currentProjectKey();
     if (!projectKey) return;
+    // Notes anchor to the columns' geometry and the columns are hidden under the
+    // automation page, so a new note takes the user back to them.
+    closeAutomationPage();
     ensureLoaded(projectKey).then(function () {
       if (currentProjectKey() !== projectKey) return;
       var arr = getNotes(projectKey);
