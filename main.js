@@ -13,6 +13,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { detectCrossings: detectPlanLimitCrossings } = require('./lib/plan-limit-thresholds');
 const { isValidHookToken } = require('./lib/hook-token');
+const { nextPollDelay } = require('./lib/poll-backoff');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
 const http = require('http');
@@ -4710,7 +4711,8 @@ ipcMain.handle('session:modelContextLimit', (_event, model) => modelContextLimit
 // That avoids the constant cross-fade flicker when Claude alternates tools
 // (Read → Edit → Read) — the widget only flips when the tool category does.
 const clawdTails = new Map();
-// columnId -> { filePath, offset, buf, timer, sender, sessionId,
+const CLAWD_POLL_BACKOFF = { min: 150, max: 1000 };
+// columnId -> { filePath, offset, buf, timer, delay, sender, sessionId,
 //               state: { kind, tool }, lastEmitted: { kind, tool } }
 
 function _clawdLineToTransition(line) {
@@ -4776,12 +4778,14 @@ function _clawdReplayBuffer(t, text, opts) {
   }
 }
 
+// Returns true when the file size differed from the last poll, so the caller
+// can reset its backoff.
 function clawdPollTail(columnId) {
   const t = clawdTails.get(columnId);
-  if (!t) return;
+  if (!t) return false;
   let stat;
-  try { stat = fs.statSync(t.filePath); } catch { return; }
-  if (stat.size === t.offset) return;
+  try { stat = fs.statSync(t.filePath); } catch { return false; }
+  if (stat.size === t.offset) return false;
   if (stat.size < t.offset) { t.offset = 0; t.buf = ''; }
   let chunk = '';
   try {
@@ -4790,10 +4794,23 @@ function clawdPollTail(columnId) {
     fs.readSync(fd, buf, 0, buf.length, t.offset);
     fs.closeSync(fd);
     chunk = buf.toString('utf8');
-  } catch { return; }
+  } catch { return true; }
   t.offset = stat.size;
   _clawdReplayBuffer(t, chunk, { flush: false });
   _clawdEmitIfChanged(columnId, t, false);
+  return true;
+}
+
+// Self-rescheduling poll: 150ms while the session is active, backing off to
+// 1s when idle. Skips rescheduling once the tail was stopped or replaced.
+function clawdScheduleTail(columnId, t) {
+  t.timer = setTimeout(() => {
+    if (clawdTails.get(columnId) !== t) return;
+    const changed = clawdPollTail(columnId);
+    if (clawdTails.get(columnId) !== t) return;
+    t.delay = nextPollDelay(t.delay, changed, CLAWD_POLL_BACKOFF);
+    clawdScheduleTail(columnId, t);
+  }, t.delay);
 }
 
 function clawdStartTail(columnId, projectPath, sessionId, sender, profileId) {
@@ -4807,9 +4824,10 @@ function clawdStartTail(columnId, projectPath, sessionId, sender, profileId) {
     filePath, offset, buf: '', sender, sessionId,
     state: { kind: 'idle' },
     lastEmitted: null,
+    delay: CLAWD_POLL_BACKOFF.min,
   };
-  t.timer = setInterval(() => clawdPollTail(columnId), 150);
   clawdTails.set(columnId, t);
+  clawdScheduleTail(columnId, t);
   // Deliberately no initial emit. Resurrecting the last turn's state from
   // the JSONL was misleading (a brand-new column would inherit yesterday's
   // tool_use as its "current" state). The widget defaults to idle and the
@@ -4819,7 +4837,7 @@ function clawdStartTail(columnId, projectPath, sessionId, sender, profileId) {
 function clawdStopTail(columnId) {
   const t = clawdTails.get(columnId);
   if (!t) return;
-  clearInterval(t.timer);
+  clearTimeout(t.timer);
   clawdTails.delete(columnId);
 }
 
@@ -10739,7 +10757,7 @@ app.on('before-quit', () => {
   stopAutomationScheduler();
   step('clawdTails clear: ' + clawdTails.size);
   for (const [colId, t] of clawdTails) {
-    try { clearInterval(t.timer); } catch {}
+    try { clearTimeout(t.timer); } catch {}
   }
   clawdTails.clear();
   step('stopHeadroomProxyProcess');
