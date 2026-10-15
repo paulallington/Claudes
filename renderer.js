@@ -643,7 +643,6 @@ var popoutProjectKey = null;
 })();
 
 // Automations state
-var automationsForProject = [];
 var allAutomationsData = null;
 // Sidebar automation rows: view-models keyed by projectPathKey, rebuilt by
 // refreshSidebarAutomations(). activeAutomationPage names the selected row.
@@ -3958,7 +3957,6 @@ function renderProjectList() {
     renderProjectEntries(unpinnedEntries, projectListEl, '');
   }
 
-  updateAutomationSidebarBadges();
 }
 
 // Respect the persisted activeWorkspaceId on first route-in. If the id points
@@ -4068,7 +4066,6 @@ function setActiveWorkspace(projectIndex, workspaceId, isStartup) {
   var state = getOrCreateProjectState(newStateKey);
   state.containerEl.style.display = 'flex';
   refreshExplorer();
-  if (activeAutomationDetailId) closeAutomationDetail();
   refreshAutomations();
   var spawnOptionsPromise = loadSpawnOptions();
 
@@ -9287,7 +9284,6 @@ document.querySelectorAll('.explorer-tab').forEach(function (tab) {
     if (tabName === 'files') { stopGitPolling(); refreshFileTree(); }
     else if (tabName === 'git') { refreshGitStatus(true); startGitPolling(); }
     else if (tabName === 'run') { stopGitPolling(); showRunListView(); refreshRunConfigs(); }
-    else if (tabName === 'automations') { stopGitPolling(); refreshAutomations(); refreshFindingsInbox(); }
     refocusActiveTerminal();
   });
 });
@@ -11610,7 +11606,6 @@ function refreshExplorer() {
   if (tabName === 'files') refreshFileTree();
   else if (tabName === 'git') refreshGitStatus();
   else if (tabName === 'run') refreshRunConfigs();
-  else if (tabName === 'automations') refreshAutomations();
 }
 
 btnToggleExplorer.addEventListener('click', toggleExplorer);
@@ -17902,7 +17897,7 @@ function runWindowBadgeHtml(auto) {
 }
 
 // ============================================================
-// Automations Tab
+// Automations: shared refresh, scheduler banner, schedule text
 // ============================================================
 
 function applyGlobalPausedBannerUi(settings) {
@@ -17919,66 +17914,13 @@ function refreshGlobalPausedBanner() {
   return window.electronAPI.getAutomationSettings().then(applyGlobalPausedBannerUi);
 }
 
+// The one "something changed" entry point: every create/edit/delete/toggle/
+// import and agent/manager event ends here. Each surface skips its own work
+// when it is not showing.
 function refreshAutomations() {
-  // Every create/edit/delete/toggle/import/clear and agent/manager event
-  // already ends here, so the sidebar rows follow along.
   refreshSidebarAutomations();
   refreshAutomationPage();
-  var listEl = document.getElementById('automations-list');
-  var noProjectEl = document.getElementById('automations-no-project');
-  var searchBar = document.getElementById('automations-search-bar');
-  if (!listEl) return;
-
-  if (!activeProjectKey) {
-    listEl.innerHTML = '';
-    if (noProjectEl) noProjectEl.style.display = '';
-    if (searchBar) searchBar.style.display = 'none';
-    // A global scheduler pause is true regardless of which project is
-    // selected, so the banner is settings-driven here too, not force-hidden.
-    refreshGlobalPausedBanner();
-    document.getElementById('btn-pause-all-automations').style.display = 'none';
-    document.getElementById('btn-resume-all-automations').style.display = 'none';
-    return;
-  }
-  if (noProjectEl) noProjectEl.style.display = 'none';
-
-  Promise.all([
-    window.electronAPI.getAutomationSettings(),
-    window.electronAPI.getAutomationsForProject(activeProjectKey)
-  ]).then(function (results) {
-    var settings = results[0];
-    var automations = results[1];
-    var globalEnabled = settings && settings.globalEnabled;
-    applyGlobalPausedBannerUi(settings);
-
-    automationsForProject = automations;
-    if (searchBar) searchBar.style.display = automations.length > 0 ? '' : 'none';
-
-    var pauseBtn = document.getElementById('btn-pause-all-automations');
-    var resumeBtn = document.getElementById('btn-resume-all-automations');
-    if (automations.length === 0) {
-      pauseBtn.style.display = 'none';
-      resumeBtn.style.display = 'none';
-    } else {
-      var allDisabled = automations.every(function (a) { return !a.enabled; });
-      var anyDisabled = automations.some(function (a) { return !a.enabled; });
-      pauseBtn.style.display = allDisabled ? 'none' : '';
-      resumeBtn.style.display = anyDisabled ? '' : 'none';
-    }
-
-    var query = document.getElementById('automations-search-input').value.toLowerCase().trim();
-    if (query) {
-      automations = automations.filter(function (a) {
-        var nameMatch = a.name.toLowerCase().indexOf(query) !== -1;
-        var agentMatch = a.agents.some(function (ag) {
-          return ag.name.toLowerCase().indexOf(query) !== -1 || ag.prompt.toLowerCase().indexOf(query) !== -1;
-        });
-        return nameMatch || agentMatch;
-      });
-    }
-    renderAutomationCards(automations, listEl, globalEnabled);
-  });
-  updateAutomationsTabIndicator();
+  refreshAutomationsFlyout();
 }
 
 function formatTimeHHMM(h, m) {
@@ -18004,333 +17946,6 @@ function formatScheduleText(agent) {
   var labels = times.map(function (t) { return formatTimeHHMM(t.hour, t.minute); });
   return labels.join(', ');
 }
-
-function isManualAutomation(automation) {
-  // An automation is "manual" if ALL its independent agents have manual schedule
-  var independentAgents = automation.agents.filter(function (ag) { return ag.runMode === 'independent'; });
-  if (independentAgents.length === 0) return false;
-  return independentAgents.every(function (ag) { return ag.schedule && ag.schedule.type === 'manual'; });
-}
-
-function renderAutomationCards(automations, container, globalEnabled) {
-  container.innerHTML = '';
-  if (automations.length === 0) {
-    container.innerHTML = '<p style="opacity:0.5;text-align:center;padding:2rem 1rem;font-size:12px;">No automations configured.<br>Click + to create one.</p>';
-    return;
-  }
-
-  // Sort: manual automations first, then scheduled
-  var manualAutomations = automations.filter(isManualAutomation);
-  var scheduledAutomations = automations.filter(function (a) { return !isManualAutomation(a); });
-
-  if (manualAutomations.length > 0 && scheduledAutomations.length > 0) {
-    var manualHeader = document.createElement('div');
-    manualHeader.className = 'automation-section-header';
-    manualHeader.textContent = 'Manual';
-    container.appendChild(manualHeader);
-  }
-
-  var allSorted = manualAutomations.concat(scheduledAutomations);
-  var addedDivider = false;
-
-  allSorted.forEach(function (automation) {
-    // Add divider between manual and scheduled sections
-    if (!addedDivider && !isManualAutomation(automation) && manualAutomations.length > 0 && scheduledAutomations.length > 0) {
-      addedDivider = true;
-      var schedHeader = document.createElement('div');
-      schedHeader.className = 'automation-section-header';
-      schedHeader.textContent = 'Scheduled';
-      container.appendChild(schedHeader);
-    }
-    var card = document.createElement('div');
-    card.className = 'automation-card';
-    var isSimple = automation.agents.length === 1;
-
-    var cardStatus = window.AutomationsPauseUi.resolveAutomationCardStatus({ globalEnabled: globalEnabled, automation: automation });
-    var statusClass = cardStatus.statusClass;
-    var badgeClass = cardStatus.badgeClass;
-    var badgeText = cardStatus.badgeText;
-    card.classList.add(statusClass);
-    if (cardStatus.dimmed) card.classList.add('automation-globally-paused');
-
-    if (isSimple) {
-      var agent = automation.agents[0];
-      var schedText = formatScheduleText(agent);
-      var lastRunText = '';
-      if (agent.lastRunAt) {
-        var elapsed = Date.now() - new Date(agent.lastRunAt).getTime();
-        if (elapsed < 60000) lastRunText = 'Last: just now';
-        else if (elapsed < 3600000) lastRunText = 'Last: ' + Math.floor(elapsed / 60000) + 'm ago';
-        else if (elapsed < 86400000) lastRunText = 'Last: ' + Math.floor(elapsed / 3600000) + 'h ago';
-        else lastRunText = 'Last: ' + Math.floor(elapsed / 86400000) + 'd ago';
-      } else { lastRunText = 'Never run'; }
-
-      var summaryHtml = '';
-      if (agent.currentRunStartedAt) {
-        summaryHtml = '<div class="automation-card-summary automation-card-summary-running">Running...</div>';
-      } else if (agent.lastSummary) {
-        summaryHtml = '<div class="automation-card-summary">' + escapeHtml(agent.lastSummary) + '</div>';
-      }
-
-      var attentionHtml = '';
-      if (agent.lastAttentionItems && agent.lastAttentionItems.length > 0) {
-        attentionHtml = '<div class="automation-card-attention-summary">';
-        agent.lastAttentionItems.forEach(function (item) {
-          attentionHtml += '<div class="automation-card-attention-item">&#9888; ' + escapeHtml(item.summary) + '</div>';
-        });
-        attentionHtml += '</div>';
-      }
-
-      var toggleIcon = automation.enabled ? '&#10074;&#10074;' : '&#9654;';
-      var actionsHtml = '<span class="automation-card-actions">' +
-        '<button class="automation-btn-toggle" title="' + (automation.enabled ? 'Pause' : 'Enable') + '">' + toggleIcon + '</button>';
-      if (!agent.currentRunStartedAt && automation.enabled) actionsHtml += '<button class="automation-btn-run" title="Run Now">&#9655;</button>';
-      actionsHtml += '<button class="automation-btn-export" title="Export">&#8613;</button>' +
-        '<button class="automation-btn-edit" title="Edit">&#9998;</button>' +
-        '<button class="automation-btn-delete" title="Delete">&times;</button></span>';
-
-      var connTag = '';
-      if (endpointPresets.length > 0) {
-        if (!agent.endpointId) {
-          connTag = '<span class="automation-card-conn-tag automation-card-conn-tag--cloud">Cloud</span>';
-        } else {
-          var preset = endpointPresets.find(function (p) { return p.id === agent.endpointId; });
-          connTag = '<span class="automation-card-conn-tag automation-card-conn-tag--local">' + escapeHtml(preset ? preset.name : 'local') + '</span>';
-        }
-      }
-
-      var interactiveTag = (agent.sessionMode === 'interactive')
-        ? '<span class="automation-card-conn-tag automation-card-conn-tag--interactive" title="Drives your logged-in browser">Interactive</span>'
-        : '';
-
-      card.innerHTML = '<div class="automation-card-header">' +
-        '<span class="automation-card-name">' + escapeHtml(agent.name) + '</span>' +
-        connTag +
-        interactiveTag +
-        '<span class="automation-card-schedule">' + schedText + '</span>' +
-        '</div>' +
-        '<div class="automation-card-status">' + lastRunText + '</div>' +
-        summaryHtml + attentionHtml +
-        '<div class="automation-card-footer">' +
-          '<span class="automation-status-badge ' + badgeClass + '">' + badgeText + '</span>' +
-          runWindowBadgeHtml(automation) +
-          actionsHtml +
-        '</div>';
-    } else {
-      var independentCount = automation.agents.filter(function (ag) { return ag.runMode === 'independent'; }).length;
-      var chainedCount = automation.agents.length - independentCount;
-      var agentSummary = automation.agents.length + ' agents, ' + independentCount + ' independent' + (chainedCount > 0 ? ', ' + chainedCount + ' chained' : '');
-
-      var dotsHtml = '<div class="automation-pipeline-mini">';
-      automation.agents.forEach(function (ag) {
-        var dotClass = 'pipeline-dot-idle';
-        if (ag.currentRunStartedAt) dotClass = 'pipeline-dot-running';
-        else if (ag.lastRunStatus === 'error') dotClass = 'pipeline-dot-error';
-        else if (ag.lastRunStatus === 'skipped' || !ag.enabled) dotClass = 'pipeline-dot-waiting';
-        dotsHtml += '<span class="pipeline-dot ' + dotClass + '" title="' + escapeHtml(ag.name) + '"></span>';
-      });
-      dotsHtml += '</div>';
-
-      var toggleIcon2 = automation.enabled ? '&#10074;&#10074;' : '&#9654;';
-      var actionsHtml2 = '<span class="automation-card-actions">' +
-        '<button class="automation-btn-toggle" title="' + (automation.enabled ? 'Pause' : 'Enable') + '">' + toggleIcon2 + '</button>' +
-        (automation.enabled ? '<button class="automation-btn-run" title="Run All">&#9655;</button>' : '') +
-        '<button class="automation-btn-export" title="Export">&#8613;</button>' +
-        '<button class="automation-btn-edit" title="Edit">&#9998;</button>' +
-        '<button class="automation-btn-delete" title="Delete">&times;</button></span>';
-
-      var connTagsHtml = '';
-      if (endpointPresets.length > 0) {
-        var connNames = {};
-        automation.agents.forEach(function (ag) {
-          if (!ag.endpointId) connNames['Cloud'] = 'cloud';
-          else {
-            var p = endpointPresets.find(function (pp) { return pp.id === ag.endpointId; });
-            if (p) connNames[p.name] = 'local';
-          }
-        });
-        Object.keys(connNames).forEach(function (n) {
-          connTagsHtml += '<span class="automation-card-conn-tag automation-card-conn-tag--' + connNames[n] + '">' + escapeHtml(n) + '</span>';
-        });
-      }
-
-      var anyInteractive = automation.agents.some(function (ag) { return ag.sessionMode === 'interactive'; });
-      var interactiveTagsHtml = anyInteractive
-        ? '<span class="automation-card-conn-tag automation-card-conn-tag--interactive" title="Drives your logged-in browser">Interactive</span>'
-        : '';
-
-      card.innerHTML = '<div class="automation-card-header">' +
-        '<span class="automation-card-name">' + escapeHtml(automation.name) + '</span>' +
-        connTagsHtml +
-        interactiveTagsHtml +
-        '<span class="automation-card-schedule">' + agentSummary + '</span>' +
-        '</div>' + dotsHtml +
-        '<div class="automation-card-footer">' +
-          '<span class="automation-status-badge ' + badgeClass + '">' + badgeText + '</span>' +
-          runWindowBadgeHtml(automation) +
-          actionsHtml2 +
-        '</div>';
-    }
-
-    card.style.cursor = 'pointer';
-    card.addEventListener('click', function () { openAutomationDetail(automation); });
-
-    card.querySelector('.automation-btn-toggle').addEventListener('click', function (e) {
-      e.stopPropagation();
-      window.electronAPI.toggleAutomation(automation.id).then(function () { refreshAutomations(); });
-    });
-    var runBtn = card.querySelector('.automation-btn-run');
-    if (runBtn) {
-      runBtn.addEventListener('click', function (e) {
-        e.stopPropagation();
-        if (isSimple) window.electronAPI.runAgentNow(automation.id, automation.agents[0].id);
-        else window.electronAPI.runAutomationNow(automation.id);
-        refreshAutomations();
-      });
-    }
-    card.querySelector('.automation-btn-export').addEventListener('click', function (e) {
-      e.stopPropagation();
-      window.electronAPI.exportAutomation(automation.id);
-    });
-    card.querySelector('.automation-btn-edit').addEventListener('click', function (e) {
-      e.stopPropagation();
-      openAutomationModal(automation);
-    });
-    card.querySelector('.automation-btn-delete').addEventListener('click', function (e) {
-      e.stopPropagation();
-      if (confirm('Delete automation "' + (automation.name || automation.agents[0].name) + '"?')) {
-        window.electronAPI.deleteAutomation(automation.id).then(function () { refreshAutomations(); });
-      }
-    });
-
-    container.appendChild(card);
-  });
-}
-
-// ============================================================
-// Automation Detail Panel
-// ============================================================
-
-var activeAutomationDetailId = null;
-var activeDetailAutomation = null;
-var activeAgentDetailId = null;
-var agentDetailViewingLive = false;
-var viewingAgentInPipeline = false;
-
-function openAutomationDetail(automation) {
-  activeAutomationDetailId = automation.id;
-  activeDetailAutomation = automation;
-  var listEl = document.getElementById('automations-list');
-  var detailEl = document.getElementById('automation-detail-panel');
-  var searchBar = document.getElementById('automations-search-bar');
-  if (listEl) listEl.style.display = 'none';
-  if (searchBar) searchBar.style.display = 'none';
-  detailEl.style.display = '';
-
-  if (automation.agents.length === 1) {
-    renderSimpleDetail(automation, automation.agents[0]);
-  } else {
-    renderMultiAgentDetail(automation);
-  }
-}
-
-function renderSimpleDetail(automation, agent) {
-  var outputHeader = document.querySelector('.automation-detail-output-header');
-  if (outputHeader) outputHeader.style.display = '';
-
-  // Reset output element styles (pipeline view changes these)
-  var outputEl = document.getElementById('automation-detail-output');
-  outputEl.style.background = '';
-  outputEl.style.fontFamily = '';
-  outputEl.style.whiteSpace = '';
-
-  document.getElementById('automation-detail-name').textContent = agent.name;
-  var badge = document.getElementById('automation-detail-status-badge');
-  badge.className = 'automation-status-badge';
-  if (agent.currentRunStartedAt) { badge.classList.add('badge-running'); badge.textContent = 'running...'; }
-  else if (agent.lastRunStatus === 'error') { badge.classList.add('badge-error'); badge.textContent = 'error'; }
-  else { badge.classList.add('badge-idle'); badge.textContent = 'idle'; }
-
-  var metaEl = document.getElementById('automation-detail-meta');
-  var metaText = formatScheduleText(agent) + (agent.lastRunAt ? ' \u00b7 Last: ' + new Date(agent.lastRunAt).toLocaleString() : '');
-
-  // Add manager status for single-agent automations
-  if (automation.manager && automation.manager.enabled) {
-    var mgrBtnHtml = '';
-    if (automation.manager.needsHuman) {
-      mgrBtnHtml = '<button class="automation-detail-manager-btn needs-you" title="Manager needs your attention">Needs You &#9888;</button>';
-    } else if (automation.manager.lastRunStatus === 'running') {
-      mgrBtnHtml = '<button class="automation-detail-manager-btn running" title="Manager is investigating">Investigating...</button>';
-    } else if (automation.manager.lastRunStatus === 'resolved' || automation.manager.lastRunStatus === 'acted' || automation.manager.lastRunStatus === 'error' || automation.manager.lastRunStatus === 'escalated') {
-      mgrBtnHtml = '<button class="automation-detail-manager-btn resolved" title="' + escapeHtml(automation.manager.lastSummary || '') + '">Manager: ' + automation.manager.lastRunStatus + '</button>';
-    } else {
-      mgrBtnHtml = '<button class="automation-detail-manager-btn idle" title="Run manager">Manager</button>';
-    }
-    metaEl.innerHTML = metaText + mgrBtnHtml;
-    var mgrBtn = metaEl.querySelector('.automation-detail-manager-btn');
-    if (mgrBtn) {
-      mgrBtn.addEventListener('click', function () {
-        if (automation.manager.needsHuman) {
-          launchManagerTerminal(automation);
-        } else if (automation.manager.lastRunStatus === 'running') {
-          showManagerLiveOutput(automation);
-        } else if (automation.manager.lastRunStatus === 'resolved' || automation.manager.lastRunStatus === 'acted' || automation.manager.lastRunStatus === 'error' || automation.manager.lastRunStatus === 'escalated') {
-          showManagerOutput(automation);
-        } else {
-          window.electronAPI.runManager(automation.id);
-        }
-      });
-    }
-  } else {
-    metaEl.textContent = metaText;
-  }
-
-  if (agent.isolation && agent.isolation.enabled && agent.lastError && agent.lastError.indexOf('Working directory not found') !== -1) {
-    var recloneBtn = document.createElement('button');
-    recloneBtn.className = 'automation-detail-run-all';
-    recloneBtn.textContent = 'Re-clone';
-    recloneBtn.title = 'Re-clone repository';
-    recloneBtn.addEventListener('click', function () {
-      window.electronAPI.setupAgentClone(automation.id, agent.id).then(function (result) {
-        if (result.error) alert('Re-clone failed: ' + result.error);
-        else { refreshAutomations(); openAutomationDetail(automation); }
-      });
-    });
-    metaEl.appendChild(document.createTextNode(' '));
-    metaEl.appendChild(recloneBtn);
-  }
-
-  activeAgentDetailId = agent.id;
-  var runSelect = document.getElementById('automation-detail-run-select');
-  runSelect.style.display = '';
-
-  window.electronAPI.getAgentHistory(automation.id, agent.id, 10).then(function (history) {
-    runSelect.innerHTML = '';
-    if (agent.currentRunStartedAt) {
-      var opt = document.createElement('option');
-      opt.value = 'live'; opt.textContent = 'Live';
-      runSelect.appendChild(opt);
-    }
-    history.forEach(function (run) {
-      var opt = document.createElement('option');
-      opt.value = run.startedAt;
-      opt.textContent = new Date(run.startedAt).toLocaleString() + ' - ' + run.status;
-      runSelect.appendChild(opt);
-    });
-
-    if (agent.currentRunStartedAt) {
-      switchToAgentLiveView(automation.id, agent);
-    } else if (history.length > 0) {
-      switchToAgentRunView(automation.id, agent.id, history[0].startedAt);
-    } else {
-      document.getElementById('automation-detail-output').textContent = 'No runs yet.';
-      document.getElementById('automation-detail-summary').style.display = 'none';
-      document.getElementById('automation-detail-attention').style.display = 'none';
-    }
-  });
-}
-
-var managerTerminals = {};
 
 function launchManagerTerminal(automation) {
   if (!automation.manager) return;
@@ -18358,338 +17973,6 @@ function launchManagerTerminal(automation) {
   window.electronAPI.dismissManager(automation.id);
   refreshAutomations();
 }
-
-var viewingManagerLive = false;
-var viewingManagerAutomationId = null;
-
-function showManagerLiveOutput(automation) {
-  viewingAgentInPipeline = true;
-  viewingManagerLive = true;
-  viewingManagerAutomationId = automation.id;
-  var outputHeader = document.querySelector('.automation-detail-output-header');
-  if (outputHeader) outputHeader.style.display = '';
-  document.getElementById('automation-detail-name').textContent = automation.name + ' — Manager';
-  document.getElementById('automation-detail-run-select').style.display = 'none';
-  document.getElementById('automation-detail-summary').style.display = 'none';
-  document.getElementById('automation-detail-attention').style.display = 'none';
-
-  var outputEl = document.getElementById('automation-detail-output');
-  outputEl.style.background = '';
-  outputEl.style.fontFamily = '';
-  outputEl.style.whiteSpace = '';
-  outputEl.innerHTML = '<div class="automation-processing-indicator">Manager is investigating...</div>';
-
-  window.electronAPI.getManagerLiveOutput(automation.id).then(function (text) {
-    if (text) { outputEl.textContent = text; outputEl.scrollTop = outputEl.scrollHeight; }
-  });
-
-  var metaEl = document.getElementById('automation-detail-meta');
-  metaEl.textContent = 'Manager is running — live output';
-}
-
-function showManagerOutput(automation) {
-  viewingManagerLive = false;
-  viewingManagerAutomationId = null;
-  viewingAgentInPipeline = true; // So back button returns to pipeline
-  var outputHeader = document.querySelector('.automation-detail-output-header');
-  if (outputHeader) outputHeader.style.display = '';
-  document.getElementById('automation-detail-name').textContent = automation.name + ' — Manager';
-  document.getElementById('automation-detail-run-select').style.display = 'none';
-
-  var metaEl = document.getElementById('automation-detail-meta');
-  metaEl.textContent = 'Manager last ran: ' + (automation.manager.lastRunAt ? new Date(automation.manager.lastRunAt).toLocaleString() : 'never') +
-    ' · Status: ' + (automation.manager.lastRunStatus || 'idle');
-
-  window.electronAPI.getManagerHistory(automation.id, 1).then(function (history) {
-    var outputEl = document.getElementById('automation-detail-output');
-    var summaryEl = document.getElementById('automation-detail-summary');
-    var attentionEl = document.getElementById('automation-detail-attention');
-
-    if (history.length > 0) {
-      var run = history[0];
-      outputEl.textContent = run.output || 'No output recorded.';
-      if (run.summary) { summaryEl.textContent = run.summary; summaryEl.style.display = ''; }
-      else { summaryEl.style.display = 'none'; }
-      if (run.actions && run.actions.length > 0) {
-        attentionEl.innerHTML = '';
-        run.actions.forEach(function (action) {
-          var div = document.createElement('div');
-          div.className = 'automation-detail-attention-item';
-          div.innerHTML = '<strong>Action: ' + escapeHtml(action.type) + '</strong>' +
-            (action.agentId ? '<div>Agent: ' + escapeHtml(action.agentId) + '</div>' : '');
-          attentionEl.appendChild(div);
-        });
-        if (run.attentionItems && run.attentionItems.length > 0) {
-          run.attentionItems.forEach(function (item) {
-            var div = document.createElement('div');
-            div.className = 'automation-detail-attention-item';
-            div.innerHTML = '<strong>&#9888; ' + escapeHtml(item.summary) + '</strong>' +
-              (item.detail ? '<div>' + escapeHtml(item.detail) + '</div>' : '');
-            attentionEl.appendChild(div);
-          });
-        }
-        attentionEl.style.display = '';
-      } else {
-        attentionEl.style.display = 'none';
-      }
-    } else {
-      outputEl.textContent = 'No manager runs recorded.';
-      summaryEl.style.display = 'none';
-      attentionEl.style.display = 'none';
-    }
-  });
-}
-
-function renderMultiAgentDetail(automation) {
-  // Reset state so live output events don't corrupt the pipeline view
-  activeAgentDetailId = null;
-  viewingManagerLive = false;
-  viewingManagerAutomationId = null;
-  agentDetailViewingLive = false;
-  viewingAgentInPipeline = false;
-
-  var outputHeader = document.querySelector('.automation-detail-output-header');
-  if (outputHeader) outputHeader.style.display = 'none';
-
-  document.getElementById('automation-detail-name').textContent = automation.name;
-  var badge = document.getElementById('automation-detail-status-badge');
-  badge.className = 'automation-status-badge';
-  var anyRunning = automation.agents.some(function (ag) { return !!ag.currentRunStartedAt; });
-  if (anyRunning) { badge.classList.add('badge-running'); badge.textContent = 'running...'; }
-  else {
-    badge.classList.add('badge-idle');
-    var badgeLabel = automation.agents.length + ' agents';
-    if (automation.manager && automation.manager.enabled) badgeLabel += ' + manager';
-    badge.textContent = badgeLabel;
-  }
-
-  var metaEl = document.getElementById('automation-detail-meta');
-
-  var managerHtml = '';
-  if (automation.manager && automation.manager.enabled) {
-    var mgrStatus = automation.manager.lastRunStatus || 'idle';
-    if (automation.manager.needsHuman) {
-      managerHtml = '<button class="automation-detail-manager-btn needs-you" title="Manager needs your attention">Needs You &#9888;</button>';
-    } else if (mgrStatus === 'resolved') {
-      managerHtml = '<button class="automation-detail-manager-btn resolved" title="' + escapeHtml(automation.manager.lastSummary || 'Resolved') + '">Manager: resolved &#10003;</button>';
-    } else if (mgrStatus === 'acted') {
-      managerHtml = '<button class="automation-detail-manager-btn acted" title="Manager took action">Manager: acted</button>';
-    } else if (mgrStatus === 'running') {
-      managerHtml = '<button class="automation-detail-manager-btn running" title="Manager is investigating">Investigating...</button>';
-    } else {
-      managerHtml = '<button class="automation-detail-manager-btn idle" title="Run manager manually">Manager</button>';
-    }
-  }
-
-  metaEl.innerHTML = '<button class="automation-detail-run-all" title="Run All">&#9655; Run All</button>' +
-    '<button class="automation-detail-pause-all" title="Pause">&#10074;&#10074; Pause</button>' +
-    managerHtml;
-  metaEl.querySelector('.automation-detail-run-all').addEventListener('click', function () {
-    window.electronAPI.runAutomationNow(automation.id);
-  });
-  metaEl.querySelector('.automation-detail-pause-all').addEventListener('click', function () {
-    window.electronAPI.toggleAutomation(automation.id).then(function () { refreshAutomations(); });
-  });
-
-  var mgrBtn = metaEl.querySelector('.automation-detail-manager-btn');
-  if (mgrBtn) {
-    mgrBtn.addEventListener('click', function () {
-      if (automation.manager.needsHuman) {
-        launchManagerTerminal(automation);
-      } else if (automation.manager.lastRunStatus === 'running') {
-        showManagerLiveOutput(automation);
-      } else if (automation.manager.lastRunStatus === 'resolved' || automation.manager.lastRunStatus === 'acted' || automation.manager.lastRunStatus === 'error' || automation.manager.lastRunStatus === 'escalated') {
-        showManagerOutput(automation);
-      } else {
-        window.electronAPI.runManager(automation.id);
-      }
-    });
-  }
-
-  var outputEl = document.getElementById('automation-detail-output');
-  outputEl.innerHTML = '';
-  outputEl.style.background = 'transparent';
-  outputEl.style.fontFamily = 'inherit';
-  outputEl.style.whiteSpace = 'normal';
-  document.getElementById('automation-detail-summary').style.display = 'none';
-  document.getElementById('automation-detail-attention').style.display = 'none';
-  document.getElementById('automation-detail-run-select').style.display = 'none';
-
-  var pipelineEl = document.createElement('div');
-  pipelineEl.className = 'automation-pipeline-view';
-
-  automation.agents.forEach(function (agent) {
-    var borderColor = '#666';
-    if (agent.currentRunStartedAt) borderColor = '#3b82f6';
-    else if (agent.lastRunStatus === 'completed') borderColor = '#22c55e';
-    else if (agent.lastRunStatus === 'error') borderColor = '#ef4444';
-
-    if (agent.runMode === 'run_after' && agent.runAfter && agent.runAfter.length > 0) {
-      var connector = document.createElement('div');
-      connector.className = 'pipeline-connector';
-      var upstreamNames = agent.runAfter.map(function (id) {
-        var up = automation.agents.find(function (ag) { return ag.id === id; });
-        return up ? up.name : 'unknown';
-      });
-      connector.textContent = 'waits for: ' + upstreamNames.join(', ');
-      pipelineEl.appendChild(connector);
-    }
-
-    var row = document.createElement('div');
-    row.className = 'automation-pipeline-agent';
-    row.style.borderLeftColor = borderColor;
-    var statusText = agent.currentRunStartedAt ? 'running...' : (agent.lastRunStatus || 'pending');
-    var schedText = agent.runMode === 'run_after' ? 'Waits for upstream' : formatScheduleText(agent);
-
-    var recloneHtml = '';
-    if (agent.isolation && agent.isolation.enabled && agent.lastError && agent.lastError.indexOf('Working directory not found') !== -1) {
-      recloneHtml = '<button class="pipeline-btn-reclone" title="Re-clone repository">Re-clone</button>';
-    }
-
-    row.innerHTML = '<div class="pipeline-agent-header">' +
-      '<span class="pipeline-agent-name">' + escapeHtml(agent.name) + '</span>' +
-      '<span class="pipeline-agent-status" style="color:' + borderColor + '">' + statusText + '</span>' +
-      '</div>' +
-      '<div class="pipeline-agent-meta">' + schedText + (agent.isolation && agent.isolation.enabled ? ' \u00b7 Isolated' : '') + '</div>' +
-      (agent.lastSummary ? '<div class="pipeline-agent-summary">' + escapeHtml(agent.lastSummary) + '</div>' : '') +
-      '<div class="pipeline-agent-actions">' +
-        '<button class="pipeline-btn-run" title="Run agent">&#9655;</button>' +
-        '<button class="pipeline-btn-view-output" title="View Output">Output</button>' +
-        '<button class="pipeline-btn-open-claude" title="Open in Claude">&#8599;</button>' +
-        '<button class="pipeline-btn-history" title="History">History</button>' +
-        recloneHtml +
-      '</div>';
-
-    row.querySelector('.pipeline-btn-run').addEventListener('click', function () {
-      window.electronAPI.runAgentNow(automation.id, agent.id);
-    });
-    row.querySelector('.pipeline-btn-view-output').addEventListener('click', function () {
-      viewingAgentInPipeline = true;
-      activeAgentDetailId = agent.id;
-      document.getElementById('automation-detail-run-select').style.display = '';
-      renderSimpleDetail(automation, agent);
-    });
-    row.querySelector('.pipeline-btn-open-claude').addEventListener('click', function () {
-      var agentName = agent.name || 'Agent';
-      var output = agent.lastSummary || '';
-      if (agent.lastAttentionItems && agent.lastAttentionItems.length > 0) {
-        output += '\nAttention items: ' + agent.lastAttentionItems.map(function (i) { return i.summary; }).join('; ');
-      }
-      if (!output) {
-        alert('No output to continue with.');
-        return;
-      }
-      var context = 'You are continuing work from a background agent called "' + agentName + '". ' +
-        'Below is the output from the most recent run. The user wants to discuss, investigate, or action these findings.\n\n' +
-        '--- AGENT OUTPUT ---\n' + output + '\n--- END AGENT OUTPUT ---';
-      var spawnArgs = buildSpawnArgs();
-      spawnArgs.push('--append-system-prompt', context);
-      addColumn(spawnArgs, null, spawnOpts({ title: agentName }));
-    });
-    row.querySelector('.pipeline-btn-history').addEventListener('click', function () {
-      viewingAgentInPipeline = true;
-      activeAgentDetailId = agent.id;
-      document.getElementById('automation-detail-run-select').style.display = '';
-      renderSimpleDetail(automation, agent);
-    });
-    var recloneBtn = row.querySelector('.pipeline-btn-reclone');
-    if (recloneBtn) {
-      recloneBtn.addEventListener('click', function () {
-        window.electronAPI.setupAgentClone(automation.id, agent.id).then(function (result) {
-          if (result.error) alert('Re-clone failed: ' + result.error);
-          else refreshAutomations();
-        });
-      });
-    }
-
-    pipelineEl.appendChild(row);
-  });
-
-  outputEl.appendChild(pipelineEl);
-}
-
-function switchToAgentLiveView(automationId, agent) {
-  agentDetailViewingLive = true;
-  var outputEl = document.getElementById('automation-detail-output');
-  outputEl.innerHTML = '<div class="automation-processing-indicator">Processing...</div>';
-  document.getElementById('automation-detail-summary').style.display = 'none';
-  document.getElementById('automation-detail-attention').style.display = 'none';
-  window.electronAPI.getAgentLiveOutput(automationId, agent.id).then(function (text) {
-    if (text) { outputEl.textContent = text; outputEl.scrollTop = outputEl.scrollHeight; }
-  });
-}
-
-function switchToAgentRunView(automationId, agentId, startedAt) {
-  agentDetailViewingLive = false;
-  window.electronAPI.getAgentRunDetail(automationId, agentId, startedAt).then(function (run) {
-    if (run) {
-      document.getElementById('automation-detail-output').textContent = run.output || 'No output recorded.';
-      showAgentRunSummary(run);
-    }
-  });
-}
-
-function showAgentRunSummary(run) {
-  var summaryEl = document.getElementById('automation-detail-summary');
-  var attentionEl = document.getElementById('automation-detail-attention');
-  if (run.summary) { summaryEl.textContent = run.summary; summaryEl.style.display = ''; }
-  else { summaryEl.style.display = 'none'; }
-  if (run.attentionItems && run.attentionItems.length > 0) {
-    attentionEl.innerHTML = '';
-    run.attentionItems.forEach(function (item) {
-      var div = document.createElement('div');
-      div.className = 'automation-detail-attention-item';
-      div.innerHTML = '<strong>&#9888; ' + escapeHtml(item.summary) + '</strong>' + (item.detail ? '<div>' + escapeHtml(item.detail) + '</div>' : '');
-      attentionEl.appendChild(div);
-    });
-    attentionEl.style.display = '';
-  } else { attentionEl.style.display = 'none'; }
-}
-
-function closeAutomationDetail() {
-  activeAutomationDetailId = null;
-  activeDetailAutomation = null;
-  activeAgentDetailId = null;
-  agentDetailViewingLive = false;
-  viewingAgentInPipeline = false;
-  viewingManagerLive = false;
-  viewingManagerAutomationId = null;
-  document.getElementById('automation-detail-panel').style.display = 'none';
-  document.getElementById('automations-list').style.display = '';
-  document.getElementById('automation-detail-run-select').style.display = '';
-  var outputHeader = document.querySelector('.automation-detail-output-header');
-  if (outputHeader) outputHeader.style.display = '';
-}
-
-document.getElementById('btn-automation-detail-back').addEventListener('click', function () {
-  if (viewingAgentInPipeline && activeDetailAutomation && activeDetailAutomation.agents.length > 1) {
-    viewingAgentInPipeline = false;
-    // Re-fetch fresh data and show pipeline
-    window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
-      var auto = automations.find(function (a) { return a.id === activeAutomationDetailId; });
-      if (auto) {
-        activeDetailAutomation = auto;
-        renderMultiAgentDetail(auto);
-      } else {
-        closeAutomationDetail();
-      }
-    });
-  } else {
-    closeAutomationDetail();
-  }
-});
-
-document.getElementById('automation-detail-run-select').addEventListener('change', function () {
-  if (this.value === 'live') {
-    var auto = activeDetailAutomation;
-    if (auto) {
-      var agent = auto.agents.find(function (ag) { return ag.id === activeAgentDetailId; });
-      if (agent) switchToAgentLiveView(auto.id, agent);
-    }
-  } else {
-    switchToAgentRunView(activeAutomationDetailId, activeAgentDetailId, this.value);
-  }
-});
 
 // ============================================================
 // Automation Page
@@ -20558,16 +19841,8 @@ function finishCloneSetup() {
   document.getElementById('btn-automation-save').textContent = 'Done';
   document.getElementById('btn-automation-save').disabled = false;
   document.getElementById('btn-automation-save').onclick = function () {
-    var autoId = automationEditingId;
     closeAutomationModal();
     refreshAutomations();
-    refreshAutomationsFlyout();
-    if (autoId) {
-      window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
-        var auto = automations.find(function (a) { return a.id === autoId; });
-        if (auto) openAutomationDetail(auto);
-      });
-    }
   };
 }
 
@@ -20661,10 +19936,6 @@ window.electronAPI.onCloneProgress(function (data) {
     }
   }
 });
-document.getElementById('btn-add-automation').addEventListener('click', function () {
-  if (!activeProjectKey) { alert('Select a project first.'); return; }
-  openAutomationModal(null);
-});
 document.getElementById('btn-add-agent').addEventListener('click', function () {
   syncAllAgentsFromCards();
   if (modalAgents.length === 1 && !document.getElementById('automation-name').value) {
@@ -20685,11 +19956,10 @@ document.getElementById('automation-manager-enabled').addEventListener('change',
 ['automation-manager-prompt', 'automation-manager-db', 'automation-manager-retries'].forEach(function (id) {
   document.getElementById(id).addEventListener('keydown', function (e) { e.stopPropagation(); });
 });
-document.getElementById('btn-refresh-automations').addEventListener('click', refreshAutomations);
 
-// Project-wide automation actions. Shared by the Automations tab buttons and
-// the project right-click menu; both act on the active project. They read the
-// list fresh because automationsForProject lags a project switch.
+// Project-wide automation actions from the project right-click menu. They act
+// on the active project and read the list fresh because the sidebar rows lag a
+// project switch.
 function setAllProjectAutomationsEnabled(enabled) {
   if (!activeProjectKey) { alert('Select a project first.'); return; }
   var key = activeProjectKey;
@@ -20799,10 +20069,6 @@ function importAutomationsFromFile() {
   });
 }
 
-document.getElementById('btn-pause-all-automations').addEventListener('click', pauseAllAutomations);
-
-document.getElementById('btn-resume-all-automations').addEventListener('click', resumeAllAutomations);
-
 document.getElementById('btn-automations-global-paused-resume').addEventListener('click', function () {
   window.electronAPI.getAutomationSettings().then(function (settings) {
     if (!settings || settings.globalEnabled === false) {
@@ -20811,13 +20077,8 @@ document.getElementById('btn-automations-global-paused-resume').addEventListener
   }).catch(function () { /* ignore — refresh below reflects real state either way */ }).then(function () {
     refreshGlobalPausedBanner();
     refreshAutomations();
-    refreshAutomationsFlyout();
   });
 });
-
-document.getElementById('btn-export-automations').addEventListener('click', exportAllAutomations);
-
-document.getElementById('btn-import-automations').addEventListener('click', importAutomationsFromFile);
 
 function showImportPreview(preview) {
   var projectKey = activeProjectKey;
@@ -20988,36 +20249,6 @@ document.addEventListener('keydown', function (e) {
   if (importModalNode('overlay').classList.contains('hidden')) return;
   e.preventDefault();
   closeImportModal();
-});
-
-document.getElementById('btn-clear-automations').addEventListener('click', function () {
-  if (!activeProjectKey) { alert('Select a project first.'); return; }
-  if (automationsForProject.length === 0) { alert('No automations to clear.'); return; }
-  if (!confirm('Delete ALL ' + automationsForProject.length + ' automations for this project? This cannot be undone.')) return;
-  window.electronAPI.deleteAllAutomations(activeProjectKey).then(function (result) {
-    if (result && result.deleted) refreshAutomations();
-    refreshAutomationsFlyout();
-  });
-});
-
-document.getElementById('automations-search-input').addEventListener('input', function () {
-  var query = this.value.toLowerCase().trim();
-  var listEl = document.getElementById('automations-list');
-  var filtered = automationsForProject;
-  if (query) {
-    filtered = automationsForProject.filter(function (a) {
-      var nameMatch = a.name.toLowerCase().indexOf(query) !== -1;
-      var agentMatch = a.agents.some(function (ag) {
-        return ag.name.toLowerCase().indexOf(query) !== -1 || ag.prompt.toLowerCase().indexOf(query) !== -1;
-      });
-      return nameMatch || agentMatch;
-    });
-  }
-  renderAutomationCards(filtered, listEl);
-});
-
-document.getElementById('automations-search-input').addEventListener('keydown', function (e) {
-  e.stopPropagation();
 });
 
 // ============================================================
@@ -21309,8 +20540,7 @@ document.getElementById('btn-automations-flyout-close').addEventListener('click'
 document.getElementById('btn-automations-global-toggle').addEventListener('click', function () {
   window.electronAPI.toggleAutomationsGlobal().then(function () {
     refreshAutomationsFlyout();
-    // refreshAutomations() re-renders the cards (dimmed/paused) and always
-    // refreshes the banner too, project-active or not.
+    // The sidebar rows dim, and the open page's banner follows the setting.
     refreshAutomations();
   });
 });
@@ -21333,11 +20563,6 @@ document.getElementById('btn-automations-global-toggle').addEventListener('click
     e.stopPropagation();
     togglePopoverFrom(openBtn);
   });
-  var panelBtn = document.getElementById('btn-automations-runwindow-panel');
-  if (panelBtn) panelBtn.addEventListener('click', function (e) {
-    e.stopPropagation();
-    togglePopoverFrom(panelBtn);
-  });
   var cancelBtn = document.getElementById('btn-runwindow-cancel');
   if (cancelBtn) cancelBtn.addEventListener('click', closeRunWindowPopover);
   var saveBtn = document.getElementById('btn-runwindow-save');
@@ -21348,7 +20573,6 @@ document.getElementById('btn-automations-global-toggle').addEventListener('click
     if (!pop || pop.classList.contains('hidden')) return;
     if (pop.contains(e.target)) return;
     if (openBtn && openBtn.contains(e.target)) return;
-    if (panelBtn && panelBtn.contains(e.target)) return;
     closeRunWindowPopover();
   });
 
@@ -21386,45 +20610,18 @@ document.getElementById('btn-automations-global-toggle').addEventListener('click
 
 window.electronAPI.onAgentStarted(function (data) {
   refreshAutomations();
-  refreshAutomationsFlyout();
-  updateAutomationsTabIndicator();
-  updateAutomationSidebarBadges();
   refreshAutomationPage({ automationId: data.automationId, reloadRuns: true });
-  if (activeAutomationDetailId === data.automationId) {
-    window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
-      var auto = automations.find(function (a) { return a.id === data.automationId; });
-      if (auto) openAutomationDetail(auto);
-    });
-  }
 });
 
 window.electronAPI.onAgentOutput(function (data) {
   feedAutomationPageOutput(data.automationId, data.agentId, data.chunk);
-  if (activeAutomationDetailId === data.automationId && activeAgentDetailId === data.agentId && agentDetailViewingLive) {
-    var outputEl = document.getElementById('automation-detail-output');
-    if (outputEl) {
-      var indicator = outputEl.querySelector('.automation-processing-indicator');
-      if (indicator) outputEl.textContent = '';
-      outputEl.textContent += data.chunk;
-      outputEl.scrollTop = outputEl.scrollHeight;
-    }
-  }
 });
 
 window.electronAPI.onAgentCompleted(function (data) {
   refreshAutomations();
-  refreshAutomationsFlyout();
-  updateAutomationSidebarBadges();
-  updateAutomationsTabIndicator();
   // A finished live run is gone from the list, so the page selects the run
   // that was just saved.
   refreshAutomationPage({ automationId: data.automationId, reloadRuns: true });
-  if (activeAutomationDetailId === data.automationId) {
-    window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
-      var auto = automations.find(function (a) { return a.id === data.automationId; });
-      if (auto) openAutomationDetail(auto);
-    });
-  }
   if (data.attentionItems && data.attentionItems.length > 0) {
     var flyoutBtn = document.getElementById('btn-automations-flyout');
     if (flyoutBtn) flyoutBtn.classList.add('has-attention');
@@ -21433,98 +20630,22 @@ window.electronAPI.onAgentCompleted(function (data) {
 
 window.electronAPI.onManagerStarted(function (data) {
   refreshAutomations();
-  refreshAutomationsFlyout();
   refreshAutomationPage({ automationId: data.automationId, reloadRuns: true });
-  if (activeAutomationDetailId === data.automationId && activeDetailAutomation) {
-    window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
-      var auto = automations.find(function (a) { return a.id === data.automationId; });
-      if (auto) { activeDetailAutomation = auto; renderMultiAgentDetail(auto); }
-    });
-  }
 });
 
 window.electronAPI.onManagerCompleted(function (data) {
   refreshAutomations();
-  refreshAutomationsFlyout();
-  updateAutomationSidebarBadges();
   refreshAutomationPage({ automationId: data.automationId, reloadRuns: true });
-  if (activeAutomationDetailId === data.automationId && activeDetailAutomation) {
-    window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
-      var auto = automations.find(function (a) { return a.id === data.automationId; });
-      if (auto) { activeDetailAutomation = auto; renderMultiAgentDetail(auto); }
-    });
-  }
 });
 
 window.electronAPI.onManagerOutput(function (data) {
   feedAutomationPageOutput(data.automationId, 'manager', data.chunk);
-  if (viewingManagerLive && viewingManagerAutomationId === data.automationId) {
-    var outputEl = document.getElementById('automation-detail-output');
-    if (outputEl) {
-      var indicator = outputEl.querySelector('.automation-processing-indicator');
-      if (indicator) outputEl.textContent = '';
-      outputEl.textContent += data.chunk;
-      outputEl.scrollTop = outputEl.scrollHeight;
-    }
-  }
 });
 
 // A manager notification click opens the automation's page on the Manager tab.
 window.electronAPI.onFocusManager(function (data) {
   openAutomationPageById(data && data.automationId, { agentKey: 'manager' });
 });
-
-function updateAutomationsTabIndicator() {
-  if (!activeProjectKey) return;
-  window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
-    var hasAutomations = automations.length > 0;
-    var anyRunning = automations.some(function (auto) {
-      return auto.agents.some(function (ag) { return !!ag.currentRunStartedAt; });
-    });
-    var tab = document.querySelector('.explorer-tab[data-tab="automations"]');
-    if (tab) {
-      if (anyRunning) { tab.classList.add('has-running'); tab.classList.remove('has-automations'); }
-      else if (hasAutomations) { tab.classList.remove('has-running'); tab.classList.add('has-automations'); }
-      else { tab.classList.remove('has-running'); tab.classList.remove('has-automations'); }
-    }
-  });
-}
-
-function updateAutomationSidebarBadges() {
-  window.electronAPI.getAutomations().then(function (data) {
-    var projectsWithAttention = new Set();
-    data.automations.forEach(function (auto) {
-      auto.agents.forEach(function (ag) {
-        if (ag.lastRunStatus === 'error' || ag.lastError) {
-          projectsWithAttention.add(auto.projectPath.replace(/\\/g, '/'));
-        }
-      });
-      if (auto.manager && auto.manager.needsHuman) {
-        projectsWithAttention.add(auto.projectPath.replace(/\\/g, '/'));
-      }
-    });
-    var items = document.querySelectorAll('.project-item');
-    items.forEach(function (item) {
-      var existing = item.querySelector('.project-automation-badge');
-      if (existing) existing.remove();
-    });
-    if (config && config.projects) {
-      config.projects.forEach(function (project) {
-        var normalizedPath = project.path.replace(/\\/g, '/');
-        if (!projectsWithAttention.has(normalizedPath)) return;
-        // Match by path, not positional index — pinned/grouped projects
-        // reorder the DOM relative to config.projects order.
-        var item = projectListEl.querySelector('.project-item[data-project-path="' + CSS.escape(project.path) + '"]');
-        if (!item) return;
-        var badge = document.createElement('span');
-        badge.className = 'project-automation-badge';
-        badge.title = 'Automation needs attention';
-        var nameEl = item.querySelector('.project-name');
-        if (nameEl) nameEl.appendChild(badge);
-      });
-    }
-  });
-}
 
 // Rebuilds the sidebar automation rows from main's automations, the global
 // scheduler setting and per-automation open-item counts (acknowledged findings
@@ -21584,79 +20705,14 @@ function runSidebarAutomationsRefresh() {
 }
 
 // ============================================================
-// Findings Inbox
+// Findings
 // ============================================================
-// Read/ack surface over lib/findings-store.js's durable store (via the
-// findings: IPC family) rendered through the pure view-model in
-// lib/findings-inbox-view.js. Findings are global (not scoped to
-// activeProjectKey), so every action here that navigates somewhere first
-// resolves — and if needed switches to — the project that owns the
+// Finding cards for the automation page's Needs you pane, over
+// lib/findings-store.js's durable store (via the findings: IPC family) and the
+// pure view-model in lib/findings-inbox-view.js. Findings are global (not
+// scoped to activeProjectKey), so every action here that navigates somewhere
+// first resolves, and if needed switches to, the project that owns the
 // finding's automation.
-
-var findingsInboxData = [];
-
-function refreshFindingsInbox() {
-  if (!window.electronAPI || !window.electronAPI.findingsList) return Promise.resolve();
-  return window.electronAPI.findingsList({ unacknowledgedOnly: true }).then(function (res) {
-    findingsInboxData = (res && res.ok && res.findings) || [];
-    renderFindingsInbox();
-    updateFindingsInboxBadge(window.FindingsInboxView.unacknowledgedBadgeCount(findingsInboxData));
-  }).catch(function () {
-    if (typeof showToast === 'function') showToast('Could not load findings', { kind: 'error' });
-  });
-}
-
-function updateFindingsInboxBadge(count) {
-  var badge = document.getElementById('automations-findings-badge');
-  if (!badge) return;
-  if (count > 0) {
-    badge.textContent = count > 99 ? '99+' : String(count);
-    badge.classList.remove('hidden');
-  } else {
-    badge.textContent = '';
-    badge.classList.add('hidden');
-  }
-}
-
-function renderFindingsInbox() {
-  var listEl = document.getElementById('findings-inbox-list');
-  var emptyEl = document.getElementById('findings-inbox-empty');
-  if (!listEl) return;
-  listEl.innerHTML = '';
-  var groups = window.FindingsInboxView.groupFindingsByAutomation(findingsInboxData);
-  if (groups.length === 0) {
-    if (emptyEl) emptyEl.style.display = '';
-    listEl.style.display = 'none';
-    return;
-  }
-  if (emptyEl) emptyEl.style.display = 'none';
-  listEl.style.display = '';
-  var now = new Date();
-  groups.forEach(function (group) {
-    var groupEl = document.createElement('div');
-    groupEl.className = 'findings-inbox-group';
-
-    var headerEl = document.createElement('div');
-    headerEl.className = 'findings-inbox-group-header';
-    headerEl.innerHTML =
-      '<span class="findings-inbox-group-name">' + escapeHtml(group.automationName || 'Automation') + '</span>' +
-      // Legacy findings recorded before automationId existed can't be
-      // group-acknowledged (there's no automation to scope the action to) —
-      // omit the button rather than render one that's a permanent no-op.
-      (group.automationId ? '<button type="button" class="findings-inbox-ack-all" data-automation-id="' + escapeHtml(group.automationId) + '">Acknowledge all</button>' : '');
-    groupEl.appendChild(headerEl);
-
-    group.findings.forEach(function (finding) {
-      groupEl.appendChild(renderFindingInboxItem(finding, now));
-    });
-
-    listEl.appendChild(groupEl);
-  });
-}
-
-function renderFindingInboxItem(finding, now) {
-  return buildFindingCard(finding, now, { ackLabel: 'Acknowledge', showOpenRun: true });
-}
 
 function findingCardButton(className, label, onClick) {
   var btn = document.createElement('button');
@@ -21668,12 +20724,11 @@ function findingCardButton(className, label, onClick) {
 }
 
 // One finding as a card: summary, meta line, detail, actions, then its decision
-// (if any). Shared by the explorer inbox and the automation page's Needs you
-// pane. Built with createElement/textContent because every field is untrusted.
-// opts: ackLabel (acknowledge button text), showOpenRun (adds "Open run"),
-// detailInlineMax (when set, detail up to that many characters shows inline
-// and longer detail collapses behind a Show detail toggle; unset keeps it
-// collapsed behind a click on the summary).
+// (if any). Built with createElement/textContent because every field is
+// untrusted.
+// opts: ackLabel (acknowledge button text), detailInlineMax (when set, detail
+// up to that many characters shows inline and longer detail collapses behind a
+// Show detail toggle; unset keeps it collapsed behind a click on the summary).
 function buildFindingCard(finding, now, opts) {
   var o = opts || {};
   var view = window.FindingsInboxView;
@@ -21730,11 +20785,6 @@ function buildFindingCard(finding, now, opts) {
   actionsEl.appendChild(findingCardButton('findings-inbox-btn-ack', o.ackLabel || 'Acknowledge', function () {
     findingsInboxAcknowledge(finding.id);
   }));
-  if (o.showOpenRun) {
-    actionsEl.appendChild(findingCardButton('findings-inbox-btn-open-run', 'Open run', function () {
-      findingsInboxOpenRun(finding);
-    }));
-  }
   actionsEl.appendChild(findingCardButton('findings-inbox-btn-open-convo', view.findingConversationAction(finding).label, function () {
     findingsInboxOpenConversation(finding);
   }));
@@ -21746,10 +20796,9 @@ function buildFindingCard(finding, now, opts) {
   return row;
 }
 
-// Redraws every surface that lists findings: the explorer inbox, the open
-// automation page's Needs you pane and the sidebar badges.
+// Redraws every surface that lists findings: the open automation page's Needs
+// you pane and the sidebar rows.
 function refreshFindingSurfaces() {
-  refreshFindingsInbox();
   loadAutomationPageNeeds();
   refreshSidebarAutomations();
 }
@@ -21823,33 +20872,9 @@ function findingsInboxResolve(id, choiceId, text) {
   });
 }
 
-// Delegated: group headers (and their Acknowledge-all buttons) are rebuilt
-// on every render, so a direct listener would leak/duplicate.
-(function () {
-  var listEl = document.getElementById('findings-inbox-list');
-  if (!listEl) return;
-  listEl.addEventListener('click', function (e) {
-    var btn = e.target.closest('.findings-inbox-ack-all');
-    if (!btn) return;
-    var automationId = btn.getAttribute('data-automation-id') || null;
-    // A group button always carries its automation's id — a missing/empty
-    // one means the group itself is malformed (e.g. a legacy finding with no
-    // automationId), never "acknowledge every automation". Treat it as a
-    // no-op rather than falling through to the global acknowledge below.
-    if (!automationId) return;
-    findingsInboxAcknowledgeAll(automationId);
-  });
-})();
-
 function findingsInboxAcknowledge(id) {
   window.electronAPI.findingsAcknowledge(id).then(function () { refreshFindingSurfaces(); }).catch(function () {
     if (typeof showToast === 'function') showToast('Could not acknowledge finding', { kind: 'error' });
-  });
-}
-
-function findingsInboxAcknowledgeAll(automationId) {
-  window.electronAPI.findingsAcknowledgeAll(automationId ? { automationId: automationId } : null).then(function () { refreshFindingSurfaces(); }).catch(function () {
-    if (typeof showToast === 'function') showToast('Could not acknowledge findings', { kind: 'error' });
   });
 }
 
@@ -21895,15 +20920,6 @@ function findingsInboxResolveProfileEnv(profileId) {
   if (!window.electronAPI || !window.electronAPI.profileResolve) return Promise.resolve(undefined);
   return window.electronAPI.profileResolve({ columnProfileId: profileId || null }).then(function (r) {
     return (r && r.env && Object.keys(r.env).length) ? r.env : undefined;
-  });
-}
-
-function findingsInboxOpenRun(finding) {
-  findingsInboxWithProject(finding, function (auto) {
-    if (!auto) { alertDialog('That automation no longer exists.'); return; }
-    var tab = document.querySelector('.explorer-tab[data-tab="automations"]');
-    if (tab) tab.click();
-    openAutomationDetail(auto);
   });
 }
 
@@ -21969,7 +20985,7 @@ function findingsInboxDiscuss(finding) {
   });
 }
 
-var findingsStickyBtn = document.getElementById('btn-findings-open-sticky');
+var findingsStickyBtn = document.getElementById('btn-automations-flyout-findings');
 if (findingsStickyBtn) {
   findingsStickyBtn.addEventListener('click', function () {
     if (window.electronAPI && window.electronAPI.findingsOpenSticky) window.electronAPI.findingsOpenSticky();
@@ -21977,8 +20993,7 @@ if (findingsStickyBtn) {
 }
 
 if (window.electronAPI && window.electronAPI.onFindingsUpdated) {
-  window.electronAPI.onFindingsUpdated(function (data) {
-    updateFindingsInboxBadge(data && typeof data.count === 'number' ? data.count : 0);
+  window.electronAPI.onFindingsUpdated(function () {
     refreshFindingSurfaces();
   });
 }
@@ -22000,16 +21015,14 @@ if (window.electronAPI && window.electronAPI.onFindingsFocus) {
   });
 }
 
-refreshFindingsInbox();
 refreshSidebarAutomations();
 
 // ============================================================
-// Conversational Automation Setup
+// Open in Claude
 // ============================================================
 
-// Copy output button
-// Spawn a Claude column seeded with an automation run's output. Shared by the
-// explorer detail panel and the automation page.
+// Spawn a Claude column seeded with an automation run's output (the automation
+// page's Open in Claude button).
 function openAutomationOutputInClaude(automationName, output) {
   if (!output || output === 'Loading...' || output.indexOf('Processing...') === 0) {
     alert('No output to continue with.');
@@ -22024,27 +21037,6 @@ function openAutomationOutputInClaude(automationName, output) {
   spawnArgs.push('--append-system-prompt', context);
   addColumn(spawnArgs, null, spawnOpts({ title: automationName }));
 }
-
-document.getElementById('btn-automation-open-claude').addEventListener('click', function () {
-  if (!activeAutomationDetailId) return;
-  var outputEl = document.getElementById('automation-detail-output');
-  var nameEl = document.getElementById('automation-detail-name');
-  openAutomationOutputInClaude(nameEl ? nameEl.textContent : 'Automation', outputEl.textContent || '');
-});
-
-document.getElementById('btn-automation-copy-output').addEventListener('click', function () {
-  var outputEl = document.getElementById('automation-detail-output');
-  var text = outputEl.textContent;
-  if (!text) return;
-  window.electronAPI.clipboardWriteText(text);
-  var btn = this;
-  btn.classList.add('copied');
-  btn.textContent = 'Copied!';
-  setTimeout(function () {
-    btn.classList.remove('copied');
-    btn.innerHTML = '&#128203;';
-  }, 2000);
-});
 
 // --- Auto Update Notifications ---
 

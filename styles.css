@@ -8189,6 +8189,7 @@ body.mode-popout #btn-add-project {
   font-size: 14px;
 }
 .automations-flyout-action:hover { color: var(--text-bright); }
+.automations-flyout-findings { font-size: 11px; }
 .automations-runwindow-indicator {
   position: absolute;
   top: 2px;
