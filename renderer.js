@@ -18365,9 +18365,9 @@ function loadAutomationPageRuns() {
     if (onManager) {
       list.forEach(function (entry) { if (entry && entry.startedAt) st.managerRuns[entry.startedAt] = entry; });
     }
+    var prevItems = st.runItems;
     st.runItems = view.buildRunListItems(list, { liveStartedAt: liveStartedAt });
-    var stillListed = st.runKey && st.runItems.some(function (item) { return item.key === st.runKey; });
-    if (!stillListed) st.runKey = view.pickDefaultRunKey(st.runItems);
+    st.runKey = view.nextSelectedRunKey(prevItems, st.runItems, st.runKey);
     renderAutomationPageRuns();
     if (st.runKey !== st.loadedRunKey) loadAutomationPageRun();
   }).catch(function () { /* keep the current list */ });

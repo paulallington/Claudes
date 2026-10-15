@@ -231,3 +231,40 @@ test('pickDefaultAgentKey: otherwise the first agent, or null with none', () => 
   assert.equal(pickDefaultAgentKey({ agents: [] }), null);
   assert.equal(pickDefaultAgentKey(null), null);
 });
+
+const { nextSelectedRunKey } = require('../lib/automation-page-view');
+
+const runItem = (key, isLive) => ({ key, isLive: !!isLive });
+
+test('nextSelectedRunKey: a run that started while the newest saved one was selected switches to Live', () => {
+  const prev = [runItem('b'), runItem('a')];
+  const next = [runItem('live', true), runItem('b'), runItem('a')];
+  assert.equal(nextSelectedRunKey(prev, next, 'b'), 'live');
+});
+
+test('nextSelectedRunKey: an older run the user picked stays selected when a live run appears', () => {
+  const prev = [runItem('b'), runItem('a')];
+  const next = [runItem('live', true), runItem('b'), runItem('a')];
+  assert.equal(nextSelectedRunKey(prev, next, 'a'), 'a');
+});
+
+test('nextSelectedRunKey: Live selected and the run finishes, so the newest saved run is shown', () => {
+  const prev = [runItem('live', true), runItem('a')];
+  const next = [runItem('c'), runItem('a')];
+  assert.equal(nextSelectedRunKey(prev, next, 'live'), 'c');
+});
+
+test('nextSelectedRunKey: Live stays selected while it is still running', () => {
+  const items = [runItem('live', true), runItem('a')];
+  assert.equal(nextSelectedRunKey(items, items, 'live'), 'live');
+});
+
+test('nextSelectedRunKey: nothing selected yet picks the default, and an empty list picks nothing', () => {
+  assert.equal(nextSelectedRunKey([], [runItem('live', true), runItem('a')], null), 'live');
+  assert.equal(nextSelectedRunKey([], [runItem('a')], null), 'a');
+  assert.equal(nextSelectedRunKey([runItem('a')], [], 'a'), null);
+});
+
+test('nextSelectedRunKey: a first run on an empty agent switches to Live', () => {
+  assert.equal(nextSelectedRunKey([], [runItem('live', true)], null), 'live');
+});
