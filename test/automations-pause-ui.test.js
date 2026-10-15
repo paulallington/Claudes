@@ -16,7 +16,7 @@ test('resolveGlobalPauseUi shows the paused banner/toggle when globalEnabled is 
   assert.deepEqual(resolveGlobalPauseUi({ globalEnabled: false }), {
     paused: true,
     showBanner: true,
-    bannerText: 'Scheduler paused — no scheduled runs will start.',
+    bannerText: 'Scheduler paused. No scheduled runs will start.',
     toggleGlyph: '▶',
     toggleTitle: 'Resume scheduler',
   });
