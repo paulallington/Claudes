@@ -3770,15 +3770,15 @@ function buildProjectItem(project, index) {
       } else if (action === 'new-automation') {
         openNewAutomationForProject(projIndex);
       } else if (action === 'pause-all-automations') {
-        if (ensureProjectActive(projIndex)) pauseAllAutomations();
+        setAllProjectAutomationsEnabled(config.projects[projIndex].path, false);
       } else if (action === 'resume-all-automations') {
-        if (ensureProjectActive(projIndex)) resumeAllAutomations();
+        setAllProjectAutomationsEnabled(config.projects[projIndex].path, true);
       } else if (action === 'export-automations') {
-        if (ensureProjectActive(projIndex)) exportAllAutomations();
+        exportAllAutomations(config.projects[projIndex].path);
       } else if (action === 'delete-all-automations') {
-        if (ensureProjectActive(projIndex)) deleteAllProjectAutomations(config.projects[projIndex]);
+        deleteAllProjectAutomations(config.projects[projIndex]);
       } else if (action === 'import-automations') {
-        if (ensureProjectActive(projIndex)) importAutomationsFromFile();
+        importAutomationsFromFile(config.projects[projIndex].path);
       } else if (action === 'toggle-voice-mute') {
         config.projects[projIndex].voiceMuted = !config.projects[projIndex].voiceMuted;
         saveConfig();
@@ -19970,27 +19970,21 @@ document.getElementById('automation-manager-enabled').addEventListener('change',
   document.getElementById(id).addEventListener('keydown', function (e) { e.stopPropagation(); });
 });
 
-// Project-wide automation actions from the project right-click menu. They act
-// on the active project and read the list fresh because the sidebar rows lag a
-// project switch.
-function setAllProjectAutomationsEnabled(enabled) {
-  if (!activeProjectKey) { alert('Select a project first.'); return; }
-  var key = activeProjectKey;
+// Project-wide automation actions from the project right-click menu. They take
+// the project's path, so they work on any project without switching to it
+// (including one popped out to its own window). The list is read fresh because
+// the sidebar rows lag.
+function setAllProjectAutomationsEnabled(key, enabled) {
   window.electronAPI.getAutomationsForProject(key).then(function (automations) {
     if (!automations || automations.length === 0) return;
     return window.electronAPI.setAllAutomationsEnabled(key, enabled).then(function () { refreshAutomations(); });
   });
 }
 
-function pauseAllAutomations() { setAllProjectAutomationsEnabled(false); }
-
-function resumeAllAutomations() { setAllProjectAutomationsEnabled(true); }
-
 // Reads the list fresh: the sidebar rows lag a project switch, and the count in
 // the prompt has to be the real one.
 function deleteAllProjectAutomations(project) {
-  if (!activeProjectKey) { alert('Select a project first.'); return; }
-  var key = activeProjectKey;
+  var key = project.path;
   window.electronAPI.getAutomationsForProject(key).then(function (automations) {
     if (!automations || automations.length === 0) { alert('No automations to delete.'); return; }
     if (!confirm('Delete ALL ' + automations.length + ' automations for "' + (project && project.name || 'this project') + '"? This cannot be undone.')) return;
@@ -20002,9 +19996,7 @@ function deleteAllProjectAutomations(project) {
   });
 }
 
-function exportAllAutomations() {
-  if (!activeProjectKey) { alert('Select a project first.'); return; }
-  var key = activeProjectKey;
+function exportAllAutomations(key) {
   window.electronAPI.getAutomationsForProject(key).then(function (automations) {
     if (!automations || automations.length === 0) { alert('No automations to export.'); return; }
     window.electronAPI.exportAutomations(key);
@@ -20069,16 +20061,14 @@ function importIcon(row, glyph, state) {
   if (state) icon.classList.add('import-icon-' + state);
 }
 
-function importAutomationsFromFile() {
-  if (!activeProjectKey) { alert('Select a project first.'); return; }
-
+function importAutomationsFromFile(projectKey) {
   // Step 1: Select file and preview
   window.electronAPI.previewImport().then(function (preview) {
     if (!preview || preview.cancelled) return;
     if (preview.error) { alert(preview.error); return; }
 
     // Step 2: Show the preview for confirmation
-    showImportPreview(preview);
+    showImportPreview(preview, projectKey);
   });
 }
 
@@ -20093,8 +20083,7 @@ document.getElementById('btn-automations-global-paused-resume').addEventListener
   });
 });
 
-function showImportPreview(preview) {
-  var projectKey = activeProjectKey;
+function showImportPreview(preview, projectKey) {
   setImportModalBusy(false);
   openImportModal('Import Preview');
   var body = importModalNode('body');
