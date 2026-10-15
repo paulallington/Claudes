@@ -506,6 +506,76 @@ html[data-platform="darwin"] .sidebar-header {
 .workspace-item:hover .workspace-remove { display: inline-block; }
 .workspace-item .workspace-remove:hover { color: var(--text-primary); }
 
+/* Automation sub-rows — same metrics and indentation as .workspace-item,
+   listed after a project's workspaces. */
+.automation-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px 4px 28px;
+  margin: 0;
+  min-height: 22px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  gap: 6px;
+  user-select: none;
+  background: transparent;
+  -webkit-app-region: no-drag;
+}
+.automation-item:hover { background: var(--hover-light); }
+.automation-item.active {
+  border-left-color: var(--accent);
+  color: var(--text-bright);
+  background: var(--hover-light);
+}
+.automation-item.in-group { padding-left: 40px; }
+.automation-item.dimmed { opacity: 0.5; }
+.automation-item .automation-item-icon {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1;
+}
+.automation-item .automation-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.automation-item-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.automation-item-state {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-muted);
+}
+.automation-item-state.state-attention { color: #f5a623; }
+.automation-item-state.state-running {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-green);
+  animation: pulse-working 1.5s ease-in-out infinite; animation-play-state: paused;
+}
+.automation-item-badge {
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: rgba(245, 166, 35, 0.2);
+  color: #f5a623;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+}
+
 .project-badge {
   font-size: 11px;
   color: var(--accent);
@@ -9785,6 +9855,7 @@ body.light-theme .clawd-debug-log .ts { color: #8a8aa0; }
 .project-badge.badge-attention .claude-icon { animation-play-state: running; }
 .workspace-badge.badge-attention .claude-icon { animation-play-state: running; }
 .attention-flash { animation-play-state: running; }
+.automation-item-state.state-running { animation-play-state: running; }
 .minimize-chip.attention { animation-play-state: running; }
 .automation-status-badge.badge-running { animation-play-state: running; }
 .automation-tab { animation-play-state: running; }

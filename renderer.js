@@ -646,6 +646,12 @@ var popoutProjectKey = null;
 var automationsForProject = [];
 var allAutomationsData = null;
 var importInProgress = false;
+// Sidebar automation rows: view-models keyed by projectPathKey, rebuilt by
+// refreshSidebarAutomations(). activeAutomationPage names the selected row.
+var sidebarAutomationRows = {};
+var sidebarAutomationRowsJson = '{}';
+var sidebarAutomationsSeq = 0;
+var activeAutomationPage = null; // { projectPath, automationId } or null
 
 // ============================================================
 // Headless Runs
@@ -3000,7 +3006,8 @@ function buildWorkspaceItem(project, projectIndex, ws, wsIndex) {
   wsItem.className = 'workspace-item';
   wsItem.dataset.projectPath = project.path;
   wsItem.dataset.workspaceId = ws.id;
-  if (projectIndex === config.activeProjectIndex && project.activeWorkspaceId === ws.id) {
+  if (projectIndex === config.activeProjectIndex && project.activeWorkspaceId === ws.id
+      && !isAutomationPageActiveFor(project)) {
     wsItem.className += ' active';
   }
   if (projectsNeedingAttention.has(stateKey(project.path, ws.id))) {
@@ -3053,6 +3060,7 @@ function buildWorkspaceItem(project, projectIndex, ws, wsIndex) {
   wsItem.appendChild(right);
 
   wsItem.addEventListener('click', function () {
+    clearActiveAutomationPage();
     setActiveWorkspace(projectIndex, ws.id, false);
   });
 
@@ -3115,6 +3123,177 @@ function buildWorkspaceItem(project, projectIndex, ws, wsIndex) {
   return wsItem;
 }
 
+// Switch to a project (keeping its current workspace) so project-scoped
+// automation actions run against it. Returns false when the project can't be
+// driven from this window (popped out to its own window, or another project's
+// popout window).
+function ensureProjectActive(projectIndex) {
+  var project = config.projects[projectIndex];
+  if (!project) return false;
+  if (popoutMode) return project.path === activeProjectKey;
+  if (project.poppedOut) {
+    if (window.electronAPI && window.electronAPI.focusPopoutWindow) window.electronAPI.focusPopoutWindow(project.path);
+    return false;
+  }
+  if (config.activeProjectIndex !== projectIndex || activeProjectKey !== project.path) {
+    setActiveProject(projectIndex, false);
+  }
+  return true;
+}
+
+// Deselect the sidebar automation row without a re-render, for when the user
+// goes back to a project card or workspace row.
+function clearActiveAutomationPage() {
+  if (!activeAutomationPage) return;
+  activeAutomationPage = null;
+  document.querySelectorAll('.automation-item.active').forEach(function (el) {
+    el.classList.remove('active');
+  });
+}
+
+function isAutomationPageActiveFor(project) {
+  return !!(activeAutomationPage && activeAutomationPage.projectPath === project.path);
+}
+
+// Interim: opens the automation's detail in the explorer Automations tab. A
+// later step replaces this body with the full-window automation page.
+function openAutomationPage(projectIndex, automationId) {
+  var project = config.projects[projectIndex];
+  if (!project || !ensureProjectActive(projectIndex)) return;
+  activeAutomationPage = { projectPath: project.path, automationId: automationId };
+  var tab = document.querySelector('.explorer-tab[data-tab="automations"]');
+  if (tab) tab.click();
+  window.electronAPI.getAutomationsForProject(activeProjectKey).then(function (automations) {
+    var auto = automations.find(function (a) { return a.id === automationId; });
+    if (auto) openAutomationDetail(auto);
+  });
+  renderProjectList();
+}
+
+function openNewAutomationForProject(projectIndex) {
+  if (!ensureProjectActive(projectIndex)) return;
+  openAutomationModal(null);
+}
+
+function buildAutomationItem(project, projectIndex, row) {
+  var item = document.createElement('div');
+  item.className = 'automation-item';
+  item.dataset.projectPath = project.path;
+  item.dataset.automationId = row.id;
+  if (row.dimmed) item.classList.add('dimmed');
+  if (activeAutomationPage && activeAutomationPage.automationId === row.id
+      && activeAutomationPage.projectPath === project.path) {
+    item.classList.add('active');
+  }
+  item.title = row.title;
+
+  var icon = document.createElement('span');
+  icon.className = 'automation-item-icon';
+  icon.textContent = '⚡︎';
+
+  var nameEl = document.createElement('div');
+  nameEl.className = 'automation-item-name';
+  nameEl.textContent = row.name;
+
+  var right = document.createElement('div');
+  right.className = 'automation-item-right';
+
+  if (row.state !== 'idle') {
+    var stateEl = document.createElement('span');
+    stateEl.className = 'automation-item-state state-' + row.state;
+    if (row.state === 'attention') stateEl.textContent = '!';
+    else if (row.state === 'paused' || row.state === 'disabled') stateEl.textContent = '‖';
+    right.appendChild(stateEl);
+  }
+
+  if (row.badgeCount > 0) {
+    var badge = document.createElement('span');
+    badge.className = 'automation-item-badge';
+    badge.textContent = row.badgeCount > 99 ? '99+' : String(row.badgeCount);
+    right.appendChild(badge);
+  }
+
+  item.appendChild(icon);
+  item.appendChild(nameEl);
+  item.appendChild(right);
+
+  item.addEventListener('click', function () {
+    openAutomationPage(projectIndex, row.id);
+  });
+  item.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    showAutomationContextMenu(e, project, projectIndex, row);
+  });
+  return item;
+}
+
+// Same shared #project-context-menu element as the project and workspace
+// menus (see the coupling note on showWorkspaceContextMenu).
+function showAutomationContextMenu(event, project, projectIndex, row) {
+  var menu = document.getElementById('project-context-menu');
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.id = 'project-context-menu';
+    menu.className = 'project-context-menu';
+    document.body.appendChild(menu);
+  }
+  while (menu.firstChild) menu.removeChild(menu.firstChild);
+
+  function addItem(label, action) {
+    var mi = document.createElement('div');
+    mi.className = 'project-context-item';
+    mi.dataset.action = action;
+    mi.textContent = label;
+    menu.appendChild(mi);
+  }
+  addItem('Run now', 'run');
+  addItem(row.state === 'disabled' ? 'Resume' : 'Pause', 'toggle');
+  addItem('Edit…', 'edit');
+  addItem('Export…', 'export');
+  addItem('Delete…', 'delete');
+
+  menu.style.left = event.clientX + 'px';
+  menu.style.top = event.clientY + 'px';
+  menu.style.display = 'block';
+
+  menu.onclick = function (ev) {
+    var action = ev.target.dataset.action;
+    menu.style.display = 'none';
+    if (!action) return;
+    // Fresh read so Edit and Run now see the current agents, not the row model.
+    window.electronAPI.getAutomationsForProject(project.path).then(function (automations) {
+      var automation = automations.find(function (a) { return a.id === row.id; });
+      if (!automation) return;
+      if (action === 'run') {
+        if (automation.agents.length === 1) window.electronAPI.runAgentNow(automation.id, automation.agents[0].id);
+        else window.electronAPI.runAutomationNow(automation.id);
+        refreshAutomations();
+      } else if (action === 'toggle') {
+        window.electronAPI.toggleAutomation(automation.id).then(function () { refreshAutomations(); });
+      } else if (action === 'edit') {
+        if (!ensureProjectActive(projectIndex)) return;
+        openAutomationModal(automation);
+      } else if (action === 'export') {
+        window.electronAPI.exportAutomation(automation.id);
+      } else if (action === 'delete') {
+        if (confirm('Delete automation "' + (automation.name || automation.agents[0].name) + '"?')) {
+          window.electronAPI.deleteAutomation(automation.id).then(function () {
+            if (activeAutomationPage && activeAutomationPage.automationId === automation.id) activeAutomationPage = null;
+            refreshAutomations();
+          });
+        }
+      }
+    });
+  };
+
+  setTimeout(function () {
+    document.addEventListener('click', function closeMenu() {
+      menu.style.display = 'none';
+      document.removeEventListener('click', closeMenu);
+    });
+  }, 0);
+}
+
 function buildProjectItem(project, index) {
   var key = project.path;
   // Primary badge count = only columns in Primary's state bucket.
@@ -3127,7 +3306,7 @@ function buildProjectItem(project, index) {
   // Project card is highlighted only when Primary is the active workspace.
   // When a sub-workspace is active, the .workspace-item gets .active instead.
   if (index === config.activeProjectIndex && !project.poppedOut
-      && project.activeWorkspaceId == null) {
+      && project.activeWorkspaceId == null && !isAutomationPageActiveFor(project)) {
     item.className += ' active';
   }
   if (projectsNeedingAttention.has(stateKey(key, null))) item.className += ' attention-flash';
@@ -3251,6 +3430,7 @@ function buildProjectItem(project, index) {
     }
     // Clicking the project card always routes to Primary, even if the user
     // was previously on a sub-workspace.
+    clearActiveAutomationPage();
     setActiveWorkspace(index, null, false);
   });
 
@@ -3577,6 +3757,16 @@ function renderProjectEntries(entries, parent, sectionSuffix) {
         var wsItem = buildWorkspaceItem(project, index, ws, wsIndex);
         if (inGroup) wsItem.classList.add('in-group');
         targetParent.appendChild(wsItem);
+      });
+    }
+
+    // Automation rows follow the workspaces, in automation list order.
+    var autoRows = sidebarAutomationRows[window.AutomationSidebarView.projectPathKey(project.path)];
+    if (autoRows && autoRows.length > 0) {
+      autoRows.forEach(function (row) {
+        var autoItem = buildAutomationItem(project, index, row);
+        if (inGroup) autoItem.classList.add('in-group');
+        targetParent.appendChild(autoItem);
       });
     }
   });
@@ -17598,6 +17788,9 @@ function refreshGlobalPausedBanner() {
 }
 
 function refreshAutomations() {
+  // Every create/edit/delete/toggle/import/clear and agent/manager event
+  // already ends here, so the sidebar rows follow along.
+  refreshSidebarAutomations();
   if (importInProgress) return; // Don't overwrite import progress panel
   var listEl = document.getElementById('automations-list');
   var noProjectEl = document.getElementById('automations-no-project');
@@ -20430,6 +20623,36 @@ function updateAutomationSidebarBadges() {
   });
 }
 
+// Rebuilds the sidebar automation rows from main's automations, the global
+// scheduler setting and ALL findings (acknowledged ones included: an
+// acknowledged finding with an unresolved decision still counts as open).
+// Re-renders the project list only when the rows changed. Must not be called
+// from renderProjectList.
+function refreshSidebarAutomations() {
+  if (!window.electronAPI || !window.electronAPI.getAutomations || !window.AutomationSidebarView) return Promise.resolve();
+  var seq = ++sidebarAutomationsSeq;
+  var settingsP = window.electronAPI.getAutomationSettings
+    ? window.electronAPI.getAutomationSettings() : Promise.resolve(null);
+  var findingsP = window.electronAPI.findingsList
+    ? window.electronAPI.findingsList({ unacknowledgedOnly: false }) : Promise.resolve(null);
+  return Promise.all([window.electronAPI.getAutomations(), settingsP, findingsP]).then(function (results) {
+    if (seq !== sidebarAutomationsSeq) return; // a newer refresh is in flight
+    var data = results[0];
+    var settings = results[1];
+    var findings = results[2] && results[2].ok && results[2].findings ? results[2].findings : [];
+    var rows = window.AutomationSidebarView.buildSidebarAutomationRows(
+      (data && data.automations) || [],
+      findings,
+      { globalEnabled: !(settings && settings.globalEnabled === false) }
+    );
+    var json = JSON.stringify(rows);
+    if (json === sidebarAutomationRowsJson) return;
+    sidebarAutomationRows = rows;
+    sidebarAutomationRowsJson = json;
+    if (config && config.projects && config.projects.length > 0) renderProjectList();
+  }).catch(function () { /* keep the previous rows */ });
+}
+
 // ============================================================
 // Findings Inbox
 // ============================================================
@@ -20769,6 +20992,7 @@ if (window.electronAPI && window.electronAPI.onFindingsUpdated) {
   window.electronAPI.onFindingsUpdated(function (data) {
     updateFindingsInboxBadge(data && typeof data.count === 'number' ? data.count : 0);
     refreshFindingsInbox();
+    refreshSidebarAutomations();
   });
 }
 
@@ -20788,6 +21012,7 @@ if (window.electronAPI && window.electronAPI.onFindingsFocus) {
 }
 
 refreshFindingsInbox();
+refreshSidebarAutomations();
 
 // ============================================================
 // Conversational Automation Setup
