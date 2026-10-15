@@ -1558,6 +1558,7 @@ html[data-platform="darwin"] #toolbar {
 .automation-page-run-tools button { padding: 3px 10px; }
 .automation-page-actions button:disabled { opacity: 0.45; cursor: default; }
 .automation-page-actions .needs-you { border-color: #f5a623; color: #f5a623; }
+[data-theme="light"] .automation-page-actions .needs-you { border-color: #9a6700; color: #9a6700; }
 
 .automation-page-agents {
   display: flex;
@@ -6518,11 +6519,11 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 .findings-inbox-meta {
   margin-top: 3px;
   font-size: 10px;
-  color: var(--text-faint);
+  color: var(--text-secondary);
 }
 
 .findings-inbox-occurrence {
-  color: var(--text-faint);
+  color: var(--text-secondary);
 }
 
 .findings-inbox-detail {
@@ -7213,9 +7214,9 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
 
 /* Automation page action buttons */
 .automation-detail-run-all {
-  background: rgba(255,255,255,0.06);
-  border: 1px solid #444;
-  color: #ccc;
+  background: var(--hover-strong);
+  border: 1px solid var(--text-faint);
+  color: var(--text-body);
   padding: 2px 8px;
   border-radius: 4px;
   font-size: 11px;
@@ -7223,7 +7224,7 @@ html[data-platform="darwin"] #sidebar.collapsed ~ #explorer-panel.collapsed ~ #m
   white-space: nowrap;
 }
 
-.automation-detail-run-all:hover { border-color: #22c55e; color: #22c55e; }
+.automation-detail-run-all:hover { border-color: var(--color-green-bright); color: var(--color-green-bright); }
 
 /* Manager Section (Modal) */
 .automation-manager-section {
