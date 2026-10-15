@@ -651,6 +651,8 @@ var importInProgress = false;
 var sidebarAutomationRows = {};
 var sidebarAutomationRowsJson = '{}';
 var sidebarAutomationsSeq = 0;
+var sidebarAutomationsTimer = null;
+var sidebarAutomationsTrailing = false;
 var activeAutomationPage = null; // { projectPath, automationId } or null
 
 // ============================================================
@@ -20684,26 +20686,44 @@ function updateAutomationSidebarBadges() {
 }
 
 // Rebuilds the sidebar automation rows from main's automations, the global
-// scheduler setting and ALL findings (acknowledged ones included: an
-// acknowledged finding with an unresolved decision still counts as open).
+// scheduler setting and per-automation open-item counts (acknowledged findings
+// with an unresolved decision still count as open, see openItemCounts).
 // Re-renders the project list only when the rows changed. Must not be called
 // from renderProjectList.
+// Runs immediately, then coalesces any further calls within 250ms into one
+// trailing run (project switches and agent events fire this in bursts).
 function refreshSidebarAutomations() {
+  if (sidebarAutomationsTimer) {
+    sidebarAutomationsTrailing = true;
+    return Promise.resolve();
+  }
+  sidebarAutomationsTimer = setTimeout(function () {
+    sidebarAutomationsTimer = null;
+    if (sidebarAutomationsTrailing) {
+      sidebarAutomationsTrailing = false;
+      refreshSidebarAutomations();
+    }
+  }, 250);
+  return runSidebarAutomationsRefresh();
+}
+
+function runSidebarAutomationsRefresh() {
   if (!window.electronAPI || !window.electronAPI.getAutomations || !window.AutomationSidebarView) return Promise.resolve();
   var seq = ++sidebarAutomationsSeq;
   var settingsP = window.electronAPI.getAutomationSettings
     ? window.electronAPI.getAutomationSettings() : Promise.resolve(null);
-  var findingsP = window.electronAPI.findingsList
-    ? window.electronAPI.findingsList({ unacknowledgedOnly: false }) : Promise.resolve(null);
-  return Promise.all([window.electronAPI.getAutomations(), settingsP, findingsP]).then(function (results) {
+  // Counts only: findings.json can be megabytes.
+  var countsP = window.electronAPI.findingsOpenCounts
+    ? window.electronAPI.findingsOpenCounts() : Promise.resolve(null);
+  return Promise.all([window.electronAPI.getAutomations(), settingsP, countsP]).then(function (results) {
     if (seq !== sidebarAutomationsSeq) return; // a newer refresh is in flight
     var data = results[0];
     var settings = results[1];
-    var findings = results[2] && results[2].ok && results[2].findings ? results[2].findings : [];
+    var openCounts = results[2] && results[2].ok && results[2].counts ? results[2].counts : {};
     var rows = window.AutomationSidebarView.buildSidebarAutomationRows(
       (data && data.automations) || [],
-      findings,
-      { globalEnabled: !(settings && settings.globalEnabled === false) }
+      null,
+      { globalEnabled: !(settings && settings.globalEnabled === false), openCounts: openCounts }
     );
     var json = JSON.stringify(rows);
     if (json === sidebarAutomationRowsJson) return;

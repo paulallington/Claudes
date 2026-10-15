@@ -150,6 +150,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   codexWatchThemeChanged: (theme) => ipcRenderer.send('codexwatch:themeChanged', theme),
   onCodexWatchTheme: (cb) => ipcRenderer.on('codexwatch:theme', (_e, theme) => cb(theme)),
   findingsList: (opts) => ipcRenderer.invoke('findings:list', opts),
+  findingsOpenCounts: () => ipcRenderer.invoke('findings:openCounts'),
   findingsAcknowledge: (id) => ipcRenderer.invoke('findings:acknowledge', id),
   findingsResolve: (id, choice) => ipcRenderer.invoke('findings:resolve', { id, choiceId: choice && choice.choiceId, text: choice && choice.text }),
   findingsAcknowledgeAll: (filter) => ipcRenderer.invoke('findings:acknowledgeAll', filter),

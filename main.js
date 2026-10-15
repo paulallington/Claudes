@@ -61,6 +61,7 @@ const { CodexAppServerService, REMOTE_TOKEN_ENV_NAME } = require('./lib/codex-ap
 const { createSpawnTicketStore } = require('./lib/codex-spawn-ticket');
 const { checkAttachmentPath, checkAttachmentOpenPath, checkAttachmentContainment } = require('./lib/attachment-file-guard');
 const FindingsStore = require('./lib/findings-store');
+const AutomationSidebarView = require('./lib/automation-sidebar-view');
 const { buildResolutionsBlock, pendingResolutionIds } = require('./lib/findings-resolution-injection');
 const https = require('https');
 
@@ -8479,7 +8480,18 @@ ipcMain.handle('findings:list', (event, opts) => {
   }
 });
 
-ipcMain.handle('findings:acknowledge', (event, id) => {
+// Counts only ({ [automationId]: openCount }) so the sidebar badges don't ship
+// the whole store over IPC on every refresh. Takes no renderer input.
+ipcMain.handle('findings:openCounts', () => {
+  try {
+    const store = readFindings();
+    return { ok: true, counts: AutomationSidebarView.openItemCounts(FindingsStore.listFindings(store, { unacknowledgedOnly: false })) };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+ipcMain.handle('findings:acknowledge',(event, id) => {
   try {
     if (typeof id !== 'string' || !id) return { ok: false, error: 'invalid id' };
     const store = readFindings();
